@@ -306,20 +306,15 @@ let serverLoginUrl: string | null = null;
 // navigations. Boot also reads this to skip mounting the app when the
 // session is already on its way out (see `isLoginRedirectPending`).
 let loginRedirectPending = false;
-// The Server the cached identity above was read from. Everything in this
-// module is per-Server, and an embedded host can repoint the app at another
-// Server in place, so the cache is bound to its Server and dropped when the
-// host moves rather than reused or forwarded. `undefined` means nothing has
-// been bound yet. Keyed on the Server rather than the host-config generation
-// so a re-render that reinstalls the same config costs no extra `/v1/me`.
+// Server the cached identity was read from (`undefined` until first bound). A
+// host can repoint the app at another Server in place, so the cache is dropped
+// when it changes; keyed on the Server, not the (re-render-bumped) generation.
 let identityServer: string | null | undefined;
 
 /**
- * Drop the cached identity when the host has switched Servers.
- *
- * Called by every reader below, so a synchronous caller never sees the
- * previous Server's user or admin flag after the switch. Standalone has one
- * same-origin Server for the page, so this never fires there.
+ * Drop the cached identity when the host has switched Servers. Every reader
+ * below calls this first, so no synchronous caller sees the previous Server's
+ * user or admin flag; standalone has one Server per page, so it never fires.
  */
 function syncIdentityServer(): void {
   const server = getOmnigentServerIdentity();
