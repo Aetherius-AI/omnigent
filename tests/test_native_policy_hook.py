@@ -464,7 +464,7 @@ def _make_redirect_then_ok_client(
     """Build an httpx.Client stub: redirect on attempt 1, ``ok`` thereafter."""
 
     class _Client:
-        def __init__(self, *, headers: dict[str, str], timeout: object) -> None:
+        def __init__(self, *, headers: dict[str, str], timeout: object, **_kwargs: object) -> None:
             del timeout
             self._headers = headers
 
@@ -489,7 +489,7 @@ def _make_sequence_client(
     """Build an httpx.Client stub that returns responses in order."""
 
     class _Client:
-        def __init__(self, *, headers: dict[str, str], timeout: object) -> None:
+        def __init__(self, *, headers: dict[str, str], timeout: object, **_kwargs: object) -> None:
             del headers, timeout
 
         def __enter__(self) -> _Client:
@@ -621,6 +621,57 @@ def test_post_evaluate_with_retry_keeps_non_429_4xx_single_attempt(
     assert len(request_bodies) == 1
 
 
+@pytest.mark.parametrize(
+    ("url", "expected_trust_env"),
+    [
+        ("http://127.0.0.1:6767/v1/sessions/s/policies/evaluate", False),
+        ("http://localhost:6767/v1/sessions/s/policies/evaluate", False),
+        ("http://[::1]:6767/v1/sessions/s/policies/evaluate", False),
+        ("https://omnigent.example.com/v1/sessions/s/policies/evaluate", True),
+    ],
+)
+def test_post_evaluate_with_retry_bypasses_proxies_only_for_loopback_targets(
+    monkeypatch: pytest.MonkeyPatch,
+    url: str,
+    expected_trust_env: bool,
+) -> None:
+    """Local policy callbacks bypass proxies; remote deployments retain them."""
+    captured_trust_env: list[bool] = []
+
+    class _Client:
+        def __init__(
+            self,
+            *,
+            headers: dict[str, str],
+            timeout: object,
+            trust_env: bool,
+        ) -> None:
+            del headers, timeout
+            captured_trust_env.append(trust_env)
+
+        def __enter__(self) -> _Client:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def post(self, request_url: str, *, json: dict[str, object]) -> httpx.Response:
+            del json
+            return httpx.Response(
+                200,
+                text='{"result":"POLICY_ACTION_ALLOW"}',
+                request=httpx.Request("POST", request_url),
+            )
+
+    monkeypatch.setattr(native_policy_hook.httpx, "Client", _Client)
+
+    response, error = post_evaluate_with_retry(url, {}, {"event": {}}, 5.0, "evaluate-policy hook")
+
+    assert response is not None
+    assert error is None
+    assert captured_trust_env == [expected_trust_env]
+
+
 def test_post_evaluate_with_retry_reauths_on_login_redirect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -697,7 +748,7 @@ def test_post_evaluate_with_retry_reparks_a_held_ask_poll_the_gateway_severed(
     )
 
     class _Client:
-        def __init__(self, *, headers: dict[str, str], timeout: object) -> None:
+        def __init__(self, *, headers: dict[str, str], timeout: object, **_kwargs: object) -> None:
             del headers, timeout
 
         def __enter__(self) -> _Client:
@@ -806,7 +857,7 @@ def test_post_evaluate_with_retry_fast_5xx_still_exhausts_the_budget(
     posts: list[str] = []
 
     class _Client:
-        def __init__(self, *, headers: dict[str, str], timeout: object) -> None:
+        def __init__(self, *, headers: dict[str, str], timeout: object, **_kwargs: object) -> None:
             del headers, timeout
 
         def __enter__(self) -> _Client:

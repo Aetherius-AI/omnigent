@@ -30,6 +30,7 @@ from collections.abc import Callable, Mapping
 from typing import NotRequired, TypedDict
 
 import httpx
+from omnigent_client._http import is_loopback_url
 
 from omnigent.util.http_retry import bounded_retry_after_seconds
 
@@ -663,7 +664,12 @@ def post_evaluate_with_retry(
         attempt_started = time.monotonic()
         held_poll_severed = False
         try:
-            with httpx.Client(headers=headers, timeout=timeout) as client:
+            # Loopback callbacks cannot traverse an environment-configured proxy.
+            with httpx.Client(
+                headers=headers,
+                timeout=timeout,
+                trust_env=not is_loopback_url(url),
+            ) as client:
                 resp = client.post(url, json=request_body)
                 if (
                     reauth is not None
