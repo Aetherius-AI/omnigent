@@ -87,7 +87,10 @@ def _source_epoch(value: object) -> int | None:
             return None
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=UTC)
-        seconds = parsed.timestamp()
+        try:
+            seconds = parsed.timestamp()
+        except (OverflowError, OSError):
+            return None
     else:
         return None
     return int(seconds) if seconds > 0 else None
