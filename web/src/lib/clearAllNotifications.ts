@@ -1,7 +1,7 @@
 import type { Conversation } from "@/hooks/useConversations";
 import { markAllSeen } from "@/hooks/useSeenComments";
 import { isConversationUnseen, markConversationRead } from "@/hooks/useUnseenConversations";
-import { toast } from "@/components/ui/toast";
+import { dismissAllToasts } from "@/components/ui/toast";
 
 /** Clear dismissible notification state while leaving approvals unresolved. */
 export function clearAllNotifications(
@@ -14,5 +14,5 @@ export function clearAllNotifications(
     }
   }
   markAllSeen(unseenCommentIds);
-  toast.dismiss();
+  dismissAllToasts();
 }

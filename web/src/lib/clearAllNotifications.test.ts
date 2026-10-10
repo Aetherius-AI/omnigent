@@ -1,4 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createElement } from "react";
+import { toast } from "sonner";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Conversation } from "@/hooks/useConversations";
 import { getSeenCommentIds } from "@/hooks/useSeenComments";
@@ -10,8 +12,6 @@ import {
 } from "@/hooks/useUnseenConversations";
 import { clearAllNotifications } from "./clearAllNotifications";
 
-const toastMocks = vi.hoisted(() => ({ dismiss: vi.fn() }));
-vi.mock("@/components/ui/toast", () => ({ toast: toastMocks }));
 vi.mock("@/lib/identity", () => ({
   authenticatedFetch: vi.fn(async () => new Response(null, { status: 204 })),
 }));
@@ -30,10 +30,17 @@ function conversation(id: string, pendingApprovals = 0): Conversation {
   };
 }
 
+function activeToastIds(): (string | number)[] {
+  return toast.getToasts().map((active) => active.id);
+}
+
 beforeEach(() => {
   localStorage.clear();
   resetReadStateForTests();
-  toastMocks.dismiss.mockReset();
+});
+
+afterEach(() => {
+  for (const id of activeToastIds()) toast.dismiss(id);
 });
 
 describe("clearAllNotifications", () => {
@@ -45,6 +52,8 @@ describe("clearAllNotifications", () => {
     seedReadState(conversations);
     markConversationUnread(unread.id, unread.updated_at);
     markConversationUnread(unreadWithApproval.id, unreadWithApproval.updated_at);
+    toast("Copied", { id: "notice" });
+    toast.error("Failed", { id: "error", duration: Number.POSITIVE_INFINITY });
 
     clearAllNotifications(conversations, ["comment-1", "comment-2"]);
 
@@ -61,6 +70,19 @@ describe("clearAllNotifications", () => {
     );
     expect(getSeenCommentIds()).toEqual(new Set(["comment-1", "comment-2"]));
     expect(unreadWithApproval.pending_elicitations_count).toBe(2);
-    expect(toastMocks.dismiss).toHaveBeenCalledExactlyOnceWith();
+    expect(activeToastIds()).toEqual([]);
+  });
+
+  it("keeps non-dismissible toasts that hold a pending decision", () => {
+    toast("Copied", { id: "notice" });
+    toast.custom(() => createElement("div"), {
+      id: "clipboard-consent",
+      dismissible: false,
+      duration: Number.POSITIVE_INFINITY,
+    });
+
+    clearAllNotifications([], []);
+
+    expect(activeToastIds()).toEqual(["clipboard-consent"]);
   });
 });

@@ -18,11 +18,13 @@ describe("isClearAllNotificationsHotkey", () => {
     expect(isClearAllNotificationsHotkey(new KeyboardEvent("keydown", { key: "Escape" }))).toBe(
       false,
     );
-    expect(
-      isClearAllNotificationsHotkey(
-        new KeyboardEvent("keydown", { key: "Escape", shiftKey: true, metaKey: true }),
-      ),
-    ).toBe(false);
+    for (const modifier of ["metaKey", "ctrlKey", "altKey"] as const) {
+      expect(
+        isClearAllNotificationsHotkey(
+          new KeyboardEvent("keydown", { key: "Escape", shiftKey: true, [modifier]: true }),
+        ),
+      ).toBe(false);
+    }
   });
 });
 
@@ -52,6 +54,33 @@ describe("useClearAllNotificationsHotkey", () => {
     renderHook(() => useClearAllNotificationsHotkey(onClear));
 
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+
+    expect(onClear).not.toHaveBeenCalled();
+  });
+
+  it("ignores auto-repeat and already-handled Shift+Escape", () => {
+    const onClear = vi.fn();
+    renderHook(() => useClearAllNotificationsHotkey(onClear));
+
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", shiftKey: true, repeat: true }),
+    );
+    const handled = new KeyboardEvent("keydown", {
+      key: "Escape",
+      shiftKey: true,
+      cancelable: true,
+    });
+    handled.preventDefault();
+    window.dispatchEvent(handled);
+
+    expect(onClear).not.toHaveBeenCalled();
+  });
+
+  it("does nothing when disabled", () => {
+    const onClear = vi.fn();
+    renderHook(() => useClearAllNotificationsHotkey(onClear, false));
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", shiftKey: true }));
 
     expect(onClear).not.toHaveBeenCalled();
   });
