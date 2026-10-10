@@ -535,13 +535,11 @@ def write_mcp_config(
     config_dir = agy_gemini_dir(bridge_dir) / _MCP_CONFIG_DIR
     config_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     path = config_dir / _MCP_CONFIG_FILE
-    payload = _load_user_mcp_config(Path.home())
-    user_servers = payload.get("mcpServers")
-    servers: dict[str, object] = dict(user_servers) if isinstance(user_servers, dict) else {}
+    servers = dict(_load_user_mcp_servers(Path.home()))
     servers[_MCP_SERVER_NAME] = _build_relay_server(
         bridge_dir, python_executable=python_executable
     )
-    payload["mcpServers"] = servers
+    payload = {"mcpServers": servers}
     # Inherited server definitions may carry credentials in their env blocks, so
     # the file is created owner-only rather than reusing a stale temp file's mode.
     fd, tmp_name = tempfile.mkstemp(prefix=_MCP_CONFIG_FILE + ".", dir=config_dir)
@@ -551,11 +549,13 @@ def write_mcp_config(
         os.replace(tmp_name, path)
     finally:
         Path(tmp_name).unlink(missing_ok=True)
+    # Earlier releases staged this write at a fixed name with a looser mode.
+    path.with_suffix(path.suffix + ".tmp").unlink(missing_ok=True)
     return path
 
 
-def _load_user_mcp_config(real_home: Path) -> dict[str, object]:
-    """Load the user's real agy MCP config; a missing or malformed file yields ``{}``."""
+def _load_user_mcp_servers(real_home: Path) -> dict[str, object]:
+    """Return the user's real agy MCP servers; a missing or malformed file yields ``{}``."""
     path = real_home / ".gemini" / _MCP_CONFIG_DIR / _MCP_CONFIG_FILE
     try:
         loaded = json.loads(path.read_text(encoding="utf-8"))
@@ -568,14 +568,15 @@ def _load_user_mcp_config(real_home: Path) -> dict[str, object]:
             exc_info=True,
         )
         return {}
-    if not isinstance(loaded, dict) or not isinstance(loaded.get("mcpServers", {}), dict):
+    servers = loaded.get("mcpServers", {}) if isinstance(loaded, dict) else None
+    if not isinstance(servers, dict):
         _logger.warning(
             "agy MCP config at %s is not a JSON object with an mcpServers object; "
             "seeding only the Omnigent relay",
             path,
         )
         return {}
-    return loaded
+    return servers
 
 
 def seed_isolated_agy_home(

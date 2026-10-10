@@ -12,6 +12,7 @@ journey's isolated HOME and must never touch a real ``~/.gemini``.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import json
 import os
@@ -27,6 +28,7 @@ from omnigent.harnesses.antigravity_native.bridge import (
     agy_home_dir,
     read_tmux_info,
 )
+from omnigent.harnesses.antigravity_native.launch import agy_binary_path
 from tests.e2e_ui.shells import test_antigravity_tmux_recovery as _tmux_recovery
 from tests.e2e_ui.shells.test_antigravity_tmux_recovery import _antigravity_stack, _wait_until
 from tests.e2e_ui.shells.test_terminal_direct_attach import _BLOCK_LOOPBACK_DIALS
@@ -56,6 +58,7 @@ tools='{"tools":[{"name":"@NAME@_find_code","description":"stand-in",'
 tools="$tools"'"inputSchema":{"type":"object","properties":{}}}]}'
 while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  [ -n "$id" ] || continue
   case "$line" in
     *'"method":"initialize"'*) result="$init" ;;
     *'"method":"tools/list"'*) result="$tools" ;;
@@ -85,7 +88,7 @@ _TOOL_LISTING = _ToolListingReply()
 def _agy_mcp_list(home: Path) -> str:
     """``agy mcp list`` output for ``<home>/.gemini/config/mcp_config.json``."""
     result = subprocess.run(
-        ["agy", "mcp", "list"],
+        [agy_binary_path(), "mcp", "list"],
         env={**os.environ, "HOME": str(home)},
         capture_output=True,
         text=True,
@@ -119,7 +122,8 @@ def user_home(antigravity_model: list[str] | None, tmp_path: Path) -> Path:
         stub.write_text(_MCP_STUB.replace("@NAME@", name), encoding="utf-8")
         stub.chmod(0o700)
         subprocess.run(
-            ["agy", "mcp", "add", name, str(stub), "mcp"],
+            [agy_binary_path(), "mcp", "add", name, str(stub), "mcp"],
+            env={**os.environ, "HOME": str(home)},
             capture_output=True,
             text=True,
             timeout=30,
@@ -211,12 +215,17 @@ def test_dispatched_agy_worker_keeps_user_mcp_servers(
             if os.environ.get("OMNIGENT_E2E_RECORD_DIR"):
                 page.wait_for_timeout(3_000)  # let the recording linger on the reply
         finally:
-            evidence["worker-pane.txt"] = pane_text()
-            evidence["assistant-reply.txt"] = reply_text
-            evidence.update(
-                {f"model-request-{i}.json": raw for i, raw in enumerate(_TOOL_LISTING.requests)}
-            )
-            _retain_evidence(evidence)
+            # Best-effort diagnostics must never mask the failure being diagnosed.
+            with contextlib.suppress(Exception):
+                evidence["worker-pane.txt"] = pane_text()
+                evidence["assistant-reply.txt"] = reply_text
+                evidence.update(
+                    {
+                        f"model-request-{i}.json": raw
+                        for i, raw in enumerate(_TOOL_LISTING.requests)
+                    }
+                )
+                _retain_evidence(evidence)
             context.close()
 
         worker_list = _agy_mcp_list(agy_home_dir(session.bridge_dir))

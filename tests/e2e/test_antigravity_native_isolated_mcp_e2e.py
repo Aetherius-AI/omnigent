@@ -49,10 +49,13 @@ _CONNECTING_RE = re.compile(r"server\(s\) still connecting after \d+s:\s*(.+?)\s
 _AGY_MCP_SCAN_TIMEOUT = 75.0
 
 
-def _agy_loaded_mcp_servers(gemini_dir: Path, *, cwd: Path) -> tuple[set[str], str]:
+def _agy_loaded_mcp_servers(
+    gemini_dir: Path, *, cwd: Path, expected: set[str]
+) -> tuple[set[str], str]:
     """Launch agy against *gemini_dir*; return the servers its log reports still connecting.
 
-    Also returns the MCP-related log lines scanned, for diagnosing a changed log format.
+    Polls until every *expected* server is named or the scan deadline passes. Also
+    returns the MCP-related log lines scanned, for diagnosing a changed log format.
     """
     assert _AGY_BIN is not None
     child = pexpect.spawn(
@@ -89,7 +92,7 @@ def _agy_loaded_mcp_servers(gemini_dir: Path, *, cwd: Path) -> tuple[set[str], s
             except pexpect.EOF:
                 break
             scan_logs()
-            if servers:
+            if expected <= servers:
                 break
         scan_logs()  # agy may exit right after logging the answer
     finally:
@@ -130,13 +133,18 @@ def test_dispatched_agy_worker_inherits_user_mcp_servers(
     dispatched_ws = tmp_path / "dispatched-ws"
     dispatched_ws.mkdir()
 
-    interactive, interactive_log = _agy_loaded_mcp_servers(real_gemini, cwd=interactive_ws)
+    expected = set(_USER_MCP_SERVERS)
+    interactive, interactive_log = _agy_loaded_mcp_servers(
+        real_gemini, cwd=interactive_ws, expected=expected
+    )
     assert {"graft", "graphify"} <= interactive, (
         "interactive agy did not load the fixture MCP servers \u2014 fixture invalid "
         f"(loaded {sorted(interactive)}); MCP log lines:\n{interactive_log}"
     )
 
-    dispatched, dispatched_log = _agy_loaded_mcp_servers(iso_gemini, cwd=dispatched_ws)
+    dispatched, dispatched_log = _agy_loaded_mcp_servers(
+        iso_gemini, cwd=dispatched_ws, expected=expected
+    )
     assert {"graft", "graphify"} <= dispatched, (
         "dispatched agy worker lost the user's MCP servers: interactive agy loaded "
         f"{sorted(interactive)} but the isolated --gemini_dir worker loaded "

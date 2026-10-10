@@ -7,6 +7,7 @@ import logging
 import os
 import shlex
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1585,6 +1586,44 @@ def test_write_mcp_config_tolerates_malformed_user_config(
     assert len(warnings) == 1 and "seeding only the Omnigent relay" in warnings[0]
 
 
+def _write_invalid_utf8(real_config: Path) -> None:
+    real_config.write_bytes(b"\xff\xfe{")
+
+
+def _replace_with_directory(real_config: Path) -> None:
+    real_config.unlink()
+    real_config.mkdir()
+
+
+@pytest.mark.parametrize(
+    "corrupt", [_write_invalid_utf8, _replace_with_directory], ids=["not-utf8", "unreadable"]
+)
+def test_write_mcp_config_tolerates_unreadable_user_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    corrupt: Callable[[Path], None],
+) -> None:
+    """A mis-encoded or unreadable user config degrades to the relay alone, with a warning."""
+    fake_home = tmp_path / "real-home"
+    corrupt(_write_user_mcp_config(fake_home, "{}"))
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: fake_home))
+
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    with caplog.at_level(logging.WARNING, logger=_mod.__name__):
+        path = write_mcp_config(bridge_dir, python_executable="python-test")
+
+    written = json.loads(path.read_text(encoding="utf-8"))
+    assert written == build_mcp_config(bridge_dir, python_executable="python-test")
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == _mod.__name__ and record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1 and "seeding only the Omnigent relay" in warnings[0]
+
+
 @pytest.mark.posix_only
 def test_write_mcp_config_restricts_isolated_config_to_owner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1608,6 +1647,7 @@ def test_write_mcp_config_restricts_isolated_config_to_owner(
     path = write_mcp_config(bridge_dir, python_executable="python-test")
 
     assert path.stat().st_mode & 0o777 == 0o600
+    assert not (config_dir / "mcp_config.json.tmp").exists()
     assert json.loads(path.read_text(encoding="utf-8"))["mcpServers"]["graft"]["env"] == {
         "GRAFT_TOKEN": "s"
     }
