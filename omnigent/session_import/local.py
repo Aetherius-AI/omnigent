@@ -73,9 +73,13 @@ def _source_epoch(value: object) -> int | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        if not math.isfinite(value):
+        try:
+            number = float(value)
+        except OverflowError:
             return None
-        seconds = value / 1000 if value > 1e12 else value
+        if not math.isfinite(number):
+            return None
+        seconds = number / 1000 if number > 1e12 else number
     elif isinstance(value, str) and value:
         try:
             parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -536,7 +540,11 @@ def load_claude_session(
             type=item.item_type,
             response_id=item.response_id,
             data=parse_item_data(item.item_type, _claude_import_item_data(item)),
-            created_at=int(item.created_at) if item.created_at is not None else None,
+            created_at=(
+                int(item.created_at)
+                if item.created_at is not None and item.created_at > 0
+                else None
+            ),
         )
         for item in source_items
     )

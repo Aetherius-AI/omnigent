@@ -79,6 +79,7 @@ def _import_claude_session(base_url: str, home: Path) -> str:
     env = {
         **os.environ,
         "HOME": str(home),
+        "CLAUDE_CONFIG_DIR": str(home / ".claude"),
         "OMNIGENT_CONFIG_HOME": str(home / "config"),
         "OMNIGENT_DATA_DIR": str(home / "omnigent-data"),
     }
@@ -135,9 +136,9 @@ def test_imported_session_sidebar_recency_is_the_source_time(
     expect(tooltip).to_be_visible()
     title_line = tooltip.locator("p").first
     expect(title_line).to_contain_text("inspect TODO.md")
-    page.wait_for_timeout(1_500)
-
     expect(title_line).to_have_text(_MONTHS_OR_YEARS_OLD)
+    # Hold the dated tooltip on screen so the e2e recording can show it.
+    page.wait_for_timeout(1_500)
 
 
 @pytest.mark.browser_context_args(timezone_id="UTC", locale="en-US")
@@ -152,6 +153,7 @@ def test_imported_messages_show_their_source_timestamps(
     bubbles = page.locator(_BUBBLE)
     expect(bubbles).to_have_count(len(_TEXTS), timeout=30_000)
     first_time = _revealed_timestamp(bubbles.first)
+    # Hold each revealed timestamp on screen so the e2e recording can show it.
     page.wait_for_timeout(1_500)
     last_time = _revealed_timestamp(bubbles.last)
     page.wait_for_timeout(1_500)

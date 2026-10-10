@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -126,7 +127,8 @@ def test_import_command_sends_source_record_times(tmp_path: Path) -> None:
 
     assert result.exit_code == 0, result.output
     payload = json.loads(route.calls.last.request.content)
-    assert payload["items"][0]["created_at"] == 1781514000
+    expected = int(datetime.fromisoformat("2026-06-15T09:00:00+00:00").timestamp())
+    assert payload["items"][0]["created_at"] == expected
 
 
 @respx.mock

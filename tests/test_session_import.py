@@ -430,6 +430,8 @@ def _iso_epoch(iso_timestamp: str) -> int:
         (1781514000123, 1781514000),
         (0, None),
         (-1, None),
+        (10**400, None),
+        (-(10**400), None),
         (float("inf"), None),
         (float("nan"), None),
         (True, None),
@@ -447,6 +449,8 @@ def test_source_epoch_normalizes_record_times(value: object, expected: int | Non
 @pytest.fixture
 def east_of_utc(monkeypatch: pytest.MonkeyPatch) -> None:
     """Run the process clock nine hours ahead of UTC (a POSIX TZ string needs no tzdata)."""
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset is POSIX-only")
     monkeypatch.setenv("TZ", "JST-9")
     time.tzset()
     yield
