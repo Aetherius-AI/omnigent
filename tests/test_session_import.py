@@ -234,7 +234,7 @@ def test_load_opencode_session_preserves_messages_files_and_tools(
         },
         "messages": [
             {
-                "info": {"id": "msg_user", "role": "user"},
+                "info": {"id": "msg_user", "role": "user", "time": {"created": 1781514000123}},
                 "parts": [
                     {"type": "text", "text": "inspect TODO.md"},
                     {
@@ -245,7 +245,11 @@ def test_load_opencode_session_preserves_messages_files_and_tools(
                 ],
             },
             {
-                "info": {"id": "msg_assistant", "role": "assistant"},
+                "info": {
+                    "id": "msg_assistant",
+                    "role": "assistant",
+                    "time": {"created": 1781514060456},
+                },
                 "parts": [
                     {"type": "reasoning", "text": "private reasoning"},
                     {"type": "text", "text": "Checking."},
@@ -306,6 +310,14 @@ def test_load_opencode_session_preserves_messages_files_and_tools(
     assert dumped[3] == {"call_id": "call_1", "output": "TODO.md:1:item"}
     assert dumped[4]["content"] == [{"type": "output_text", "text": "Done."}]
     assert {item.response_id for item in imported.items[1:]} == {"opencode:msg_assistant"}
+    # info.time.created is epoch milliseconds; every part of a message shares it.
+    assert [item.created_at for item in imported.items] == [
+        1781514000,
+        1781514060,
+        1781514060,
+        1781514060,
+        1781514060,
+    ]
 
 
 def test_load_opencode_session_rejects_invalid_or_mismatched_ids(
@@ -405,6 +417,27 @@ def test_load_claude_session_normalizes_parent_transcript(tmp_path: Path) -> Non
 def _iso_epoch(iso_timestamp: str) -> int:
     """Unix seconds for an ISO-8601 transcript timestamp."""
     return int(datetime.fromisoformat(iso_timestamp.replace("Z", "+00:00")).timestamp())
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("2026-06-15T09:00:00.000Z", 1781514000),
+        ("2026-06-15T09:00:00+00:00", 1781514000),
+        (1781514000, 1781514000),
+        (1781514000.9, 1781514000),
+        (1781514000123, 1781514000),
+        (0, None),
+        (-1, None),
+        (True, None),
+        ("not a timestamp", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_source_epoch_normalizes_record_times(value: object, expected: int | None) -> None:
+    """Seconds, milliseconds, and ISO-8601 strings all become whole Unix seconds."""
+    assert local_import._source_epoch(value) == expected
 
 
 def test_load_claude_session_preserves_record_timestamps(tmp_path: Path) -> None:

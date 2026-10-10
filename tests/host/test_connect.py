@@ -8306,6 +8306,7 @@ async def test_handle_import_local_slices_oversized_session_into_chunks(
             type="message",
             response_id="r1",
             data=SimpleNamespace(model_dump=lambda **_kw: payload),
+            created_at=None,
         )
         return SimpleNamespace(
             external_session_id=session_id,
@@ -8380,6 +8381,7 @@ async def test_handle_import_local_legacy_server_skips_only_unsafe_session(
             type="message",
             response_id="r1",
             data=SimpleNamespace(model_dump=lambda **_kw: payload),
+            created_at=None,
         )
         return SimpleNamespace(
             external_session_id=session_id,

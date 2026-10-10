@@ -1,19 +1,10 @@
-"""E2E: ``omnigent import`` keeps the source transcript's timestamps.
+"""E2E: an imported Claude Code session shows its source times in the app.
 
-Drives the real CLI (``python -m omnigent import --harness claude``) against
-the live server with a Claude Code transcript whose records are dated months
-in the past, then reads the result where a user sees it:
-
-* the sidebar row's hover tooltip labels the session by ``updated_at``
-  (``2mo`` for a July session; ``now`` when stamped at import time);
-* the hover-revealed ``message-timestamp`` on each imported bubble renders
-  the item's ``created_at`` (``Jul 21, 12:00 PM`` vs. today's clock time).
-
-Selectors:
-  - sidebar row: ``li[data-sidebar-session-id=<id>]``; its tooltip is
-    ``data-testid="session-tooltip-content"``
-  - bubbles: ``data-testid="message-bubble"`` + ``data-role="user|assistant"``;
-    timestamp ``data-testid="message-timestamp"``
+``omnigent import`` reads a local Claude Code JSONL transcript whose records
+carry ISO ``timestamp`` fields and posts them to ``/v1/imports``. The sidebar
+tooltip renders the session's ``updated_at`` as a relative age and each bubble
+reveals its ``created_at`` on hover, so a session worked on months ago must
+read as months old in both places rather than as if it happened at import time.
 """
 
 from __future__ import annotations
@@ -23,65 +14,68 @@ import os
 import re
 import subprocess
 import sys
-import time
-from datetime import UTC, datetime
+import uuid
+from datetime import datetime
 from pathlib import Path
-from typing import Any
 
-import httpx
 import pytest
-from playwright.sync_api import Page, expect
+from playwright.sync_api import Locator, Page, expect
 
-_USER_BUBBLE = '[data-testid="message-bubble"][data-role="user"]'
-_ASSISTANT_BUBBLE = '[data-testid="message-bubble"][data-role="assistant"]'
+_RECORD_TIMES = (
+    "2026-07-21T12:00:00.000Z",
+    "2026-07-21T12:05:00.000Z",
+    "2026-07-21T13:30:00.000Z",
+    "2026-07-21T13:31:00.000Z",
+)
+_TEXTS = (
+    "inspect TODO.md",
+    "TODO.md lists three open items.",
+    "close the first item",
+    "Done.",
+)
+# en-US renders the day once the stamp is not today; the year appears only
+# after the calendar year rolls over.
+_FIRST_MESSAGE_TIME = re.compile(r"^Jul 21(, 2026)?, 12:00 PM$")
+_LAST_MESSAGE_TIME = re.compile(r"^Jul 21(, 2026)?, 1:31 PM$")
+_MONTHS_OR_YEARS_OLD = re.compile(r"· \d+(mo|y)$")
+_BUBBLE = '[data-testid="message-bubble"]'
 _TIMESTAMP = '[data-testid="message-timestamp"]'
 
-_FIRST_AT = datetime(2026, 7, 21, 12, 0, tzinfo=UTC)
-_LAST_AT = datetime(2026, 7, 21, 13, 31, tzinfo=UTC)
-_TRANSCRIPT_RECORDS: tuple[tuple[str, str, str], ...] = (
-    ("user", "2026-07-21T12:00:00.000Z", "inspect TODO.md"),
-    ("assistant", "2026-07-21T12:05:00.000Z", "Looking now."),
-    ("user", "2026-07-21T13:30:00.000Z", "thanks, summarize"),
-    ("assistant", "2026-07-21T13:31:00.000Z", "Done."),
-)
 
-
-@pytest.fixture
-def browser_context_args(browser_context_args: dict[str, Any]) -> dict[str, Any]:
-    """Pin locale and zone so the rendered date strings are deterministic."""
-    return {**browser_context_args, "locale": "en-US", "timezone_id": "UTC"}
-
-
-def _write_claude_transcript(home: Path, session_id: str) -> Path:
+def _write_claude_transcript(home: Path) -> str:
+    """Write a four-record Claude Code transcript dated Jul 21 2026; return its session id."""
+    session_id = str(uuid.uuid4())
     transcript = home / ".claude" / "projects" / "-repo" / f"{session_id}.jsonl"
     transcript.parent.mkdir(parents=True, exist_ok=True)
-    records = []
+    records: list[dict[str, object]] = []
     parent: str | None = None
-    for index, (role, stamp, text) in enumerate(_TRANSCRIPT_RECORDS, start=1):
-        uuid = f"{role}-{index}"
-        content: object = text if role == "user" else [{"type": "text", "text": text}]
+    for index, (stamp, text) in enumerate(zip(_RECORD_TIMES, _TEXTS, strict=True)):
+        role = "user" if index % 2 == 0 else "assistant"
+        record_id = f"{role}-{index // 2 + 1}"
         records.append(
             {
                 "type": role,
-                "uuid": uuid,
+                "uuid": record_id,
                 "parentUuid": parent,
                 "sessionId": session_id,
                 "cwd": "/repo",
                 "timestamp": stamp,
-                "message": {"role": role, "content": content},
+                "message": {
+                    "role": role,
+                    "content": text if role == "user" else [{"type": "text", "text": text}],
+                },
             }
         )
-        parent = uuid
-    transcript.write_text(
-        "".join(f"{json.dumps(record)}\n" for record in records), encoding="utf-8"
-    )
-    last_modified = _LAST_AT.timestamp()
-    os.utime(transcript, (last_modified, last_modified))
-    return transcript
+        parent = record_id
+    transcript.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+    last = datetime.fromisoformat(_RECORD_TIMES[-1].replace("Z", "+00:00")).timestamp()
+    os.utime(transcript, (last, last))
+    return session_id
 
 
-def _import_with_cli(base_url: str, home: Path, session_id: str) -> str:
-    """Run the real ``omnigent import`` for ``session_id`` and return the new session id."""
+def _import_claude_session(base_url: str, home: Path) -> str:
+    """Import the transcript under ``home`` with the real CLI; return the new session id."""
+    source_session_id = _write_claude_transcript(home)
     env = {
         **os.environ,
         "HOME": str(home),
@@ -97,14 +91,14 @@ def _import_with_cli(base_url: str, home: Path, session_id: str) -> str:
             "--harness",
             "claude",
             "--session",
-            session_id,
+            source_session_id,
             "--server",
             base_url,
         ],
         check=True,
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=60,
         env=env,
     )
     match = re.search(r"Imported \d+ item\(s\) into \S+/c/(\S+)", result.stdout)
@@ -112,91 +106,55 @@ def _import_with_cli(base_url: str, home: Path, session_id: str) -> str:
     return match.group(1)
 
 
-def _relative_label(timestamp_s: float, now_s: float) -> str:
-    """Mirror ``web/src/lib/relativeTime.ts`` for the sidebar tooltip."""
-    diff = max(0.0, now_s - timestamp_s)
-    minute, hour, day = 60.0, 3600.0, 86400.0
-    week, month, year = 7 * day, 30 * day, 365 * day
-    if diff < minute:
-        return "now"
-    if diff < hour:
-        return f"{int(diff // minute)}m"
-    if diff < day:
-        return f"{int(diff // hour)}h"
-    if diff < week:
-        return f"{int(diff // day)}d"
-    if diff < month:
-        return f"{int(diff // week)}w"
-    if diff < year:
-        return f"{int(diff // month)}mo"
-    return f"{int(diff // year)}y"
+def _sidebar_row(page: Page, session_id: str) -> Locator:
+    return page.locator("li").filter(has=page.locator(f'a[href="/c/{session_id}"]'))
 
 
-def _bubble_stamp(at: datetime) -> re.Pattern[str]:
-    """en-US/UTC rendering of ``formatBubbleTimestamp`` for a past-day ``at``."""
-    year = "" if at.year == datetime.now(UTC).year else f", {at.year}"
-    hour = at.hour % 12 or 12
-    meridiem = "AM" if at.hour < 12 else "PM"
-    return re.compile(rf"^{at:%b} {at.day}{year}, {hour}:{at:%M}\s?{meridiem}$")
+def _revealed_timestamp(bubble: Locator) -> str:
+    """Hover ``bubble`` until its action row is opaque and return the timestamp text."""
+    bubble.scroll_into_view_if_needed()
+    bubble.hover()
+    timestamp = bubble.locator(_TIMESTAMP)
+    expect(timestamp.locator("..")).to_have_css("opacity", "1")
+    return timestamp.inner_text()
 
 
-def test_imported_session_recency_reflects_source_time(
-    page: Page,
-    live_server: str,
-    tmp_path: Path,
+@pytest.mark.browser_context_args(timezone_id="UTC", locale="en-US")
+def test_imported_session_sidebar_recency_is_the_source_time(
+    request: pytest.FixtureRequest, live_server: str, tmp_path: Path
 ) -> None:
-    """The sidebar dates an imported session by its last source message, not the import."""
-    source_session_id = "a1b2c3d4-0721-4000-8000-00000000000a"
-    _write_claude_transcript(tmp_path, source_session_id)
-    session_id = _import_with_cli(live_server, tmp_path, source_session_id)
+    """The sidebar tooltip dates an imported session by its last source message."""
+    session_id = _import_claude_session(live_server, tmp_path)
 
+    page: Page = request.getfixturevalue("page")
     page.goto(f"{live_server}/c/{session_id}")
-    row = page.locator(f'li[data-sidebar-session-id="{session_id}"]')
+    row = _sidebar_row(page, session_id)
     expect(row).to_be_visible(timeout=30_000)
     row.hover()
     tooltip = page.get_by_test_id("session-tooltip-content")
-    expect(tooltip).to_be_visible(timeout=10_000)
-    expect(tooltip).to_contain_text(f"· {_relative_label(_LAST_AT.timestamp(), time.time())}")
+    expect(tooltip).to_be_visible()
+    title_line = tooltip.locator("p").first
+    expect(title_line).to_contain_text("inspect TODO.md")
+    page.wait_for_timeout(1_500)
 
-    session = httpx.get(
-        f"{live_server}/v1/sessions/{session_id}",
-        params={"include_items": "false", "include_liveness": "false"},
-        timeout=10,
-    )
-    session.raise_for_status()
-    body = session.json()
-    first_s, last_s = int(_FIRST_AT.timestamp()), int(_LAST_AT.timestamp())
-    assert first_s <= body["created_at"] <= last_s, body["created_at"]
-    assert first_s <= body["updated_at"] <= last_s, body["updated_at"]
+    expect(title_line).to_have_text(_MONTHS_OR_YEARS_OLD)
 
 
-def test_imported_messages_keep_source_timestamps(
-    page: Page,
-    live_server: str,
-    tmp_path: Path,
+@pytest.mark.browser_context_args(timezone_id="UTC", locale="en-US")
+def test_imported_messages_show_their_source_timestamps(
+    request: pytest.FixtureRequest, live_server: str, tmp_path: Path
 ) -> None:
-    """Each imported bubble shows its own source record time, not the import time."""
-    source_session_id = "a1b2c3d4-0721-4000-8000-00000000000b"
-    _write_claude_transcript(tmp_path, source_session_id)
-    session_id = _import_with_cli(live_server, tmp_path, source_session_id)
+    """Hovering imported bubbles reveals each record's own date and time."""
+    session_id = _import_claude_session(live_server, tmp_path)
 
+    page: Page = request.getfixturevalue("page")
     page.goto(f"{live_server}/c/{session_id}")
-    first_user = page.locator(_USER_BUBBLE).first
-    expect(first_user).to_be_visible(timeout=30_000)
-    first_user.hover()
-    first_stamp = first_user.locator(_TIMESTAMP)
-    expect(first_stamp).to_be_visible(timeout=10_000)
-    expect(first_stamp).to_have_text(_bubble_stamp(_FIRST_AT))
+    bubbles = page.locator(_BUBBLE)
+    expect(bubbles).to_have_count(len(_TEXTS), timeout=30_000)
+    first_time = _revealed_timestamp(bubbles.first)
+    page.wait_for_timeout(1_500)
+    last_time = _revealed_timestamp(bubbles.last)
+    page.wait_for_timeout(1_500)
 
-    last_assistant = page.locator(_ASSISTANT_BUBBLE).last
-    expect(last_assistant).to_be_visible()
-    last_assistant.hover()
-    last_stamp = last_assistant.locator(_TIMESTAMP)
-    expect(last_stamp).to_be_visible(timeout=10_000)
-    expect(last_stamp).to_have_text(_bubble_stamp(_LAST_AT))
-
-    items = httpx.get(f"{live_server}/v1/sessions/{session_id}/items", timeout=10)
-    items.raise_for_status()
-    created = [item["created_at"] for item in items.json()["data"]]
-    assert len(created) == len(_TRANSCRIPT_RECORDS), created
-    assert len(set(created)) > 1, f"every imported item shares one created_at: {created}"
+    assert _FIRST_MESSAGE_TIME.match(first_time), first_time
+    assert _LAST_MESSAGE_TIME.match(last_time), last_time

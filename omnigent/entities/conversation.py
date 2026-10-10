@@ -839,7 +839,8 @@ def _validate_type_matches_data(item_type: str, data: ItemData) -> None:
 
 class NewConversationItem(BaseModel):
     """
-    An item that has not yet been persisted. No ID or timestamp.
+    An item that has not yet been persisted. It has no ID, and no
+    timestamp unless ``created_at`` is supplied.
 
     :param type: Item type, e.g. ``"message"``,
         ``"function_call"``.
