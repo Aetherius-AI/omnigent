@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import sqlite3
 import subprocess
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
 from typing import get_args
@@ -72,14 +73,20 @@ def _source_epoch(value: object) -> int | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
+        if not math.isfinite(value):
+            return None
         seconds = value / 1000 if value > 1e12 else value
-        return int(seconds) if seconds > 0 else None
-    if isinstance(value, str) and value:
+    elif isinstance(value, str) and value:
         try:
-            return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp())
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError:
             return None
-    return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        seconds = parsed.timestamp()
+    else:
+        return None
+    return int(seconds) if seconds > 0 else None
 
 
 def _bounded_response_id(response_id: str) -> str:
