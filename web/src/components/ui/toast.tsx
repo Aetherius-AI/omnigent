@@ -1,5 +1,8 @@
 import type { ReactNode } from "react";
-import { toast } from "sonner";
+import { toast as sonnerToast } from "sonner";
+
+/** App toast API. Import this wrapper instead of coupling call sites to Sonner. */
+export const toast = sonnerToast;
 
 /**
  * Compatibility wrapper for existing call sites while they migrate to Sonner.
