@@ -120,6 +120,19 @@ def _revealed_timestamp(bubble: Locator) -> str:
     return timestamp.inner_text()
 
 
+def _hold_for_recording(page: Page, request: pytest.FixtureRequest) -> None:
+    """Pause so a video capture can read the asserted state; a no-op otherwise.
+
+    The preceding ``expect`` assertions already verify the state, so a normal
+    test run skips the wait and only a recording run keeps it on screen.
+    """
+    recording = bool(os.environ.get("OMNIGENT_E2E_RECORD_DIR")) or (
+        request.config.getoption("--video", "off") != "off"
+    )
+    if recording:
+        page.wait_for_timeout(1_500)
+
+
 @pytest.mark.browser_context_args(timezone_id="UTC", locale="en-US")
 def test_imported_session_sidebar_recency_is_the_source_time(
     request: pytest.FixtureRequest, live_server: str, tmp_path: Path
@@ -137,8 +150,7 @@ def test_imported_session_sidebar_recency_is_the_source_time(
     title_line = tooltip.locator("p").first
     expect(title_line).to_contain_text("inspect TODO.md")
     expect(title_line).to_have_text(_MONTHS_OR_YEARS_OLD)
-    # Hold the dated tooltip on screen so the e2e recording can show it.
-    page.wait_for_timeout(1_500)
+    _hold_for_recording(page, request)
 
 
 @pytest.mark.browser_context_args(timezone_id="UTC", locale="en-US")
@@ -153,10 +165,9 @@ def test_imported_messages_show_their_source_timestamps(
     bubbles = page.locator(_BUBBLE)
     expect(bubbles).to_have_count(len(_TEXTS), timeout=30_000)
     first_time = _revealed_timestamp(bubbles.first)
-    # Hold each revealed timestamp on screen so the e2e recording can show it.
-    page.wait_for_timeout(1_500)
+    _hold_for_recording(page, request)
     last_time = _revealed_timestamp(bubbles.last)
-    page.wait_for_timeout(1_500)
+    _hold_for_recording(page, request)
 
     assert _FIRST_MESSAGE_TIME.match(first_time), first_time
     assert _LAST_MESSAGE_TIME.match(last_time), last_time
