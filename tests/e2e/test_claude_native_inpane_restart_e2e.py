@@ -57,16 +57,17 @@ from pathlib import Path
 
 import pytest
 
+from omnigent.harnesses.claude_native import bridge as _bridge
 from omnigent.harnesses.claude_native.bridge import (
     bridge_dir_for_bridge_id,
     inject_user_message,
     write_tmux_target,
 )
 
-# A stray re-delivery in the product only fires after the restart receipt
-# grace (``_RESTART_RECEIPT_GRACE_S``, 5s) lapses with no receipt, so the
-# exactly-once settle must outlast it to count a duplicate.
-_DUPLICATE_SETTLE_S = 6.0
+# The exactly-once settle must outlast the restart-receipt grace a stray
+# re-delivery waits out. Derive it from the bridge constant, with a fallback
+# so this module still imports against a build that predates that constant.
+_DUPLICATE_SETTLE_S = getattr(_bridge, "_RESTART_RECEIPT_GRACE_S", 5.0) + 1.0
 
 
 def _tmux_version() -> tuple[int, ...] | None:

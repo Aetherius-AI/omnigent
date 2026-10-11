@@ -5105,14 +5105,18 @@ class _RestartableFakeTui:
     :param draft: Draft text a paste deposits in the composer.
     :param on_enter: Per-submit callbacks; index is the Enter count - 1.
         Missing indexes do nothing beyond clearing the composer.
+    :param on_paste: Per-paste callbacks; index is the paste count - 1.
+        A ``None`` entry or missing index does nothing. Lets a test land a
+        hook record while a specific paste's draft is pending.
     """
 
-    def __init__(self, draft: str, on_enter: list[Any]) -> None:
+    def __init__(self, draft: str, on_enter: list[Any], on_paste: list[Any] | None = None) -> None:
         self.pane = _composer_pane()
         self.pastes = 0
         self.enters = 0
         self._draft = draft
         self._on_enter = on_enter
+        self._on_paste = on_paste or []
 
     def run(self, cmd: list[str], **kwargs: object) -> SimpleNamespace:
         """
@@ -5128,6 +5132,10 @@ class _RestartableFakeTui:
         if "paste-buffer" in cmd:
             self.pastes += 1
             self.pane = _composer_pane(self._draft)
+            if self.pastes - 1 < len(self._on_paste):
+                callback = self._on_paste[self.pastes - 1]
+                if callback is not None:
+                    callback()
         elif cmd[-1] == "Enter":
             self.enters += 1
             self.pane = _composer_pane()
@@ -5301,6 +5309,63 @@ def test_inject_user_message_does_not_redeliver_when_receipt_lands_during_restar
     assert tui.pastes == 1, (
         "A receipt that arrives during the post-restart ready-wait must cancel "
         f"re-delivery; got {tui.pastes} pastes."
+    )
+
+
+def test_inject_user_message_does_not_resubmit_when_receipt_lands_during_retry_draft_wait(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A receipt landing while the retry draft settles cancels the second submit.
+
+    The ready-wait re-scan clears the window up to the retry's paste, but
+    the original submit can still land its ``UserPromptSubmit`` while the
+    replacement draft settles, just before the retry presses Enter. The
+    re-delivery pastes, then re-checks the original receipt cursor one last
+    time; finding it, it clears the retry draft and returns without
+    submitting — the message is pasted twice but only ever sent once.
+    """
+    _shrink_delivery_watch(monkeypatch)
+    bridge_dir = tmp_path / "bridge"
+    write_tmux_target(
+        bridge_dir,
+        socket_path=Path("/tmp/example/tmux.sock"),
+        tmux_target="claude:0.0",
+    )
+    record_hook_event(
+        bridge_dir,
+        {"hook_event_name": "SessionStart", "source": "startup", "session_id": "boot-1"},
+    )
+    content = "the message delivered as the retry draft settled"
+    tui = _RestartableFakeTui(
+        content,
+        on_enter=[
+            lambda: _append_hook_line(
+                bridge_dir,
+                {"hook_event_name": "SessionStart", "source": "startup", "session_id": "boot-2"},
+            ),
+        ],
+        # The original receipt lands only once the retry's second paste has
+        # deposited its draft, i.e. inside the retry's own pre-Enter window.
+        on_paste=[
+            None,
+            lambda: _append_hook_line(
+                bridge_dir,
+                {"hook_event_name": "UserPromptSubmit", "session_id": "boot-1", "prompt": content},
+            ),
+        ],
+    )
+    monkeypatch.setattr("subprocess.run", tui.run)
+
+    inject_user_message(bridge_dir, content=content)
+
+    assert tui.pastes == 2, (
+        f"The re-delivery should still paste into the replacement composer; got {tui.pastes}."
+    )
+    assert tui.enters == 1, (
+        "A receipt that lands while the retry draft settles must cancel the "
+        f"second submit; got {tui.enters} submits."
     )
 
 
