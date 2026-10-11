@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import subprocess
 import time
 import uuid
 from collections.abc import Callable
@@ -48,9 +49,29 @@ from ..messages.test_native_codex_render_parity import (
 )
 from .test_codex_native_cached_tokens_cost import _open_agent_info, _session_snapshot
 
+# Spawning a built-in child against the mock Responses API needs the multi-agent
+# tooling of codex-cli 0.154.0; on 0.139.0 the scripted spawn never registers a child.
+_MIN_CODEX_VERSION_FOR_MOCK_SPAWN = (0, 154, 0)
+
+
+def _codex_version() -> tuple[int, ...] | None:
+    codex = shutil.which("codex")
+    if codex is None:
+        return None
+    try:
+        output = subprocess.run(
+            [codex, "--version"], capture_output=True, text=True, timeout=30, check=False
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", output)
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
+_CODEX_VERSION = _codex_version()
 pytestmark = pytest.mark.skipif(
-    shutil.which("codex") is None,
-    reason="the codex CLI binary is required for the codex-native child usage e2e",
+    _CODEX_VERSION is None or _CODEX_VERSION < _MIN_CODEX_VERSION_FOR_MOCK_SPAWN,
+    reason="codex-cli 0.154.0+ is needed to spawn a built-in child against the mock backend",
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]

@@ -213,15 +213,21 @@ async def test_child_usage_retries_model_discovery_after_initial_resume_race() -
 
 
 @pytest.mark.asyncio
-async def test_child_usage_frame_survives_recovery_connection_error() -> None:
-    """Counts received with an unknown model stay buffered when the live resume fails."""
+@pytest.mark.parametrize(
+    "live_failure",
+    [
+        pytest.param(RuntimeError("no rollout found for thread id thread_child"), id="not_ready"),
+        pytest.param(ConnectionError("connection closed"), id="connection_error"),
+    ],
+)
+async def test_child_usage_close_recovers_model_after_failed_live_discovery(
+    live_failure: Exception,
+) -> None:
+    """Counts buffered through a failed live discovery post once shutdown recovers the model."""
     client = _RecordingClient()
     codex_client = MagicMock()
     codex_client.request = AsyncMock(
-        side_effect=[
-            ConnectionError("connection closed"),
-            _resume_response("thread_child", "child-model"),
-        ]
+        side_effect=[live_failure, _resume_response("thread_child", "child-model")]
     )
     state = _child_state(codex_client)
     tracker = fwd._CodexElicitationTaskTracker()
@@ -239,8 +245,48 @@ async def test_child_usage_frame_survives_recovery_connection_error() -> None:
     await state.close_child_usage_coalescers(client)
 
     assert codex_client.request.await_count == 2
+    codex_client.request.assert_awaited_with("thread/resume", {"threadId": "thread_child"})
     posted = _usage_posts(client)[0][1]["data"]
-    assert (posted["model"], posted["cumulative_input_tokens"]) == ("child-model", 20_280)
+    assert (
+        posted["model"],
+        posted["cumulative_input_tokens"],
+        posted["cumulative_cache_read_input_tokens"],
+    ) == ("child-model", 20_280, 9_984)
+    await tracker.close()
+
+
+@pytest.mark.asyncio
+async def test_child_usage_frame_bounds_hung_live_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hung resume on the live path cannot stall event handling; the counts stay buffered."""
+    monkeypatch.setattr(fwd, "_CHILD_MODEL_RECOVERY_TIMEOUT_SECONDS", 0.01)
+    client = _RecordingClient()
+    codex_client = MagicMock()
+
+    async def hang(*_args: object, **_kwargs: object) -> None:
+        await asyncio.Event().wait()
+
+    codex_client.request = AsyncMock(side_effect=hang)
+    state = _child_state(codex_client)
+    tracker = fwd._CodexElicitationTaskTracker()
+
+    await asyncio.wait_for(
+        _handle_child_event(
+            client, state, tracker, _usage_event("thread_child", cached_input_tokens=80)
+        ),
+        timeout=1.0,
+    )
+
+    assert _usage_posts(client) == []
+    assert state.child_usage_coalescers_by_thread["thread_child"].has_pending_usage
+    assert state.needs_child_thread_backfill("thread_child")
+
+    codex_client.request = AsyncMock(return_value=_resume_response("thread_child", "child-model"))
+    await state.close_child_usage_coalescers(client)
+
+    posted = _usage_posts(client)[0][1]["data"]
+    assert (posted["model"], posted["cumulative_cache_read_input_tokens"]) == ("child-model", 80)
     await tracker.close()
 
 
@@ -281,36 +327,6 @@ async def test_child_usage_frame_survives_cancelled_recovery() -> None:
 
 
 @pytest.mark.asyncio
-async def test_child_usage_close_makes_final_model_discovery_attempt() -> None:
-    """Shutdown resolves and posts usage retained through repeated not-ready races."""
-    client = _RecordingClient()
-    codex_client = MagicMock()
-    codex_client.request = AsyncMock(
-        side_effect=[
-            RuntimeError("no rollout found for thread id thread_child"),
-            _resume_response("thread_child", "child-model"),
-        ]
-    )
-    state = _child_state(codex_client)
-    tracker = fwd._CodexElicitationTaskTracker()
-
-    await _handle_child_event(
-        client,
-        state,
-        tracker,
-        _usage_event("thread_child", cached_input_tokens=80),
-    )
-    assert _usage_posts(client) == []
-
-    await state.close_child_usage_coalescers(client)
-
-    assert codex_client.request.await_count == 2
-    codex_client.request.assert_awaited_with("thread/resume", {"threadId": "thread_child"})
-    assert _usage_posts(client)[0][1]["data"]["model"] == "child-model"
-    await tracker.close()
-
-
-@pytest.mark.asyncio
 async def test_child_usage_close_continues_after_recovery_exception() -> None:
     """One broken child recovery cannot prevent later child usage from flushing."""
     client = _RecordingClient()
@@ -345,11 +361,7 @@ async def test_child_usage_close_bounds_hung_model_recovery(
     async def wait_forever(*_args: object, **_kwargs: object) -> None:
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(
-        fwd,
-        "_CHILD_MODEL_RECOVERY_CLOSE_TIMEOUT_SECONDS",
-        0.01,
-    )
+    monkeypatch.setattr(fwd, "_CHILD_MODEL_RECOVERY_TIMEOUT_SECONDS", 0.01)
     client = _RecordingClient()
     codex_client = MagicMock()
     codex_client.request = AsyncMock(side_effect=wait_forever)
@@ -369,6 +381,39 @@ async def test_child_usage_close_bounds_hung_model_recovery(
         if record.getMessage().startswith("Codex child usage remained unposted at shutdown")
     ]
     assert len(unposted) == 2
+
+
+class _HangingPostClient:
+    """Async client stub whose ``post`` never returns."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def post(self, url: str, **_kwargs: object) -> httpx.Response:
+        self.calls += 1
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
+@pytest.mark.asyncio
+async def test_child_usage_close_bounds_hung_usage_post(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A hung usage POST at shutdown is abandoned within the drain budget and reported."""
+    monkeypatch.setattr(fwd, "_CHILD_USAGE_SHUTDOWN_TIMEOUT_SECONDS", 0.05)
+    client = _HangingPostClient()
+    state = _child_state()
+    state.child_models_by_thread["thread_child"] = "child-model"
+    _record_child_usage(client, state, "thread_child", "conv_child")  # type: ignore[arg-type]
+
+    await asyncio.wait_for(state.close_child_usage_coalescers(client), timeout=1.0)  # type: ignore[arg-type]
+
+    assert client.calls == 1
+    assert state.child_usage_coalescers_by_thread == {}
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(m.startswith("Codex child usage post timed out at shutdown") for m in messages)
+    assert any(m.startswith("Codex child usage remained unposted at shutdown") for m in messages)
 
 
 @pytest.mark.asyncio

@@ -120,9 +120,12 @@ _DELTA_FLUSH_GRACE_SECONDS = 1.0
 # Bound the post-shedding wait below the runner's 10s cancellation budget and
 # above the delta POST deadline.
 _DELTA_MARKER_TIMEOUT_SECONDS = 6.0
-# Shared budget for recovering child models at shutdown so teardown cannot
-# stall on hung thread/resume calls.
-_CHILD_MODEL_RECOVERY_CLOSE_TIMEOUT_SECONDS = 3.0
+# Bound child model recovery (a thread/resume) on the live path and at
+# shutdown so a hung app-server cannot stall event forwarding or teardown.
+_CHILD_MODEL_RECOVERY_TIMEOUT_SECONDS = 3.0
+# Bound the shutdown drain of child usage, recovery plus final posts, below
+# the runner's cancellation grace.
+_CHILD_USAGE_SHUTDOWN_TIMEOUT_SECONDS = 6.0
 _EXTERNAL_REASONING_EFFORT_CHANGE_TYPE = "external_reasoning_effort_change"
 # Context-compaction progress edge. Publishes the same
 # ``response.compaction.in_progress`` / ``response.compaction.completed`` SSE
@@ -680,7 +683,8 @@ class _CodexForwarderState:
     async def close_child_usage_coalescers(self, client: httpx.AsyncClient) -> None:
         """Recover child models, then flush usage owned by this connection."""
         loop = asyncio.get_running_loop()
-        recovery_deadline = loop.time() + _CHILD_MODEL_RECOVERY_CLOSE_TIMEOUT_SECONDS
+        recovery_deadline = loop.time() + _CHILD_MODEL_RECOVERY_TIMEOUT_SECONDS
+        drain_deadline = loop.time() + _CHILD_USAGE_SHUTDOWN_TIMEOUT_SECONDS
         closed: set[str] = set()
         # Recovery replays a child's resume, which can register nested children
         # mid-loop, so keep draining until every coalescer has been closed.
@@ -716,7 +720,13 @@ class _CodexForwarderState:
                         thread_id,
                         exc_info=True,
                     )
-            await coalescer.close()
+            try:
+                async with asyncio.timeout_at(drain_deadline):
+                    await coalescer.close()
+            except TimeoutError:
+                _logger.warning(
+                    "Codex child usage post timed out at shutdown: thread_id=%s", thread_id
+                )
             if coalescer.has_pending_usage:
                 _logger.warning(
                     "Codex child usage remained unposted at shutdown: thread_id=%s model_known=%s",
@@ -3253,11 +3263,17 @@ async def _handle_event(
         # Buffer the counts first so a failed or cancelled resume cannot lose them.
         child_coalescer.record(params)
         try:
-            await _recover_child_usage_model(
-                client,
-                child_session_id=route_session_id,
-                child_thread_id=event_thread_id,
-                forwarder_state=forwarder_state,
+            async with asyncio.timeout(_CHILD_MODEL_RECOVERY_TIMEOUT_SECONDS):
+                await _recover_child_usage_model(
+                    client,
+                    child_session_id=route_session_id,
+                    child_thread_id=event_thread_id,
+                    forwarder_state=forwarder_state,
+                )
+        except TimeoutError:
+            _logger.warning(
+                "Codex child model recovery timed out; usage stays buffered: thread_id=%s",
+                event_thread_id,
             )
         except Exception:  # noqa: BLE001 - the counts stay buffered for a later retry.
             _logger.warning(
