@@ -390,10 +390,11 @@ _MODEL_PAREN_GROUP_RE = re.compile(r"\s*\([^()]*\)\s*")
 
 
 def _catalog_model_id(display_name: str) -> str:
-    """Normalize an agy display name (``"Gemini 3.8 Flash (Medium)"``) to the id the server
-    prices with (``"gemini-3.8-flash"``): every parenthetical tier/qualifier dropped,
-    lowercased, hyphenated; Claude version dots become hyphens. An unresolved raw enum
-    (``MODEL_PLACEHOLDER_M20``) is returned unchanged, since it matches no catalog id either way."""
+    """Normalize an agy display name (``"Gemini 3.8 Flash (Medium)"``) to the id the
+    server prices with (``"gemini-3.8-flash"``): every parenthetical tier/qualifier
+    dropped, lowercased, hyphenated; Claude version dots become hyphens. An unresolved
+    raw enum (``MODEL_PLACEHOLDER_M20``) is returned unchanged, since it matches no
+    catalog id either way."""
     label = _MODEL_PAREN_GROUP_RE.sub(" ", display_name).strip()
     if not label:
         return display_name
