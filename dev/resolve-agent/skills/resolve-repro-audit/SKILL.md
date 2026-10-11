@@ -73,8 +73,9 @@ before Step 1.
      example, the session must be *seen* leaving `idle`), or whose deadlines
      do not leave the whole test well inside the effective per-test timeout
      (`pytest-timeout` is 300 s by default and 180 s in some e2e workflows;
-     the sandbox lane caps a command at 300 s) with margin for setup and
-     teardown, sleeps its full budget on a correct fix and times out the
+     CI's workflow-provided sandbox test lane, which is not configured in
+     this repository, defaults to a 300 s command cap) with margin for setup
+     and teardown, sleeps its full budget on a correct fix and times out the
      lane. Rewrite it to return on evidence the turn leaves behind — a new
      assistant or error item (or rendered reply) past a pre-send snapshot
      together with a terminal status, or a `failed` status that was not

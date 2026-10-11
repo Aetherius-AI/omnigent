@@ -819,7 +819,9 @@ Check these before debugging a Playwright driver against the SPA:
   `poll_session_until_terminal` in `tests/e2e/conftest.py` is the complete
   pattern for idle (it accepts `idle` after a running edge *or* real turn
   output), but it returns on any `failed` and defaults to a 300 s timeout, so
-  pass `timeout=` and apply the pre-send status check around it. In
+  pass `timeout=`, and if it returns a `failed` that was already present
+  before the send, keep waiting for new-turn evidence or a status transition
+  within the original deadline instead of treating that return as done. In
   `tests/e2e_ui/chat/`, `_poll_turn_outcome` in
   `test_absolute_watchdog_spares_active_turn.py` shows the transcript check and
   `_wait_for_idle` in `test_acp_catalog_model_selection.py` the status check,
