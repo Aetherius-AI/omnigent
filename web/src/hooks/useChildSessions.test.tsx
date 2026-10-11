@@ -207,6 +207,21 @@ describe("useSubagentTree", () => {
     expect(fetchedUrls()).toHaveLength(2);
   });
 
+  it("stops on page cursors that alternate", async () => {
+    const page = (lastId: string) =>
+      jsonResponse({ object: "list", data: [], last_id: lastId, has_more: true });
+    vi.mocked(authenticatedFetch)
+      .mockResolvedValueOnce(treePage([descendantRow("conv_a", "conv_root", 1)], true))
+      .mockResolvedValueOnce(page("conv_x"))
+      .mockResolvedValueOnce(page("conv_a"))
+      .mockResolvedValueOnce(page("conv_x"));
+
+    const { result } = renderHook(() => useSubagentTree("conv_root"), { wrapper });
+
+    await waitFor(() => expect(result.current.error?.message).toMatch(/cursor did not advance/));
+    expect(fetchedUrls()).toHaveLength(3);
+  });
+
   it("hides settled archived rows but keeps an archived parent of live work", async () => {
     // WHY: archiving a middle session must not disconnect the live
     // sub-agents beneath it, while finished archived ones stay out of the rail.

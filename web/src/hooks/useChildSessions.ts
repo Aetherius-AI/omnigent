@@ -369,6 +369,7 @@ function withoutSettledArchived(rows: DescendantSessionWire[]): DescendantSessio
 /** Read every ``descendants`` page under ``rootId`` in the server's order. */
 async function fetchDescendantRows(rootId: string): Promise<DescendantSessionWire[]> {
   const rows: DescendantSessionWire[] = [];
+  const cursors = new Set<string>();
   let after: string | null = null;
   // Each page's cursor comes from the previous response, so the awaits
   // cannot be parallelized.
@@ -383,7 +384,9 @@ async function fetchDescendantRows(rootId: string): Promise<DescendantSessionWir
     const json = (await res.json()) as DescendantsResponse;
     rows.push(...json.data);
     const next = json.has_more ? json.last_id : null;
-    if (next !== null && next === after) throw new Error("descendants cursor did not advance");
+    // A cursor seen before means the server is not advancing; stop here.
+    if (next !== null && cursors.has(next)) throw new Error("descendants cursor did not advance");
+    if (next !== null) cursors.add(next);
     after = next;
   } while (after !== null);
   /* oxlint-enable no-await-in-loop */
