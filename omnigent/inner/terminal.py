@@ -832,11 +832,10 @@ def _tmux_executable_for_path(path_env: str) -> str:
     """Resolve tmux against one ``PATH`` value, cached so repeated idle polls
     don't re-walk every ``PATH`` entry on each fork+exec.
 
-    *path_env* is both the cache key and the search path, so a cached result
-    matches the ``PATH`` it was resolved against: a changed ``PATH`` re-resolves,
-    but a tmux moved within an unchanged ``PATH`` keeps the cached path for the
-    process lifetime. An empty value falls back to the default search path.
-    ``_require_supported_tmux`` still does a live ``shutil.which`` at setup.
+    A changed ``PATH`` re-resolves, but a tmux moved within an unchanged
+    ``PATH`` keeps the cached path for the process lifetime. An empty value
+    falls back to the default search path. ``_require_supported_tmux`` still
+    does a live ``shutil.which`` at setup.
     """
     return shutil.which("tmux", path=path_env or None) or "tmux"
 

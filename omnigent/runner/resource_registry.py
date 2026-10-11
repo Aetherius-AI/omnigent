@@ -759,7 +759,7 @@ class SessionResourceRegistry:
                     continue
                 entry.instance.wake_idle_watcher(expect_output=True)
             except Exception as exc:  # noqa: BLE001 - waking is best-effort.
-                _logger.debug("Terminal watcher wake failed (%s)", type(exc).__name__)
+                _logger.debug("Terminal watcher wake failed for %s: %s", entry.terminal_name, exc)
 
     def note_terminal_control_request(self, session_id: str, action: str) -> None:
         """Record explicit runner requests separately from process exit and cleanup."""

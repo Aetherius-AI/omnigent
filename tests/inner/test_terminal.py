@@ -1302,12 +1302,24 @@ def test_wake_signal_consume_returns_on_wake_not_timeout() -> None:
     assert elapsed < 1.0
 
 
-def test_idle_detector_quiescent_for_tracks_last_change() -> None:
-    """``quiescent_for`` is True only once the pane has been stable long enough."""
+def test_idle_detector_quiescent_for_tracks_last_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``quiescent_for`` accrues quiet time, and a content change resets it."""
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(terminal_mod.time, "monotonic", lambda: clock["now"])
     detector = terminal_mod._IdleDetector()
     detector.tick("frame-one")
-    assert detector.quiescent_for(0.0) is True
-    assert detector.quiescent_for(3600.0) is False
+    clock["now"] = 1005.0
+    assert detector.quiescent_for(5.0) is True
+    assert detector.quiescent_for(6.0) is False
+    # A changed snapshot resets the quiet clock.
+    detector.tick("frame-two")
+    assert detector.quiescent_for(5.0) is False
+    # An unchanged snapshot keeps accruing from the last change.
+    clock["now"] = 1011.0
+    detector.tick("frame-two")
+    assert detector.quiescent_for(5.0) is True
 
 
 def test_next_watch_interval_backs_off_only_when_fully_quiet(tmp_path: Path) -> None:
