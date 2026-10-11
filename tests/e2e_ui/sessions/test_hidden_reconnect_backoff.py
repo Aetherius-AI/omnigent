@@ -61,6 +61,9 @@ _WS_PROBE_SCRIPT = """
       let target = url;
       if (String(url).includes("/v1/sessions/updates")) {
         const rewritten = new URL(String(url));
+        // Force loopback so a remote --ui-base-url still dials the locally
+        // reserved, never-listening port and is refused at once.
+        rewritten.hostname = "127.0.0.1";
         rewritten.port = String(__CLOSED_PORT__);
         target = rewritten.toString();
         dials.push(performance.now());

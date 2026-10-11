@@ -222,6 +222,22 @@ describe("sessionUpdatesSocket visibility-aware reconnect", () => {
     expect(FakeWebSocket.instances.length).toBe(2);
   });
 
+  it("keeps a visible-ramp retry on its short delay across a hide/show flap", () => {
+    sessionUpdatesSocket.start();
+    const dialsBefore = FakeWebSocket.instances.length;
+
+    // A retry scheduled while visible is pending; a quick hide then show must
+    // not short-circuit it, or flapping during an outage would bypass the ramp.
+    latestWs().close();
+    fireVisibilityChange(true);
+    fireVisibilityChange(false);
+    expect(FakeWebSocket.instances.length).toBe(dialsBefore);
+
+    // It still fires once, on its own short ramp delay rather than instantly.
+    vi.advanceTimersByTime(RECONNECT_CEILING_MS);
+    expect(FakeWebSocket.instances.length).toBe(dialsBefore + 1);
+  });
+
   it("does not redial on visibility while a socket is open or still connecting", () => {
     sessionUpdatesSocket.start();
     // Still connecting (no open yet): a visibility flip must not open a second socket.

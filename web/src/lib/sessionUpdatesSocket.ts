@@ -17,7 +17,7 @@
 // access-checks every watched id against the connection's user.
 
 import { isHostRoutingEnabled, resolveWebSocketUrl } from "@/lib/host";
-import { nextReconnectDelay } from "@/lib/reconnectBackoff";
+import { isPageHidden, nextReconnectDelay } from "@/lib/reconnectBackoff";
 import { modalHostId } from "@/lib/sessionHost";
 import type { SessionListWireItem } from "@/lib/sessionListCache";
 
@@ -94,6 +94,8 @@ class SessionUpdatesSocket {
   private connected = false;
   private failedAttempts = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  // Set when the pending reconnect timer was scheduled on the hidden cadence.
+  private hiddenRetryPending = false;
   private watchdogTimer: ReturnType<typeof setTimeout> | null = null;
   private started = false;
 
@@ -121,6 +123,7 @@ class SessionUpdatesSocket {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    this.hiddenRetryPending = false;
     const ws = this.ws;
     this.ws = null;
     if (ws) {
@@ -255,15 +258,17 @@ class SessionUpdatesSocket {
   }
 
   /**
-   * A retry scheduled while the page was hidden waits the stretched hidden
-   * cadence (see reconnectBackoff.ts). Once the page is visible again, skip
-   * the remaining wait and reconnect now.
+   * When the page becomes visible, skip the long wait only for a retry
+   * scheduled on the hidden cadence (see reconnectBackoff.ts); a retry
+   * scheduled while visible keeps its short ramp, so a hide/show flap can't
+   * bypass the backoff.
    */
   private readonly onVisibilityChange = (): void => {
     if (document.hidden || !this.started) return;
-    if (this.reconnectTimer !== null && this.ws === null) {
+    if (this.reconnectTimer !== null && this.ws === null && this.hiddenRetryPending) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
+      this.hiddenRetryPending = false;
       this.connect();
     }
   };
@@ -271,9 +276,12 @@ class SessionUpdatesSocket {
   private scheduleReconnect(): void {
     if (!this.started || this.reconnectTimer !== null) return;
     this.failedAttempts += 1;
-    const delay = nextReconnectDelay(this.failedAttempts);
+    const hidden = isPageHidden();
+    this.hiddenRetryPending = hidden;
+    const delay = nextReconnectDelay(this.failedAttempts, hidden);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
+      this.hiddenRetryPending = false;
       if (this.started) this.connect();
     }, delay);
   }
