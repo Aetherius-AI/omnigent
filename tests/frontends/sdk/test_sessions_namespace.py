@@ -1182,22 +1182,62 @@ async def test_fork_404_raises() -> None:
 # ── child_sessions_tree() / subtree_busy() ───────────────────────────
 
 
+def _flatten_tree(
+    tree: dict[str, list[dict[str, Any]]], root: str, *, max_depth: int
+) -> list[dict[str, Any]]:
+    """Breadth-first ``DescendantSessionSummary`` rows for a parent→children map."""
+    rows: list[dict[str, Any]] = []
+    frontier = [root]
+    depth = 0
+    while frontier and depth < max_depth:
+        depth += 1
+        next_frontier: list[str] = []
+        for parent_id in frontier:
+            for child in tree.get(parent_id, []):
+                rows.append({**child, "parent_session_id": parent_id, "depth": depth})
+                next_frontier.append(child["id"])
+        frontier = next_frontier
+    return rows
+
+
 def _tree_handler(
     tree: dict[str, list[dict[str, Any]]],
+    *,
+    page_size: int | None = None,
+    requests: list[httpx.Request] | None = None,
 ) -> Callable[[httpx.Request], httpx.Response]:
-    """Serve ``GET …/{id}/child_sessions`` from an in-memory parent→children map.
+    """Serve ``GET …/{id}/descendants`` from an in-memory parent→children map.
 
-    The recursion helper queries each node's children with a fresh request, so
-    the map keys are parent ids and the values are the ``ChildSessionSummary``
-    rows that parent returns. Unknown parents return an empty page.
+    Flattens the map breadth-first from the requested session, honouring
+    ``max_depth``, and pages the rows via ``after`` — ``page_size`` rows at a
+    time when set, else the request's ``limit``. Every request is appended to
+    ``requests`` when given, so tests can count calls and inspect params.
     """
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if requests is not None:
+            requests.append(request)
         parts = request.url.path.split("/")
-        # …/v1/sessions/<id>/child_sessions
-        assert parts[-1] == "child_sessions"
-        parent_id = parts[-2]
-        return httpx.Response(200, json={"data": tree.get(parent_id, [])})
+        # …/v1/sessions/<id>/descendants
+        assert parts[-1] == "descendants"
+        max_depth = int(request.url.params.get("max_depth", "99"))
+        rows = _flatten_tree(tree, parts[-2], max_depth=max_depth)
+        start = 0
+        after = request.url.params.get("after")
+        if after is not None:
+            start = next(i for i, row in enumerate(rows) if row["id"] == after) + 1
+        limit = page_size or int(request.url.params.get("limit", "100"))
+        page = rows[start : start + limit]
+        return httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "data": page,
+                "first_id": page[0]["id"] if page else None,
+                "last_id": page[-1]["id"] if page else None,
+                "has_more": start + limit < len(rows),
+            },
+        )
 
     return handler
 
@@ -1207,11 +1247,12 @@ def _child(sid: str, **fields: Any) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_child_sessions_tree_recurses_and_tags_parent() -> None:
-    """The tree helper walks every level and stamps each row with its parent.
+async def test_child_sessions_tree_reads_the_subtree_in_one_request() -> None:
+    """The whole subtree arrives flat from ``…/descendants`` — one request, not
+    one per node — with every row tagged with its parent.
 
-    Failure means the SDK rollup (and the CLI tree it now feeds) loses
-    grandchildren or mis-attaches the hierarchy.
+    Failure means the SDK rollup (and the CLI tree it feeds) loses
+    grandchildren, mis-attaches the hierarchy, or is back to walking per node.
     """
     tree = {
         "root": [_child("a"), _child("b")],
@@ -1219,7 +1260,8 @@ async def test_child_sessions_tree_recurses_and_tags_parent() -> None:
         "a1": [_child("a1x")],
         "b": [],
     }
-    ns, client = _make_namespace(_tree_handler(tree))
+    requests: list[httpx.Request] = []
+    ns, client = _make_namespace(_tree_handler(tree, requests=requests))
     try:
         nodes = await ns.child_sessions_tree("root")
     finally:
@@ -1230,39 +1272,89 @@ async def test_child_sessions_tree_recurses_and_tags_parent() -> None:
     assert by_id["a"]["parent_id"] == "root"
     assert by_id["a1"]["parent_id"] == "a"
     assert by_id["a1x"]["parent_id"] == "a1"
+    assert by_id["a1x"]["depth"] == 3
+    assert len(requests) == 1
+    assert requests[0].url.params["max_depth"] == "3"
+    assert "include_archived" not in requests[0].url.params
 
 
 @pytest.mark.asyncio
 async def test_child_sessions_tree_respects_max_depth() -> None:
-    """``max_depth`` caps descent — depth 1 returns direct children only."""
+    """``max_depth`` is sent to the server and caps descent — depth 1 returns
+    direct children only."""
     tree = {
         "root": [_child("a")],
         "a": [_child("a1")],
     }
-    ns, client = _make_namespace(_tree_handler(tree))
+    requests: list[httpx.Request] = []
+    ns, client = _make_namespace(_tree_handler(tree, requests=requests))
     try:
         nodes = await ns.child_sessions_tree("root", max_depth=1)
     finally:
         await client.aclose()
 
     assert [n["id"] for n in nodes] == ["a"]  # a1 is one level too deep
+    assert requests[0].url.params["max_depth"] == "1"
 
 
 @pytest.mark.asyncio
-async def test_child_sessions_tree_cycle_guard() -> None:
-    """A child pointing back at an ancestor is visited once, not forever."""
-    tree = {
-        "root": [_child("a")],
-        "a": [_child("root"), _child("a1")],  # 'root' is a back-edge
-    }
-    ns, client = _make_namespace(_tree_handler(tree))
+async def test_child_sessions_tree_follows_the_page_cursor() -> None:
+    """A subtree wider than one page is read to its end, not truncated."""
+    tree = {"root": [_child(f"c{i}") for i in range(5)]}
+    requests: list[httpx.Request] = []
+    ns, client = _make_namespace(_tree_handler(tree, page_size=2, requests=requests))
+    try:
+        nodes = await ns.child_sessions_tree("root", limit=2)
+    finally:
+        await client.aclose()
+
+    assert [n["id"] for n in nodes] == [f"c{i}" for i in range(5)]
+    assert [r.url.params.get("after") for r in requests] == [None, "c1", "c3"]
+
+
+@pytest.mark.asyncio
+async def test_child_sessions_tree_sends_include_archived() -> None:
+    requests: list[httpx.Request] = []
+    ns, client = _make_namespace(_tree_handler({"root": []}, requests=requests))
+    try:
+        await ns.child_sessions_tree("root", include_archived=True)
+    finally:
+        await client.aclose()
+
+    assert requests[0].url.params["include_archived"] == "true"
+
+
+@pytest.mark.asyncio
+async def test_child_sessions_tree_keeps_a_row_repeated_across_pages_once() -> None:
+    """A sibling created mid-walk can push a row onto the next page too; the
+    walk keeps it once and never re-adds the root."""
+    pages = [
+        {
+            "data": [_child("a", parent_session_id="root", depth=1)],
+            "last_id": "a",
+            "has_more": True,
+        },
+        {
+            "data": [
+                _child("a", parent_session_id="root", depth=1),
+                _child("root", parent_session_id="a", depth=2),
+                _child("b", parent_session_id="root", depth=1),
+            ],
+            "last_id": "b",
+            "has_more": False,
+        },
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=pages.pop(0))
+
+    ns, client = _make_namespace(handler)
     try:
         nodes = await ns.child_sessions_tree("root")
     finally:
         await client.aclose()
 
-    # 'root' is the seed (already seen) so the back-edge is dropped; 'a1' stays.
-    assert [n["id"] for n in nodes] == ["a", "a1"]
+    assert [n["id"] for n in nodes] == ["a", "b"]
 
 
 @pytest.mark.asyncio

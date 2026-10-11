@@ -844,6 +844,27 @@ class ChildSessionSummary(BaseModel):
     routing_decision_id: str | None = None
 
 
+class DescendantSessionSummary(ChildSessionSummary):
+    """
+    One node of a sub-agent subtree, as listed by
+    ``GET /v1/sessions/{id}/descendants``.
+
+    A :class:`ChildSessionSummary` whose ``parent_session_id`` is the
+    node's own parent rather than the route's ``session_id``, so a client
+    can rebuild the whole hierarchy from one flat, paginated listing
+    instead of fetching ``child_sessions`` once per node.
+
+    :param depth: Levels below the requested session: ``1`` for its
+        direct children, ``2`` for grandchildren, and so on.
+    :param archived: Whether this session is archived. Archived rows
+        appear when the caller passes ``include_archived=true``, or when
+        a live descendant needs them to keep the listing connected.
+    """
+
+    depth: int
+    archived: bool = False
+
+
 # ── Responses ───────────────────────────────────────────────────
 
 
@@ -2846,6 +2867,16 @@ class ChildSessionList(BaseModel):
 
     object: Literal["list"] = "list"
     data: list[ChildSessionSummary] = Field(default_factory=list)
+    first_id: str | None = None
+    last_id: str | None = None
+    has_more: bool = False
+
+
+class DescendantSessionList(BaseModel):
+    """Paginated sub-agent subtree; ``data`` is a breadth-first page of descendant summaries."""
+
+    object: Literal["list"] = "list"
+    data: list[DescendantSessionSummary] = Field(default_factory=list)
     first_id: str | None = None
     last_id: str | None = None
     has_more: bool = False

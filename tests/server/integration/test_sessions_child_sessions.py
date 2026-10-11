@@ -2342,3 +2342,189 @@ async def test_fork_of_child_promotes_it_into_the_sidebar(
     assert child_ids == {child.id}, (
         f"parent's children must be exactly the untouched source, got {child_ids}"
     )
+
+
+# ── GET /sessions/{id}/descendants — the subtree in one listing ──
+
+
+async def _seed_subtree(
+    client: httpx.AsyncClient,
+    conv_store: SqlAlchemyConversationStore,
+    *,
+    agent_name: str = "subtree-agent",
+) -> tuple[dict[str, Any], dict[str, Conversation]]:
+    """
+    Seed ``root → {c1 → {g1 → {gg1}}, c2}`` and return the root plus rows by name.
+
+    :param client: The test HTTP client.
+    :param conv_store: Store for the child conversations.
+    :param agent_name: Name for the root's agent; distinct per root in one DB.
+    :returns: The root's ``POST /v1/sessions`` body and the seeded children
+        keyed ``c1``, ``c2``, ``g1``, ``gg1``.
+    """
+    session = await _create_parent_session(client, agent_name=agent_name)
+    agent_id = session["agent_id"]
+    rows: dict[str, Conversation] = {}
+    rows["c1"] = _seed_child(
+        conv_store=conv_store, parent_id=session["id"], title="worker:c1", agent_id=agent_id
+    )
+    rows["c2"] = _seed_child(
+        conv_store=conv_store, parent_id=session["id"], title="worker:c2", agent_id=agent_id
+    )
+    rows["g1"] = _seed_child(
+        conv_store=conv_store, parent_id=rows["c1"].id, title="worker:g1", agent_id=agent_id
+    )
+    rows["gg1"] = _seed_child(
+        conv_store=conv_store, parent_id=rows["g1"].id, title="worker:gg1", agent_id=agent_id
+    )
+    return session, rows
+
+
+async def test_descendants_lists_whole_subtree_breadth_first(
+    client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """
+    One request returns every level, each row naming its own parent and depth.
+
+    Another root's children never leak in. Depth-1 siblings are seeded within
+    the same second, so only their level is pinned, not their relative order.
+
+    :param client: The test HTTP client.
+    :param db_uri: Per-test SQLite database URI.
+    """
+    conv_store = SqlAlchemyConversationStore(db_uri)
+    session, rows = await _seed_subtree(client, conv_store)
+    other = await _create_parent_session(client, agent_name="other-agent")
+    _seed_child(
+        conv_store=conv_store,
+        parent_id=other["id"],
+        title="worker:elsewhere",
+        agent_id=other["agent_id"],
+    )
+
+    resp = await client.get(f"/v1/sessions/{session['id']}/descendants")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    listed = [(r["id"], r["parent_session_id"], r["depth"]) for r in body["data"]]
+    assert sorted(listed[:2]) == sorted(
+        [(rows["c1"].id, session["id"], 1), (rows["c2"].id, session["id"], 1)]
+    )
+    assert listed[2:] == [
+        (rows["g1"].id, rows["c1"].id, 2),
+        (rows["gg1"].id, rows["g1"].id, 3),
+    ]
+    assert body["has_more"] is False
+    assert body["first_id"] == listed[0][0]
+    assert body["last_id"] == rows["gg1"].id
+    leaf = body["data"][-1]
+    assert leaf["object"] == "child_session"
+    assert (leaf["tool"], leaf["session_name"], leaf["archived"]) == ("worker", "gg1", False)
+
+
+async def test_descendants_pages_follow_the_cursor_and_reject_a_stale_one(
+    client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """
+    ``limit``/``after`` page the listing to its end; an unknown cursor is a
+    ``stale_cursor`` 400 rather than a silently empty page.
+
+    :param client: The test HTTP client.
+    :param db_uri: Per-test SQLite database URI.
+    """
+    conv_store = SqlAlchemyConversationStore(db_uri)
+    session, rows = await _seed_subtree(client, conv_store)
+    url = f"/v1/sessions/{session['id']}/descendants"
+
+    first = await client.get(url, params={"limit": 3})
+    assert first.status_code == 200, first.text
+    page_one = first.json()
+    assert len(page_one["data"]) == 3
+    assert page_one["has_more"] is True
+
+    second = await client.get(url, params={"limit": 3, "after": page_one["last_id"]})
+    assert second.status_code == 200, second.text
+    page_two = second.json()
+    assert [r["id"] for r in page_two["data"]] == [rows["gg1"].id]
+    assert page_two["has_more"] is False
+    assert {r["id"] for r in page_one["data"]} | {rows["gg1"].id} == {
+        conv.id for conv in rows.values()
+    }
+
+    stale = await client.get(url, params={"after": "0" * 32})
+    assert stale.status_code == 400, stale.text
+    assert stale.json()["error"]["code"] == "stale_cursor"
+
+
+async def test_descendants_max_depth_caps_the_walk(
+    client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """
+    ``max_depth`` stops the listing at that level, as the REPL and SDK trees do.
+
+    :param client: The test HTTP client.
+    :param db_uri: Per-test SQLite database URI.
+    """
+    conv_store = SqlAlchemyConversationStore(db_uri)
+    session, rows = await _seed_subtree(client, conv_store)
+
+    resp = await client.get(f"/v1/sessions/{session['id']}/descendants", params={"max_depth": 2})
+    assert resp.status_code == 200, resp.text
+    assert {r["id"] for r in resp.json()["data"]} == {
+        rows["c1"].id,
+        rows["c2"].id,
+        rows["g1"].id,
+    }
+
+
+async def test_descendants_keep_an_archived_node_only_while_live_work_sits_beneath_it(
+    client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """
+    Archiving a middle node must not hide the live sessions under it.
+
+    ``c1`` is archived but ``g1``/``gg1`` beneath it are live, so it stays
+    listed (flagged) to keep the tree connected; ``c2`` is an archived leaf
+    and drops out unless ``include_archived`` is set.
+
+    :param client: The test HTTP client.
+    :param db_uri: Per-test SQLite database URI.
+    """
+    conv_store = SqlAlchemyConversationStore(db_uri)
+    session, rows = await _seed_subtree(client, conv_store)
+    for name in ("c1", "c2"):
+        archived = await client.patch(f"/v1/sessions/{rows[name].id}", json={"archived": True})
+        assert archived.status_code == 200, archived.text
+    url = f"/v1/sessions/{session['id']}/descendants"
+
+    default = await client.get(url)
+    assert default.status_code == 200, default.text
+    assert [(r["id"], r["archived"]) for r in default.json()["data"]] == [
+        (rows["c1"].id, True),
+        (rows["g1"].id, False),
+        (rows["gg1"].id, False),
+    ]
+
+    everything = await client.get(url, params={"include_archived": "true"})
+    assert everything.status_code == 200, everything.text
+    assert {(r["id"], r["archived"]) for r in everything.json()["data"]} == {
+        (rows["c1"].id, True),
+        (rows["c2"].id, True),
+        (rows["g1"].id, False),
+        (rows["gg1"].id, False),
+    }
+
+
+async def test_descendants_404_for_nonexistent_session(
+    client: httpx.AsyncClient,
+) -> None:
+    """
+    An unknown session gets the same existence-hiding 404 as ``child_sessions``.
+
+    :param client: The test HTTP client.
+    """
+    resp = await client.get(f"/v1/sessions/{'0' * 32}/descendants")
+    assert resp.status_code == 404, resp.text

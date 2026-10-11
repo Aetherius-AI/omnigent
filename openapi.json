@@ -1513,6 +1513,260 @@
         "title": "DailyCost",
         "type": "object"
       },
+      "DescendantSessionList": {
+        "description": "Paginated sub-agent subtree; `data` is a breadth-first page of descendant summaries.",
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/DescendantSessionSummary"
+            },
+            "title": "Data",
+            "type": "array"
+          },
+          "first_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Id"
+          },
+          "has_more": {
+            "default": false,
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "last_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Id"
+          },
+          "object": {
+            "const": "list",
+            "default": "list",
+            "title": "Object",
+            "type": "string"
+          }
+        },
+        "title": "DescendantSessionList",
+        "type": "object"
+      },
+      "DescendantSessionSummary": {
+        "description": "One node of a sub-agent subtree, as listed by\n`GET /v1/sessions/{id}/descendants`.\n\nA `ChildSessionSummary` whose `parent_session_id` is the\nnode's own parent rather than the route's `session_id`, so a client\ncan rebuild the whole hierarchy from one flat, paginated listing\ninstead of fetching `child_sessions` once per node.",
+        "properties": {
+          "agent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Id"
+          },
+          "agent_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Name"
+          },
+          "archived": {
+            "default": false,
+            "description": "Whether this session is archived. Archived rows appear when the caller passes `include_archived=true`, or when a live descendant needs them to keep the listing connected.",
+            "title": "Archived",
+            "type": "boolean"
+          },
+          "busy": {
+            "default": false,
+            "title": "Busy",
+            "type": "boolean"
+          },
+          "created_at": {
+            "format": "int64",
+            "title": "Created At",
+            "type": "integer"
+          },
+          "current_task_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Task Id"
+          },
+          "current_task_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Task Status"
+          },
+          "depth": {
+            "description": "Levels below the requested session: `1` for its direct children, `2` for grandchildren, and so on.",
+            "format": "int64",
+            "title": "Depth",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "default": "sub_agent",
+            "title": "Kind",
+            "type": "string"
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Labels",
+            "type": "object"
+          },
+          "last_message_preview": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Message Preview"
+          },
+          "last_task_error": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Task Error"
+          },
+          "object": {
+            "default": "child_session",
+            "title": "Object",
+            "type": "string"
+          },
+          "parent_session_id": {
+            "title": "Parent Session Id",
+            "type": "string"
+          },
+          "pending_elicitations_count": {
+            "default": 0,
+            "format": "int64",
+            "title": "Pending Elicitations Count",
+            "type": "integer"
+          },
+          "routed_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Routed Model"
+          },
+          "routing_decision_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Routing Decision Id"
+          },
+          "session_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Name"
+          },
+          "task_summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Summary"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "tool": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool"
+          },
+          "updated_at": {
+            "format": "int64",
+            "title": "Updated At",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "parent_session_id",
+          "created_at",
+          "updated_at",
+          "depth"
+        ],
+        "title": "DescendantSessionSummary",
+        "type": "object"
+      },
       "ElicitationRequestEvent": {
         "description": "Synchronous request for a decision from upstream.\n\nEmitted by Omnigent (or, under the new contract, by a harness)\nwhen the LLM / a tool / a policy needs a verdict before\nproceeding. The consumer replies via\n`POST /v1/sessions/{session_id}/events` with\n`type == \"approval\"` and\n`omnigent.server.schemas.ElicitationResult` fields in\n`data`. This preserves MCP request/reply correlation by id\nwithout threading elicitations through PATCH.\n\nWire shape matches the existing emit at\n`omnigent/runtime/policies/approval.py:175`.",
         "properties": {
@@ -13552,6 +13806,119 @@
         "summary": "Update Comment",
         "tags": [
           "comments"
+        ]
+      }
+    },
+    "/v1/sessions/{session_id}/descendants": {
+      "get": {
+        "description": "List every sub-agent session under a parent, at any depth.\n\nThe whole subtree comes back as one flat, breadth-first listing of\n`DescendantSessionSummary` rows, each naming its own parent\nand depth, so a client rebuilds the tree with one request per\npage instead of one `GET \u2026/child_sessions` per node (the REPL\nnavigator and the SDK `child_sessions_tree` / `subtree_busy`\nhelpers read this). The rows come from the spawn tree the store\nindexes by `root_conversation_id`; children of each node are\nnewest-first, matching `list_child_sessions`.\n\nArchived nodes are walked regardless, so live work under an\narchived session stays visible. Without `include_archived` an\narchived row is returned only while a live descendant needs it to\nkeep the listing connected.\n\n**Returns:** A `PaginatedList` of `DescendantSessionSummary` objects.\n\n**Raises**\n\n- `OmnigentError` \u2014 404 if no readable session exists at `session_id`; 400 `stale_cursor` if `after` names a row that is no longer listed.",
+        "operationId": "list_descendant_sessions_v1_sessions__session_id__descendants_get",
+        "parameters": [
+          {
+            "description": "Session whose subtree to list, e.g. `\"conv_abc123\"`. Not itself included in the result.",
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Maximum rows per page (1-1000, default 100).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Cursor \u2014 return rows after this session id in the listing order, e.g. `\"conv_child123\"`.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "After"
+            }
+          },
+          {
+            "description": "Deepest level to return (1 = direct children only). `None` returns the whole subtree.",
+            "in": "query",
+            "name": "max_depth",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Max Depth"
+            }
+          },
+          {
+            "description": "Also return archived descendants that have no live descendant of their own.",
+            "in": "query",
+            "name": "include_archived",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Archived",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DescendantSessionList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The `after`/`before` cursor names an item that no longer exists (it was deleted, or archived out of the filtered set) so the keyset bound cannot be resolved. The `error.code` is `stale_cursor`. Enumeration cannot continue from this cursor: restart from the first page, without a cursor."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Descendant Sessions",
+        "tags": [
+          "sessions"
         ]
       }
     },
