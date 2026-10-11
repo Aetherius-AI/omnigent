@@ -135,10 +135,11 @@ def test_hidden_page_stretches_session_updates_reconnect(
     """
     base_url, session_id = seeded_session
     reserved_port = _reserve_closed_loopback_port()
-    context, page = _new_android_phone_page(
-        playwright, browser, int(reserved_port.getsockname()[1])
-    )
+    context: BrowserContext | None = None
     try:
+        context, page = _new_android_phone_page(
+            playwright, browser, int(reserved_port.getsockname()[1])
+        )
         page.goto(f"{base_url}/c/{session_id}")
         expect(page.get_by_label("Message the agent")).to_be_visible(timeout=30_000)
         expect(page.locator(".app-shell")).to_have_attribute("data-android-native", "true")
@@ -164,5 +165,6 @@ def test_hidden_page_stretches_session_updates_reconnect(
             f"({ramp_dials} dials during the visible ramp)"
         )
     finally:
-        context.close()
+        if context is not None:
+            context.close()
         reserved_port.close()

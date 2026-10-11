@@ -183,6 +183,7 @@ describe("sessionUpdatesSocket visibility-aware reconnect", () => {
     Reflect.deleteProperty(document, "hidden");
     vi.clearAllTimers();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
     vi.useRealTimers();
   });
 
@@ -206,6 +207,22 @@ describe("sessionUpdatesSocket visibility-aware reconnect", () => {
     expect(FakeWebSocket.instances.length).toBe(dialsBefore + 1);
     vi.advanceTimersByTime(HIDDEN_RECONNECT_MS - HIDDEN_FLOOR_MS + 1);
     expect(FakeWebSocket.instances.length).toBe(dialsBefore + 2);
+  });
+
+  it("stretches even a healthy close to the hidden cadence while the page is hidden", () => {
+    sessionUpdatesSocket.start();
+    latestWs().open();
+
+    // A clean drop while hidden (not a failed open) still reschedules on the
+    // stretched cadence: the socket backs off every hidden close this way, the
+    // documented trade-off for a backgrounded tab.
+    setPageHidden(true);
+    const dialsBefore = FakeWebSocket.instances.length;
+    latestWs().close();
+    vi.advanceTimersByTime(HIDDEN_FLOOR_MS - 1);
+    expect(FakeWebSocket.instances.length).toBe(dialsBefore);
+    vi.advanceTimersByTime(HIDDEN_RECONNECT_MS - HIDDEN_FLOOR_MS + 1);
+    expect(FakeWebSocket.instances.length).toBe(dialsBefore + 1);
   });
 
   it("reconnects at once when the page becomes visible with a hidden retry pending", () => {
@@ -266,6 +283,10 @@ describe("sessionUpdatesSocket visibility-aware reconnect", () => {
     expect(FakeWebSocket.instances.length).toBe(1);
 
     // A fresh start() ramps from the base again, not the saturated hidden delay.
+    // Pin the jitter so this reliably detects a dropped reset: a base-ramp
+    // (attempt 1) delay stays under the advance below, while a carried-over
+    // attempt-2 delay would not.
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
     setPageHidden(false);
     sessionUpdatesSocket.start();
     const dialsBefore = FakeWebSocket.instances.length;
