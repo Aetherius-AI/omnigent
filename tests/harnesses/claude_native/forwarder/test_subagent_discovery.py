@@ -831,8 +831,8 @@ async def test_resolve_misses_survive_a_forwarder_restart(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A partly spent resolve budget reloads from disk and gets only its remaining
-    attempts after a restart; a spent one stays set aside with no further scan or
-    WARNING."""
+    attempts after a restart, a count whose meta file is gone is dropped, and a
+    spent budget stays set aside with no further scan or WARNING."""
     bridge_dir = tmp_path / "bridge"
     transcript_path = tmp_path / "session.jsonl"
     transcript_path.write_text("", encoding="utf-8")
@@ -852,20 +852,28 @@ async def test_resolve_misses_survive_a_forwarder_restart(
 
     budget = forwarder._SUBAGENT_RESOLVE_MAX_ATTEMPTS
     spent = budget // 2
-    # A previous forwarder process persisted a partly spent budget.
+    # A previous forwarder process persisted a partly spent budget, plus a count
+    # for a sub-agent whose meta file has since been removed.
     forwarder._write_subagent_forward_state(
         bridge_dir,
-        forwarder.SubagentForwardState(subagents={}, resolve_misses={"orphan": spent}),
+        forwarder.SubagentForwardState(
+            subagents={}, resolve_misses={"orphan": spent, "gone": budget}
+        ),
     )
     state = forwarder._read_subagent_forward_state(bridge_dir)
-    assert state.resolve_misses == {"orphan": spent}
+    assert state.resolve_misses == {"orphan": spent, "gone": budget}
 
     scans = _count_transcript_scans(monkeypatch)
     caplog.set_level(logging.DEBUG, logger="omnigent.harnesses.claude_native.forwarder")
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(_registering_handler), base_url="http://ap"
     ) as client:
-        for _ in range(budget):
+        state = await _poll_subagents(
+            client, bridge_dir=bridge_dir, transcript_path=transcript_path, state=state
+        )
+        assert state.resolve_misses == {"orphan": spent + 1}, "a vanished meta's count is dropped"
+        assert forwarder._read_subagent_forward_state(bridge_dir) == state
+        for _ in range(budget - 1):
             state = await _poll_subagents(
                 client, bridge_dir=bridge_dir, transcript_path=transcript_path, state=state
             )
@@ -885,47 +893,6 @@ async def test_resolve_misses_survive_a_forwarder_restart(
     assert "orphan" not in state.subagents
     assert not scans
     assert not _set_aside_warnings(caplog)
-
-
-async def test_resolve_misses_of_a_vanished_meta_are_dropped(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A persisted count whose meta file is gone has nothing left to resolve and is
-    dropped from the state on the next poll."""
-    bridge_dir = tmp_path / "bridge"
-    transcript_path = tmp_path / "session.jsonl"
-    transcript_path.write_text("", encoding="utf-8")
-    subagents_dir = transcript_path.parent / transcript_path.stem / "subagents"
-    subagents_dir.mkdir(parents=True, exist_ok=True)
-    (subagents_dir / "agent-orphan.meta.json").write_text(
-        json.dumps(
-            {
-                "agentType": "general-purpose",
-                "description": "spawn is in no transcript",
-                "toolUseId": "toolu_orphan",
-            }
-        ),
-        encoding="utf-8",
-    )
-    (subagents_dir / "agent-orphan.jsonl").write_text("", encoding="utf-8")
-    budget = forwarder._SUBAGENT_RESOLVE_MAX_ATTEMPTS
-    state = forwarder.SubagentForwardState(
-        subagents={}, resolve_misses={"gone": budget, "orphan": budget // 2}
-    )
-    forwarder._write_subagent_forward_state(bridge_dir, state)
-
-    scans = _count_transcript_scans(monkeypatch)
-    async with httpx.AsyncClient(
-        transport=httpx.MockTransport(_registering_handler), base_url="http://ap"
-    ) as client:
-        state = await _poll_subagents(
-            client, bridge_dir=bridge_dir, transcript_path=transcript_path, state=state
-        )
-
-    assert len(scans) == 1
-    assert state.resolve_misses == {"orphan": budget // 2 + 1}
-    assert forwarder._read_subagent_forward_state(bridge_dir) == state
 
 
 async def test_unreadable_meta_never_spends_the_resolve_budget(
@@ -1029,6 +996,74 @@ async def test_late_spawn_record_registers_and_forgets_the_resolve_misses(
     assert state.subagents["late"].child_conversation_id == "conv_late"
     assert state.resolve_misses == {}
     assert forwarder._read_subagent_forward_state(bridge_dir) == state
+
+
+async def test_late_spawn_park_forgets_resolve_misses(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Parking a sub-agent whose registration is dropped for good clears the misses
+    it accumulated while its spawn record was still missing."""
+    bridge_dir = tmp_path / "bridge"
+    transcript_path = tmp_path / "session.jsonl"
+    transcript_path.write_text("", encoding="utf-8")
+    subagents_dir = transcript_path.parent / transcript_path.stem / "subagents"
+    subagents_dir.mkdir(parents=True, exist_ok=True)
+    (subagents_dir / "agent-late.meta.json").write_text(
+        json.dumps(
+            {
+                "agentType": "Explore",
+                "description": "spawn record not flushed yet",
+                "toolUseId": "toolu_late",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (subagents_dir / "agent-late.jsonl").write_text("", encoding="utf-8")
+
+    def dropping_handler(request: httpx.Request) -> httpx.Response:
+        if json.loads(request.content).get("type") == "external_subagent_start":
+            return httpx.Response(400)
+        return httpx.Response(202, json={})
+
+    caplog.set_level(logging.DEBUG, logger="omnigent.harnesses.claude_native.forwarder")
+    unresolved_polls = forwarder._SUBAGENT_RESOLVE_MAX_ATTEMPTS // 2
+    tracker = forwarder._PostRetryTracker(base_delay_s=0.0)
+    state = forwarder.SubagentForwardState(subagents={})
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(dropping_handler), base_url="http://ap"
+    ) as client:
+        for _ in range(unresolved_polls):
+            state = await _poll_subagents(
+                client,
+                bridge_dir=bridge_dir,
+                transcript_path=transcript_path,
+                state=state,
+                start_retry_tracker=tracker,
+            )
+        assert state.resolve_misses == {"late": unresolved_polls}
+
+        # The spawn record lands, but every registration attempt is rejected.
+        _seed_subagent_on_disk(
+            transcript_path=transcript_path,
+            subagent_id="late",
+            agent_type="Explore",
+            description="spawn record not flushed yet",
+            tool_use_id="toolu_late",
+        )
+        for _ in range(forwarder._HTTP_POST_MAX_PERMANENT_FAILURES):
+            state = await _poll_subagents(
+                client,
+                bridge_dir=bridge_dir,
+                transcript_path=transcript_path,
+                state=state,
+                start_retry_tracker=tracker,
+            )
+
+    assert state.subagents["late"].child_conversation_id == ""
+    assert state.resolve_misses == {}
+    assert forwarder._read_subagent_forward_state(bridge_dir) == state
+    assert not _set_aside_warnings(caplog)
 
 
 async def test_checkpointing_a_child_cursor_keeps_an_orphans_resolve_misses(
@@ -1247,14 +1282,16 @@ async def test_chain_parked_under_a_dropped_grandparent_spends_no_resolve_budget
     assert caplog.text.count("whose parent was dropped") == 2
 
 
-async def test_child_of_a_parent_without_meta_spends_its_own_budget(
+@pytest.mark.parametrize("parent_meta", ["absent", "unreadable"])
+async def test_child_of_an_unregistrable_parent_spends_its_own_budget(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
+    parent_meta: str,
 ) -> None:
-    """A child whose spawn lives in a transcript with no meta file has no parent
-    that can ever register, so it spends its own budget, persists the count across
-    a restart, and stops re-reading the transcripts once it is set aside."""
+    """A child whose parent has no meta file, or one that never becomes readable,
+    has no parent that can register, so it spends its own budget and stops
+    re-reading the transcripts once it is set aside."""
     bridge_dir = tmp_path / "bridge"
     transcript_path = tmp_path / "session.jsonl"
     transcript_path.write_text("", encoding="utf-8")
@@ -1264,31 +1301,23 @@ async def test_child_of_a_parent_without_meta_spends_its_own_budget(
         transcript_path=transcript_path,
         subagent_id="a-child",
         agent_type="general-purpose",
-        description="spawned by a sub-agent that left no meta",
+        description="spawned by a sub-agent that cannot register",
         tool_use_id="toolu_child",
         spawn_transcript_path=subagents_dir / "agent-ghost.jsonl",
     )
-    assert not (subagents_dir / "agent-ghost.meta.json").exists()
+    if parent_meta == "unreadable":
+        (subagents_dir / "agent-ghost.meta.json").write_text(
+            '{"agentType": "gen', encoding="utf-8"
+        )
 
     budget = forwarder._SUBAGENT_RESOLVE_MAX_ATTEMPTS
-    spent_before_restart = budget // 2
     scans = _count_transcript_scans(monkeypatch)
     caplog.set_level(logging.DEBUG, logger="omnigent.harnesses.claude_native.forwarder")
     state = forwarder.SubagentForwardState(subagents={})
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(_registering_handler), base_url="http://ap"
     ) as client:
-        for _ in range(spent_before_restart):
-            state = await _poll_subagents(
-                client, bridge_dir=bridge_dir, transcript_path=transcript_path, state=state
-            )
-        assert state.resolve_misses == {"a-child": spent_before_restart}
-        assert not _set_aside_warnings(caplog)
-
-        # A restart reloads the count and gets only the remaining attempts.
-        state = forwarder._read_subagent_forward_state(bridge_dir)
-        assert state.resolve_misses == {"a-child": spent_before_restart}
-        for _ in range(budget):
+        for _ in range(budget + 1):
             state = await _poll_subagents(
                 client, bridge_dir=bridge_dir, transcript_path=transcript_path, state=state
             )

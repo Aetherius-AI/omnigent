@@ -627,14 +627,11 @@ class SubagentForwardState:
         per-sub-agent entry. New sub-agents discovered on disk are
         inserted here after the Omnigent server returns a child
         Conversation id.
-    :param resolve_misses: Map from ``subagent_id`` to the number of
-        polls whose transcript scan failed to find the sub-agent's
-        spawn call. A sub-agent reaching
-        ``_SUBAGENT_RESOLVE_MAX_ATTEMPTS`` is set aside and no longer
-        scanned for. The count is durable so the full re-read does not
-        resume after a forwarder restart; set-aside sub-agents are never
-        registered children, so they stay out of ``subagents``, and
-        registering or parking a sub-agent forgets its count.
+    :param resolve_misses: Durable unresolved-spawn counts by
+        ``subagent_id``. Reaching ``_SUBAGENT_RESOLVE_MAX_ATTEMPTS`` sets
+        the sub-agent aside and stops resolution attempts, across
+        forwarder restarts too. Registration, parking, or removal of the
+        meta file clears the count.
     """
 
     subagents: dict[str, SubagentEntry]
@@ -2668,6 +2665,7 @@ async def _forward_available_subagents(
             # budget, so it still registers once it becomes readable.
             continue
         candidates.append((meta_path, meta))
+    readable_ids = {_subagent_id_from_meta_path(path) for path, _ in candidates}
     parents_by_tool_use = (
         await asyncio.to_thread(
             _subagent_parents_by_tool_use,
@@ -2813,7 +2811,7 @@ async def _forward_available_subagents(
         if not made_progress:
             # Nothing registered this pass. A deferred child follows a set-aside parent
             # (re-swept until the cascade stops, whatever order the metas sort in), waits
-            # while its parent is registered or still on disk, else spends its own budget.
+            # while its parent is registered, backing off or readable, else spends budget.
             waiting = deferred
             while waiting:
                 still_waiting: list[tuple[Path, dict[str, str], str | None]] = []
@@ -2834,7 +2832,10 @@ async def _forward_available_subagents(
                         swept = True
                     elif (
                         parent_subagent_id in updated.subagents
-                        or parent_subagent_id in meta_ids_on_disk
+                        or parent_subagent_id in readable_ids
+                        or start_retry_tracker.has_retry_state(
+                            f"subagent_start:{parent_subagent_id}"
+                        )
                     ):
                         still_waiting.append((meta_path, meta, parent_subagent_id))
                     else:
@@ -2842,7 +2843,7 @@ async def _forward_available_subagents(
                             parent_session_id=parent_session_id,
                             subagent_id=subagent_id,
                             tool_use_id=meta["toolUseId"],
-                            reason=f"parent {parent_subagent_id} has no meta on disk",
+                            reason=f"parent {parent_subagent_id} has no readable meta",
                             state=updated,
                         )
                 waiting = still_waiting
