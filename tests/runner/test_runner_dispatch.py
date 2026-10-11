@@ -3964,7 +3964,7 @@ async def test_sys_session_send_workspace_lands_in_child_create_body(
     workspace.mkdir(parents=True)
     create_bodies: list[dict[str, Any]] = []
     monkeypatch.setattr(runner_app, "get_session_agent_id", lambda _sid: "ag_parent")
-    monkeypatch.setattr(runner_app, "register_child_session", lambda *a, **k: None)
+    monkeypatch.setattr(subagent_work, "register_child_session", lambda *a, **k: None)
     session_inbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
     async def _server_handler(request: httpx.Request) -> httpx.Response:
@@ -3999,15 +3999,15 @@ async def test_sys_session_send_workspace_lands_in_child_create_body(
                 session_inbox=session_inbox,
             )
         finally:
-            runner_app.unregister_subagent_work("conv_child_workspace")
-            runner_app._session_inboxes_ref.pop("conv_parent_workspace", None)
+            subagent_work.unregister_subagent_work("conv_child_workspace")
+            subagent_work._session_inboxes_ref.pop("conv_parent_workspace", None)
 
     assert json.loads(output)["status"] == "launching"
     assert len(create_bodies) == 1
     create_body = dict(create_bodies[0])
     # Every child create is stamped with a fresh dispatch id; assert its
     # shape separately so this test stays about the workspace plumbing.
-    dispatch_id = create_body.pop("labels")[runner_app.SUBAGENT_DISPATCH_ID_LABEL_KEY]
+    dispatch_id = create_body.pop("labels")[subagent_work.SUBAGENT_DISPATCH_ID_LABEL_KEY]
     assert dispatch_id.startswith("subagent_")
     assert create_body == {
         "agent_id": "ag_parent",
@@ -4082,7 +4082,7 @@ async def test_sys_session_send_rejects_workspace_outside_worker_root(
                 session_inbox=session_inbox,
             )
         finally:
-            runner_app._session_inboxes_ref.pop("conv_parent_outside", None)
+            subagent_work._session_inboxes_ref.pop("conv_parent_outside", None)
 
     assert output.startswith("Error:")
     assert "outside" in output
@@ -4120,7 +4120,7 @@ async def test_sys_session_send_rejects_workspace_in_by_id_mode(tmp_path: Path) 
                 session_inbox=session_inbox,
             )
         finally:
-            runner_app._session_inboxes_ref.pop("conv_parent_existing_workspace", None)
+            subagent_work._session_inboxes_ref.pop("conv_parent_existing_workspace", None)
 
     assert output.startswith("Error:")
     assert "workspace" in output
@@ -4181,7 +4181,7 @@ async def test_sys_session_send_rejects_workspace_for_existing_named_child(
                 session_inbox=session_inbox,
             )
         finally:
-            runner_app._session_inboxes_ref.pop("conv_parent_named_workspace", None)
+            subagent_work._session_inboxes_ref.pop("conv_parent_named_workspace", None)
 
     assert output.startswith("Error:")
     assert "conv_existing_workspace" in output
