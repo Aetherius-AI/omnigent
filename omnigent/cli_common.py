@@ -26,18 +26,14 @@ CLAUDE_STARTUP_PROFILE_ENV_VAR = "OMNIGENT_CLAUDE_STARTUP_PROFILE"
 
 
 class AuthFailure(click.ClickException):
-    """A login or credential failure; recovery is re-authenticating.
+    """A sign-in or credential failure; the recovery is re-authenticating.
 
-    The top-level CLI handler appends a stale-host recovery hint
-    (``run `omnigent stop```) to command errors because stale host
-    processes can cause runner tunnel rejections. Sign-in and token
-    verification failures are never caused by stale host processes, so
-    errors raised as :class:`AuthFailure` skip that hint instead of
-    sending users to chase process cleanup for an access problem.
+    ``main()`` appends the stale-host recovery hint to command errors because
+    stale host processes can cause runner tunnel rejections. Login and token
+    verification failures have a different cause, so they opt out of it.
     """
 
-    # cli_diagnostics.SUPPRESS_RECOVERY_HINT_ATTR: re-authenticating, not
-    # `omnigent stop`, is the recovery for a sign-in/access failure.
+    # Attribute name is cli_diagnostics.SUPPRESS_RECOVERY_HINT_ATTR.
     omnigent_suppress_recovery_hint = True
 
 

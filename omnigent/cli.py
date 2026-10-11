@@ -2396,8 +2396,10 @@ def main() -> None:
     setup_cli_logging(argv)
 
     # Do not recommend the off-switch when it is already running. Commands
-    # unrelated to runner startup are excluded to avoid a misleading hint.
-    suggest_stale_host_recovery = argv[0] not in {
+    # unrelated to runner startup are excluded to avoid a misleading hint;
+    # group options may precede the command (`omnigent --profiling login`).
+    command = next((arg for arg in argv if not arg.startswith("-")), "")
+    suggest_stale_host_recovery = command not in {
         "integration",
         "login",
         "setup",
@@ -2428,10 +2430,9 @@ def main() -> None:
     except click.ClickException as exc:
         log_cli_exception(exc, prefix="Click CLI error")
         exc.show()
-        # Withhold the stale-host hint for failures `omnigent stop` cannot
-        # fix — an auth/access failure (AuthFailure), a crashed background
-        # server (LocalServerStartupError), or a missing dependency — whose
-        # real cause is already surfaced above.
+        # Withhold the stale-host hint for failures `omnigent stop` cannot fix
+        # (auth failures, crashed background server, missing dependency) —
+        # their real cause is already surfaced above.
         if suggest_stale_host_recovery and not suppresses_recovery_hint(exc):
             print_stale_host_hint()
         raise SystemExit(exc.exit_code) from exc

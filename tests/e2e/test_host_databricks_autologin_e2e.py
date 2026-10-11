@@ -1,33 +1,11 @@
-"""`omnigent host` auto-login against a Databricks workspace mount.
+"""`omnigent host` auto-login against a Databricks workspace mount, end to end.
 
-Reproduces the reported journey end-to-end through the real CLI under a
-pseudo-TTY (pexpect), against a faithful fake Databricks workspace edge:
-
-- the ``/api/2.0/omnigent`` mount answers an unauthenticated probe with the
-  401 ``DatabricksRealm`` challenge (workspace-hosted omnigent shape),
-- the workspace root answers like the Databricks web app
-  (404 + ``Server: databricks``),
-- ``/.well-known/databricks-config`` reports an account-acting host
-  (an ``account_id`` but no ``workspace_id``),
-- an authenticated ``/v1/me`` succeeds only when the request carries the
-  ``?o=<workspace>`` selector (the account host rejects unrouted tokens
-  with HTTP 403 — the reported failure shape).
-
-A stub ``databricks`` CLI on PATH simulates the browser login: it
-auto-selects the workspace and records ``host`` / ``token`` /
-``workspace_id`` into ``DATABRICKS_CONFIG_FILE`` exactly as the real
-``databricks auth login --host <ws> --profile <p>`` does.
-
-Two behaviors are pinned:
-
-1. The auto-login inside ``omnigent host --server <ws>/omnigent?o=<id>``
-   completes unattended: the token verify inherits the CLI-recorded
-   workspace selector, so the login does NOT die with the misleading
-   "rejected the token (HTTP 403)" the reported transcript shows.
-2. When the mount genuinely rejects the token (the user lacks app
-   access), the login error is NOT followed by the irrelevant
-   "runner tunnel rejection (HTTP 401) ... run `omnigent stop`" hint —
-   stale host processes have nothing to do with a login-time 403.
+Drives the real CLI under a pseudo-TTY against a fake workspace edge (401
+``DatabricksRealm`` challenge on the mount, ``Server: databricks`` web root,
+account-acting ``/.well-known/databricks-config``) with a stub ``databricks``
+CLI standing in for the browser login. Two behaviors are pinned: the token
+verify inherits the workspace selector the CLI recorded during login, and a
+genuine token rejection (HTTP 403) is not followed by the stale-host hint.
 
 Usage::
 
@@ -300,17 +278,8 @@ def _omnigent_cli() -> str:
 def test_host_autologin_inherits_workspace_selector(
     edge_no_o_403: str, host_env: dict[str, str]
 ) -> None:
-    """`omnigent host --server <ws>/omnigent?o=<id>` logs in unattended.
-
-    The reported transcript's first failure: the auto-login's token verify
-    reached the account host without the ``?o=`` workspace selector, was
-    rejected with HTTP 403, and the CLI told the user to check app access —
-    even though a manual ``omnigent login`` (which routes the selector) then
-    succeeded. The fixed flow inherits the workspace id the Databricks CLI
-    recorded during the browser login, so the verify routes to the
-    workspace and the whole `host` bring-up completes without a manual
-    retry.
-    """
+    """`omnigent host --server <ws>/omnigent?o=<id>` logs in unattended: the
+    token verify routes with the workspace selector recorded during login."""
     child = pexpect.spawn(
         _omnigent_cli(),
         ["host", "--server", f"{edge_no_o_403}/omnigent?o={_WORKSPACE_ID}"],
@@ -340,16 +309,7 @@ def test_host_autologin_inherits_workspace_selector(
 def test_login_403_error_omits_stale_host_hint(
     edge_always_403: str, host_env: dict[str, str]
 ) -> None:
-    """A login-time 403 must not print the stale-host / HTTP 401 hint.
-
-    When the mount genuinely rejects the workspace token (HTTP 403), the
-    CLI raises "…rejected the token (HTTP 403). Check that your user has
-    access to this app." — a login/access failure. The generic ClickException
-    handler then appends "If this is a runner tunnel rejection (HTTP 401),
-    stale host processes may be the cause. Run `omnigent stop` …", which is
-    unrelated to a login 403 and misleads users into chasing stale host
-    processes instead of access grants.
-    """
+    """A login-time HTTP 403 is an access failure; the stale-host hint must not follow it."""
     child = pexpect.spawn(
         _omnigent_cli(),
         ["host", "--background", "--server", f"{edge_always_403}/omnigent?o={_WORKSPACE_ID}"],
