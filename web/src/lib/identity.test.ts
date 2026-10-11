@@ -843,7 +843,7 @@ describe("host Server switch", () => {
   it("ignores a superseded probe's answer after the host left and returned to its Server", async () => {
     const { setOmnigentHostConfig } = await import("./host");
     const { resolveIdentity, getCurrentIsAdmin, getCurrentUserId } = await import("./identity");
-    const answers: Array<(r: Response) => void> = [];
+    const answers: ((r: Response) => void)[] = [];
     const serverA = vi.fn(
       () =>
         new Promise<Response>((r) => {
