@@ -115,6 +115,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   clearSessionTombstones();
+  clearRecentlyCreated();
 });
 
 describe("SessionUpdatesProvider watch-set", () => {
@@ -437,7 +438,6 @@ describe("SessionUpdatesProvider snapshot timestamps", () => {
       .pages[0].data;
     expect(rows.map((row) => row.id)).toEqual(["old-pin", "conv_a"]);
     expect(rows[0].updated_at).toBe(0);
-    clearRecentlyCreated();
   });
 });
 

@@ -165,9 +165,8 @@ function applyItemsToCache(
         const changedFields = changedWireFields(row, item);
         // The pinned copy of a row outside the list window converges only through
         // the pinned query; like the list path, the active row needs none.
-        if (options.keepUpdatedAt && changedFields.delete("updated_at") && row.id !== activeId) {
-          pinnedNeedsRefetch = true;
-        }
+        const timestampLeads = options.keepUpdatedAt && changedFields.delete("updated_at");
+        if (timestampLeads && row.id !== activeId) pinnedNeedsRefetch = true;
         if (changedFields.size === 0) return row;
         changed = true;
         // Pin membership and pin timestamps reconcile through the pinned query.

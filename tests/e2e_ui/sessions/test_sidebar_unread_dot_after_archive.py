@@ -159,6 +159,8 @@ def _other_rows_lit(log: list[dict[str, Any]], t_action_ms: float, exclude: str)
     """Which rows other than ``exclude`` showed a dot after the action, and when."""
     lit: dict[str, float] = {}
     for entry in log:
+        if entry["t"] < t_action_ms:
+            continue
         for href in entry["rows"]:
             if href != exclude and href not in lit:
                 lit[href] = round((entry["t"] - t_action_ms) / 1000, 3)
