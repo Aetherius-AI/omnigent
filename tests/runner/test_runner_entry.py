@@ -2887,6 +2887,53 @@ async def test_resolve_agent_spec_from_server_evicts_prior_revision(
 
 
 @pytest.mark.asyncio
+async def test_resolve_agent_spec_from_server_separates_env_expansion_modes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session-scoped resolve never reuses the env-expanded parse of the same bytes."""
+    import omnigent.runner._entry as entry_mod
+
+    monkeypatch.setenv("SPEC_MEMO_SECRET", "expanded-secret")
+    config_bytes = (
+        b"spec_version: 1\nname: cached-agent\nexecutor:\n  config:\n    harness: claude-sdk\n"
+        b"llm:\n  model: openai/gpt-5.4\n  connection:\n    api_key: ${SPEC_MEMO_SECRET}\n"
+    )
+    bundle_buf = io.BytesIO()
+    with tarfile.open(fileobj=bundle_buf, mode="w:gz") as tf:
+        info = tarfile.TarInfo(name="config.yaml")
+        info.size = len(config_bytes)
+        tf.addfile(info, io.BytesIO(config_bytes))
+
+    # The same bytes served first as an operator template, then session-scoped.
+    scoped = iter(["false", "true"])
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=bundle_buf.getvalue(),
+            headers={"X-Agent-Version": "1", "X-Agent-Session-Scoped": next(scoped)},
+        )
+
+    cache: dict[tuple[str, Path, bool], Any] = {}
+    monkeypatch.setattr(entry_mod, "_SPEC_PARSE_CACHE", cache)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_handler), base_url="http://server.test"
+    ) as client:
+        template = await _resolve_agent_spec_from_server(
+            client, tmp_path, "ag_env", session_id="conv_template"
+        )
+        tenant = await _resolve_agent_spec_from_server(
+            client, tmp_path, "ag_env", session_id="conv_tenant"
+        )
+    assert template is not None and tenant is not None
+    assert template.workdir == tenant.workdir
+    assert template.spec.llm is not None and tenant.spec.llm is not None
+    assert template.spec.llm.connection == {"api_key": "expanded-secret"}
+    assert tenant.spec.llm.connection == {"api_key": "${SPEC_MEMO_SECRET}"}
+    assert list(cache) == [("ag_env", tenant.workdir, False)]
+
+
+@pytest.mark.asyncio
 async def test_resolve_agent_spec_from_server_bounds_memo_across_agents(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2940,6 +2987,7 @@ async def test_resolve_agent_spec_does_not_reparse_cached_bundle_per_session(
     ``(agent_id, version)`` bundle each re-parse the whole bundle. During sub-agent
     fan-out that bursts runner CPU on redundant YAML parsing.
     """
+    import omnigent.runner._entry as entry_mod
     import omnigent.spec as spec_pkg
     import omnigent.spec.parser as spec_parser
 
@@ -2981,6 +3029,7 @@ async def test_resolve_agent_spec_does_not_reparse_cached_bundle_per_session(
     # discovery calls it through ``omnigent.spec.parser``. Patch both entry points.
     monkeypatch.setattr(spec_parser, "parse", _counting_parse)
     monkeypatch.setattr(spec_pkg, "parse", _counting_parse)
+    monkeypatch.setattr(entry_mod, "_SPEC_PARSE_CACHE", {})
 
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(_handler),

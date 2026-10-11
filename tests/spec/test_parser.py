@@ -4573,7 +4573,7 @@ def test_config_yaml_parsed_with_libyaml_when_available(
     real_load = yaml.load
 
     def _capturing_load(stream: object, Loader: type) -> object:
-        captured["loader"] = Loader
+        captured.setdefault("loader", Loader)
         return real_load(stream, Loader=Loader)
 
     monkeypatch.setattr(parser.yaml, "load", _capturing_load)

@@ -22,6 +22,7 @@ Run::
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
@@ -229,52 +230,54 @@ def instrumented_stack(
             }
         )
     )
-    server_handle = open(server_log, "w")  # noqa: SIM115
-    server_proc = subprocess.Popen(
-        [
-            server_executable(),
-            "-m",
-            "omnigent.cli",
-            "server",
-            "--port",
-            str(port),
-            "--database-uri",
-            f"sqlite:///{tmp_path / 'e2e.db'}",
-            "--artifact-location",
-            str(artifact_dir),
-            "--config",
-            str(server_cfg),
-        ],
-        env={**env, "OMNIGENT_RUNNER_TUNNEL_TOKEN": binding_token},
-        cwd=compat_server_cwd(),
-        stdout=server_handle,
-        stderr=subprocess.STDOUT,
-    )
+    with contextlib.ExitStack() as stack:
+        server_handle = stack.enter_context(open(server_log, "w"))
+        server_proc = subprocess.Popen(
+            [
+                server_executable(),
+                "-m",
+                "omnigent.cli",
+                "server",
+                "--port",
+                str(port),
+                "--database-uri",
+                f"sqlite:///{tmp_path / 'e2e.db'}",
+                "--artifact-location",
+                str(artifact_dir),
+                "--config",
+                str(server_cfg),
+            ],
+            env={**env, "OMNIGENT_RUNNER_TUNNEL_TOKEN": binding_token},
+            cwd=compat_server_cwd(),
+            stdout=server_handle,
+            stderr=subprocess.STDOUT,
+        )
+        stack.callback(_terminate, server_proc, timeout=10)
 
-    runner_env = apply_runner_env(
-        {
-            **env,
-            "OMNIGENT_RUNNER_ID": runner_id,
-            "OMNIGENT_RUNNER_TUNNEL_BINDING_TOKEN": binding_token,
-            "OMNIGENT_RUNNER_PARENT_PID": str(os.getpid()),
-            "RUNNER_SERVER_URL": base_url,
-            _PARSE_LOG_ENV: str(parse_log),
-        }
-    )
-    runner_env["PYTHONPATH"] = os.pathsep.join(
-        [str(shim_dir), *filter(None, [runner_env.get("PYTHONPATH")])]
-    )
-    runner_handle = open(runner_log, "w")  # noqa: SIM115
-    runner_proc = subprocess.Popen(
-        [runner_executable(), "-m", "omnigent.runner._entry"],
-        env=runner_env,
-        cwd=compat_runner_cwd(),
-        stdout=runner_handle,
-        stderr=subprocess.STDOUT,
-    )
+        runner_env = apply_runner_env(
+            {
+                **env,
+                "OMNIGENT_RUNNER_ID": runner_id,
+                "OMNIGENT_RUNNER_TUNNEL_BINDING_TOKEN": binding_token,
+                "OMNIGENT_RUNNER_PARENT_PID": str(os.getpid()),
+                "RUNNER_SERVER_URL": base_url,
+                _PARSE_LOG_ENV: str(parse_log),
+            }
+        )
+        runner_env["PYTHONPATH"] = os.pathsep.join(
+            [str(shim_dir), *filter(None, [runner_env.get("PYTHONPATH")])]
+        )
+        runner_handle = stack.enter_context(open(runner_log, "w"))
+        runner_proc = subprocess.Popen(
+            [runner_executable(), "-m", "omnigent.runner._entry"],
+            env=runner_env,
+            cwd=compat_runner_cwd(),
+            stdout=runner_handle,
+            stderr=subprocess.STDOUT,
+        )
+        stack.callback(_terminate, runner_proc, timeout=5)
 
-    client = httpx.Client(base_url=base_url, timeout=30.0)
-    try:
+        client = stack.enter_context(httpx.Client(base_url=base_url, timeout=30.0))
         try:
             _wait_online(base_url, runner_id, server_proc)
         except RuntimeError as exc:
@@ -294,12 +297,6 @@ def instrumented_stack(
             runner_log=runner_log,
             server_log=server_log,
         )
-    finally:
-        client.close()
-        _terminate(runner_proc, timeout=5)
-        runner_handle.close()
-        _terminate(server_proc, timeout=10)
-        server_handle.close()
 
 
 def _agent_config(

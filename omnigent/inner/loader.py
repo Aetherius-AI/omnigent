@@ -89,7 +89,7 @@ def load_agent_def(
     path: Path | None = None
     if isinstance(path_or_dict, (str, Path)):
         path = Path(path_or_dict)
-        data = _yaml_load(path.read_text(), _OmnigentYamlLoader)
+        data = _yaml_load(path.read_text(encoding="utf-8"), _OmnigentYamlLoader)
         instructions_root: Path | None = path.parent
     else:
         data = path_or_dict

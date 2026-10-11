@@ -11,9 +11,8 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 if TYPE_CHECKING:
-    # ``CSafeLoader`` is not a subclass of ``SafeLoader`` — the two are
-    # siblings sharing ``SafeConstructor`` and ``Resolver``. mypy also
-    # cannot subclass a value chosen at runtime, so the pure-Python
+    # CSafeLoader is a sibling of SafeLoader (shared SafeConstructor/Resolver),
+    # and mypy cannot subclass a runtime-chosen value, so the pure-Python
     # loader stands in as the static base for both.
     SafeLoaderBase = yaml.SafeLoader
 else:
@@ -23,11 +22,9 @@ else:
 # need to report which base they exercised.
 USING_LIBYAML = SafeLoaderBase is not yaml.SafeLoader
 
-# Failures raised while reading the document's structure, before any tag is
-# resolved or any constructor runs. Both parsers raise these same classes,
-# and at this stage a loader's resolver and constructor tables cannot have
-# influenced the outcome — which is what makes the reparse in :func:`load`
-# a faithful substitution.
+# Structural failures raised before any tag resolution or constructor runs.
+# Both parsers raise these same classes, so the SafeLoader reparse in
+# :func:`load` is a faithful substitution.
 _PARSE_STAGE_ERRORS = (
     yaml.scanner.ScannerError,
     yaml.parser.ParserError,
@@ -43,11 +40,14 @@ def narrow_bools_to_yaml_1_2(loader: type[yaml.SafeLoader]) -> None:
     """Keep on/off/yes/no as strings and true/false as booleans.
 
     Apply only to a dedicated SafeLoader or CSafeLoader subclass. Both parsers
-    use the Python resolver; copying its table leaves other YAML callers intact."""
-    # Copy before mutating. ``yaml_implicit_resolvers`` lives on PyYAML's
-    # shared ``BaseResolver``, so the same dict object backs SafeLoader and
-    # CSafeLoader alike; an in-place edit would strip bool parsing from
-    # every yaml.safe_load caller in the process.
+    use the Python resolver; copying its table leaves other YAML callers intact.
+
+    :raises TypeError: If *loader* is the shared base rather than a subclass."""
+    if loader is yaml.SafeLoader or loader is SafeLoaderBase:
+        raise TypeError("narrow a dedicated SafeLoader/CSafeLoader subclass, not the shared base")
+    # Copy before mutating: the resolver dict on BaseResolver is shared by
+    # SafeLoader and CSafeLoader, so an in-place edit would strip bool parsing
+    # from every yaml.safe_load caller in the process.
     loader.yaml_implicit_resolvers = {
         key: [(tag, regexp) for tag, regexp in value if tag != _BOOL_TAG]
         for key, value in loader.yaml_implicit_resolvers.items()
@@ -85,10 +85,9 @@ def load(text: str, loader: type[yaml.SafeLoader]) -> Any:  # type: ignore[expli
             # chain so the traceback shows one diagnosis, not two.
             raise detailed_error from None
         except Exception:  # noqa: BLE001 - any other outcome is not our failure
-            # The two parsers disagree about where the document breaks: ``!] ``
-            # fails libyaml's scanner but scans clean for pure-Python, which
-            # then dies in the constructor. That diagnosis describes a
-            # different problem, so it must not be substituted.
+            # The parsers disagree on where the document breaks (``!]`` fails
+            # libyaml's scanner but pure-Python's constructor); that diagnosis
+            # describes a different problem and must not be substituted.
             pass
         # The retry either succeeded or failed elsewhere. Either way libyaml's
         # error is the accurate one; surface it rather than pretending the

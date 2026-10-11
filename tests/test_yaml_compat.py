@@ -15,7 +15,13 @@ import textwrap
 import pytest
 import yaml
 
-from omnigent._yaml_compat import USING_LIBYAML, SafeLoaderBase, load, safe_load
+from omnigent._yaml_compat import (
+    USING_LIBYAML,
+    SafeLoaderBase,
+    load,
+    narrow_bools_to_yaml_1_2,
+    safe_load,
+)
 from omnigent.inner.loader import _OmnigentYamlLoader
 from omnigent.spec.parser import _ConfigYamlLoader
 
@@ -248,3 +254,31 @@ def test_pure_python_fallback_when_libyaml_is_absent() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip().endswith("OK")
+
+
+def test_narrow_bools_rejects_the_shared_base() -> None:
+    """Narrowing the shared base would strip bool parsing from every caller."""
+    for base in {yaml.SafeLoader, SafeLoaderBase}:
+        with pytest.raises(TypeError):
+            narrow_bools_to_yaml_1_2(base)
+
+
+@pytest.mark.skipif(not USING_LIBYAML, reason="without libyaml there is no retry to exercise")
+def test_load_keeps_libyaml_error_when_the_retry_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retry that parses cleanly must not hide the original structural error."""
+    real_load = yaml.load
+    fast_error = yaml.scanner.ScannerError(None, None, "libyaml rejected the document", None)
+
+    def _load(stream: object, Loader: type) -> object:
+        if Loader is _ConfigYamlLoader:
+            raise fast_error
+        return real_load(stream, Loader=Loader)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(yaml, "load", _load)
+    with pytest.raises(yaml.scanner.ScannerError) as excinfo:
+        load("a: 1\n", _ConfigYamlLoader)
+    assert excinfo.value is fast_error
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__suppress_context__ is True

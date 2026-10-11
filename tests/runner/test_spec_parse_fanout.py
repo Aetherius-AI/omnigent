@@ -7,14 +7,13 @@ from __future__ import annotations
 
 import io
 import tarfile
-import tempfile
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
-import yaml
 
+import omnigent.runner._entry as entry_mod
 import omnigent.spec as spec_pkg
 import omnigent.spec.parser as parser_mod
 from omnigent.runner import create_runner_app
@@ -117,7 +116,7 @@ class _FakeProcessManager:
 
 
 async def test_fanout_does_not_reparse_bundle_per_session(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Session creation must reuse the parse for a shared (agent_id, version) bundle."""
     bundle = _build_multi_agent_bundle()
@@ -140,8 +139,9 @@ async def test_fanout_does_not_reparse_bundle_per_session(
     # every top-level bundle parse is observed regardless of entry point.
     monkeypatch.setattr(parser_mod, "parse", _counting_parse)
     monkeypatch.setattr(spec_pkg, "parse", _counting_parse)
+    monkeypatch.setattr(entry_mod, "_SPEC_PARSE_CACHE", {})
 
-    spec_cache_root = Path(tempfile.mkdtemp(prefix="fanout-specs-"))
+    spec_cache_root = tmp_path
     resolver_client = httpx.AsyncClient(
         transport=httpx.MockTransport(_bundle_handler),
         base_url="http://server.test",
@@ -193,19 +193,4 @@ async def test_fanout_does_not_reparse_bundle_per_session(
         f"({len(parse_roots)} YAML parses total, sub-agent configs included). "
         f"The parsed AgentSpec must be memoized per bundle revision so fan-out "
         f"does not burn runner CPU re-parsing identical YAML."
-    )
-
-
-def test_config_yaml_loader_uses_libyaml() -> None:
-    """Use the accelerated safe loader when libyaml is installed."""
-    if not getattr(yaml, "__with_libyaml__", False):
-        pytest.skip("PyYAML built without libyaml; CSafeLoader unavailable")
-
-    from omnigent.spec.parser import _ConfigYamlLoader
-
-    assert issubclass(_ConfigYamlLoader, yaml.CSafeLoader), (
-        "_ConfigYamlLoader subclasses the pure-Python yaml.SafeLoader even "
-        "though the libyaml CSafeLoader is available in this runtime; spec "
-        f"parsing pays a ~10-20x CPU penalty per parse. MRO: "
-        f"{[cls.__name__ for cls in _ConfigYamlLoader.__mro__]}"
     )
