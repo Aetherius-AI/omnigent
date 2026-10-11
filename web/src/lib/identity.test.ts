@@ -286,7 +286,6 @@ describe("authenticatedFetch", () => {
         if (mode === "known") setSessionHost("session-a", "host_target");
         vi.doMock("./host", () => ({
           getOmnigentHostConfig: vi.fn(() => ({ fetcher: () => fetch })),
-          getOmnigentServerIdentity: vi.fn(() => "server"),
           hostFetch: fetchMock,
           isDatabricksWorkspace: vi.fn(() => true),
           isHostRoutingEnabled: vi.fn(() => true),
@@ -322,7 +321,6 @@ describe("authenticatedFetch", () => {
       }));
       vi.doMock("./host", () => ({
         getOmnigentHostConfig: vi.fn(() => ({ fetcher: () => fetch })),
-        getOmnigentServerIdentity: vi.fn(() => "server"),
         hostFetch: fetchMock,
         isDatabricksWorkspace: vi.fn(() => true),
         isHostRoutingEnabled: vi.fn(() => true),
@@ -356,7 +354,6 @@ describe("authenticatedFetch", () => {
       }));
       vi.doMock("./host", () => ({
         getOmnigentHostConfig: vi.fn(() => ({})),
-        getOmnigentServerIdentity: vi.fn(() => "server"),
         hostFetch: fetchMock,
         isDatabricksWorkspace: vi.fn(() => true),
         isHostRoutingEnabled: vi.fn(() => true),
@@ -384,7 +381,6 @@ describe("authenticatedFetch", () => {
       }));
       vi.doMock("./host", () => ({
         getOmnigentHostConfig: vi.fn(() => ({ fetcher: () => fetch })),
-        getOmnigentServerIdentity: vi.fn(() => "server"),
         hostFetch: fetchMock,
         isDatabricksWorkspace: vi.fn(() => true),
         isHostRoutingEnabled: vi.fn(() => true),
@@ -428,7 +424,6 @@ describe("authenticatedFetch", () => {
         setSessionParent("child", "parent");
         vi.doMock("./host", () => ({
           getOmnigentHostConfig: vi.fn(() => ({ fetcher: () => fetch })),
-          getOmnigentServerIdentity: vi.fn(() => "server"),
           hostFetch: fetchMock,
           isDatabricksWorkspace: vi.fn(() => true),
           isHostRoutingEnabled: vi.fn(() => true),
@@ -490,7 +485,6 @@ describe("authenticatedFetch", () => {
       }));
       vi.doMock("./host", () => ({
         getOmnigentHostConfig: vi.fn(() => ({ fetcher: () => fetch })),
-        getOmnigentServerIdentity: vi.fn(() => "server"),
         hostFetch: fetchMock,
         isDatabricksWorkspace: vi.fn(() => true),
         isHostRoutingEnabled: vi.fn(() => true),

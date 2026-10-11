@@ -19,7 +19,6 @@ import { stripBasePath, withBasePath } from "./basePath";
 import { getCachedServerInfo } from "./capabilities";
 import {
   getOmnigentHostConfig,
-  getOmnigentServerIdentity,
   hostFetch,
   isDatabricksWorkspace,
   isHostRoutingEnabled,
@@ -312,12 +311,21 @@ let loginRedirectPending = false;
 let identityServer: string | null | undefined;
 
 /**
+ * The Server named by the host config. Standalone and unnamed embedded hosts
+ * have one Server per page, so `null` never changes. Read off the config this
+ * module already depends on rather than widening its `./host` contract.
+ */
+function configuredServer(): string | null {
+  return getOmnigentHostConfig().serverIdentity?.trim() || null;
+}
+
+/**
  * Drop the cached identity when the host has switched Servers. Every reader
  * below calls this first, so no synchronous caller sees the previous Server's
  * user or admin flag; standalone has one Server per page, so it never fires.
  */
 function syncIdentityServer(): void {
-  const server = getOmnigentServerIdentity();
+  const server = configuredServer();
   if (identityServer === undefined) {
     identityServer = server;
     return;
@@ -393,8 +401,8 @@ export async function resolveIdentity(): Promise<string | null> {
   // The Server this probe is asking. Compared against the live host config
   // when it answers, so a reply that lands after the host switched Servers is
   // discarded instead of being cached for the Server that never sent it.
-  const probeServer = getOmnigentServerIdentity();
-  const isStale = () => getOmnigentServerIdentity() !== probeServer;
+  const probeServer = configuredServer();
+  const isStale = () => configuredServer() !== probeServer;
   identityPromise = (async () => {
     try {
       const res = await hostFetch("/v1/me");
