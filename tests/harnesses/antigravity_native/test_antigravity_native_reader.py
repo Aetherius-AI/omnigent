@@ -2759,8 +2759,9 @@ async def test_tiered_display_name_usage_posts_catalog_id(
         ("Codestral", "codestral"),
         ("GPT-5", "gpt-5"),
         ("O3", "o3"),
-        # Stacked parenthetical suffixes are all stripped, not just the last.
+        # Parenthetical qualifiers are stripped wherever they sit, not just at the end.
         ("Gemini 3 (Preview) (Medium)", "gemini-3"),
+        ("Gemini 3 (Preview) Flash", "gemini-3-flash"),
         # Id-shaped labels and unresolved raw enums pass through untouched.
         ("gemini-3.8-flash", "gemini-3.8-flash"),
         ("MODEL_PLACEHOLDER_M20", "MODEL_PLACEHOLDER_M20"),

@@ -7,8 +7,6 @@ from __future__ import annotations
 import asyncio
 import io
 import json
-import signal
-import subprocess
 import tarfile
 from collections.abc import Iterator
 from typing import Any
@@ -18,7 +16,7 @@ import pytest
 import yaml
 
 from omnigent.harnesses.antigravity_native import reader as agy_reader
-from tests._helpers.live_server import HarnessCredentials, start_live_server
+from tests._helpers.live_server import HarnessCredentials, start_live_server, terminate_process
 from tests._helpers.model_catalog import offline_catalog_isolated, seed_offline_catalog
 
 pytestmark = offline_catalog_isolated
@@ -78,12 +76,7 @@ def gemini_catalog_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[
     try:
         yield base_url
     finally:
-        proc.send_signal(signal.SIGTERM)
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5)
+        terminate_process(proc)
 
 
 def _create_session(client: httpx.Client) -> str:

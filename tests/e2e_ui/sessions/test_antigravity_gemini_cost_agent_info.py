@@ -8,8 +8,6 @@ import asyncio
 import contextlib
 import io
 import json
-import signal
-import subprocess
 import tarfile
 import threading
 import uuid
@@ -22,7 +20,7 @@ import yaml
 from playwright.sync_api import Locator, Page, expect
 
 from omnigent.harnesses.antigravity_native import reader as agy_reader
-from tests._helpers.live_server import HarnessCredentials, start_live_server
+from tests._helpers.live_server import HarnessCredentials, start_live_server, terminate_process
 from tests._helpers.model_catalog import offline_catalog_isolated, seed_offline_catalog
 
 pytestmark = offline_catalog_isolated
@@ -63,12 +61,7 @@ def gemini_catalog_server(
     try:
         yield base_url
     finally:
-        proc.send_signal(signal.SIGTERM)
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5)
+        terminate_process(proc)
 
 
 def _build_minimal_agent_bundle(name: str) -> bytes:
