@@ -203,9 +203,12 @@ def test_antigravity_gemini_usage_shows_cost_in_agent_info(
         page.goto(f"{base_url}/c/{bug_id}")
         usage_section = _open_usage_breakdown(page)
 
-        # Tokens are shown, so a missing cost line would be an unpriced turn.
-        model_groups = usage_section.locator('[data-testid^="agent-info-model-"]')
-        expect(model_groups.first).to_be_visible()
+        # Tokens are shown, so a missing cost would be an unpriced turn. The
+        # reader's usage must price under the normalized id, so that model's own
+        # group renders a Cost row, not merely the session-level total.
+        model_group = usage_section.get_by_test_id(f"agent-info-model-{_CATALOG_MODEL_ID}")
+        expect(model_group).to_be_visible()
+        expect(model_group.get_by_text("Cost", exact=True)).to_be_visible()
         expect(page.get_by_test_id("agent-info-session-cost")).to_be_visible(timeout=15_000)
     finally:
         for sid in (control_id, bug_id):
