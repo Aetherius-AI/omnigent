@@ -3509,6 +3509,11 @@ def create_runner_app(
         source_error: Mapping[str, object] | None = None,
         response_id: str | None = None,
     ) -> None:
+        if status == "running":
+            # A new turn is starting: pull any backed-off native terminal idle
+            # watcher back to its base cadence so session status tracks the
+            # turn without waiting out a slow poll.
+            resource_registry.wake_session_terminal_watchers(conv_id)
         if status == "waiting" and not (
             _server_version is not None and _version_supports_waiting_status(_server_version)
         ):
