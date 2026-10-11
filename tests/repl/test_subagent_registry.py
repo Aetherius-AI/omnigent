@@ -208,7 +208,7 @@ async def test_refresh_subagent_tree_seeds_grandchildren_from_one_fetch() -> Non
     ]
     assert host.active_subagent_count() == 2
     # The whole tree came from a single root-scoped request.
-    assert client.sessions.calls == [("conv_main", 3, 100, False)]
+    assert client.sessions.calls == [("conv_main", _repl._MAX_SUBAGENT_TREE_DEPTH, 100, False)]
 
 
 @pytest.mark.asyncio

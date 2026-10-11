@@ -1027,6 +1027,7 @@ class SessionsNamespace:
         """Page through ``GET …/descendants`` and return the rows breadth-first."""
         nodes: list[dict[str, Any]] = []
         seen: set[str] = {session_id}
+        cursors: set[str] = set()
         after: str | None = None
         while True:
             params: dict[str, str | int] = {"limit": limit, "max_depth": max_depth}
@@ -1047,9 +1048,12 @@ class SessionsNamespace:
                     continue
                 seen.add(sid)
                 nodes.append({**row, "parent_id": row.get("parent_session_id")})
+            # A cursor seen before means the server is not advancing; stop
+            # rather than loop on it.
             last_id = body.get("last_id")
-            if not body.get("has_more") or not isinstance(last_id, str) or last_id == after:
+            if not body.get("has_more") or not isinstance(last_id, str) or last_id in cursors:
                 break
+            cursors.add(last_id)
             after = last_id
         # Pages arrive in primary-key order; callers expect levels in order and
         # siblings newest-first, same-second siblings by descending id.
@@ -1074,6 +1078,7 @@ class SessionsNamespace:
             depth += 1
             next_frontier: list[str] = []
             for parent_id in frontier:
+                cursors: set[str] = set()
                 after: str | None = None
                 while True:
                     params: dict[str, str | int] = {"limit": limit}
@@ -1101,9 +1106,10 @@ class SessionsNamespace:
                     if (
                         not body.get("has_more")
                         or not isinstance(last_id, str)
-                        or last_id == after
+                        or last_id in cursors
                     ):
                         break
+                    cursors.add(last_id)
                     after = last_id
             frontier = next_frontier
         return nodes

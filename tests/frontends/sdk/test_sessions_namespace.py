@@ -1570,6 +1570,37 @@ async def test_child_sessions_tree_stops_on_a_cursor_that_does_not_advance() -> 
 
 
 @pytest.mark.asyncio
+async def test_child_sessions_tree_stops_on_cursors_that_alternate() -> None:
+    """A server bouncing between two cursors while reporting ``has_more`` is
+    caught by the set of cursors already followed, not just the last one."""
+    pages = [
+        {
+            "data": [_child("a", parent_session_id="root", depth=1)],
+            "last_id": "x",
+            "has_more": True,
+        },
+        {"data": [], "last_id": "y", "has_more": True},
+        {"data": [], "last_id": "x", "has_more": True},
+        {"data": [], "last_id": "y", "has_more": True},
+    ]
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json=pages[min(calls - 1, len(pages) - 1)])
+
+    ns, client = _make_namespace(handler)
+    try:
+        nodes = await ns.child_sessions_tree("root")
+    finally:
+        await client.aclose()
+
+    assert [n["id"] for n in nodes] == ["a"]
+    assert calls == 3
+
+
+@pytest.mark.asyncio
 async def test_child_sessions_tree_keeps_a_row_repeated_across_pages_once() -> None:
     """A sibling created mid-walk can push a row onto the next page too; the
     walk keeps it once and never re-adds the root."""

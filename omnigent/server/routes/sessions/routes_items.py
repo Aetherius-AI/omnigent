@@ -88,7 +88,7 @@ def _descendant_rows(
                 # A corrupt parent cycle, or a chain already longer than the
                 # requested depth, puts the row outside the listed tree.
                 if cursor in chain or (max_depth is not None and len(chain) > max_depth):
-                    cursor = None
+                    depth_of[conv.id] = None
                     break
                 chain.append(cursor)
                 ancestor = known.get(cursor)
@@ -102,7 +102,8 @@ def _descendant_rows(
                 for steps, conv_id in enumerate(reversed(chain), start=1):
                     depth_of[conv_id] = None if base is None else base + steps
                 continue
-            still_unresolved.append(conv)
+            if conv.id not in depth_of:
+                still_unresolved.append(conv)
         if not missing:
             break
         fetched = conversation_store.get_conversations(sorted(missing))
