@@ -1280,8 +1280,10 @@ def _agent_cache_dest(spec_cache_root: Path, agent_id: str, version: str) -> Pat
     return dest
 
 
-# LRU bound on the parse memo: per-agent eviction keeps one entry per agent,
-# so this caps how many distinct agents' parsed specs a runner retains.
+# Parsed specs shared by every session this runner resolves, keyed by agent id,
+# extracted bundle directory (its name carries the version header and content
+# digest) and env-expansion mode. One entry per agent; LRU-bounded across agents.
+_SPEC_PARSE_CACHE: dict[tuple[str, Path, bool], AgentSpec] = {}
 _SPEC_PARSE_CACHE_MAX_AGENTS = 32
 
 
@@ -1290,10 +1292,13 @@ async def _resolve_agent_spec_from_server(
     spec_cache_root: Path,
     agent_id: str,
     session_id: str | None = None,
-    spec_parse_cache: dict[tuple[str, str, bool], AgentSpec] | None = None,
 ) -> ResolvedSpec | None:
     """
     Fetch, cache, and parse one agent spec bundle from the Omnigent server.
+
+    The parsed spec is memoized per bundle revision, so a parent session and
+    the sub-agent sessions sharing its bundle parse it once; every caller
+    receives its own deep copy.
 
     :param server_client: HTTP client pointed at the Omnigent server,
         e.g. base URL ``"http://127.0.0.1:6767"``.
@@ -1305,12 +1310,6 @@ async def _resolve_agent_spec_from_server(
         via the session-scoped endpoint, e.g. ``"conv_abc123"``.
         ``None`` means the runner cannot resolve the session-scoped
         bundle and returns ``None``.
-    :param spec_parse_cache: Optional memo of parsed specs keyed by
-        ``(agent_id, version, expand_env)``, so a sub-agent fan-out
-        reuses the parent bundle's parse instead of repeating it. Each
-        caller gets a deepcopy. Holds at most one entry per agent, LRU
-        beyond :data:`_SPEC_PARSE_CACHE_MAX_AGENTS` agents. ``None``
-        disables memoization.
     :returns: The parsed :class:`AgentSpec` plus its extracted bundle
         directory, or ``None`` when the server returns 404 for the
         requested agent.
@@ -1360,34 +1359,32 @@ async def _resolve_agent_spec_from_server(
     # unsupported sub-agent and launch the parent with what this runner
     # *does* support, rather than failing every dispatch of the agent.
     # See omnigent.spec.load.
-    if not dest.exists():
-        dest.mkdir(parents=True)
-        load(resp.content, dest=dest, expand_env=expand_env, prune_invalid_sub_agents=True)
-    if spec_parse_cache is None:
-        spec = load(dest, expand_env=expand_env, prune_invalid_sub_agents=True)
-    else:
-        cache_key = (agent_id, version, expand_env)
-        master = spec_parse_cache.get(cache_key)
-        if master is None:
+    cache_key = (agent_id, dest, expand_env)
+    master = _SPEC_PARSE_CACHE.get(cache_key)
+    if master is None:
+        if dest.exists():
             master = load(dest, expand_env=expand_env, prune_invalid_sub_agents=True)
-            # A new parse supersedes the agent's other entries across every key
-            # dimension (version and expand_env are provenance-stable per
-            # agent), so at most one entry per agent survives.
-            for stale in [k for k in spec_parse_cache if k[0] == agent_id]:
-                del spec_parse_cache[stale]
-            spec_parse_cache[cache_key] = master
-            # LRU bound across distinct agents (dict insertion order is recency).
-            while len(spec_parse_cache) > _SPEC_PARSE_CACHE_MAX_AGENTS:
-                del spec_parse_cache[next(iter(spec_parse_cache))]
         else:
-            # Re-insert the hit so recently used agents stay cached.
-            del spec_parse_cache[cache_key]
-            spec_parse_cache[cache_key] = master
-        # Callers edit the resolved spec in place per session (a builtin tool can
-        # append a sub-agent), so keep the memoized one pristine.
-        spec = copy.deepcopy(master)
-    # Applied to the per-caller copy, never the memoized master: it mutates
-    # the spec from this runner's host environment.
+            # Extraction already parses and validates the bundle; reuse that spec.
+            dest.mkdir(parents=True)
+            master = load(
+                resp.content, dest=dest, expand_env=expand_env, prune_invalid_sub_agents=True
+            )
+        # A new revision supersedes the agent's other entries, so at most one
+        # entry per agent survives.
+        for stale in [k for k in _SPEC_PARSE_CACHE if k[0] == agent_id]:
+            del _SPEC_PARSE_CACHE[stale]
+        _SPEC_PARSE_CACHE[cache_key] = master
+        # LRU bound across distinct agents (dict insertion order is recency).
+        while len(_SPEC_PARSE_CACHE) > _SPEC_PARSE_CACHE_MAX_AGENTS:
+            del _SPEC_PARSE_CACHE[next(iter(_SPEC_PARSE_CACHE))]
+    else:
+        # Re-insert the hit so recently used agents stay cached.
+        del _SPEC_PARSE_CACHE[cache_key]
+        _SPEC_PARSE_CACHE[cache_key] = master
+    # Callers edit the resolved spec in place per session (a builtin tool can
+    # append a sub-agent), so hand out a copy and keep the memoized one pristine.
+    spec = copy.deepcopy(master)
     _apply_host_interactive_shells(spec)
     return ResolvedSpec(spec=spec, workdir=dest)
 
@@ -1500,8 +1497,6 @@ def create_app(
     import tempfile
 
     _spec_cache_root = Path(tempfile.mkdtemp(prefix=f"runner-specs-{_runner_id}-"))
-    # Parsed-spec memo; lives for the runner's lifetime.
-    _spec_parse_cache: dict[tuple[str, str, bool], AgentSpec] = {}
 
     async def spec_resolver(agent_id: str, session_id: str | None = None) -> ResolvedSpec | None:
         """
@@ -1529,7 +1524,6 @@ def create_app(
             _spec_cache_root,
             agent_id,
             session_id=session_id,
-            spec_parse_cache=_spec_parse_cache,
         )
 
     host_owns_global_cleanup = _runner_host_owns_global_cleanup_from_env()

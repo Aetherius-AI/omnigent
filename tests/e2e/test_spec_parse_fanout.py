@@ -147,16 +147,6 @@ async def test_fanout_does_not_reparse_bundle_per_session(
         base_url="http://server.test",
     )
 
-    # Mirror the runner entry point's spec_resolver closure, including the
-    # runner-lifetime parsed-spec memo it threads through when the resolver
-    # supports one. Introspecting keeps the failure behavioral (a parse
-    # count) rather than a TypeError on trees without the memo parameter.
-    import inspect
-
-    resolver_state: dict[str, Any] = {}
-    if "spec_parse_cache" in inspect.signature(_resolve_agent_spec_from_server).parameters:
-        resolver_state["spec_parse_cache"] = {}
-
     async def _spec_resolver(agent_id: str, session_id: str | None = None) -> Any:
         # Mirrors the runner entry point's spec_resolver closure.
         return await _resolve_agent_spec_from_server(
@@ -164,7 +154,6 @@ async def test_fanout_does_not_reparse_bundle_per_session(
             spec_cache_root,
             agent_id,
             session_id=session_id,
-            **resolver_state,
         )
 
     app = create_runner_app(
@@ -197,16 +186,13 @@ async def test_fanout_does_not_reparse_bundle_per_session(
     # Sub-agent discovery parses agents/*/config.yaml as part of a
     # top-level parse; count only the top-level bundle parses.
     top_level_parses = [root for root in parse_roots if "/agents/" not in root]
-    # Budget: one parse to validate the freshly extracted bundle plus one
-    # for the first in-memory resolution. Anything above that means the
-    # identical (agent_id, version) bundle is re-parsed per session.
-    assert len(top_level_parses) <= 2, (
+    # Extraction parses the bundle once; every later session must hit the memo.
+    assert len(top_level_parses) == 1, (
         f"Creating 1 parent + {N_SUB_AGENTS} sub-agent sessions sharing one "
-        f"(agent_id, version) bundle parsed the top-level config.yaml "
-        f"{len(top_level_parses)} times ({len(parse_roots)} YAML parses "
-        f"total, sub-agent configs included). The parsed AgentSpec must be "
-        f"memoized by (agent_id, version) so fan-out does not burn runner "
-        f"CPU re-parsing identical YAML."
+        f"bundle parsed the top-level config.yaml {len(top_level_parses)} times "
+        f"({len(parse_roots)} YAML parses total, sub-agent configs included). "
+        f"The parsed AgentSpec must be memoized per bundle revision so fan-out "
+        f"does not burn runner CPU re-parsing identical YAML."
     )
 
 

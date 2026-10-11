@@ -4553,6 +4553,39 @@ def test_config_loader_does_not_mutate_shared_safeloader_resolvers() -> None:
     assert yaml.load("false", loader) is False
 
 
+def test_config_yaml_parsed_with_libyaml_when_available(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``parse`` must use the libyaml C loader for config.yaml when it is available.
+
+    ``_ConfigYamlLoader`` derives from the pure-Python ``yaml.SafeLoader``, which is
+    ~10-20x slower than the libyaml-backed ``CSafeLoader``, so every spec parse pays
+    that cost even when ``yaml.__with_libyaml__`` is True. The runner re-parses a
+    bundle per session, multiplying it. This captures the loader ``parse`` actually
+    hands ``yaml.load`` so the assertion survives a loader rename.
+    """
+    if not yaml.__with_libyaml__:
+        pytest.skip("libyaml C bindings not available in this interpreter")
+
+    (tmp_path / "config.yaml").write_text(yaml.dump({"spec_version": 1, "name": "libyaml-probe"}))
+
+    captured: dict[str, type] = {}
+    real_load = yaml.load
+
+    def _capturing_load(stream: object, Loader: type) -> object:
+        captured["loader"] = Loader
+        return real_load(stream, Loader=Loader)
+
+    monkeypatch.setattr(parser.yaml, "load", _capturing_load)
+    parse(tmp_path)
+
+    loader = captured["loader"]
+    assert issubclass(loader, yaml.CSafeLoader), (
+        f"config.yaml parsed with pure-Python {loader.__name__} "
+        f"({[c.__name__ for c in loader.__mro__]}); expected a libyaml-backed loader"
+    )
+
+
 # ── Sub-agent bundle provenance (``source_rel_dir``) ──────────
 
 
