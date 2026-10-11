@@ -1875,6 +1875,126 @@ async def test_a_routed_gateway_pick_is_pinned_only_when_the_pane_can_run_it(
         assert "gateway" in decisions[0].data.rationale.lower()
 
 
+class _CaptureRunnerClient:
+    """Runner-client stub: records forwarded turns, reports no catalog.
+
+    The empty ``/models`` catalog makes routing fall back to the static
+    gateway candidates — the exact shape that let the judge pick an
+    unrunnable ``databricks-*`` model in the first place.
+    """
+
+    def __init__(self, forwarded: list[dict[str, Any]]) -> None:
+        self._forwarded = forwarded
+
+    async def post(self, path: str, *, json: dict[str, Any], **_: Any) -> Any:
+        """Record the forwarded body and return a fake 202."""
+        del path
+        self._forwarded.append(json)
+
+        class _Resp:
+            status_code = 202
+            headers: dict[str, str] = {}
+            text = ""
+
+        return _Resp()
+
+    async def get(self, *_: Any, **__: Any) -> Any:
+        """Report no runner catalog, so static fallback offers candidates."""
+
+        class _Resp:
+            status_code = 200
+
+            @staticmethod
+            def raise_for_status() -> None:
+                return None
+
+            @staticmethod
+            def json() -> dict[str, Any]:
+                return {}
+
+        return _Resp()
+
+
+async def test_the_events_route_threads_the_spec_so_an_offgateway_pick_is_declined(
+    client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real ``POST /events`` route resolves the spec and declines a bad pin.
+
+    The unit veto test calls ``_forward_event_to_runner`` with a hand-built
+    spec; this drives the whole route, so the spec must be loaded from the
+    agent cache and threaded to the forwarder. A direct-vendor ``claude-sdk``
+    session with Smart Routing on draws a ``databricks-*`` pick it cannot run
+    on both turns: the row must stay clear so each turn routes again, and no
+    gateway model may reach the runner body.
+    """
+    from omnigent.server.routes import sessions as sessions_mod
+
+    agent = await create_test_agent(
+        client,
+        name="offgateway-events",
+        include_llm=False,
+        executor={
+            "config": {"harness": "claude-sdk"},
+            "model": "claude-sonnet-4-20250514",
+            "auth": {"type": "api_key", "api_key": "mock-key"},
+        },
+    )
+    resp = await client.post(
+        "/v1/sessions",
+        json={"agent_id": agent["id"], "cost_control_mode_override": "on"},
+    )
+    assert resp.status_code == 201, resp.text
+    sid = resp.json()["id"]
+
+    forwarded: list[dict[str, Any]] = []
+
+    async def _stub_runner(*_: Any, **__: Any) -> _CaptureRunnerClient:
+        return _CaptureRunnerClient(forwarded)
+
+    monkeypatch.setattr(sessions_mod, "_get_runner_client", _stub_runner)
+    routing_client = FakeRoutingClient(
+        RoutingResult(model=ROUTED_MODEL, rationale="deep refactor", harness="claude_code")
+    )
+
+    async def _post_turn(text: str) -> None:
+        turn = await client.post(
+            f"/v1/sessions/{sid}/events",
+            json={
+                "type": "message",
+                "data": {"role": "user", "content": [{"type": "input_text", "text": text}]},
+            },
+        )
+        assert turn.status_code == 202, turn.text
+
+    with patch("omnigent.runtime._globals._caps", new=FakeCaps(routing_client=routing_client)):
+        await _post_turn("refactor auth")
+        await _post_turn("now the tests")
+
+    conv_store = SqlAlchemyConversationStore(db_uri)
+    refreshed = conv_store.get_conversation(sid)
+    assert refreshed is not None
+    # The unrunnable gateway pick was never pinned, on either turn.
+    assert refreshed.model_override is None
+
+    decisions = _routing_decisions(conv_store, sid)
+    assert len(decisions) == 2, (
+        f"Expected one declined decision per turn; got {len(decisions)}. "
+        "The spec must thread through POST /events so each turn routes and vetoes."
+    )
+    for decision in decisions:
+        assert decision.data.scope == "turn"
+        assert decision.data.applied is False
+        assert "gateway" in decision.data.rationale.lower()
+
+    assert forwarded, "The route never forwarded a turn to the runner."
+    assert all(body.get("model_override") != ROUTED_MODEL for body in forwarded), (
+        "An unrunnable gateway pick reached the runner body: "
+        f"{[body.get('model_override') for body in forwarded]!r}"
+    )
+
+
 # ── 10. A routed child's harness is chosen once, not per message ─────
 
 

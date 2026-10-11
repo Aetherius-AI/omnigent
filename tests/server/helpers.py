@@ -1109,12 +1109,16 @@ class FakeCaps:
 
     ``routing_backends`` left ``None`` makes the routing seam derive the pair
     from ``routing_client``, which classifies any non-``ExternalRoutingClient``
-    as the built-in judge — the shape most tests want.
+    as the built-in judge — the shape most tests want. ``default_policies``
+    left empty lets the request-phase input-policy check short-circuit, so a
+    full POST /events turn reaches the runner forward (and the routing seam)
+    without a policy engine.
     """
 
     routing_client: Any = None  # type: ignore[explicit-any]
     routing_backends: Any = None  # type: ignore[explicit-any]
     routing_settings: Any = field(default_factory=RoutingSettings)  # type: ignore[explicit-any]
+    default_policies: Any = None  # type: ignore[explicit-any]
 
 
 def echo_runner_client() -> httpx.AsyncClient:

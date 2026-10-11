@@ -6127,18 +6127,22 @@ def _session_uses_direct_vendor_transport(spec: AgentSpec, harness: str | None) 
     Whether this session reaches its model direct from the vendor.
 
     A direct ``api_key`` or bare subscription login has no gateway
-    transport, so the harness executor rejects a gateway-hosted
-    (``databricks-*``) model the instant it is built — see
-    :class:`omnigent.inner.claude_sdk_executor.ClaudeSDKExecutor`. Pinning
-    such a pick as the session ``model_override`` would both fail this turn
-    and disable routing for every later one. Resolution mirrors the spawn
-    builders (:func:`omnigent.models.model_catalog.resolve_model_provider`);
-    an unresolvable provider is reported as *not* direct, leaving the launch
-    env the authority (fail open).
+    transport. A direct ``claude-sdk`` pane rejects a gateway-hosted
+    (``databricks-*``) model at construction — see
+    :class:`omnigent.inner.claude_sdk_executor.ClaudeSDKExecutor`; other
+    transports may surface the mismatch later instead. Pinning such a pick
+    as the session ``model_override`` would both fail this turn and disable
+    routing for every later one. Resolution reuses the catalog lookup the
+    spawn builders call
+    (:func:`omnigent.models.model_catalog.resolve_model_provider`); a
+    provider that does not resolve to direct key or subscription auth is
+    treated as *not* direct, so launch-time resolution stays the authority
+    (fail open).
 
     :param spec: The session's resolved agent spec.
     :param harness: The session's harness id, e.g. ``"claude-sdk"``.
-    :returns: ``True`` when the resolved provider talks direct to the vendor.
+    :returns: ``True`` when the resolved provider uses direct key or
+        subscription auth to the vendor.
     """
     from omnigent.models.model_catalog import (
         KEY_KIND,
