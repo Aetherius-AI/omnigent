@@ -544,3 +544,22 @@ def test_helper_windows_config_delivery_without_active_sandbox(tmp_path: Path) -
         client.close()
     assert client._tmpdir is None
     assert not created.exists()
+
+
+def test_windows_os_env_helper_starts_without_sandbox_tmpdir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``sandbox: none`` environment runs a shell through Windows config delivery."""
+    monkeypatch.setattr("omnigent.inner.os_env.IS_WINDOWS", True)
+
+    os_env = create_os_environment(
+        OSEnvSpec(type="caller_process", sandbox=OSEnvSandboxSpec(type="none"))
+    )
+    assert os_env is not None
+    try:
+        result = asyncio.run(os_env.shell("echo degraded-mode-shell-ok"))
+    finally:
+        os_env.close()
+
+    assert "degraded-mode-shell-ok" in result.get("stdout", "")
+    assert result.get("exit_code") == 0
