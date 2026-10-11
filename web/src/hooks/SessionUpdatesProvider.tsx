@@ -85,12 +85,19 @@ function applyItemsToCache(
       nullsToUndefined(isSessionArchiving(item.id) ? { ...item, archived: true } : item),
     );
   }
-  // A snapshot may also insert a watched row the list window lacks. A pinned
-  // copy already holds that row's timestamp, so the insertion must not lead it.
-  const pinnedUpdatedAt = new Map<string, number>();
+  // A snapshot may also surface a watched row the flat list lacks. A pinned or
+  // folder copy already shows that row and keeps its timestamp, so it is not
+  // inserted; that copy's own refetch converges it.
+  const projectEntries = queryClient.getQueriesData<ConversationsInfiniteData>({
+    queryKey: ["project-sessions"],
+  });
+  const heldElsewhere = new Set<string>();
   if (options.keepUpdatedAt) {
     const pinned = queryClient.getQueryData<PinnedConversationsResult>(PINNED_CONVERSATIONS_KEY);
-    for (const row of pinned?.conversations ?? []) pinnedUpdatedAt.set(row.id, row.updated_at);
+    for (const row of pinned?.conversations ?? []) heldElsewhere.add(row.id);
+    for (const id of collectConversationIds(projectEntries.map(([, data]) => data))) {
+      heldElsewhere.add(id);
+    }
   }
   const foundAnywhere = new Set<string>();
   let needsRefetch = false;
@@ -114,9 +121,7 @@ function applyItemsToCache(
     // missing so the folder still reconciles via the scheduled refetch.
     const missingHere = new Map<string, SessionListWireItem>();
     for (const [id, item] of itemsById) {
-      if (found.has(id)) continue;
-      const kept = pinnedUpdatedAt.get(id);
-      missingHere.set(id, kept === undefined ? item : { ...item, updated_at: kept });
+      if (!found.has(id) && !heldElsewhere.has(id)) missingHere.set(id, item);
     }
     const { data: next, inserted } = insertNewRowsIntoPages(
       merged,
@@ -140,9 +145,6 @@ function applyItemsToCache(
   // filed session's row stays frozen at fetch time. Folders are non-archived,
   // unsearched lists; an archived/label-changed row converges via the
   // debounced ["project-sessions"] invalidation the caller schedules.
-  const projectEntries = queryClient.getQueriesData<ConversationsInfiniteData>({
-    queryKey: ["project-sessions"],
-  });
   for (const [key, data] of projectEntries) {
     const {
       data: next,
@@ -165,8 +167,11 @@ function applyItemsToCache(
         const changedFields = changedWireFields(row, item);
         // The pinned copy of a row outside the list window converges only through
         // the pinned query; like the list path, the active row needs none.
-        const timestampLeads = options.keepUpdatedAt && changedFields.delete("updated_at");
-        if (timestampLeads && row.id !== activeId) pinnedNeedsRefetch = true;
+        const timestampLeads = Boolean(options.keepUpdatedAt) && changedFields.has("updated_at");
+        if (timestampLeads) {
+          changedFields.delete("updated_at");
+          if (row.id !== activeId) pinnedNeedsRefetch = true;
+        }
         if (changedFields.size === 0) return row;
         changed = true;
         // Pin membership and pin timestamps reconcile through the pinned query.

@@ -307,19 +307,35 @@ describe("SessionUpdatesProvider comments fingerprint", () => {
 });
 
 describe("SessionUpdatesProvider snapshot timestamps", () => {
+  // A list-shaped title: the wire's null becomes undefined on apply, which would
+  // read as a title change against the bare fixture and request a refetch on
+  // its own.
+  const titled = (id: string) => ({ ...conv(id), title: id });
+  const page = (rows: Conversation[]): ConversationsInfiniteData => ({
+    pages: [
+      {
+        data: rows,
+        first_id: rows[0]?.id ?? null,
+        last_id: rows.at(-1)?.id ?? null,
+        has_more: false,
+      },
+    ],
+    pageParams: [undefined],
+  });
+
   // A snapshot restates the watch-set after a connect or a watch-set change
   // (archive, next page, reconnect). Where the stream's updated_at leads the
   // list's for an unchanged row, overlaying it lit the dot on every read row.
   it("keeps a listed row's updated_at on a snapshot and still schedules the list refetch", async () => {
     const client = new QueryClient();
-    seedConversations(client, ["conv_a", "conv_b"]);
+    client.setQueryData(["conversations", "", false], page([titled("conv_a"), titled("conv_b")]));
     renderProvider(client, ["/"]);
     const invalidate = vi.spyOn(client, "invalidateQueries");
 
     act(() =>
       frameHandler()({
         type: "snapshot",
-        items: [{ ...conv("conv_a"), updated_at: 5, runner_online: true }, conv("conv_b")],
+        items: [{ ...titled("conv_a"), updated_at: 5, runner_online: true }, titled("conv_b")],
       }),
     );
 
@@ -414,10 +430,10 @@ describe("SessionUpdatesProvider snapshot timestamps", () => {
     expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["pinned-conversations"] });
   });
 
-  it("inserts a pinned row the list window lacks with the pinned copy's updated_at", () => {
+  it("leaves a pinned row the list window lacks to the pinned query instead of inserting it", () => {
     // The sidebar shows the list copy of a duplicated row first, so a snapshot
-    // that surfaces an off-window pinned session must not insert it with the
-    // stream's leading timestamp.
+    // that surfaces an off-window pinned session must not add a list copy; the
+    // pinned copy keeps its timestamp and is refetched.
     const client = new QueryClient();
     seedConversations(client, ["conv_a"]);
     const pinnedRow = { ...conv("old-pin"), title: "Pinned", labels: { "omnigent.pinned": "123" } };
@@ -426,6 +442,7 @@ describe("SessionUpdatesProvider snapshot timestamps", () => {
       filterHonored: true,
     });
     renderProvider(client, ["/"]);
+    const invalidate = vi.spyOn(client, "invalidateQueries");
 
     act(() =>
       frameHandler()({
@@ -436,8 +453,38 @@ describe("SessionUpdatesProvider snapshot timestamps", () => {
 
     const rows = client.getQueryData<ConversationsInfiniteData>(["conversations", "", false])!
       .pages[0].data;
-    expect(rows.map((row) => row.id)).toEqual(["old-pin", "conv_a"]);
-    expect(rows[0].updated_at).toBe(0);
+    expect(rows.map((row) => row.id)).toEqual(["conv_a"]);
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["pinned-conversations"] });
+  });
+
+  it("leaves a folder-held row the flat list lacks to the folder refetch instead of inserting it", async () => {
+    // The folder renderer prefers the flat-list copy, so a snapshot that
+    // surfaces an off-window filed session must not add a list copy either; the
+    // folder copy keeps its timestamp and the scheduled folder refetch converges it.
+    const client = new QueryClient();
+    client.setQueryData(["conversations", "", false], page([titled("conv_a")]));
+    client.setQueryData(["project-sessions", "Sprint 42"], page([titled("conv_filed")]));
+    renderProvider(client, ["/"]);
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+
+    act(() =>
+      frameHandler()({
+        type: "snapshot",
+        items: [titled("conv_a"), { ...titled("conv_filed"), updated_at: 7 }],
+      }),
+    );
+
+    const rows = client.getQueryData<ConversationsInfiniteData>(["conversations", "", false])!
+      .pages[0].data;
+    expect(rows.map((row) => row.id)).toEqual(["conv_a"]);
+    const folder = client.getQueryData<ConversationsInfiniteData>([
+      "project-sessions",
+      "Sprint 42",
+    ]);
+    expect(folder!.pages[0].data[0].updated_at).toBe(0);
+    await waitFor(() =>
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: ["project-sessions"] }),
+    );
   });
 });
 
