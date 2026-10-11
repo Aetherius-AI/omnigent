@@ -6096,21 +6096,57 @@ def _routed_turn_model_spelling(
     return spelling
 
 
-def _unapplied_routed_verdict(model: str, verdict: dict[str, Any]) -> dict[str, Any]:
+def _unapplied_routed_verdict(
+    model: str, verdict: dict[str, Any], reason: str | None = None
+) -> dict[str, Any]:
     """
-    Record on a verdict that the terminal cannot switch to *model*.
+    Record on a verdict that the pick was not applied, with the reason.
 
-    :param model: The routed model id the pane has no spelling for.
+    :param model: The routed model id that was not applied.
     :param verdict: Router verdict about to be recorded as a chip.
+    :param reason: The user-facing note; defaults to the claude-native
+        pane's vocabulary case when the caller gives none.
     :returns: The verdict with ``applied`` cleared and the reason noted.
     """
     rationale = verdict.get("rationale")
-    note = f"Not applied: this Claude terminal cannot switch to {model}."
+    note = reason or f"Not applied: this Claude terminal cannot switch to {model}."
     return {
         **verdict,
         "applied": False,
         "rationale": f"{rationale} {note}" if isinstance(rationale, str) and rationale else note,
     }
+
+
+#: Model-id spellings only the Databricks AI-Gateway serves; a pane whose
+#: executor talks direct to the vendor cannot run them.
+_GATEWAY_MODEL_PREFIXES: tuple[str, ...] = ("databricks-", "databricks/")
+
+
+def _session_uses_direct_vendor_transport(spec: AgentSpec, harness: str | None) -> bool:
+    """
+    Whether this session reaches its model direct from the vendor.
+
+    A direct ``api_key`` or bare subscription login has no gateway
+    transport, so the harness executor rejects a gateway-hosted
+    (``databricks-*``) model the instant it is built — see
+    :class:`omnigent.inner.claude_sdk_executor.ClaudeSDKExecutor`. Pinning
+    such a pick as the session ``model_override`` would both fail this turn
+    and disable routing for every later one. Resolution mirrors the spawn
+    builders (:func:`omnigent.models.model_catalog.resolve_model_provider`);
+    an unresolvable provider is reported as *not* direct, leaving the launch
+    env the authority (fail open).
+
+    :param spec: The session's resolved agent spec.
+    :param harness: The session's harness id, e.g. ``"claude-sdk"``.
+    :returns: ``True`` when the resolved provider talks direct to the vendor.
+    """
+    from omnigent.models.model_catalog import (
+        KEY_KIND,
+        SUBSCRIPTION_KIND,
+        resolve_model_provider,
+    )
+
+    return resolve_model_provider(spec, harness).kind in {KEY_KIND, SUBSCRIPTION_KIND}
 
 
 #: Placeholder model on a decision card for a routing call that never answered.
@@ -6326,6 +6362,7 @@ async def _forward_event_to_runner(
     created_by: str | None = None,
     host_store: HostStore | None = None,
     agent_revision: str | None = None,
+    agent_spec: AgentSpec | None = None,
 ) -> str:
     """
     Persist a user event and forward it to the runner.
@@ -6359,6 +6396,10 @@ async def _forward_event_to_runner(
         ``None`` reads as unknown, which counts as backed.
     :param agent_revision: The agent's current ``bundle_location``; the
         runner rebuilds the session's spec when it changes.
+    :param agent_spec: The session's resolved agent spec, read only to
+        learn whether a routed gateway-hosted pick is runnable on this
+        session before pinning it. ``None`` reads as unknown and never
+        vetoes a pick.
     :returns: The store-assigned id of the persisted item.
     """
     import uuid
@@ -6614,6 +6655,9 @@ async def _forward_event_to_runner(
     # Set when the pick has no spelling this session can be switched to, so
     # nothing was pinned and the chip must say so.
     _turn_unapplied = False
+    # The user-facing reason the pick was not applied; ``None`` keeps the
+    # chip's default claude-native wording.
+    _unapplied_reason: str | None = None
     # Set when the routing call itself failed — on either branch below. The
     # chip then carries the "unavailable" placeholder rather than a model,
     # nothing is pinned, and the route-once label is left unclaimed.
@@ -6770,8 +6814,25 @@ async def _forward_event_to_runner(
                     # model must not be pinned (the pin disables routing for
                     # every later turn) nor reported as this turn's model.
                     _turn_spelling = _routed_turn_model_spelling(session_id, conv, _routed_model)
-                    if _turn_spelling is None:
+                    # A gateway-hosted pick (static-fallback can offer one
+                    # even when the pane talks direct to the vendor) would
+                    # make the executor raise at construction, so decline the
+                    # pin and run the turn unrouted with the reason on the card.
+                    _pick_off_gateway = (
+                        _routed_model.startswith(_GATEWAY_MODEL_PREFIXES)
+                        and agent_spec is not None
+                        and await asyncio.to_thread(
+                            _session_uses_direct_vendor_transport, agent_spec, _harness
+                        )
+                    )
+                    if _turn_spelling is None or _pick_off_gateway:
                         _turn_unapplied = True
+                        if _pick_off_gateway:
+                            _unapplied_reason = (
+                                "Not applied: this session reaches its model direct "
+                                f"from the vendor and cannot run {_routed_model}, "
+                                "which needs the Databricks gateway."
+                            )
                     else:
                         effective_runner_override = _routed_model
                         # Persist as the session's model_override so all
@@ -6911,7 +6972,9 @@ async def _forward_event_to_runner(
         if _routed_model is not None and _verdict is not None:
             _decision_scope = "child_session" if _parent_routing_on else "turn"
             if _turn_unapplied:
-                _verdict = _unapplied_routed_verdict(_routed_model, _verdict)
+                _verdict = _unapplied_routed_verdict(
+                    _routed_model, _verdict, reason=_unapplied_reason
+                )
             # The router wins over the orchestrator's own pick; the attempt is
             # recorded so the UI can show what it overrode. Compared on the bare
             # arm, so another spelling of the same model (a spawn's
@@ -7208,6 +7271,7 @@ async def _dispatch_session_event_to_runner_impl(
     host_registry: HostRegistry | None = None,
     background_titles_enabled: bool = True,
     agent_revision: str | None = None,
+    agent_spec: AgentSpec | None = None,
 ) -> _SessionEventDispatchResult:
     """
     Forward an item-event to the runner with harness-aware dispatch.
@@ -7282,6 +7346,9 @@ async def _dispatch_session_event_to_runner_impl(
         an older host row gets.
     :param agent_revision: The agent's current ``bundle_location``, stamped on
         non-native forwards (see :func:`_forward_event_to_runner`).
+    :param agent_spec: The session's resolved agent spec, forwarded so the
+        router can tell whether a gateway-hosted pick is runnable on this
+        session before pinning it (see :func:`_forward_event_to_runner`).
     :returns: A :class:`_SessionEventDispatchResult` carrying the
         persisted item id (non-native) or the pending-input id
         (claude-native message bypass).
@@ -7623,6 +7690,7 @@ async def _dispatch_session_event_to_runner_impl(
         created_by=created_by,
         host_store=host_store,
         agent_revision=agent_revision,
+        agent_spec=agent_spec,
     )
     return _SessionEventDispatchResult(item_id=item_id, pending_id=None)
 

@@ -1774,6 +1774,107 @@ async def test_turn_candidates_come_from_the_panes_own_vocabulary(
     ]
 
 
+def _claude_sdk_spec(tmp_path: Any, auth_block: str) -> Any:
+    """Load a top-level ``claude-sdk`` spec with the given auth block.
+
+    The ``auth:`` block decides the resolved provider kind, and therefore
+    whether a routed gateway-hosted pick is runnable on the pane: an
+    ``api_key`` block talks direct to the vendor (``key`` kind), a
+    ``databricks`` block reaches models over the gateway.
+
+    :param tmp_path: A scratch directory to hold the one-file bundle.
+    :param auth_block: The YAML ``executor.auth:`` block, indented two spaces.
+    :returns: The parsed :class:`~omnigent.spec.types.AgentSpec`.
+    """
+    from omnigent.spec import load as load_spec
+
+    bundle = tmp_path / "sdk_agent"
+    bundle.mkdir()
+    (bundle / "config.yaml").write_text(
+        "spec_version: 1\n"
+        "name: offgateway-sdk\n"
+        "prompt: terse.\n"
+        "executor:\n"
+        "  config:\n"
+        "    harness: claude-sdk\n"
+        "  model: claude-sonnet-4-20250514\n" + auth_block
+    )
+    return load_spec(bundle)
+
+
+@pytest.mark.parametrize(
+    ("case", "auth_block", "pinned"),
+    [
+        # Direct-to-vendor api_key pane: the gateway-hosted pick is unrunnable,
+        # so it must not be pinned and the turn runs unrouted.
+        ("offgateway-api-key", "  auth:\n    type: api_key\n    api_key: mock-key\n", False),
+        # Gateway-backed databricks pane: the same pick runs, so it is pinned.
+        ("gateway-databricks", "  auth:\n    type: databricks\n    profile: DEFAULT\n", True),
+    ],
+    ids=["offgateway-api-key", "gateway-databricks"],
+)
+async def test_a_routed_gateway_pick_is_pinned_only_when_the_pane_can_run_it(
+    client: httpx.AsyncClient,
+    db_uri: str,
+    tmp_path: Any,
+    case: str,
+    auth_block: str,
+    pinned: bool,
+) -> None:
+    """The router may only pin a gateway-hosted model a pane can actually run.
+
+    With no host reporting gateway backing the pane defaults to gateway-backed,
+    so the static fallback offers ``databricks-*`` candidates the judge can
+    pick. Pinning one as ``model_override`` on a direct-to-vendor pane makes
+    the ``claude-sdk`` executor raise (``gateway=False``) on this and every
+    later turn. Such a pick must run unrouted with the reason on its card and
+    the row left clear so the next turn routes again; a gateway-backed pane
+    takes the same pick normally.
+    """
+    agent = await create_test_agent(client, name=f"routing-offgateway-{case}")
+    resp = await client.post(
+        "/v1/sessions",
+        json={"agent_id": agent["id"], "cost_control_mode_override": "on"},
+    )
+    assert resp.status_code == 201, resp.text
+    conv_store = SqlAlchemyConversationStore(db_uri)
+    conv = conv_store.get_conversation(resp.json()["id"])
+    assert conv is not None
+    assert conv.model_override is None
+
+    routing_client = FakeRoutingClient(
+        RoutingResult(model=ROUTED_MODEL, rationale="deep refactor", harness="claude_code")
+    )
+    body = SessionEventInput(
+        type="message",
+        data={"role": "user", "content": [{"type": "input_text", "text": "refactor auth"}]},
+    )
+    with patch("omnigent.runtime._globals._caps", new=FakeCaps(routing_client=routing_client)):
+        async with echo_runner_client() as runner_client:
+            await orchestration_module._forward_event_to_runner(
+                conv.id,
+                conv,
+                body,
+                conv_store,
+                runner_client,
+                agent_spec=_claude_sdk_spec(tmp_path, auth_block),
+            )
+
+    refreshed = conv_store.get_conversation(conv.id)
+    assert refreshed is not None
+    decisions = _routing_decisions(conv_store, conv.id)
+    assert len(decisions) == 1
+    assert decisions[0].data.scope == "turn"
+    assert decisions[0].data.applied is pinned
+    if pinned:
+        assert refreshed.model_override == ROUTED_MODEL
+    else:
+        # The row stays clear, so the next turn routes again rather than
+        # failing on a model the pane cannot run, and the card says why.
+        assert refreshed.model_override is None
+        assert "gateway" in decisions[0].data.rationale.lower()
+
+
 # ── 10. A routed child's harness is chosen once, not per message ─────
 
 
