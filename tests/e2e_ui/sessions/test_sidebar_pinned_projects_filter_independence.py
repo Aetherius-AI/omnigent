@@ -24,7 +24,6 @@ same harness as ``test_sidebar_ownership_gating.py``.
 
 from __future__ import annotations
 
-import json
 import uuid
 from collections.abc import Iterator
 
@@ -32,6 +31,7 @@ import httpx
 import pytest
 from playwright.sync_api import Browser, Locator, Page, expect
 
+from tests._helpers.session import post_session_bundle
 from tests.e2e_ui.collaboration._multi_user_server import (
     ADMIN_EMAIL,
     MultiUserServer,
@@ -70,10 +70,10 @@ def _create_session(server: MultiUserServer, *, owner_email: str, title: str) ->
     the row easy to spot among other tests' sessions on the shared server.
     """
     headers = {"X-Forwarded-Email": owner_email}
-    create = httpx.post(
+    create = post_session_bundle(
+        httpx.post,
         f"{server.base_url}/v1/sessions",
-        data={"metadata": json.dumps({})},
-        files={"bundle": ("agent.tar.gz", _build_hello_world_bundle(), "application/gzip")},
+        _build_hello_world_bundle(),
         headers=headers,
         timeout=30.0,
     )
@@ -172,7 +172,9 @@ def test_pinned_section_ignores_the_session_filter(
         page.goto(f"{server.public_url}/c/{owned}")
         expect(page.locator(_FILTER)).to_be_visible(timeout=30_000)
 
-        # Pin both from the default "All sessions" view, where both rows show.
+        # Switch to "All sessions" so both rows show, then pin both. (The
+        # default "My sessions" hides the shared row, leaving nothing to pin.)
+        _set_filter(page, "all")
         _pin_row(page, owned)
         _pin_row(page, shared)
         _pinned_has(page, owned)
@@ -281,6 +283,9 @@ def test_shared_session_stays_in_flat_list_on_project_name_collision(
         page = ctx.new_page()
         page.goto(f"{server.public_url}/c/{owned}")
         expect(page.locator(_FILTER)).to_be_visible(timeout=30_000)
+        # The shared row is hidden under the default "My sessions"; switch to
+        # "All sessions", since this test is about where that shared row lands.
+        _set_filter(page, "all")
 
         # The folder exists (the owned session filed it), but the shared session
         # is NOT filed away: it stays in the flat Sessions list, not the folder.

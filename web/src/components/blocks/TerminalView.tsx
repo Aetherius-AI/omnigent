@@ -9,11 +9,29 @@
 // guard against a missing `ref.current`.
 
 import { Loader2Icon } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { useTheme } from "next-themes";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useResolvedThemeMode } from "@/components/theme/useResolvedThemeMode";
 import { Button } from "@/components/ui/button";
-import { isDatabricksWorkspace, resolveWebSocketUrl } from "@/lib/host";
+import { toast } from "sonner";
+import {
+  isTerminalClipboardWritePending,
+  queueTerminalClipboardWrite,
+} from "@/lib/terminalClipboardWriter";
+import {
+  getOmnigentServerIdentity,
+  isDatabricksWorkspace,
+  isHostRoutingEnabled,
+  resolveWebSocketUrl,
+} from "@/lib/host";
+import {
+  canRememberTerminalClipboardPreference,
+  readTerminalClipboardPreference,
+  subscribeTerminalClipboardPreference,
+  writeTerminalClipboardPreference,
+  type TerminalClipboardPreference,
+} from "@/lib/terminalClipboardPreferences";
 import { subscribeCodeFont } from "@/lib/codeFontPreferences";
+import { useFileViewer, useWorkspacePaths } from "@/shell/FileViewerContext";
 import { resolveInitialAttachUrl, watchDirectUpgrade, withAttachParams } from "@/lib/terminals";
 import {
   readTerminalThemeMode,
@@ -23,11 +41,19 @@ import {
 } from "@/lib/terminalThemePreferences";
 import { getSessionHost, markHostKeyless, isHostKeyless } from "@/lib/sessionHost";
 import {
+  TerminalClipboardPrompt,
+  type TerminalClipboardDecision,
+  type TerminalClipboardPromptReason,
+} from "./TerminalClipboardPrompt";
+import {
   type ConnectionState,
   type TerminalActivityListener,
   type TerminalInputListener,
+  applyTerminalCopy,
   isUnexpectedTerminalClose,
+  resolveTerminalWorkspaceFileLink,
   TerminalSession,
+  terminalTheme,
   WS_CLOSE_WRONG_REPLICA,
 } from "./TerminalSession";
 
@@ -37,9 +63,26 @@ import {
  * when the schedule is exhausted the closed overlay stays up and the
  * user falls back to a manual refresh / resume.
  *
+ * The cumulative budget must outlast a server outage so a terminal
+ * watched through one recovers on its own instead of dead-ending while
+ * the backend is still coming back. The fast ramp covers the common
+ * case — a Databricks Apps redeploy reroutes the ingress in ~20-25s —
+ * and the schedule then holds at 30s for several minutes so a slow
+ * redeploy, a stuck rollout, or a longer infra blip still self-heals
+ * rather than stranding the user on a manual refresh. ~5 min total.
+ * (A backgrounded tab also re-dials with a fresh budget on the
+ * visibilitychange reveal, so this budget is really about a foreground
+ * terminal the user is actively watching.)
+ *
  * Exported for direct unit testing (fake timers advance through it).
  */
-export const RECONNECT_BACKOFF_MS = [500, 1000, 2000, 4000, 8000] as const;
+export const RECONNECT_BACKOFF_MS = [
+  // Fast ramp: recover promptly from the common ~20-25s redeploy.
+  500, 1000, 2000, 4000, 8000, 15000,
+  // Then hold at 30s for the rest of a ~5-minute budget, so a longer
+  // outage still auto-recovers at a calm cadence instead of dead-ending.
+  30000, 30000, 30000, 30000, 30000, 30000, 30000, 30000, 30000,
+] as const;
 
 /**
  * A connection that stayed open at least this long before dropping is
@@ -49,6 +92,20 @@ export const RECONNECT_BACKOFF_MS = [500, 1000, 2000, 4000, 8000] as const;
  * plain reset-on-connect, a connect→drop hot loop would retry forever.
  */
 export const RECONNECT_STABLE_MS = 30_000;
+
+function isReconnectableTerminalClose(code: number): boolean {
+  return (
+    isUnexpectedTerminalClose(code) || (code === WS_CLOSE_WRONG_REPLICA && !isDatabricksWorkspace())
+  );
+}
+
+interface TerminalClipboardRequest {
+  scope: string;
+  epoch: number;
+  generation: number;
+  text: string;
+  source: "terminal" | "selection";
+}
 
 interface TerminalViewProps {
   /** Session/conversation identifier, e.g. ``"conv_abc123"``. */
@@ -76,16 +133,6 @@ interface TerminalViewProps {
   /** Whether the optional resume action is currently in flight. */
   resumePending?: boolean;
   /**
-   * Web-attach transport for this terminal (``"control"`` / ``"pty"``),
-   * from the terminal resource's ``metadata.terminal_transport``. Control
-   * mode gives the browser xterm native scrollback + selection, so the
-   * mouse/selection workarounds and the hint bar are dropped. ``undefined``
-   * (or ``"pty"``) keeps the legacy PTY behavior. When set, it is also
-   * forwarded to the server as ``?transport=`` so the attach matches the
-   * behavior the UI renders for.
-   */
-  transport?: "control" | "pty";
-  /**
    * False while the surface is mounted but hidden (a pre-warmed attach
    * kept alive behind the chat view). The session stays connected either
    * way; on the hidden→visible edge the terminal takes keyboard focus —
@@ -93,6 +140,15 @@ interface TerminalViewProps {
    * Default true.
    */
   active?: boolean;
+  /**
+   * Whether the terminal grabs keyboard focus when its WS connects. Defaults
+   * to ``active`` — a foreground surface claims the keyboard as it comes up.
+   * The workspace-rail shell overrides this to false so a shell restored on a
+   * session switch connects in the background without yanking focus off the
+   * chat composer; it stays fully interactive (clipboard, reconnect) either
+   * way. It still grabs focus on the reveal edge and on an explicit open.
+   */
+  focusOnConnect?: boolean;
   /**
    * Loopback attach URL advertised by the session's runner (from the
    * terminal resource's ``metadata.direct_attach_url``). When set, each
@@ -113,16 +169,94 @@ export function TerminalView({
   onInput,
   onResume,
   resumePending = false,
-  transport,
   active = true,
+  focusOnConnect = active,
   directAttachUrl,
 }: TerminalViewProps) {
-  // Control mode: xterm owns the buffer + mouse, so plain drag selects and
-  // the normal copy gesture works — no forced-selection modifier, no hint bar.
-  const controlMode = transport === "control";
+  const openFile = useFileViewer();
+  const workspacePaths = useWorkspacePaths();
+  const fileLinkRef = useRef({ openFile, ...workspacePaths });
+  fileLinkRef.current = { openFile, ...workspacePaths };
+  const notifyFileLink = useCallback((uri: string): boolean => {
+    const current = fileLinkRef.current;
+    if (current.openFile === null) return false;
+    const target = resolveTerminalWorkspaceFileLink(uri, current.root, current.home);
+    if (target === null) return false;
+    if (target.line === null) current.openFile(target.path);
+    else current.openFile(target.path, { line: target.line });
+    return true;
+  }, []);
   const [state, setState] = useState<ConnectionState>({ kind: "connecting" });
   const [connectAttempt, setConnectAttempt] = useState(0);
   const [resumeError, setResumeError] = useState<string | null>(null);
+  const clipboardServerIdentity = getOmnigentServerIdentity();
+  const clipboardScope = JSON.stringify([clipboardServerIdentity, sessionId, terminalId, readOnly]);
+  const [clipboardPrompt, setClipboardPrompt] = useState<
+    | (TerminalClipboardRequest & {
+        reason: TerminalClipboardPromptReason;
+        copyFailed?: boolean;
+      })
+    | null
+  >(null);
+  const clipboardScopeRef = useRef({ scope: clipboardScope, epoch: 0 });
+  // Unremembered choices apply to one mounted terminal; saved choices apply
+  // to every terminal on this server in the current browser or app.
+  const clipboardConsentRef = useRef<{
+    scope: string;
+    decision: TerminalClipboardPreference;
+  }>({ scope: clipboardScope, decision: readTerminalClipboardPreference() });
+  const clipboardNeedsClickRef = useRef(false);
+  const clipboardRequestGenerationRef = useRef(0);
+  const clipboardMountedRef = useRef(true);
+  const clipboardActiveRef = useRef(active);
+  const [clipboardScopeEpoch, setClipboardScopeEpoch] = useState(0);
+  useLayoutEffect(() => {
+    if (clipboardActiveRef.current !== active) {
+      clipboardActiveRef.current = active;
+      clipboardRequestGenerationRef.current += 1;
+      if (!active) {
+        setClipboardPrompt(null);
+      }
+    }
+    if (clipboardScopeRef.current.scope !== clipboardScope) {
+      const epoch = clipboardScopeRef.current.epoch + 1;
+      clipboardScopeRef.current = { scope: clipboardScope, epoch };
+      clipboardConsentRef.current = {
+        scope: clipboardScope,
+        decision: readTerminalClipboardPreference(),
+      };
+      clipboardNeedsClickRef.current = false;
+      clipboardRequestGenerationRef.current += 1;
+      setClipboardPrompt(null);
+      setClipboardScopeEpoch(epoch);
+    }
+  }, [active, clipboardScope]);
+  useEffect(
+    () =>
+      subscribeTerminalClipboardPreference((decision) => {
+        const { scope, epoch } = clipboardScopeRef.current;
+        const previousGeneration = clipboardRequestGenerationRef.current;
+        const generation = (clipboardRequestGenerationRef.current += 1);
+        clipboardConsentRef.current = { scope, decision };
+        clipboardNeedsClickRef.current = false;
+        // Shared grants keep waiting text visible; revocations discard it.
+        const keepPendingRequest =
+          decision === "allow" && clipboardMountedRef.current && clipboardActiveRef.current;
+        setClipboardPrompt((current) =>
+          keepPendingRequest &&
+          current?.scope === scope &&
+          current.epoch === epoch &&
+          current.generation === previousGeneration
+            ? {
+                ...current,
+                generation,
+                reason: current.reason === "consent" ? "permission" : current.reason,
+              }
+            : null,
+        );
+      }),
+    [clipboardServerIdentity],
+  );
   // True between an unexpected close and the re-dial it scheduled, so
   // the overlay reads "Reconnecting…" instead of the dead-end
   // "Bridge closed" message during automatic recovery.
@@ -134,7 +268,7 @@ export function TerminalView({
   // Lets the close handler tell "stable connection finally dropped"
   // (reset the budget) from "re-dial died straight away" (burn it).
   const connectedAtRef = useRef<number | null>(null);
-  const { resolvedTheme } = useTheme();
+  const resolvedMode = useResolvedThemeMode();
   // Terminal theme is independent of the app theme: "auto" follows the app's
   // resolved appearance, while "light"/"dark" pin the terminal. Reading the
   // pref as state (seeded at mount, updated via the pub/sub) lets a Settings
@@ -143,7 +277,8 @@ export function TerminalView({
     readTerminalThemeMode(),
   );
   useEffect(() => subscribeTerminalTheme(setTerminalMode), []);
-  const isDark = resolveTerminalIsDark(terminalMode, resolvedTheme === "dark");
+  const isDark = resolveTerminalIsDark(terminalMode, resolvedMode === "dark");
+  const terminalBackground = terminalTheme(isDark).background;
   // Stable ref so the theme-update effect can reach the live session
   // without adding isDark to the attachSession deps (which would
   // reconnect the WebSocket on every theme change).
@@ -157,6 +292,10 @@ export function TerminalView({
   onActivityRef.current = onActivity;
   const onInputRef = useRef(onInput);
   onInputRef.current = onInput;
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  const focusOnConnectRef = useRef(focusOnConnect);
+  focusOnConnectRef.current = focusOnConnect;
   // Track whether this terminal has already tried a keyless re-dial after a
   // 4400 wrong-replica close. If keyless still fails with 4400, the host is
   // genuinely unreachable — stop retrying.
@@ -168,6 +307,14 @@ export function TerminalView({
   // Abort handle for the outgoing attach's direct-upgrade probe, which
   // otherwise holds a loopback socket open for its full timeout.
   const upgradeCtlRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    clipboardMountedRef.current = true;
+    return () => {
+      clipboardMountedRef.current = false;
+      clipboardRequestGenerationRef.current += 1;
+    };
+  }, []);
 
   // Stable dispatcher: updates local state and notifies the parent.
   const notifyState = useCallback((next: ConnectionState) => {
@@ -182,6 +329,163 @@ export function TerminalView({
   const notifyInput = useCallback(() => {
     onInputRef.current?.();
   }, []);
+
+  const queueSessionClipboardCopy = useCallback(
+    (request: TerminalClipboardRequest & { kind: "automatic" | "user" }) => {
+      queueTerminalClipboardWrite({
+        text: request.text,
+        isCurrent: () =>
+          clipboardMountedRef.current &&
+          clipboardActiveRef.current &&
+          clipboardRequestGenerationRef.current === request.generation &&
+          clipboardScopeRef.current.scope === request.scope &&
+          clipboardScopeRef.current.epoch === request.epoch &&
+          (request.kind === "user" || clipboardConsentRef.current.decision === "allow"),
+        onResult: (copied) => {
+          if (copied) {
+            clipboardNeedsClickRef.current = false;
+            toast.success("Copied from terminal.", { duration: 1500 });
+          } else {
+            clipboardNeedsClickRef.current = true;
+            setClipboardPrompt({
+              ...request,
+              reason: "browser",
+              copyFailed: request.kind === "user",
+            });
+          }
+        },
+      });
+    },
+    [],
+  );
+
+  const notifyClipboardRequest = useCallback(
+    (text: string, copyEvent?: ClipboardEvent) => {
+      if (
+        !clipboardMountedRef.current ||
+        !clipboardActiveRef.current ||
+        (readOnly && !copyEvent) ||
+        clipboardScopeRef.current.scope !== clipboardScope ||
+        clipboardScopeRef.current.epoch !== clipboardScopeEpoch
+      ) {
+        return;
+      }
+      const generation = (clipboardRequestGenerationRef.current += 1);
+      if (clipboardConsentRef.current.scope !== clipboardScope) {
+        clipboardConsentRef.current = {
+          scope: clipboardScope,
+          decision: readTerminalClipboardPreference(),
+        };
+      }
+      if (clipboardConsentRef.current.decision === "block") {
+        toast.info("Copying from this terminal is blocked.", {
+          id: "terminal-clipboard-blocked",
+          description: "Change this in Settings → General.",
+        });
+        return;
+      }
+      const source = copyEvent ? "selection" : "terminal";
+      if (
+        clipboardConsentRef.current.decision === "allow" &&
+        copyEvent?.clipboardData &&
+        !isTerminalClipboardWritePending()
+      ) {
+        // Keep native copy gestures independent of browser async-clipboard permissions.
+        // If a write is in flight, queue below so it cannot overwrite this selection.
+        setClipboardPrompt(null);
+        clipboardNeedsClickRef.current = false;
+        applyTerminalCopy(copyEvent, text);
+        return;
+      }
+      if (
+        clipboardConsentRef.current.decision === "allow" &&
+        (copyEvent || !clipboardNeedsClickRef.current)
+      ) {
+        setClipboardPrompt(null);
+        queueSessionClipboardCopy({
+          scope: clipboardScope,
+          epoch: clipboardScopeEpoch,
+          generation,
+          text,
+          source,
+          kind: "automatic",
+        });
+        return;
+      }
+      // Keep only the newest request while the prompt is open.
+      setClipboardPrompt({
+        scope: clipboardScope,
+        epoch: clipboardScopeEpoch,
+        generation,
+        text,
+        source,
+        reason: clipboardConsentRef.current.decision === "allow" ? "browser" : "consent",
+      });
+    },
+    [clipboardScope, clipboardScopeEpoch, queueSessionClipboardCopy, readOnly],
+  );
+
+  const handleClipboardConsent = useCallback(
+    (decision: TerminalClipboardDecision | "retry", remember = false) => {
+      const prompt =
+        clipboardMountedRef.current &&
+        clipboardActiveRef.current &&
+        (!readOnly || clipboardPrompt?.source === "selection") &&
+        clipboardPrompt?.scope === clipboardScope &&
+        clipboardPrompt.epoch === clipboardScopeEpoch &&
+        clipboardPrompt.generation === clipboardRequestGenerationRef.current
+          ? clipboardPrompt
+          : null;
+      if (prompt === null) return;
+      setClipboardPrompt(null);
+      if (remember && (decision === "allow" || decision === "block")) {
+        if (!writeTerminalClipboardPreference(decision)) {
+          toast.error(
+            "Couldn't remember your clipboard choice. It applies only to this open terminal.",
+            {
+              duration: Number.POSITIVE_INFINITY,
+              closeButton: true,
+            },
+          );
+        }
+      }
+      // Saving can synchronously invalidate requests in every mounted terminal.
+      const generation = (clipboardRequestGenerationRef.current += 1);
+      if (decision !== "retry") {
+        clipboardConsentRef.current = {
+          scope: clipboardScope,
+          decision: decision === "once" ? "ask" : decision,
+        };
+      }
+      if (decision !== "block") {
+        queueSessionClipboardCopy({
+          scope: clipboardScope,
+          epoch: clipboardScopeEpoch,
+          generation,
+          text: prompt.text,
+          source: prompt.source,
+          kind: "user",
+        });
+      }
+      sessionRef.current?.focus();
+    },
+    [clipboardPrompt, clipboardScope, clipboardScopeEpoch, queueSessionClipboardCopy, readOnly],
+  );
+
+  const dismissClipboardPrompt = useCallback(() => {
+    clipboardRequestGenerationRef.current += 1;
+    setClipboardPrompt(null);
+    sessionRef.current?.focus();
+  }, []);
+
+  const visibleClipboardPrompt =
+    clipboardPrompt?.scope === clipboardScope &&
+    clipboardPrompt.epoch === clipboardScopeEpoch &&
+    clipboardPrompt.generation === clipboardRequestGenerationRef.current &&
+    active &&
+    (!readOnly || clipboardPrompt.source === "selection")
+      ? clipboardPrompt
+      : null;
 
   // Dispose the outgoing session before a remount re-dials. React 18
   // ignores the cleanup function attachSession returns (ref cleanups
@@ -248,21 +552,17 @@ export function TerminalView({
         // every await.
         await Promise.resolve();
         if (superseded()) return;
-        // Route this WS to the replica holding the session's runner tunnel
-        // (key = the session's host_id). A browser WS can't set request
-        // headers, so the key rides the query string. Only against a
-        // Databricks workspace-hosted server — an unsharded server needs no key,
-        // and a hostless session yields none. The direct URL needs no key: it
-        // bypasses the server entirely.
+        // Browser WebSockets carry the host ID in the query string so they
+        // reach the replica holding the runner tunnel. Hostless sessions
+        // and direct connections need no routing key.
         const computedHostId = (() => {
-          if (keylessRef.current || !isDatabricksWorkspace()) return undefined;
+          if (!isHostRoutingEnabled()) return undefined;
+          if (isDatabricksWorkspace() && keylessRef.current) return undefined;
           const h = getSessionHost(sessionId);
-          return h && !isHostKeyless(h) ? h : undefined;
+          return h && (!isDatabricksWorkspace() || !isHostKeyless(h)) ? h : undefined;
         })();
-        const relayUrl = buildAttachUrl(sessionId, terminalId, readOnly, computedHostId, transport);
-        const directUrl = directAttachUrl
-          ? withAttachParams(directAttachUrl, readOnly, transport)
-          : undefined;
+        const relayUrl = buildAttachUrl(sessionId, terminalId, readOnly, computedHostId);
+        const directUrl = directAttachUrl ? withAttachParams(directAttachUrl, readOnly) : undefined;
         // Never keep the user waiting on the direct path: this resolves
         // direct only when the loopback listener is already known
         // reachable; otherwise it returns the relay URL immediately.
@@ -275,7 +575,11 @@ export function TerminalView({
           isDarkRef.current,
           notifyActivity,
           notifyInput,
-          controlMode,
+          !readOnly && activeRef.current,
+          notifyClipboardRequest,
+          focusOnConnectRef.current,
+          terminalId === "terminal_codex_main",
+          notifyFileLink,
         );
         sessionRef.current = terminalSession;
         // Relay-connected with a direct URL on offer: negotiate the
@@ -303,12 +607,12 @@ export function TerminalView({
       sessionId,
       terminalId,
       readOnly,
-      transport,
       directAttachUrl,
-      controlMode,
       notifyState,
       notifyActivity,
       notifyInput,
+      notifyClipboardRequest,
+      notifyFileLink,
       disposeActiveSession,
     ],
   );
@@ -317,6 +621,10 @@ export function TerminalView({
   useEffect(() => {
     sessionRef.current?.setTheme(isDark);
   }, [isDark]);
+
+  useEffect(() => {
+    sessionRef.current?.setClipboardEnabled(!readOnly && active);
+  }, [readOnly, active]);
 
   // On the hidden→visible edge of a pre-warmed surface: focus the
   // terminal (the session's WS-open focus is a no-op while the element is
@@ -333,7 +641,7 @@ export function TerminalView({
     if (active && !wasActiveRef.current) {
       sessionRef.current?.focus();
       const current = stateRef.current;
-      if (current.kind === "closed" && isUnexpectedTerminalClose(current.code)) {
+      if (current.kind === "closed" && isReconnectableTerminalClose(current.code)) {
         reconnectAttemptsRef.current = 0;
         disposeActiveSession();
         setConnectAttempt((attempt) => attempt + 1);
@@ -350,7 +658,7 @@ export function TerminalView({
   // disconnected still lands on reconnect.
   useEffect(() => {
     return subscribeCodeFont((font) => {
-      sessionRef.current?.setFont(font.sizePx, font.family);
+      sessionRef.current?.setFont(font);
     });
   }, []);
 
@@ -375,7 +683,7 @@ export function TerminalView({
     // immediately without backoff (the correct route is one handshake away).
     // One-shot: if we're ALREADY keyless and still get 4400, the host is
     // genuinely unreachable from here — stop, don't loop.
-    if (state.code === WS_CLOSE_WRONG_REPLICA) {
+    if (state.code === WS_CLOSE_WRONG_REPLICA && isDatabricksWorkspace()) {
       if (keylessRef.current) {
         setReconnectPending(false);
         return;
@@ -388,7 +696,7 @@ export function TerminalView({
       setConnectAttempt((attempt) => attempt + 1);
       return;
     }
-    if (!isUnexpectedTerminalClose(state.code)) {
+    if (!isReconnectableTerminalClose(state.code)) {
       setReconnectPending(false);
       return;
     }
@@ -431,90 +739,43 @@ export function TerminalView({
     };
   }, [state, disposeActiveSession, sessionId]);
 
+  // `isolate` scopes the status overlay's z-index to this surface so it
+  // can't paint over body-portaled UI such as the header's session menu.
   return (
     <div
       data-testid="terminal-view"
       data-state={state.kind}
       data-terminal-id={terminalId}
       data-terminal-theme={isDark ? "dark" : "light"}
-      className="relative flex min-h-0 flex-1 flex-col"
+      className="relative isolate flex min-h-0 flex-1 flex-col"
     >
-      {/* `p-1` lives on the wrapper, not the xterm mount node: FitAddon
-          reads the parent's border-box height but only subtracts the xterm
-          element's own padding, so padding on the mount node oversizes the
-          grid by a row and `overflow-hidden` clips the footer. */}
-      <div className="min-h-0 flex-1 overflow-hidden p-1">
-        <div key={connectAttempt} ref={attachSession} className="h-full w-full overflow-hidden" />
-      </div>
-      {/* PTY transport only: the attached tmux session runs with `mouse on`,
-          so a plain click-drag is captured by tmux (copy-mode) instead of
-          making a browser selection — the user can't select-and-copy without a
-          platform-specific modifier, and there's no other discoverable cue, so
-          surface it as a persistent hint. Control mode gives xterm native
-          selection, so the hint is unnecessary and omitted. */}
-      {!controlMode && (
-        <div
-          data-testid="terminal-selection-hint"
-          className="shrink-0 select-none px-2 py-1 text-[10px] text-muted-foreground/70"
-        >
-          {selectionHintText(isMacPlatform())}
-        </div>
-      )}
-      {state.kind !== "connected" && (
-        <StatusOverlay
-          state={state}
-          reconnectPending={reconnectPending}
-          onResume={onResume ? handleResume : undefined}
-          resumePending={resumePending}
-          resumeError={resumeError}
+      {visibleClipboardPrompt !== null && (
+        <TerminalClipboardPrompt
+          reason={visibleClipboardPrompt.reason}
+          canRemember={canRememberTerminalClipboardPreference()}
+          copyFailed={visibleClipboardPrompt.copyFailed === true}
+          onDecision={handleClipboardConsent}
+          onRetry={() => handleClipboardConsent("retry")}
+          onDismiss={dismissClipboardPrompt}
         />
       )}
+      <div
+        className="relative min-h-0 flex-1 overflow-hidden p-3"
+        style={{ backgroundColor: terminalBackground }}
+      >
+        <div key={connectAttempt} ref={attachSession} className="h-full w-full overflow-hidden" />
+        {state.kind !== "connected" && (
+          <StatusOverlay
+            state={state}
+            reconnectPending={reconnectPending}
+            onResume={onResume ? handleResume : undefined}
+            resumePending={resumePending}
+            resumeError={resumeError}
+          />
+        )}
+      </div>
     </div>
   );
-}
-
-/**
- * Detect whether the current browser is running on macOS.
- *
- * Used to pick the correct text-selection modifier and copy shortcut
- * for the terminal hint: macOS bypasses tmux mouse capture with Option
- * and copies with Command, while other platforms use Shift.
- *
- * Prefers the modern ``navigator.userAgentData.platform`` and falls
- * back to the deprecated-but-universal ``navigator.platform``.
- *
- * :returns: ``true`` on macOS, ``false`` elsewhere (and in any
- *     non-browser context where ``navigator`` is undefined).
- */
-export function isMacPlatform(): boolean {
-  if (typeof navigator === "undefined") return false;
-  const uaData = (navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData;
-  const platform = uaData?.platform ?? navigator.platform ?? "";
-  return /mac/i.test(platform);
-}
-
-/**
- * Build the persistent selection/copy hint shown under the terminal.
- *
- * The attached tmux session captures plain mouse drags for its own
- * copy-mode, so the user must hold a modifier to make a native browser
- * selection (xterm's ``shouldForceSelection``: Option on macOS, Shift
- * elsewhere). Copying the selection is wired in
- * {@link TerminalSession} via a ``copy`` listener, so on macOS ``Cmd+C``
- * copies; on other platforms ``Ctrl+C`` stays SIGINT, so we point users
- * at right-click → Copy (the cross-platform copy gesture) instead.
- *
- * Pure helper — exported for direct unit testing.
- *
- * :param isMac: Whether the browser is on macOS, e.g. from
- *     :func:`isMacPlatform`.
- * :returns: The hint string to render, e.g.
- *     ``"Hold ⌥ and drag to select · ⌘C to copy"``.
- */
-export function selectionHintText(isMac: boolean): string {
-  return isMac
-    ? "Hold ⌥ and drag to select · ⌘C to copy"
-    : "Hold Shift and drag to select · right-click to copy";
 }
 
 function StatusOverlay({
@@ -560,6 +821,7 @@ function StatusOverlay({
               onClick={onResume}
               disabled={resumePending}
               className="border-zinc-500/50 bg-zinc-100 text-zinc-950 hover:bg-white"
+              componentId="diagnostics.terminal.resume"
             >
               {resumePending ? "Resuming…" : "Resume session"}
             </Button>
@@ -596,10 +858,6 @@ function resumeErrorText(error: unknown): string {
  *     e.g. ``"terminal_bash_s1"``.
  * :param readOnly: If true, requests a read-only attach. Forwarded
  *     to the server as ``?read_only=true``.
- * :param transport: Optional per-attach transport override
- *     (``"control"`` / ``"pty"``), forwarded as ``?transport=``. Lets a
- *     terminal be A/B'd against the other mode side by side; ``undefined``
- *     lets the server pick from the terminal spec / global default.
  * :returns: The path-and-query portion of the WS URL, e.g.
  *     ``"/v1/sessions/.../resources/terminals/.../attach"``.
  */
@@ -608,7 +866,6 @@ export function buildAttachPath(
   terminalId: string,
   readOnly: boolean,
   hostId?: string,
-  transport?: string,
 ): string {
   const path =
     `/v1/sessions/${encodeURIComponent(sessionId)}` +
@@ -622,7 +879,6 @@ export function buildAttachPath(
   const params = new URLSearchParams();
   if (readOnly) params.set("read_only", "true");
   if (hostId) params.set("omnigent_slice_key", hostId);
-  if (transport) params.set("transport", transport);
   const qs = params.toString();
   return qs ? `${path}?${qs}` : path;
 }
@@ -639,7 +895,6 @@ export function buildAttachPath(
  * :param readOnly: If true, requests a read-only attach.
  * :param hostId: The session's host_id, forwarded as the routing key
  *     ``?omnigent_slice_key=``.
- * :param transport: Optional per-attach transport override.
  * :returns: The fully-qualified ``ws(s)://`` URL.
  */
 function buildAttachUrl(
@@ -647,9 +902,8 @@ function buildAttachUrl(
   terminalId: string,
   readOnly: boolean,
   hostId?: string,
-  transport?: string,
 ): string {
   // Delegates origin/prefix resolution to the embed host when present
   // (standalone falls back to the current page's origin).
-  return resolveWebSocketUrl(buildAttachPath(sessionId, terminalId, readOnly, hostId, transport));
+  return resolveWebSocketUrl(buildAttachPath(sessionId, terminalId, readOnly, hostId));
 }

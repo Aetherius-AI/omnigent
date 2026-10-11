@@ -38,10 +38,12 @@ import httpx
 import pytest
 from playwright.sync_api import Browser, BrowserContext, Page, Route, expect
 
+from tests._helpers.session import post_session_bundle
 from tests.e2e_ui.conftest import (
     _build_hello_world_bundle,
     _ensure_runner_online,
     _server_state,
+    fetch_with_retry,
     open_right_rail,
 )
 
@@ -93,11 +95,7 @@ def shared_browse(
     # tree really re-rooted rather than showing a workspace file of the same name.
     (outside / "owner-only.txt").write_text("visible only to the owner\n")
 
-    create = owner.post(
-        "/v1/sessions",
-        data={"metadata": json.dumps({})},
-        files={"bundle": ("agent.tar.gz", _build_hello_world_bundle(), "application/gzip")},
-    )
+    create = post_session_bundle(owner.post, "/v1/sessions", _build_hello_world_bundle())
     create.raise_for_status()
     session_id = create.json()["session_id"]
     owner.patch(
@@ -146,7 +144,7 @@ def _stub_host_binding(page: Page, session_id: str, *, entry: Path) -> None:
         if request.method != "GET" or urlparse(request.url).path != f"/v1/sessions/{session_id}":
             route.continue_()
             return
-        response = route.fetch()
+        response = fetch_with_retry(route)
         payload = response.json()
         payload["host_id"] = _FAKE_HOST_ID
         route.fulfill(
@@ -213,6 +211,17 @@ def _absolute_fs_url(base_url: str, session_id: str, target: Path) -> str:
     )
 
 
+def _absolute_fs_url_base_host(base_url: str, session_id: str, target: Path) -> str:
+    """The proxy-safe wire form the web uses: a bare path (no leading ``%2F``)
+    named absolute by ``?base=host``. The owner gate must apply to this exactly
+    as it does to the ``%2F`` form, or the fix would be a way around it.
+    """
+    return (
+        f"{base_url}/v1/sessions/{session_id}/resources/environments/default"
+        f"/filesystem/{str(target).lstrip('/')}?base=host"
+    )
+
+
 def test_owner_browses_outside_workspace_but_shared_collaborator_cannot(
     browser: Browser,
     live_server: str,
@@ -242,11 +251,12 @@ def test_owner_browses_outside_workspace_but_shared_collaborator_cannot(
         picker = owner_page.get_by_test_id("workspace-picker")
         expect(picker).to_be_visible(timeout=15_000)
         picker.get_by_test_id(f"workspace-picker-entry-{outside.name}").click()
+        picker.get_by_test_id("workspace-picker-select").click()
 
         # Proof the tree re-rooted: this file exists only outside the workspace.
         expect(owner_rail.get_by_text("owner-only.txt")).to_be_visible(timeout=30_000)
     finally:
-        # The snapshot stub does a real `route.fetch()`, and `useSession`
+        # The snapshot stub does a real upstream fetch, and `useSession`
         # refetches that URL for as long as the page lives. Closing with one in
         # flight leaks its error onto the next Playwright call — landing on an
         # unrelated later test — so drop the routes before closing.
@@ -288,6 +298,12 @@ def test_owner_browses_outside_workspace_but_shared_collaborator_cannot(
 
         refused = bob_page.request.get(_absolute_fs_url(live_server, session_id, outside))
         assert refused.status == 403, refused.text()
+        # The proxy-safe wire form is gated identically -- base=host is not a
+        # way around the owner check.
+        refused_base_host = bob_page.request.get(
+            _absolute_fs_url_base_host(live_server, session_id, outside)
+        )
+        assert refused_base_host.status == 403, refused_base_host.text()
     finally:
         bob_page.unroute_all(behavior="ignoreErrors")
         bob_page.close()
@@ -299,6 +315,10 @@ def test_owner_browses_outside_workspace_but_shared_collaborator_cannot(
         _absolute_fs_url(live_server, session_id, outside).removeprefix(live_server)
     )
     assert allowed.status_code == 200, allowed.text
+    allowed_base_host = shared_browse.owner.get(
+        _absolute_fs_url_base_host(live_server, session_id, outside).removeprefix(live_server)
+    )
+    assert allowed_base_host.status_code == 200, allowed_base_host.text
 
 
 def test_shared_collaborator_double_clicks_into_a_workspace_folder(

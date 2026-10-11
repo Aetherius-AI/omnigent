@@ -26,12 +26,12 @@ from typing import Any, Literal, Protocol, TypeAlias, cast
 
 import httpx
 
-from omnigent import model_catalog
-from omnigent.json_types import JsonObject as _JsonObject
 from omnigent.llms._usage_observer import notify_from_dict as _notify_usage_from_dict
 from omnigent.llms.errors import is_context_length_exceeded as _is_context_length_exceeded
-from omnigent.reasoning_effort import OPENAI_AGENTS_EFFORTS, validate_effort
+from omnigent.models import model_catalog
 from omnigent.spec.types import RetryPolicy
+from omnigent.util.json_types import JsonObject as _JsonObject
+from omnigent.util.reasoning_effort import OPENAI_AGENTS_EFFORTS, validate_effort
 
 from .async_utils import run_sync_on_thread
 from .executor import (
@@ -93,6 +93,7 @@ RawToolItem: TypeAlias = Any  # type: ignore[explicit-any]
 # an optional import at type-check time — the executor only constructs
 # one when instantiated.
 AsyncOpenAIClient: TypeAlias = Any  # type: ignore[explicit-any]
+ReasoningItemIdPolicy: TypeAlias = Literal["preserve", "omit"]
 
 # Tool executor callable wired in by ``omnigent.Session``. The result
 # is JSON-ish (dict[str, Any]) but the static type leaks ``Any`` through
@@ -127,9 +128,11 @@ def _normalize_responses_items_for_chat(
     :returns: New list with normalised ``input_file`` blocks in message
         content.  Items without ``input_file`` blocks are returned as-is.
     """
+    from omnigent.inner.native_attachments import expand_framework_notices
+
     result: list[_JsonObject] = []
-    for item in items:
-        if item.get("type") == "message":
+    for item in expand_framework_notices(items):
+        if item.get("type") == "message" or "role" in item:
             raw_content = item.get("content")
             if item.get("role") == "assistant" and isinstance(raw_content, str):
                 # The chat converter iterates assistant content expecting
@@ -826,7 +829,7 @@ def _build_reasoning_model_settings(effort: str | None) -> dict[str, object]:
 
 
 def _is_databricks_openai_client(client: AsyncOpenAIClient) -> bool:
-    """Return whether *client* targets a Databricks AI Gateway base URL."""
+    """Return whether *client* targets a Databricks Unity Gateway base URL."""
     return "/ai-gateway/" in str(getattr(client, "base_url", ""))
 
 
@@ -953,6 +956,81 @@ def _wrap_client_for_reasoning_models(client: AsyncOpenAIClient) -> AsyncOpenAIC
     return client
 
 
+def _is_plain_json(value: object) -> bool:
+    """Return whether *value* is acyclic JSON: scalars, lists, and str-keyed dicts.
+
+    A cycle returns ``False``, so the caller falls back to the client's normal
+    path; a node shared by two parents is fine, as it is for ``json.dumps``.
+    """
+    on_path: set[int] = set()
+    stack: list[tuple[object, bool]] = [(value, False)]
+    while stack:
+        node, leaving = stack.pop()
+        if leaving:
+            on_path.discard(id(node))
+            continue
+        if isinstance(node, (dict, list)):
+            if id(node) in on_path:
+                return False
+            on_path.add(id(node))
+            stack.append((node, True))
+            if isinstance(node, dict):
+                if not all(isinstance(key, str) for key in node):
+                    return False
+                stack.extend((item, False) for item in node.values())
+            else:
+                stack.extend((item, False) for item in node)
+        elif node is not None and not isinstance(node, (str, int, float, bool)):
+            return False
+    return True
+
+
+def _history_via_extra_body(kwargs: dict[str, Any], field: str) -> dict[str, Any]:
+    """Move the plain-JSON history list *field* into ``extra_body``.
+
+    The client merges ``extra_body`` into the request body as-is, after its
+    type-driven param transform, so the request JSON is unchanged.
+
+    :param kwargs: Keyword arguments for a ``create`` call.
+    :param field: History parameter, ``"input"`` or ``"messages"``.
+    :returns: Rewritten kwargs, or *kwargs* itself when the value is not a
+        plain-JSON list or ``extra_body`` already sets *field*.
+    """
+    value = kwargs.get(field)
+    extra = kwargs.get("extra_body")
+    if not isinstance(value, list) or not value:
+        return kwargs
+    if extra is not None and (not isinstance(extra, dict) or field in extra):
+        return kwargs
+    if not _is_plain_json(value):
+        return kwargs
+    return {**kwargs, field: [], "extra_body": {**(extra or {}), field: value}}
+
+
+def _skip_history_transform(resource: object, field: str) -> None:
+    """Route *resource*'s ``create`` history list around the client's param transform.
+
+    The openai client walks every request param through ``transform`` on each
+    call, ~0.2 ms per history item, so a 400-item session spends ~85 ms per
+    turn before the request is sent. The Responses and Chat Completions param
+    types declare no aliases or formats, so for the plain JSON the Agents SDK
+    builds that walk changes nothing. Shadowing ``create`` on the instance also
+    covers ``with_streaming_response`` / ``with_raw_response``, which wrap it.
+
+    :param resource: ``client.responses`` or ``client.chat.completions``.
+    :param field: History parameter, ``"input"`` or ``"messages"``.
+    """
+    create = getattr(resource, "create", None)
+    if not callable(create) or getattr(create, "_skips_history_transform", False):
+        return
+
+    def _create(*args: Any, **kwargs: Any) -> Any:  # type: ignore[explicit-any]
+        return create(*args, **_history_via_extra_body(kwargs, field))
+
+    _create._skips_history_transform = True  # type: ignore[attr-defined]
+    object.__setattr__(resource, "create", _create)
+
+
 def _count_output_items(new_items: Sequence[object]) -> int:
     """Count run items that represent user-visible output.
 
@@ -1026,6 +1104,7 @@ class OpenAIAgentsSDKExecutor(Executor):
         base_url_override: str | None = None,
         gateway_host: str | None = None,
         gateway_auth_command: str | None = None,
+        reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     ) -> None:
         """Create an OpenAIAgentsSDKExecutor.
 
@@ -1071,7 +1150,15 @@ class OpenAIAgentsSDKExecutor(Executor):
             ``"databricks auth token --host https://example.databricks.com ..."``
             or ``"printf %s sk-..."``. Set from
             ``HARNESS_OPENAI_AGENTS_GATEWAY_AUTH_COMMAND``.
+        :param reasoning_item_id_policy: Optional Responses API replay policy.
+            ``"preserve"`` retains reasoning item IDs; ``"omit"`` is available
+            for legacy providers that reject orphaned reasoning items. ``None``
+            leaves the setting unspecified and uses the SDK default.
+        :raises ValueError: If *reasoning_item_id_policy* is not ``"preserve"``
+            or ``"omit"``.
         """
+        if reasoning_item_id_policy not in (None, "preserve", "omit"):
+            raise ValueError("reasoning_item_id_policy must be 'preserve', 'omit', or unset")
         self._retry_policy = retry_policy if retry_policy is not None else RetryPolicy()
         raw_client = (
             client
@@ -1086,6 +1173,11 @@ class OpenAIAgentsSDKExecutor(Executor):
                 model=model,
             )
         )
+        if client is None:
+            # An injected client stays as the caller built it.
+            _skip_history_transform(getattr(raw_client, "responses", None), "input")
+            _chat = getattr(raw_client, "chat", None)
+            _skip_history_transform(getattr(_chat, "completions", None), "messages")
         # Wrap the chat.completions path to strip list-type delta.content
         # (reasoning blocks emitted by models like Kimi K2).  The SDK's
         # ChatCmplStreamHandler validates delta as str; list input raises
@@ -1100,6 +1192,7 @@ class OpenAIAgentsSDKExecutor(Executor):
         self._profile = profile
         self._use_responses = use_responses
         self._model_override = model
+        self._reasoning_item_id_policy = reasoning_item_id_policy
         self._databricks = _is_databricks_openai_client(self._client)
         self._tool_executor: ToolExecutor | None = None
         self._session_states: dict[str, _AgentsSessionState] = {}
@@ -1310,8 +1403,9 @@ class OpenAIAgentsSDKExecutor(Executor):
                 # endpoint may not support ``file`` content blocks at all.
                 # Converting to ``input_text`` is the universally compatible
                 # path: the model sees the file content as plain text.
-                normalized = _normalize_content_blocks_for_chat(content)
-                return [{"type": "message", "role": "user", "content": normalized}]
+                return _normalize_responses_items_for_chat(
+                    [{"type": "message", "role": "user", "content": content}]
+                )
             return json.dumps(content)
         return _normalize_responses_items_for_chat(_convert_messages_to_responses(delta_messages))
 
@@ -1525,13 +1619,15 @@ class OpenAIAgentsSDKExecutor(Executor):
             max_tokens=max_tokens,
         )
         current_item_count = len(await state.sdk_session.get_items())
-        run_config = agents_sdk.RunConfig(
-            model=model,
-            model_provider=provider,
-            tracing_disabled=True,
-            reasoning_item_id_policy="omit",
-            call_model_input_filter=self._filter_model_input,
-        )
+        run_config_kwargs: dict[str, object] = {
+            "model": model,
+            "model_provider": provider,
+            "tracing_disabled": True,
+            "call_model_input_filter": self._filter_model_input,
+        }
+        if self._reasoning_item_id_policy is not None:
+            run_config_kwargs["reasoning_item_id_policy"] = self._reasoning_item_id_policy
+        run_config = agents_sdk.RunConfig(**run_config_kwargs)
         max_turns = 1 if stepwise_internal_turns else int(cfg.extra.get("max_turns", 1000))
 
         # ── LLM_REQUEST policy evaluation ────────────────────────
@@ -1838,21 +1934,19 @@ class OpenAIAgentsSDKExecutor(Executor):
             in_tok = sum(getattr(r.usage, "input_tokens", 0) or 0 for r in raw_responses)
             out_tok = sum(getattr(r.usage, "output_tokens", 0) or 0 for r in raw_responses)
             total_tok = sum(getattr(r.usage, "total_tokens", 0) or 0 for r in raw_responses)
-            # OpenAI's ``input_tokens`` (aka ``prompt_tokens``) is the
-            # TOTAL input count *including* cached tokens, whereas
-            # ``compute_llm_cost`` expects Anthropic semantics where
-            # ``input_tokens`` is the non-cached portion and
-            # ``cache_read_input_tokens`` is additive. Extract cached
-            # tokens from ``prompt_tokens_details.cached_tokens`` and
-            # subtract so downstream billing uses the cheaper cache rate.
+            # SDK ``input_tokens`` INCLUDES cached tokens; ``compute_llm_cost`` expects
+            # Anthropic semantics (non-cached input + additive cache_read), so subtract
+            # ``Usage.input_tokens_details.cached_tokens`` (its only cache field).
             cached_tok = 0
             for r in raw_responses:
-                details = getattr(r.usage, "prompt_tokens_details", None)
+                details = getattr(r.usage, "input_tokens_details", None)
                 if details is not None:
                     cached = getattr(details, "cached_tokens", None)
                     if cached is None and isinstance(details, dict):
                         cached = details.get("cached_tokens")
-                    cached_tok += cached or 0
+                    # Clamp per response to [0, input] so malformed counts never go negative.
+                    r_in = getattr(r.usage, "input_tokens", 0) or 0
+                    cached_tok += min(max(cached or 0, 0), r_in)
             last_r = raw_responses[-1]
             last_in = getattr(last_r.usage, "input_tokens", 0) or 0
             last_out = getattr(last_r.usage, "output_tokens", 0) or 0

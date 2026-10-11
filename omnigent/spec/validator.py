@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass, field
 
 from omnigent.spec.types import AgentSpec, ToolRuntime
+from omnigent.util.reasoning_effort import EFFORT_VALUES, validate_effort
 
 _SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9-]+$")
 # Agent names appear as components of the ``model`` field in API responses
@@ -86,6 +87,7 @@ def validate(spec: AgentSpec) -> ValidationResult:
     _validate_spec_version(spec, result)
     _validate_executor_type(spec, result)
     _validate_llm(spec, result)
+    _validate_reasoning_effort(spec, result)
     _validate_interaction(spec, result)
     _validate_skills(spec, result)
     _validate_mcp_servers(spec, result)
@@ -221,6 +223,25 @@ def _validate_llm(spec: AgentSpec, result: ValidationResult) -> None:
         )
 
 
+def _validate_reasoning_effort(spec: AgentSpec, result: ValidationResult) -> None:
+    """
+    Validate ``executor.reasoning_effort`` against the shared effort vocabulary.
+
+    Runs the same check as session create, so a spec that validates cannot be
+    rejected when a session is created; harness-specific support is enforced
+    downstream at launch.
+
+    :param spec: The agent spec to check.
+    :param result: Accumulator for any validation errors found.
+    """
+    if spec.executor.reasoning_effort is None:
+        return
+    try:
+        validate_effort(spec.executor.reasoning_effort, "reasoning_effort", EFFORT_VALUES)
+    except ValueError as exc:
+        result.add("executor.reasoning_effort", str(exc))
+
+
 def _validate_interaction(spec: AgentSpec, result: ValidationResult) -> None:
     """
     Validate input and output modalities against allowed values.
@@ -253,11 +274,11 @@ def _validate_skills(spec: AgentSpec, result: ValidationResult) -> None:
     seen_names: set[str] = set()
     for i, skill in enumerate(spec.skills):
         prefix = f"skills[{i}]"
-        # Name format
+        # Name format (the directory name; the frontmatter label is free-form)
         if not _SKILL_NAME_PATTERN.match(skill.name):
             result.add(
                 f"{prefix}.name",
-                f"must match [a-z0-9-]+, got {skill.name!r}",
+                f"skill directory name must match [a-z0-9-]+, got {skill.name!r}",
             )
         # Name length
         if len(skill.name) > _SKILL_NAME_MAX_LEN:
