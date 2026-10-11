@@ -96,6 +96,7 @@ interface ChildSessionsResponse {
 interface DescendantSessionWire extends ChildSessionWire {
   parent_session_id: string;
   depth: number;
+  created_at?: number;
   archived?: boolean;
 }
 
@@ -132,12 +133,21 @@ function isSubagentTreeQueryKey(key: readonly unknown[]): boolean {
 }
 
 /**
- * Cached result of one subtree fetch: the parents whose ``child_sessions``
- * lists it seeded. A list is "covered" by the tree while its parent is here,
- * so refreshes of that list reload the tree instead of fetching the node.
+ * Cached result of one subtree fetch: every session the server listed under
+ * the root, hidden archived rows included, plus the root itself. A child list
+ * is "covered" by the tree while its parent is here, so refreshes of that
+ * list reload the tree instead of fetching the node.
  */
 interface SubagentTreeData {
-  parents: string[];
+  members: string[];
+}
+
+/**
+ * Counter of refreshes requested while the root's subtree fetch was in
+ * flight; the fetch re-reads the tree when it changed under it.
+ */
+function subagentTreeDirtyKey(rootId: string): readonly unknown[] {
+  return ["conversation", rootId, "descendants", "dirty"];
 }
 
 /** Thrown by ``fetchSubagentTree`` so callers can tell a missing route apart. */
@@ -168,25 +178,35 @@ export const SubagentTreeContext = createContext(false);
  * Refresh a parent's child list. When a loaded subtree covers the parent the
  * tree is reloaded instead (one request re-seeds every list, including this
  * one); otherwise the list's own query refetches as before. A tree whose
- * last load failed for its root is retried the same way.
+ * last load failed for its root is retried the same way, and a tree still
+ * loading is marked so it re-reads itself once the current fetch lands.
  *
  * @param queryClient - The app QueryClient holding child-session caches.
  * @param parentId - Parent whose child list changed, e.g. ``"conv_root"``.
  */
 export function invalidateChildSessions(queryClient: QueryClient, parentId: string): Promise<void> {
-  const cache = queryClient.getQueryCache();
-  const covering = cache.findAll({
+  const trees = queryClient.getQueryCache().findAll({
     queryKey: ["conversation"],
-    predicate: (query) =>
-      isSubagentTreeQueryKey(query.queryKey) &&
-      query.state.status === "success" &&
-      ((query.state.data as SubagentTreeData | undefined)?.parents.includes(parentId) ?? false),
+    predicate: (query) => isSubagentTreeQueryKey(query.queryKey),
   });
-  const failedRoots = cache.findAll({
-    queryKey: subagentTreeQueryKey(parentId),
-    predicate: (query) =>
-      query.state.status === "error" && !isMissingSubtreeRoute(query.state.error),
-  });
+  const covering = trees.filter(
+    (tree) =>
+      tree.state.status === "success" &&
+      ((tree.state.data as SubagentTreeData | undefined)?.members.includes(parentId) ?? false),
+  );
+  const failedRoots = trees.filter(
+    (tree) =>
+      tree.queryKey[1] === parentId &&
+      tree.state.status === "error" &&
+      !isMissingSubtreeRoute(tree.state.error),
+  );
+  // A fetch in flight read the server before this change; without a loaded
+  // membership the event may concern any tree, so every loading one re-reads.
+  for (const tree of trees) {
+    if (tree.state.fetchStatus !== "fetching") continue;
+    const rootId = tree.queryKey[1] as string;
+    queryClient.setQueryData<number>(subagentTreeDirtyKey(rootId), (count) => (count ?? 0) + 1);
+  }
   const refreshes = [...covering, ...failedRoots].map((tree) =>
     queryClient.invalidateQueries({ queryKey: tree.queryKey }, { cancelRefetch: false }),
   );
@@ -330,31 +350,21 @@ function childInfoFromWire(row: ChildSessionWire): ChildSessionInfo {
  * session stays in the tree only while it connects a live descendant.
  */
 function withoutSettledArchived(rows: DescendantSessionWire[]): DescendantSessionWire[] {
-  const liveBelow = new Set<string>();
-  // Deepest rows first, so every child is seen before its parent.
+  const live = new Set<string>();
+  // Deepest rows first, so every child is seen before its parent. Archiving
+  // does not end a session's work, so a busy or waiting archived row is live.
   for (const row of [...rows].sort((a, b) => b.depth - a.depth)) {
-    if (!row.archived || liveBelow.has(row.id)) liveBelow.add(row.parent_session_id);
+    const working = row.busy || (row.pending_elicitations_count ?? 0) > 0;
+    if (!row.archived || working || live.has(row.id)) {
+      live.add(row.id);
+      live.add(row.parent_session_id);
+    }
   }
-  return rows.filter((row) => !row.archived || liveBelow.has(row.id));
+  return rows.filter((row) => live.has(row.id));
 }
 
-/**
- * Fetch every sub-agent under ``rootId`` down to ``MAX_TREE_DEPTH`` through
- * ``GET /v1/sessions/{id}/descendants`` — one request per page, not one per
- * node — and seed each parent's ``child_sessions`` cache from the result, so
- * the rows the Agents rail renders find their children already cached.
- *
- * Exported for unit testing; production code should call ``useSubagentTree``.
- *
- * @param rootId - Root session whose subtree to load, e.g. ``"conv_root"``.
- * @param queryClient - The app QueryClient whose child-session caches to seed.
- * @returns The parents whose child lists were seeded.
- */
-export async function fetchSubagentTree(
-  rootId: string,
-  queryClient: QueryClient,
-): Promise<SubagentTreeData> {
-  const startedAt = Date.now();
+/** Read every ``descendants`` page under ``rootId`` in the server's order. */
+async function fetchDescendantRows(rootId: string): Promise<DescendantSessionWire[]> {
   const rows: DescendantSessionWire[] = [];
   let after: string | null = null;
   // Each page's cursor comes from the previous response, so the awaits
@@ -374,6 +384,40 @@ export async function fetchSubagentTree(
     after = next;
   } while (after !== null);
   /* oxlint-enable no-await-in-loop */
+  return rows;
+}
+
+/**
+ * Fetch every sub-agent under ``rootId`` down to ``MAX_TREE_DEPTH`` through
+ * ``GET /v1/sessions/{id}/descendants`` — one request per page, not one per
+ * node — and seed each parent's ``child_sessions`` cache from the result, so
+ * the rows the Agents rail renders find their children already cached. A
+ * refresh requested while the pages were loading re-reads the tree before
+ * returning, so no event lands between the server's snapshot and the cache.
+ *
+ * Exported for unit testing; production code should call ``useSubagentTree``.
+ *
+ * @param rootId - Root session whose subtree to load, e.g. ``"conv_root"``.
+ * @param queryClient - The app QueryClient whose child-session caches to seed.
+ * @returns The sessions the tree covers (the root and every listed descendant).
+ */
+export async function fetchSubagentTree(
+  rootId: string,
+  queryClient: QueryClient,
+): Promise<SubagentTreeData> {
+  const dirtyKey = subagentTreeDirtyKey(rootId);
+  let rows: DescendantSessionWire[] = [];
+  let startedAt = Date.now();
+  // Bounded so a storm of events cannot keep this fetch running; the next
+  // event refreshes again anyway.
+  /* oxlint-disable no-await-in-loop */
+  for (let pass = 0; pass < 3; pass++) {
+    startedAt = Date.now();
+    const dirtyAtStart = queryClient.getQueryData<number>(dirtyKey) ?? 0;
+    rows = await fetchDescendantRows(rootId);
+    if ((queryClient.getQueryData<number>(dirtyKey) ?? 0) === dirtyAtStart) break;
+  }
+  /* oxlint-enable no-await-in-loop */
   const byParent = new Map<string, ChildSessionInfo[]>([[rootId, []]]);
   for (const row of withoutSettledArchived(rows)) {
     setSessionParent(row.id, row.parent_session_id);
@@ -384,14 +428,17 @@ export async function fetchSubagentTree(
     // empty one so a childless row never asks the server.
     if (row.depth < MAX_TREE_DEPTH && !byParent.has(row.id)) byParent.set(row.id, []);
   }
+  // Pages come in primary-key order; the rail shows siblings newest-first.
+  const createdAt = new Map(rows.map((row) => [row.id, row.created_at ?? 0]));
   for (const [parentId, children] of byParent) {
+    children.sort((a, b) => (createdAt.get(b.id) ?? 0) - (createdAt.get(a.id) ?? 0));
     // A list patched by a live event while this fetch was in flight is newer
     // than the snapshot; leave it for the next refresh.
     const updatedAt = queryClient.getQueryState(childSessionsQueryKey(parentId))?.dataUpdatedAt;
     if (updatedAt !== undefined && updatedAt > startedAt) continue;
     queryClient.setQueryData(childSessionsQueryKey(parentId), children);
   }
-  return { parents: [...byParent.keys()] };
+  return { members: [rootId, ...rows.map((row) => row.id)] };
 }
 
 /**

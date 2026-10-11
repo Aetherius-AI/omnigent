@@ -48,9 +48,22 @@ function legacyRow(id: string) {
   };
 }
 
-/** A minimal ``descendants`` wire row under ``parentId`` at ``depth``. */
+let nextCreatedAt = 1_000;
+
+/**
+ * A minimal ``descendants`` wire row under ``parentId`` at ``depth``. Each
+ * row is created later than the one built before it, so siblings listed
+ * earlier in a fixture are older.
+ */
 function descendantRow(id: string, parentId: string, depth: number, archived = false) {
-  return { ...legacyRow(id), parent_session_id: parentId, depth, archived };
+  nextCreatedAt += 1;
+  return {
+    ...legacyRow(id),
+    parent_session_id: parentId,
+    depth,
+    created_at: nextCreatedAt,
+    archived,
+  };
 }
 
 function treePage(rows: ReturnType<typeof descendantRow>[], hasMore = false) {
@@ -135,7 +148,8 @@ describe("useSubagentTree", () => {
 
     expect(result.current.isLoading).toBe(true);
     expect(result.current.fromTree).toBe(true);
-    await waitFor(() => expect(ids(result.current.children)).toEqual(["conv_b", "conv_a"]));
+    // Siblings render newest-first whatever order the page listed them in.
+    await waitFor(() => expect(ids(result.current.children)).toEqual(["conv_a", "conv_b"]));
     expect(result.current.fromTree).toBe(true);
     expect(fetchedUrls()).toEqual(["/v1/sessions/conv_root/descendants?max_depth=3&limit=1000"]);
     expect(cachedIds(queryClient, "conv_a")).toEqual(["conv_a1"]);
@@ -152,10 +166,28 @@ describe("useSubagentTree", () => {
 
     const { result } = renderHook(() => useSubagentTree("conv_root"), { wrapper });
 
-    await waitFor(() => expect(ids(result.current.children)).toEqual(["conv_a", "conv_b"]));
+    await waitFor(() => expect(ids(result.current.children)).toEqual(["conv_b", "conv_a"]));
     expect(fetchedUrls()).toEqual([
       "/v1/sessions/conv_root/descendants?max_depth=3&limit=1000",
       "/v1/sessions/conv_root/descendants?max_depth=3&limit=1000&after=conv_a",
+    ]);
+  });
+
+  it("walks past an empty page that continues", async () => {
+    // WHY: rows outside the subtree or below the depth cap are dropped from a
+    // page but still advance the cursor, so an empty page is not the end.
+    vi.mocked(authenticatedFetch)
+      .mockResolvedValueOnce(
+        jsonResponse({ object: "list", data: [], last_id: "conv_filtered", has_more: true }),
+      )
+      .mockResolvedValueOnce(treePage([descendantRow("conv_a", "conv_root", 1)]));
+
+    const { result } = renderHook(() => useSubagentTree("conv_root"), { wrapper });
+
+    await waitFor(() => expect(ids(result.current.children)).toEqual(["conv_a"]));
+    expect(fetchedUrls()).toEqual([
+      "/v1/sessions/conv_root/descendants?max_depth=3&limit=1000",
+      "/v1/sessions/conv_root/descendants?max_depth=3&limit=1000&after=conv_filtered",
     ]);
   });
 
@@ -183,6 +215,8 @@ describe("useSubagentTree", () => {
       treePage([
         descendantRow("conv_leaf", "conv_mid", 2),
         descendantRow("conv_settled", "conv_root", 1, true),
+        // Archiving does not end a session's work: a busy archived leaf stays.
+        { ...descendantRow("conv_working", "conv_root", 1, true), busy: true },
         descendantRow("conv_mid", "conv_root", 1, true),
       ]),
     );
@@ -191,7 +225,7 @@ describe("useSubagentTree", () => {
       wrapper: wrapperFor(queryClient),
     });
 
-    await waitFor(() => expect(ids(result.current.children)).toEqual(["conv_mid"]));
+    await waitFor(() => expect(ids(result.current.children)).toEqual(["conv_mid", "conv_working"]));
     expect(cachedIds(queryClient, "conv_mid")).toEqual(["conv_leaf"]);
     expect(queryClient.getQueryData(childSessionsQueryKey("conv_settled"))).toBeUndefined();
   });
@@ -253,12 +287,12 @@ describe("useSubagentTree", () => {
       );
     renderRail(queryClient);
     await waitFor(() => expect(screen.getByTestId("row-conv_a")).toHaveTextContent("conv_a1"));
-    expect(screen.getByTestId("root")).toHaveTextContent("conv_b,conv_a");
+    expect(screen.getByTestId("root")).toHaveTextContent("conv_a,conv_b");
 
     await act(() => invalidateChildSessions(queryClient, "conv_a"));
 
     await waitFor(() =>
-      expect(screen.getByTestId("row-conv_a")).toHaveTextContent("conv_a2,conv_a1"),
+      expect(screen.getByTestId("row-conv_a")).toHaveTextContent("conv_a1,conv_a2"),
     );
     expect(fetchedUrls()).toEqual([
       "/v1/sessions/conv_root/descendants?max_depth=3&limit=1000",
@@ -267,6 +301,64 @@ describe("useSubagentTree", () => {
     expect(cachedIds(queryClient, "conv_root")).toHaveLength(22);
     expect(cachedIds(queryClient, "conv_root")).toContain("conv_b");
     expect(cachedIds(queryClient, "conv_b")).toEqual(["conv_b1"]);
+  });
+
+  it("re-reads the subtree when a nested list is refreshed while it was loading", async () => {
+    // WHY: an event for a nested parent can arrive after the server built the
+    // in-flight snapshot; the rows beneath never fetch for themselves, so the
+    // tree must read again or the new descendant stays hidden.
+    const queryClient = newQueryClient();
+    queryClient.setQueryData(childSessionsQueryKey("conv_root"), [
+      { ...legacyRow("conv_a"), task_summary: null, labels: {}, last_task_error: null },
+    ] as ChildSessionInfo[]);
+    let release: (response: Response) => void = () => {};
+    vi.mocked(authenticatedFetch)
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            release = resolve;
+          }),
+      )
+      .mockResolvedValueOnce(
+        treePage([descendantRow("conv_a", "conv_root", 1), descendantRow("conv_a1", "conv_a", 2)]),
+      );
+    renderRail(queryClient);
+    await waitFor(() => expect(authenticatedFetch).toHaveBeenCalledTimes(1));
+
+    await act(() => invalidateChildSessions(queryClient, "conv_a"));
+    release(treePage([descendantRow("conv_a", "conv_root", 1)]));
+
+    await waitFor(() => expect(screen.getByTestId("row-conv_a")).toHaveTextContent("conv_a1"));
+    expect(fetchedUrls()).toEqual([
+      "/v1/sessions/conv_root/descendants?max_depth=3&limit=1000",
+      "/v1/sessions/conv_root/descendants?max_depth=3&limit=1000",
+    ]);
+  });
+
+  it("reloads the subtree for a hidden archived parent that gains live work", async () => {
+    // WHY: a settled archived session is hidden from the rail but still part
+    // of the tree; a child spawned under it must bring both back into view.
+    const queryClient = newQueryClient();
+    vi.mocked(authenticatedFetch)
+      .mockResolvedValueOnce(treePage([descendantRow("conv_a", "conv_root", 1, true)]))
+      .mockResolvedValueOnce(
+        treePage([
+          descendantRow("conv_a", "conv_root", 1, true),
+          descendantRow("conv_a1", "conv_a", 2),
+        ]),
+      );
+    renderRail(queryClient);
+    await waitFor(() => expect(authenticatedFetch).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(cachedIds(queryClient, "conv_root")).toEqual([]));
+
+    await act(() => invalidateChildSessions(queryClient, "conv_a"));
+
+    await waitFor(() => expect(screen.getByTestId("root")).toHaveTextContent("conv_a"));
+    await waitFor(() => expect(screen.getByTestId("row-conv_a")).toHaveTextContent("conv_a1"));
+    expect(fetchedUrls()).toEqual([
+      "/v1/sessions/conv_root/descendants?max_depth=3&limit=1000",
+      "/v1/sessions/conv_root/descendants?max_depth=3&limit=1000",
+    ]);
   });
 
   it("leaves a list patched while the subtree was loading for the next refresh", async () => {
