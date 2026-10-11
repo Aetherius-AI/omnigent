@@ -1,9 +1,5 @@
-"""E2E: a session search that outlives the client's deadline reads as a timeout.
-
-The browser holds the ``GET /v1/sessions?search_query=`` request open so only the
-client's ``SEARCH_FETCH_TIMEOUT_MS`` deadline can end it; the palette must then say
-the search timed out rather than the generic "Couldn't load sessions.".
-"""
+"""E2E: a search request held past the client's ``SEARCH_FETCH_TIMEOUT_MS`` must
+read as a timed-out search in the palette, not as "Couldn't load sessions."."""
 
 from __future__ import annotations
 

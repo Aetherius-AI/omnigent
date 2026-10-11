@@ -8,10 +8,7 @@ export function isAbortTimeout(error: unknown): boolean {
   return error instanceof DOMException && error.name === "TimeoutError";
 }
 
-/**
- * A search that ended at a deadline (the client's fetch timeout or the server's
- * `query_timeout`) rather than failing: not retried, and shown as timed out.
- */
+/** True when a search ended at a deadline (client fetch timeout or server `query_timeout`). */
 export function isSearchTimeoutError(error: unknown): boolean {
   return isAbortTimeout(error) || (error instanceof ApiError && error.code === QUERY_TIMEOUT_CODE);
 }

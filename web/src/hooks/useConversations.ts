@@ -77,15 +77,9 @@ export const CONNECTED_STREAM_REFETCH_INTERVAL_MS = 60_000;
 export const DISCONNECTED_STREAM_REFETCH_INTERVAL_MS = 45_000;
 
 /**
- * Client-side deadline for a *search* page fetch (`?search_query=`). Content
- * search is an unindexed substring scan server-side, so on a large deployment
- * it can run for tens of seconds and the palette would otherwise sit on
- * "Searching…" (the fetch has no timeout of its own). Aborting here settles
- * the query with a `TimeoutError` the palette shows as a timed-out search.
- * Deliberately shorter than the server's own search `statement_timeout` (see
- * `_SEARCH_STATEMENT_TIMEOUT_MS` in the store) so the client gives up first.
- * Only search fetches are bounded — ordinary (indexed) list pagination is left
- * untouched.
+ * Client deadline for a search page fetch (`?search_query=`); the abort's
+ * `TimeoutError` is what the palette shows as a timed-out search. Shorter than
+ * the server's search `statement_timeout`. Plain list pages stay unbounded.
  */
 export const SEARCH_FETCH_TIMEOUT_MS = 10_000;
 
@@ -675,10 +669,8 @@ export function useConversations(
           meta: { snapshot: true },
         }
       : {}),
-    // A timed-out search (the client's deadline or the server's statement
-    // timeout) is terminal — retrying would re-run the same slow search (default
-    // 3×) and prolong the spinner. Any other failure keeps React Query's default
-    // retry behaviour.
+    // A timed-out search (either deadline) is terminal: a retry would re-run the
+    // same slow search. Other failures keep React Query's default retries.
     // A stale cursor is terminal for that page param too: the row it names is
     // gone, so a retry reissues the same doomed cursor. The restart below
     // recovers it instead.
