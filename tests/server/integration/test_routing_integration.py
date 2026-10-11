@@ -2338,13 +2338,80 @@ async def test_an_off_gateway_host_never_offers_the_static_table_to_a_turn(
         patch.object(smart_routing_module, "fetch_runner_models", _empty_catalog),
     ):
         async with echo_runner_client() as runner_client:
-            await orchestration_module._forward_event_to_runner(
+            item_id = await orchestration_module._forward_event_to_runner(
                 conv.id, conv, body, conv_store, runner_client
             )
 
+    # The decline is not a block: the prompt is still persisted and forwarded,
+    # it just carries no ``databricks-*`` pin.
+    assert item_id, item_id
     assert judge.offered == [], judge.offered
     decisions = _routing_decisions(conv_store, conv.id)
     assert decisions == [], [d.data for d in decisions]
     refreshed = conv_store.get_conversation(conv.id)
     assert refreshed is not None
     assert refreshed.model_override is None, refreshed.model_override
+
+
+@pytest.mark.parametrize("harness", ["claude-sdk", "pi"])
+async def test_the_route_turn_hook_declines_the_static_table_off_gateway(
+    client: httpx.AsyncClient,
+    db_uri: str,
+    harness: str,
+) -> None:
+    """The first-prompt hook is the composer path's HTTP sibling: off the gateway
+    a subscription-only SDK/Pi prompt is allowed through unrouted, never pinned to
+    an unreachable ``databricks-*`` id. The host reports only Claude/Codex (all
+    ``False``); ``claude-sdk``/``pi`` are absent, so the static table is withheld
+    even though the built-in judge would gladly offer one. No runner is bound, so
+    the live catalog is empty — the static table is the only other source."""
+    agent = await create_test_agent(
+        client,
+        name=f"routing-turn-off-gateway-{harness}",
+        executor={"type": "omnigent", "config": {"harness": harness}},
+        include_llm=False,
+    )
+    created = await client.post(
+        "/v1/sessions",
+        json={"agent_id": agent["id"], "cost_control_mode_override": "on"},
+    )
+    assert created.status_code == 201, created.text
+    session_id = created.json()["id"]
+
+    off_gateway = _host_reporting_gateway(
+        {
+            "claude-native": False,
+            "native-claude": False,
+            "codex": False,
+            "codex-native": False,
+            "native-codex": False,
+        }
+    )
+    judge = FakeRoutingClient(
+        RoutingResult(model="databricks-claude-haiku-4-5", rationale="cheap", harness=harness)
+    )
+
+    with (
+        patch("omnigent.runtime._globals._caps", new=FakeCaps(routing_client=judge)),
+        patch.object(
+            orchestration_module, "_session_routing_host", AsyncMock(return_value=off_gateway)
+        ),
+    ):
+        route = await client.post(
+            f"/v1/sessions/{session_id}/hooks/route-turn",
+            json={"harness": harness, "prompt": "hi"},
+        )
+
+    assert route.status_code == 200, route.text
+    payload = route.json()
+    assert payload["action"] == "allow", payload
+    assert not payload.get("model"), payload
+    assert judge.offered == [], judge.offered
+    conv_store = SqlAlchemyConversationStore(db_uri)
+    # A decline chip may be recorded (routing was on but no candidate was
+    # reachable), but nothing is routed: no model is pinned and the route-once
+    # label stays unclaimed, so the next prompt is free to ask again.
+    refreshed = conv_store.get_conversation(session_id)
+    assert refreshed is not None
+    assert refreshed.model_override is None, refreshed.model_override
+    assert not refreshed.labels.get(ROUTING_DECISION_LABEL_KEY)
