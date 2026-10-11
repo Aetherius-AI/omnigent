@@ -1678,11 +1678,6 @@ async function uploadFileBlocks(
 const FLASH_DURATION_MS = 1500;
 const WORKSPACE_INVALIDATION_DEBOUNCE_MS = 750;
 
-// Databricks Apps' ingress hard-caps a single HTTP/2 stream at ~5 min, so the
-// client must re-subscribe to the session SSE stream when it's dropped. The
-// reconnect backoff is the policy shared with the session-updates socket
-// (reconnectBackoff.ts) and applies only between consecutive failed opens; a
-// drop after a healthy connection reconnects instantly.
 export const ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS = 60_000;
 export const ACTIVE_SESSION_STATUS_RECONCILE_TIMEOUT_MS = 15_000;
 // After the stream reconnects, `reconcileActiveSessionStatus` runs once

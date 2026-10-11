@@ -162,38 +162,6 @@ function setPageHidden(hidden: boolean): void {
   Object.defineProperty(document, "hidden", { configurable: true, get: () => hidden });
 }
 
-describe("sessionUpdatesSocket reconnect backoff while the page is hidden", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-    FakeWebSocket.instances = [];
-    vi.stubGlobal("WebSocket", FakeWebSocket as unknown as typeof WebSocket);
-  });
-
-  afterEach(() => {
-    sessionUpdatesSocket.stop();
-    Reflect.deleteProperty(document, "visibilityState");
-    Reflect.deleteProperty(document, "hidden");
-    vi.clearAllTimers();
-    vi.unstubAllGlobals();
-    vi.useRealTimers();
-  });
-
-  it("waits longer than the visible 5 s cap before redialing an unreachable server", () => {
-    setPageHidden(true);
-    sessionUpdatesSocket.start();
-    // Every dial is refused before it opens, until the backoff has reached its cap.
-    for (let attempt = 0; attempt < 6; attempt += 1) {
-      latestWs().close();
-      vi.advanceTimersByTime(RECONNECT_CEILING_MS);
-    }
-
-    const dialsBefore = FakeWebSocket.instances.length;
-    latestWs().close();
-    vi.advanceTimersByTime(RECONNECT_CEILING_MS);
-    expect(FakeWebSocket.instances.length).toBe(dialsBefore);
-  });
-});
-
 describe("sessionUpdatesSocket visibility-aware reconnect", () => {
   const HIDDEN_FLOOR_MS = HIDDEN_RECONNECT_MS - HIDDEN_RECONNECT_JITTER_MS;
 
@@ -259,19 +227,35 @@ describe("sessionUpdatesSocket visibility-aware reconnect", () => {
     expect(FakeWebSocket.instances.length).toBe(2);
   });
 
-  it("does not redial on visibility while a socket is already open or connecting", () => {
+  it("does not redial on visibility while a socket is open or still connecting", () => {
     sessionUpdatesSocket.start();
+    // Still connecting (no open yet): a visibility flip must not open a second socket.
+    fireVisibilityChange(true);
+    fireVisibilityChange(false);
+    expect(FakeWebSocket.instances.length).toBe(1);
+
+    // And once open, a visibility flip still leaves the single live socket alone.
     latestWs().open();
     fireVisibilityChange(true);
     fireVisibilityChange(false);
     expect(FakeWebSocket.instances.length).toBe(1);
   });
 
-  it("ramps from the base again after stop() and a fresh start()", () => {
+  it("drops a pending hidden retry on stop() and ramps from the base after start()", () => {
+    setPageHidden(true);
     sessionUpdatesSocket.start();
-    refuseDials(6);
-    sessionUpdatesSocket.stop();
+    latestWs().close();
+    // The hidden retry is scheduled 45-60 s out, so nothing redials within the cap.
+    vi.advanceTimersByTime(RECONNECT_CEILING_MS);
+    expect(FakeWebSocket.instances.length).toBe(1);
 
+    sessionUpdatesSocket.stop();
+    // stop() cancels that pending hidden retry: nothing dials even past the cadence.
+    vi.advanceTimersByTime(HIDDEN_RECONNECT_MS * 2);
+    expect(FakeWebSocket.instances.length).toBe(1);
+
+    // A fresh start() ramps from the base again, not the saturated hidden delay.
+    setPageHidden(false);
     sessionUpdatesSocket.start();
     const dialsBefore = FakeWebSocket.instances.length;
     latestWs().close();

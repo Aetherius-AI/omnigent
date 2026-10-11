@@ -1,11 +1,6 @@
-// Reconnect backoff shared by the session-updates WebSocket
-// (sessionUpdatesSocket.ts) and the chat SSE pump (chatStore.ts).
-//
-// A visible page ramps 250 ms → 5 s with ±50% jitter so tabs reconnecting after
-// a server blip don't synchronize into a thundering herd. A hidden page has
-// nothing on screen to refresh, so every retry it schedules waits 45–60 s: a
-// backgrounded tab or mobile WebView facing an unreachable server wakes the
-// radio about once a minute instead of every few seconds.
+// Reconnect backoff shared by the session-updates WebSocket and the chat SSE
+// pump. A visible page ramps 250 ms → 5 s with ±50% jitter; a hidden page has
+// nothing to refresh, so every retry waits a stretched 45–60 s.
 
 export const RECONNECT_BASE_MS = 250;
 export const RECONNECT_MAX_MS = 5_000;

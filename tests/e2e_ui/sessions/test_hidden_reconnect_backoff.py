@@ -18,10 +18,10 @@ from playwright.sync_api import Browser, BrowserContext, Page, Playwright, expec
 
 from tests.e2e_ui.mobile.test_android_shell import _ANDROID_SHELL_INIT_SCRIPT
 
-# Refused dials (250 ms base, doubling) reach the 5 s cap in ~4 s, so a 10 s
-# visible ramp sees at least three dials when the loop is running.
-_RAMP_MS = 10_000
-_MIN_RAMP_DIALS = 3
+# While visible the socket keeps redialing (250 ms base, doubling, 5 s cap), so
+# a 15 s window sees at least two fresh dials even once the backoff saturates.
+_RAMP_MS = 15_000
+_MIN_RAMP_DIALS = 2
 # The visible cadence fits 4-5 dials in this window; a hidden-aware loop fires
 # at most the one retry already pending when the page hid.
 _HIDDEN_WINDOW_MS = 20_000
@@ -85,11 +85,12 @@ _HIDE_PAGE_SCRIPT = """
 """
 
 
-def _closed_loopback_port() -> int:
-    """Return a loopback port nothing listens on, so dials are refused at once."""
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
+def _reserve_closed_loopback_port() -> socket.socket:
+    """Bind a loopback port without listening and keep it reserved for the test's
+    lifetime, so dials to it are refused at once and no other process can take it."""
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    return probe
 
 
 def _new_android_phone_page(
@@ -106,9 +107,14 @@ def _new_android_phone_page(
         options["record_video_dir"] = record_dir
         options["record_video_size"] = options["viewport"]
     context = browser.new_context(**options)
-    context.add_init_script(_ANDROID_SHELL_INIT_SCRIPT)
-    context.add_init_script(_WS_PROBE_SCRIPT.replace("__CLOSED_PORT__", str(closed_port)))
-    return context, context.new_page()
+    try:
+        context.add_init_script(_ANDROID_SHELL_INIT_SCRIPT)
+        context.add_init_script(_WS_PROBE_SCRIPT.replace("__CLOSED_PORT__", str(closed_port)))
+        page = context.new_page()
+    except Exception:
+        context.close()
+        raise
+    return context, page
 
 
 def test_hidden_page_stretches_session_updates_reconnect(
@@ -123,17 +129,23 @@ def test_hidden_page_stretches_session_updates_reconnect(
     :param seeded_session: ``(base_url, session_id)`` of a runner-bound session.
     """
     base_url, session_id = seeded_session
-    context, page = _new_android_phone_page(playwright, browser, _closed_loopback_port())
+    reserved_port = _reserve_closed_loopback_port()
+    context, page = _new_android_phone_page(
+        playwright, browser, int(reserved_port.getsockname()[1])
+    )
     try:
         page.goto(f"{base_url}/c/{session_id}")
         expect(page.get_by_label("Message the agent")).to_be_visible(timeout=30_000)
         expect(page.locator(".app-shell")).to_have_attribute("data-android-native", "true")
 
+        # Count only the dials fired during the ramp window, not those accrued
+        # since page load, so the gate proves the loop is still redialing now.
+        dials_before_ramp = page.evaluate("() => window.__updatesDials.length")
         page.wait_for_timeout(_RAMP_MS)
-        ramp_dials = page.evaluate("() => window.__updatesDials.length")
+        ramp_dials = page.evaluate("() => window.__updatesDials.length") - dials_before_ramp
         assert ramp_dials >= _MIN_RAMP_DIALS, (
             "expected the socket to keep redialing the unreachable updates endpoint "
-            f"while visible, saw {ramp_dials} dials in {_RAMP_MS} ms"
+            f"while visible, saw {ramp_dials} new dials in {_RAMP_MS} ms"
         )
 
         hidden_at = page.evaluate(_HIDE_PAGE_SCRIPT)
@@ -148,3 +160,4 @@ def test_hidden_page_stretches_session_updates_reconnect(
         )
     finally:
         context.close()
+        reserved_port.close()
