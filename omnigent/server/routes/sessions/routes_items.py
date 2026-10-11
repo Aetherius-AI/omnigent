@@ -11,9 +11,7 @@ from fastapi import (
 )
 
 from omnigent.entities import Conversation
-from omnigent.errors import StaleCursorError
 from omnigent.runtime.policies.approval import _ELICITATION_MODE
-from omnigent.runtime.policies.builder import load_session_tree
 from omnigent.server._elicitation_registry import (
     _harness_elicitation_owners,
     _harness_elicitation_registry,
@@ -54,57 +52,69 @@ from omnigent.stores.permission_store import PermissionStore
 
 
 def _descendant_rows(
-    tree: list[Conversation],
+    page: list[Conversation],
     session_id: str,
+    conversation_store: ConversationStore,
     *,
     max_depth: int | None,
-    include_archived: bool,
 ) -> list[tuple[Conversation, str, int]]:
     """
-    Order the sub-agent subtree under *session_id* breadth-first.
+    Keep the rows of one spawn-tree page that sit under *session_id*.
 
-    Children of each node come newest-first (``created_at`` desc, then id),
-    matching ``GET …/child_sessions``. Archived rows are walked regardless
-    of ``include_archived`` so live work under an archived node is still
-    reached; without it, an archived row is kept only while a live
-    descendant needs it to keep the listing connected.
+    The store lists a tree newest-first, so a page can hold rows from sibling
+    branches (when *session_id* is not the tree root) or below the depth cap.
+    A row's depth is the length of its parent chain up to *session_id*;
+    chains resolve against the page first and then against the store, one
+    batched read per tree level, so the work is bounded by the page size
+    times the tree height rather than by the tree size.
 
-    :param tree: Every conversation in the spawn tree, archived included.
-    :param session_id: Subtree root; excluded from the result.
-    :param max_depth: Deepest level to return, or ``None`` for all.
-    :param include_archived: Also keep archived rows with no live descendant.
-    :returns: ``(conversation, parent_id, depth)`` triples in listing order.
+    :param page: One store page of the tree's ``sub_agent`` conversations.
+    :param session_id: Subtree root; never part of the result.
+    :param conversation_store: Store for ancestors outside the page.
+    :param max_depth: Deepest level to keep, or ``None`` for all.
+    :returns: ``(conversation, parent_id, depth)`` triples in page order.
     """
-    children_by_parent: dict[str, list[Conversation]] = {}
-    for conv in tree:
-        if conv.kind == "sub_agent" and conv.parent_conversation_id is not None:
-            children_by_parent.setdefault(conv.parent_conversation_id, []).append(conv)
-    for siblings in children_by_parent.values():
-        siblings.sort(key=lambda conv: (conv.created_at, conv.id), reverse=True)
+    known: dict[str, Conversation] = {conv.id: conv for conv in page}
+    # Depth below session_id; None marks a row outside its subtree.
+    depth_of: dict[str, int | None] = {session_id: 0}
+    unresolved = list(page)
+    while unresolved:
+        missing: set[str] = set()
+        still_unresolved: list[Conversation] = []
+        for conv in unresolved:
+            chain: list[str] = []
+            cursor: str | None = conv.id
+            while cursor is not None and cursor not in depth_of:
+                chain.append(cursor)
+                ancestor = known.get(cursor)
+                if ancestor is None:
+                    missing.add(cursor)
+                    break
+                cursor = ancestor.parent_conversation_id
+            else:
+                # A chain ending at the tree's top never met session_id.
+                base = None if cursor is None else depth_of[cursor]
+                for steps, conv_id in enumerate(reversed(chain), start=1):
+                    depth_of[conv_id] = None if base is None else base + steps
+                continue
+            still_unresolved.append(conv)
+        if not missing:
+            break
+        fetched = conversation_store.get_conversations(sorted(missing))
+        known.update(fetched)
+        for conv_id in missing - fetched.keys():
+            # Deleted mid-walk: nothing beneath it can be placed in the tree.
+            depth_of[conv_id] = None
+        unresolved = still_unresolved
 
     rows: list[tuple[Conversation, str, int]] = []
-    seen = {session_id}
-    frontier = [session_id]
-    depth = 0
-    while frontier and (max_depth is None or depth < max_depth):
-        depth += 1
-        next_frontier: list[str] = []
-        for parent_id in frontier:
-            for conv in children_by_parent.get(parent_id, []):
-                if conv.id in seen:
-                    continue
-                seen.add(conv.id)
-                rows.append((conv, parent_id, depth))
-                next_frontier.append(conv.id)
-        frontier = next_frontier
-    if include_archived:
-        return rows
-    # Reverse breadth-first order visits every child before its parent.
-    live_below: set[str] = set()
-    for conv, parent_id, _ in reversed(rows):
-        if not conv.archived or conv.id in live_below:
-            live_below.add(parent_id)
-    return [row for row in rows if not row[0].archived or row[0].id in live_below]
+    for conv in page:
+        depth = depth_of.get(conv.id)
+        if depth is None or depth < 1 or (max_depth is not None and depth > max_depth):
+            continue
+        if conv.parent_conversation_id is not None:
+            rows.append((conv, conv.parent_conversation_id, depth))
+    return rows
 
 
 def register_items_routes(
@@ -277,41 +287,43 @@ def register_items_routes(
         limit: int = Query(default=100, ge=1, le=1000),
         after: str | None = Query(default=None),
         max_depth: int | None = Query(default=None, ge=1),
-        include_archived: bool = Query(default=False),
     ) -> PaginatedList:
         """
         List every sub-agent session under a parent, at any depth.
 
-        The whole subtree comes back as one flat, breadth-first listing of
+        The subtree comes back as a flat, cursor-paginated listing of
         :class:`DescendantSessionSummary` rows, each naming its own parent
-        and depth, so a client rebuilds the tree with one request per
-        page instead of one ``GET …/child_sessions`` per node (the REPL
-        navigator and the SDK ``child_sessions_tree`` / ``subtree_busy``
-        helpers read this). The rows come from the spawn tree the store
-        indexes by ``root_conversation_id``; children of each node are
-        newest-first, matching :func:`list_child_sessions`.
+        and depth, so a client rebuilds the tree with one request per page
+        instead of one ``GET …/child_sessions`` per node (the REPL
+        navigator, the SDK ``child_sessions_tree`` / ``subtree_busy``
+        helpers and the web Agents panel read this).
 
-        Archived nodes are walked regardless, so live work under an
-        archived session stays visible. Without ``include_archived`` an
-        archived row is returned only while a live descendant needs it to
-        keep the listing connected.
+        Each page is one store page of the spawn tree the store indexes by
+        ``root_conversation_id``, newest-first across the whole tree, so
+        the rows read per request stay bounded by ``limit`` rather than by
+        the tree size. Rows from sibling branches or below ``max_depth``
+        are dropped from the page but still advance the cursor: a page can
+        be shorter than ``limit`` — even empty — while ``has_more`` is
+        true, and ``last_id`` is always the cursor for the next page.
+
+        Archived descendants are listed too, flagged ``archived``, so live
+        work under an archived session stays reachable; clients hide the
+        settled archived rows they do not want to show.
 
         :param request: Inbound HTTP request; carries the caller identity
             used to authorize READ on ``session_id``.
         :param session_id: Session whose subtree to list, e.g.
             ``"conv_abc123"``. Not itself included in the result.
-        :param limit: Maximum rows per page (1-1000, default 100).
-        :param after: Cursor — return rows after this session id in the
-            listing order, e.g. ``"conv_child123"``.
+        :param limit: Maximum rows read per page (1-1000, default 100).
+        :param after: Cursor — the ``last_id`` of the previous page, e.g.
+            ``"conv_child123"``.
         :param max_depth: Deepest level to return (1 = direct children
             only). ``None`` returns the whole subtree.
-        :param include_archived: Also return archived descendants that
-            have no live descendant of their own.
         :returns: A :class:`PaginatedList` of
             :class:`DescendantSessionSummary` objects.
         :raises OmnigentError: 404 if no readable session exists at
-            ``session_id``; 400 ``stale_cursor`` if ``after`` names a row
-            that is no longer listed.
+            ``session_id``; 400 ``stale_cursor`` if the row ``after`` names
+            was deleted.
         """
         user_id = _get_user_id(request, auth_provider)
         access = await _require_access_and_level(
@@ -322,24 +334,21 @@ def register_items_routes(
             parent = await asyncio.to_thread(conversation_store.get_conversation, session_id)
         if parent is None:
             raise _session_not_found()
-        tree = await asyncio.to_thread(
-            load_session_tree, session_id, conversation_store, parent.root_conversation_id
+        page = await asyncio.to_thread(
+            conversation_store.list_conversations,
+            limit=limit,
+            after=after,
+            kind="sub_agent",
+            root_conversation_id=parent.root_conversation_id,
+            include_archived=True,
         )
-        rows = _descendant_rows(
-            tree, session_id, max_depth=max_depth, include_archived=include_archived
+        rows = await asyncio.to_thread(
+            _descendant_rows, page.data, session_id, conversation_store, max_depth=max_depth
         )
-        start = 0
-        if after is not None:
-            position = next((i for i, (conv, _, _) in enumerate(rows) if conv.id == after), None)
-            if position is None:
-                raise StaleCursorError(after)
-            start = position + 1
-        data = await _descendant_session_summaries_from_conversations(
-            rows[start : start + limit], conversation_store
-        )
+        data = await _descendant_session_summaries_from_conversations(rows, conversation_store)
         return PaginatedList(
             data=data,
-            first_id=data[0].id if data else None,
-            last_id=data[-1].id if data else None,
-            has_more=start + limit < len(rows),
+            first_id=page.first_id,
+            last_id=page.last_id,
+            has_more=page.has_more,
         )

@@ -1225,7 +1225,9 @@ def _tree_handler(
         start = 0
         after = request.url.params.get("after")
         if after is not None:
-            start = next(i for i, row in enumerate(rows) if row["id"] == after) + 1
+            position = next((i for i, row in enumerate(rows) if row["id"] == after), None)
+            assert position is not None, f"unknown after cursor: {after!r}"
+            start = position + 1
         limit = page_size or int(request.url.params.get("limit", "100"))
         page = rows[start : start + limit]
         return httpx.Response(
@@ -1313,15 +1315,151 @@ async def test_child_sessions_tree_follows_the_page_cursor() -> None:
 
 
 @pytest.mark.asyncio
-async def test_child_sessions_tree_sends_include_archived() -> None:
+async def test_child_sessions_tree_hides_settled_archived_rows_unless_asked() -> None:
+    """The server lists archived descendants flagged; by default the walk keeps an
+    archived node only while live work sits beneath it, so the tree the REPL
+    renders stays connected without resurfacing settled archived sub-agents."""
+    tree = {
+        "root": [_child("mid", archived=True), _child("settled", archived=True)],
+        "mid": [_child("leaf", archived=False)],
+    }
     requests: list[httpx.Request] = []
-    ns, client = _make_namespace(_tree_handler({"root": []}, requests=requests))
+    ns, client = _make_namespace(_tree_handler(tree, requests=requests))
     try:
-        await ns.child_sessions_tree("root", include_archived=True)
+        pruned = await ns.child_sessions_tree("root")
+        everything = await ns.child_sessions_tree("root", include_archived=True)
     finally:
         await client.aclose()
 
-    assert requests[0].url.params["include_archived"] == "true"
+    assert [n["id"] for n in pruned] == ["mid", "leaf"]
+    assert [n["id"] for n in everything] == ["mid", "settled", "leaf"]
+    assert all("include_archived" not in r.url.params for r in requests)
+
+
+def _legacy_handler(
+    tree: dict[str, list[dict[str, Any]]],
+    *,
+    page_size: int,
+    requests: list[httpx.Request],
+    missing_session: str | None = None,
+) -> Callable[[httpx.Request], httpx.Response]:
+    """Serve a server that predates ``…/descendants``: that path is an unknown
+    route (FastAPI's bare 404) while ``…/child_sessions`` pages per node."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        parts = request.url.path.split("/")
+        if parts[-1] == "descendants":
+            return httpx.Response(404, json={"detail": "Not Found"})
+        assert parts[-1] == "child_sessions"
+        parent = parts[-2]
+        if parent == missing_session:
+            return httpx.Response(
+                404, json={"error": {"code": "not_found", "message": "Session not found"}}
+            )
+        rows = tree.get(parent, [])
+        start = 0
+        after = request.url.params.get("after")
+        if after is not None:
+            position = next((i for i, row in enumerate(rows) if row["id"] == after), None)
+            assert position is not None, f"unknown after cursor: {after!r}"
+            start = position + 1
+        page = rows[start : start + page_size]
+        return httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "data": page,
+                "first_id": page[0]["id"] if page else None,
+                "last_id": page[-1]["id"] if page else None,
+                "has_more": start + page_size < len(rows),
+            },
+        )
+
+    return handler
+
+
+@pytest.mark.asyncio
+async def test_child_sessions_tree_falls_back_to_paged_child_lists_on_an_older_server() -> None:
+    """Against a server without ``…/descendants`` the walk still assembles the
+    tree from ``…/child_sessions``, following each node's cursor rather than
+    stopping at its first page."""
+    tree = {
+        "root": [_child("a"), _child("b"), _child("c")],
+        "a": [_child("a1")],
+        "a1": [_child("a1x")],
+    }
+    requests: list[httpx.Request] = []
+    ns, client = _make_namespace(_legacy_handler(tree, page_size=2, requests=requests))
+    try:
+        nodes = await ns.child_sessions_tree("root", limit=2)
+    finally:
+        await client.aclose()
+
+    assert [(n["id"], n["parent_id"], n["depth"]) for n in nodes] == [
+        ("a", "root", 1),
+        ("b", "root", 1),
+        ("c", "root", 1),
+        ("a1", "a", 2),
+        ("a1x", "a1", 3),
+    ]
+    assert [r.url.path.rsplit("/", 1)[1] for r in requests[:1]] == ["descendants"]
+    # Depth-3 rows are leaves of the capped walk, so a1x is never expanded.
+    legacy = [(r.url.path.split("/")[-2], r.url.params.get("after")) for r in requests[1:]]
+    assert legacy == [
+        ("root", None),
+        ("root", "b"),
+        ("a", None),
+        ("b", None),
+        ("c", None),
+        ("a1", None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_child_sessions_tree_keeps_a_missing_session_404() -> None:
+    """A 404 for the session itself is not mistaken for a missing route: the
+    fallback walk raises the genuine not-found error."""
+    requests: list[httpx.Request] = []
+    ns, client = _make_namespace(
+        _legacy_handler({}, page_size=5, requests=requests, missing_session="gone")
+    )
+    try:
+        with pytest.raises(OmnigentError) as excinfo:
+            await ns.child_sessions_tree("gone")
+    finally:
+        await client.aclose()
+
+    assert excinfo.value.status_code == 404
+    assert excinfo.value.code == "not_found"
+
+
+@pytest.mark.asyncio
+async def test_child_sessions_tree_stops_on_a_cursor_that_does_not_advance() -> None:
+    """A server that keeps answering ``has_more`` with the same ``last_id`` must
+    not spin the walk forever."""
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            json={
+                "data": [_child("a", parent_session_id="root", depth=1)],
+                "last_id": "a",
+                "has_more": True,
+            },
+        )
+
+    ns, client = _make_namespace(handler)
+    try:
+        nodes = await ns.child_sessions_tree("root")
+    finally:
+        await client.aclose()
+
+    assert [n["id"] for n in nodes] == ["a"]
+    assert calls == 2
 
 
 @pytest.mark.asyncio

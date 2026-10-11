@@ -1587,7 +1587,7 @@
           },
           "archived": {
             "default": false,
-            "description": "Whether this session is archived. Archived rows appear when the caller passes `include_archived=true`, or when a live descendant needs them to keep the listing connected.",
+            "description": "Whether this session is archived. Archived rows are listed like any other so a live sub-agent under an archived session stays reachable; clients decide which to show.",
             "title": "Archived",
             "type": "boolean"
           },
@@ -13811,7 +13811,7 @@
     },
     "/v1/sessions/{session_id}/descendants": {
       "get": {
-        "description": "List every sub-agent session under a parent, at any depth.\n\nThe whole subtree comes back as one flat, breadth-first listing of\n`DescendantSessionSummary` rows, each naming its own parent\nand depth, so a client rebuilds the tree with one request per\npage instead of one `GET \u2026/child_sessions` per node (the REPL\nnavigator and the SDK `child_sessions_tree` / `subtree_busy`\nhelpers read this). The rows come from the spawn tree the store\nindexes by `root_conversation_id`; children of each node are\nnewest-first, matching `list_child_sessions`.\n\nArchived nodes are walked regardless, so live work under an\narchived session stays visible. Without `include_archived` an\narchived row is returned only while a live descendant needs it to\nkeep the listing connected.\n\n**Returns:** A `PaginatedList` of `DescendantSessionSummary` objects.\n\n**Raises**\n\n- `OmnigentError` \u2014 404 if no readable session exists at `session_id`; 400 `stale_cursor` if `after` names a row that is no longer listed.",
+        "description": "List every sub-agent session under a parent, at any depth.\n\nThe subtree comes back as a flat, cursor-paginated listing of\n`DescendantSessionSummary` rows, each naming its own parent\nand depth, so a client rebuilds the tree with one request per page\ninstead of one `GET \u2026/child_sessions` per node (the REPL\nnavigator, the SDK `child_sessions_tree` / `subtree_busy`\nhelpers and the web Agents panel read this).\n\nEach page is one store page of the spawn tree the store indexes by\n`root_conversation_id`, newest-first across the whole tree, so\nthe rows read per request stay bounded by `limit` rather than by\nthe tree size. Rows from sibling branches or below `max_depth`\nare dropped from the page but still advance the cursor: a page can\nbe shorter than `limit` \u2014 even empty \u2014 while `has_more` is\ntrue, and `last_id` is always the cursor for the next page.\n\nArchived descendants are listed too, flagged `archived`, so live\nwork under an archived session stays reachable; clients hide the\nsettled archived rows they do not want to show.\n\n**Returns:** A `PaginatedList` of `DescendantSessionSummary` objects.\n\n**Raises**\n\n- `OmnigentError` \u2014 404 if no readable session exists at `session_id`; 400 `stale_cursor` if the row `after` names was deleted.",
         "operationId": "list_descendant_sessions_v1_sessions__session_id__descendants_get",
         "parameters": [
           {
@@ -13825,7 +13825,7 @@
             }
           },
           {
-            "description": "Maximum rows per page (1-1000, default 100).",
+            "description": "Maximum rows read per page (1-1000, default 100).",
             "in": "query",
             "name": "limit",
             "required": false,
@@ -13838,7 +13838,7 @@
             }
           },
           {
-            "description": "Cursor \u2014 return rows after this session id in the listing order, e.g. `\"conv_child123\"`.",
+            "description": "Cursor \u2014 the `last_id` of the previous page, e.g. `\"conv_child123\"`.",
             "in": "query",
             "name": "after",
             "required": false,
@@ -13870,17 +13870,6 @@
                 }
               ],
               "title": "Max Depth"
-            }
-          },
-          {
-            "description": "Also return archived descendants that have no live descendant of their own.",
-            "in": "query",
-            "name": "include_archived",
-            "required": false,
-            "schema": {
-              "default": false,
-              "title": "Include Archived",
-              "type": "boolean"
             }
           }
         ],

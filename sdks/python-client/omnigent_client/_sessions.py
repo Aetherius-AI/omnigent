@@ -42,6 +42,23 @@ from ._timeouts import _SSE_TIMEOUT
 # rollup, the CLI ``↓`` tree, and the web Agents rail all walk the same depth.
 _DEFAULT_SUBTREE_DEPTH = 3
 
+
+def _without_settled_archived(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop archived rows unless live work sits beneath them.
+
+    :param nodes: Breadth-first descendant rows carrying ``parent_id``.
+    :returns: The same rows minus archived ones with no live descendant.
+    """
+    live_below: set[str] = set()
+    # Reverse breadth-first order visits every child before its parent.
+    for row in reversed(nodes):
+        if not row.get("archived") or row["id"] in live_below:
+            parent_id = row.get("parent_id")
+            if isinstance(parent_id, str):
+                live_below.add(parent_id)
+    return [row for row in nodes if not row.get("archived") or row["id"] in live_below]
+
+
 # Adapter that validates a single SSE ``data:`` payload against the
 # typed discriminated union. Built once at module load — TypeAdapter
 # caches the validator. ``ServerStreamEvent`` is a Pydantic-discriminated
@@ -969,6 +986,10 @@ class SessionsNamespace:
         ``parent_session_id``, so callers can reconstruct the hierarchy.
         Rows come breadth-first; *session_id* itself is not included.
 
+        A server that predates the route answers 404 for it; the walk then
+        falls back to paging ``GET …/child_sessions`` once per node, which
+        cannot see archived intermediates but still lists every child.
+
         This is the shared walk behind both the CLI ``↓`` sub-agent tree
         (the REPL seeds its registry from this) and :meth:`subtree_busy`.
 
@@ -976,9 +997,9 @@ class SessionsNamespace:
         :param max_depth: Levels to descend (1 = direct children only). Capped
             to match the CLI tree and the web Agents rail.
         :param limit: Page size per request (1-1000).
-        :param include_archived: Also return archived descendants. By default
-            an archived session is listed only while a live descendant needs
-            it to keep the tree connected.
+        :param include_archived: Also return archived descendants that have
+            settled. By default an archived session is listed only while a
+            live descendant needs it to keep the tree connected.
         :returns: Flattened list of descendant summary dicts, each carrying a
             ``parent_id`` key (empty when the session has no sub-agents).
         :raises StaleCursorError: If the row a page cursor named was deleted
@@ -986,13 +1007,25 @@ class SessionsNamespace:
         :raises OmnigentError: On non-2xx status (404 when the session does not
             exist).
         """
+        try:
+            nodes = await self._descendants(session_id, max_depth=max_depth, limit=limit)
+        except OmnigentError as exc:
+            if exc.status_code != 404:
+                raise
+            # Either the server lacks the route or the session is gone; the
+            # per-node walk raises the genuine 404 in the latter case.
+            nodes = await self._child_sessions_walk(session_id, max_depth=max_depth, limit=limit)
+        return nodes if include_archived else _without_settled_archived(nodes)
+
+    async def _descendants(
+        self, session_id: str, *, max_depth: int, limit: int
+    ) -> builtins.list[dict[str, Any]]:
+        """Page through ``GET …/descendants`` and return the rows breadth-first."""
         nodes: list[dict[str, Any]] = []
         seen: set[str] = {session_id}
         after: str | None = None
         while True:
             params: dict[str, str | int] = {"limit": limit, "max_depth": max_depth}
-            if include_archived:
-                params["include_archived"] = "true"
             if after is not None:
                 params["after"] = after
             resp = await self._http.get(
@@ -1011,9 +1044,57 @@ class SessionsNamespace:
                 seen.add(sid)
                 nodes.append({**row, "parent_id": row.get("parent_session_id")})
             last_id = body.get("last_id")
-            if not body.get("has_more") or not isinstance(last_id, str):
+            if not body.get("has_more") or not isinstance(last_id, str) or last_id == after:
                 break
             after = last_id
+        # Pages arrive newest-first across the tree; callers expect levels in order.
+        nodes.sort(key=lambda row: row["depth"] if isinstance(row.get("depth"), int) else 0)
+        return nodes
+
+    async def _child_sessions_walk(
+        self, session_id: str, *, max_depth: int, limit: int
+    ) -> builtins.list[dict[str, Any]]:
+        """Breadth-first walk over ``GET …/child_sessions``, following each node's cursor."""
+        nodes: list[dict[str, Any]] = []
+        seen: set[str] = {session_id}
+        frontier: list[str] = [session_id]
+        depth = 0
+        while frontier and depth < max_depth:
+            depth += 1
+            next_frontier: list[str] = []
+            for parent_id in frontier:
+                after: str | None = None
+                while True:
+                    params: dict[str, str | int] = {"limit": limit}
+                    if after is not None:
+                        params["after"] = after
+                    resp = await self._http.get(
+                        f"{self._base}/v1/sessions/{parent_id}/child_sessions",
+                        params=params,
+                    )
+                    raise_for_status(resp.status_code, response_body(resp))
+                    body = require_json_object(
+                        resp, "GET /v1/sessions/{session_id}/child_sessions"
+                    )
+                    data = body.get("data", [])
+                    for row in data if isinstance(data, list) else []:
+                        if not isinstance(row, dict):
+                            continue
+                        sid = row.get("id")
+                        if not isinstance(sid, str) or sid in seen:
+                            continue
+                        seen.add(sid)
+                        nodes.append({**row, "parent_id": parent_id, "depth": depth})
+                        next_frontier.append(sid)
+                    last_id = body.get("last_id")
+                    if (
+                        not body.get("has_more")
+                        or not isinstance(last_id, str)
+                        or last_id == after
+                    ):
+                        break
+                    after = last_id
+            frontier = next_frontier
         return nodes
 
     async def subtree_busy(

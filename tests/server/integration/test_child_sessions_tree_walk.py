@@ -8,6 +8,8 @@ so the request count and the returned descendants reflect the real
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 import httpx
@@ -37,14 +39,20 @@ async def _create_child(
     return str(resp.json()["id"])
 
 
-def _count_requests(client: httpx.AsyncClient) -> list[str]:
+@contextmanager
+def _recorded_requests(client: httpx.AsyncClient) -> Iterator[list[str]]:
+    """Collect every request URL the client sends inside the block."""
     seen: list[str] = []
 
     async def record(request: httpx.Request) -> None:
         seen.append(str(request.url))
 
-    client.event_hooks = {"request": [record]}
-    return seen
+    previous = client.event_hooks
+    client.event_hooks = {**previous, "request": [*previous.get("request", []), record]}
+    try:
+        yield seen
+    finally:
+        client.event_hooks = previous
 
 
 async def test_child_sessions_tree_request_count_is_independent_of_tree_size(
@@ -60,9 +68,8 @@ async def test_child_sessions_tree_request_count_is_independent_of_tree_size(
             grandchild = await _create_child(client, root["agent_id"], child, f"worker:c{ci}g{gi}")
             expected.add(grandchild)
 
-    requests = _count_requests(client)
-    nodes = await SessionsNamespace(client, "http://test").child_sessions_tree(root["id"])
-    client.event_hooks = {}
+    with _recorded_requests(client) as requests:
+        nodes = await SessionsNamespace(client, "http://test").child_sessions_tree(root["id"])
 
     assert {n["id"] for n in nodes} == expected
     assert len(requests) <= 2, (

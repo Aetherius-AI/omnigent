@@ -136,14 +136,14 @@ def test_child_terminal_status_settles_out_of_count() -> None:
 class _FakeSessions:
     """Minimal stand-in for ``client.sessions`` exposing ``child_sessions_tree``.
 
-    Flattens an in-memory parent→children map breadth-first the way the
-    server's ``…/descendants`` listing does — each row tagged with its
-    ``parent_id`` — and records every ``(root, max_depth)`` the REPL asks for.
+    Flattens an in-memory parent→children map breadth-first the way
+    ``child_sessions_tree`` returns the ``…/descendants`` listing — each row
+    tagged with its ``parent_id`` — and records every call's arguments.
     """
 
     def __init__(self, by_parent: dict[str, list[dict[str, Any]]]) -> None:
         self._by_parent = by_parent
-        self.calls: list[tuple[str, int]] = []
+        self.calls: list[tuple[str, int, int, bool]] = []
 
     async def child_sessions_tree(
         self,
@@ -153,7 +153,7 @@ class _FakeSessions:
         limit: int = 100,
         include_archived: bool = False,
     ) -> list[dict[str, Any]]:
-        self.calls.append((session_id, max_depth))
+        self.calls.append((session_id, max_depth, limit, include_archived))
         nodes: list[dict[str, Any]] = []
         frontier = [session_id]
         depth = 0
@@ -208,7 +208,7 @@ async def test_refresh_subagent_tree_seeds_grandchildren_from_one_fetch() -> Non
     ]
     assert host.active_subagent_count() == 2
     # The whole tree came from a single root-scoped request.
-    assert client.sessions.calls == [("conv_main", 3)]
+    assert client.sessions.calls == [("conv_main", 3, 100, False)]
 
 
 @pytest.mark.asyncio
@@ -225,7 +225,9 @@ async def test_refresh_subagent_tree_respects_depth_cap() -> None:
     await _refresh_subagent_tree(client, host, "conv_main", max_depth=1)  # type: ignore[arg-type]
     ids = {n.session_id for n, _ in host.subagent_tree()}
     assert ids == {"c1"}  # only depth-1 children surfaced
-    assert client.sessions.calls == [("conv_main", 1)]  # the cap travels with the request
+    assert client.sessions.calls == [
+        ("conv_main", 1, 100, False)
+    ]  # the cap travels with the request
 
 
 def test_run_repl_wires_subagent_plumbing() -> None:

@@ -856,9 +856,9 @@ class DescendantSessionSummary(ChildSessionSummary):
 
     :param depth: Levels below the requested session: ``1`` for its
         direct children, ``2`` for grandchildren, and so on.
-    :param archived: Whether this session is archived. Archived rows
-        appear when the caller passes ``include_archived=true``, or when
-        a live descendant needs them to keep the listing connected.
+    :param archived: Whether this session is archived. Archived rows are
+        listed like any other so a live sub-agent under an archived
+        session stays reachable; clients decide which to show.
     """
 
     depth: int
