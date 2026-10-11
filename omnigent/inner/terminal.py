@@ -2346,12 +2346,16 @@ class TerminalInstance:
                     self.session_key,
                     exc,
                 )
+                interval = base_interval
                 consecutive_capture_failures = 0
                 self._probe_failures.clear()
                 if stop_event.wait(_TMUX_PROBE_START_FAILURE_BACKOFF_SECONDS):
                     return
                 continue
             if capture is None:
+                # A failed capture can mean the pane is dying; confirm at the
+                # base cadence so a backed-off watcher reports exit promptly.
+                interval = base_interval
                 session_exists = self._tmux_session_exists_sync()
                 if session_exists is not False:
                     consecutive_capture_failures = 0
@@ -2492,11 +2496,11 @@ class TerminalInstance:
         """
         Capture the pane and its dead/alive state in one tmux invocation.
 
-        Folds the former per-tick ``list-panes`` liveness probe and
-        ``capture-pane`` into a single ``tmux list-panes ; capture-pane`` so an
-        idle watcher forks tmux once per tick instead of twice. The first line
-        is ``#{pane_dead} #{pane_dead_status}`` (recorded for
-        :meth:`last_exit_status`); the remainder is the pane capture.
+        A single ``tmux list-panes ; capture-pane`` reports liveness and
+        contents together, so an idle watcher forks tmux once per tick rather
+        than twice. The first line is ``#{pane_dead} #{pane_dead_status}``
+        (recorded for :meth:`last_exit_status`); the remainder is the pane
+        capture.
 
         With ``remain-on-exit on`` the private server survives the inner CLI's
         exit, so a dead pane — not a vanished server — is how a normal or early

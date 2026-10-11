@@ -1412,7 +1412,9 @@ def test_threaded_watcher_wakes_promptly_from_backoff(
         # fresh backed-off sleep so the wake has the full ceiling to beat.
         time.sleep(1.5)
         start = ticks["n"]
+        align_deadline = time.monotonic() + 10.0
         while ticks["n"] == start:
+            assert time.monotonic() < align_deadline, "watcher stopped ticking"
             time.sleep(0.01)
         before = ticks["n"]
         woke_at = time.monotonic()
@@ -1425,6 +1427,54 @@ def test_threaded_watcher_wakes_promptly_from_backoff(
         instance._stop_idle_watcher_thread()
     assert ticks["n"] > before
     assert latency < 1.0  # far below the ~2s sleep the wake interrupted
+
+
+def test_threaded_idle_watcher_confirms_exit_at_base_cadence_after_backoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A backed-off watcher drops to the base cadence to confirm an exit.
+
+    Each failure-confirmation retry must run at the base interval, not the
+    grown backoff ceiling, so a lost terminal is reported within the base
+    window instead of several ceiling-length sleeps.
+    """
+    monkeypatch.setattr(terminal_mod, "_IDLE_POLL_BACKOFF_AFTER_SECONDS", 0.03)
+    monkeypatch.setattr(terminal_mod, "_IDLE_POLL_BACKOFF_MAX_MULTIPLE", 1000.0)
+    monkeypatch.setattr(terminal_mod, "_IDLE_POLL_MAX_INTERVAL_SECONDS", 0.5)
+    monkeypatch.setenv(terminal_mod._IDLE_POLL_BACKOFF_ENV_VAR, "1")
+    instance = _idle_watch_instance(tmp_path)
+    instance._tmux_session_exists_sync = lambda: False  # type: ignore[method-assign]
+    quiet = {"n": 0}
+    failing = {"on": False}
+    first_fail = {"at": 0.0}
+
+    def _capture() -> tuple[bool, str] | None:
+        if not failing["on"]:
+            quiet["n"] += 1
+            return (False, "steady")
+        if first_fail["at"] == 0.0:
+            first_fail["at"] = time.monotonic()
+        return None
+
+    instance._capture_pane_state_or_none = _capture  # type: ignore[method-assign]
+    exited = threading.Event()
+    instance.start_idle_watcher_thread(on_exit=exited.set, poll_interval_s=0.01)
+    try:
+        # Let the quiet pane grow the interval to the 0.5s ceiling, then fail
+        # so the exit is confirmed from a fully backed-off state.
+        time.sleep(1.0)
+        quiet_captures = quiet["n"]
+        failing["on"] = True
+        assert exited.wait(timeout=2.0)
+        exit_latency = time.monotonic() - first_fail["at"]
+    finally:
+        instance._stop_idle_watcher_thread()
+    # Backoff engaged: far fewer than the ~100 base-cadence ticks a 1s quiet
+    # window would otherwise produce.
+    assert quiet_captures <= 15
+    # Exit confirmed within the base window, not three ceiling-length sleeps.
+    assert exit_latency < 0.4
+    assert instance.running is False
 
 
 @pytest.mark.asyncio

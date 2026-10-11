@@ -674,6 +674,38 @@ async def test_claude_native_backoff_predicate_tracks_file_idle(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_non_claude_native_terminal_has_no_idle_poll_backoff_gate(
+    tmp_path: Path,
+) -> None:
+    """Only claude-native wires the status-file backoff gate.
+
+    Other native roles have no status file to arbitrate their turn edge, so
+    the watcher receives no backoff predicate and pane quiescence alone
+    governs their polling.
+    """
+    terminal_registry = TerminalRegistry()
+    registry = SessionResourceRegistry(terminal_registry=terminal_registry)
+    registry.set_session_status_publisher(lambda *_args: None)
+    registry.set_terminal_exit_publisher(lambda *_args: None)
+    instance = make_test_terminal_instance("codex", "main", tmp_path)
+    terminal_registry._by_conversation.setdefault("conv_codex_gate", {})[("codex", "main")] = (
+        instance
+    )
+    captured: dict[str, object] = {"backoff": "unset"}
+
+    def _capture_watcher(
+        *_args: object, idle_poll_backoff_allowed: object | None = None, **_kwargs: object
+    ) -> None:
+        captured["backoff"] = idle_poll_backoff_allowed
+
+    instance.start_idle_watcher_thread = _capture_watcher  # type: ignore[method-assign]
+    await registry.observe_required_terminal(
+        "conv_codex_gate", "codex", "main", instance, resource_role=CODEX_NATIVE_TERMINAL_ROLE
+    )
+    assert captured["backoff"] is None
+
+
+@pytest.mark.asyncio
 async def test_pane_publishes_no_status_while_the_file_owns_it(tmp_path: Path) -> None:
     """An active file poller is the only status source; the pane publishes none.
 

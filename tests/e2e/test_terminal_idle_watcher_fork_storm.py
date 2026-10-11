@@ -42,8 +42,8 @@ from tests.e2e.conftest import (
 from tests.e2e.test_host_e2e import _spawn_host_daemon, _SpawnedHostDaemon, _wait_for_host_online
 
 pytestmark = pytest.mark.skipif(
-    shutil.which("tmux") is None,
-    reason="terminal idle-watcher e2e needs tmux on PATH",
+    not sys.platform.startswith("linux") or shutil.which("tmux") is None,
+    reason="idle-watcher fork-rate e2e needs Linux /proc accounting and tmux on PATH",
 )
 
 TERMINAL_SESSION_KEYS = ("s0", "s1", "s2")
@@ -173,7 +173,7 @@ def read_ledger(ledger: Path) -> list[TmuxSpawn]:
 
 @contextlib.contextmanager
 def _path_prefixed(bin_dir: Path) -> Iterator[None]:
-    original = os.environ["PATH"]
+    original = os.environ.get("PATH", "")
     os.environ["PATH"] = f"{bin_dir}{os.pathsep}{original}"
     try:
         yield
@@ -374,6 +374,10 @@ def test_idle_terminals_do_not_fork_storm_tmux(
     finally:
         journey.close()
 
+    assert sample.spawns, (
+        "no tmux spawns recorded; shim/ledger instrumentation failed and the "
+        "fork-rate assertion would otherwise pass vacuously"
+    )
     rate = sample.rate_per_terminal(len(journey.terminals))
     socket_names = {socket: name for name, socket in journey.terminals.items()}
     per_terminal = {socket_names.get(s, s): n for s, n in sample.per_socket.items()}
