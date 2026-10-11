@@ -202,7 +202,7 @@ def _send_and_capture_marker(
             captured = httpx.get(f"{mock_url}/mock/requests", timeout=10, trust_env=False).json()[
                 "requests"
             ]
-        except httpx.HTTPError:
+        except (httpx.HTTPError, json.JSONDecodeError, KeyError):
             captured = []
         if any(nonce in (blob := json.dumps(req)) and marker in blob for req in captured):
             return True
