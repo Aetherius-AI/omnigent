@@ -982,6 +982,53 @@ async def test_handle_launch_refuses_when_workspace_parent_missing(
     _cleanup_host(host)
 
 
+async def test_handle_launch_refuses_when_workspace_mkdir_denied(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    Verify that a workspace the host cannot recreate is refused, not launched.
+
+    The leaf is gone and its parent exists, so recreation is attempted, but
+    the host lacks permission to create it (for example a read-only mount).
+    The refusal must report ``workspace_missing`` and spawn no runner. Raising
+    the error keeps the test deterministic regardless of CI privileges.
+    """
+    host = _make_host_process()
+    workspace = tmp_path / "worktrees" / "feature-x"
+    workspace.parent.mkdir(parents=True)
+    assert not workspace.exists()
+
+    frame = HostLaunchRunnerFrame(
+        request_id="req_005",
+        binding_token="test_token_ghi",
+        workspace=str(workspace),
+        session_id="session_mkdir_denied",
+    )
+
+    def _deny_mkdir(*_args: object, **_kwargs: object) -> None:
+        raise PermissionError(errno.EACCES, "Permission denied", str(workspace))
+
+    def _unexpected_popen(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("a workspace that cannot be recreated must not spawn a runner")
+
+    with (
+        caplog.at_level(logging.WARNING, logger="omnigent.host.connect"),
+        patch("omnigent.host.connect.subprocess.Popen", side_effect=_unexpected_popen),
+        patch.object(Path, "mkdir", _deny_mkdir),
+    ):
+        result = await host._handle_launch(frame)
+
+    assert isinstance(result, HostLaunchRunnerResultFrame)
+    assert result.status == "failed", "a workspace that cannot be recreated must be refused"
+    assert result.error_code == WORKSPACE_MISSING_ERROR_CODE
+    assert result.workspace_recreated is False
+    assert result.runner_id is None
+    assert not workspace.exists(), "a denied mkdir must leave no workspace behind"
+
+    _cleanup_host(host)
+
+
 @pytest.mark.parametrize("binding_token", ["token_xyz", "", "   "])
 async def test_handle_launch_fails_for_bad_workspace(
     tmp_path: Path,
