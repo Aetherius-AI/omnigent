@@ -355,10 +355,10 @@ async def test_child_usage_close_bounds_hung_model_recovery(
 
 
 @pytest.mark.asyncio
-async def test_child_usage_close_tolerates_child_discovery_during_recovery(
+async def test_child_usage_close_flushes_child_discovered_during_recovery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Resume replay may discover a nested child while shutdown iterates children."""
+    """A nested child discovered by resume replay mid-shutdown still gets its usage posted."""
     client = _RecordingClient()
     state = _child_state()
     _record_child_usage(client, state, "thread_child", "conv_child")
@@ -370,19 +370,20 @@ async def test_child_usage_close_tolerates_child_discovery_during_recovery(
         child_thread_id: str,
         forwarder_state: fwd._CodexForwarderState,
     ) -> None:
+        if child_thread_id != "thread_child":
+            return
         assert child_session_id == "conv_child"
-        assert child_thread_id == "thread_child"
         forwarder_state.note_child_thread("thread_nested", "conv_nested")
-        forwarder_state.usage_coalescer_for_child_thread(
-            client,
-            thread_id="thread_nested",
-            session_id="conv_nested",
-        )
+        forwarder_state.child_models_by_thread["thread_nested"] = "nested-model"
+        _record_child_usage(client, forwarder_state, "thread_nested", "conv_nested")
 
     monkeypatch.setattr(fwd, "_recover_child_usage_model", discover_nested_child)
 
     await state.close_child_usage_coalescers(client)
 
+    assert [(url, body["data"]["model"]) for url, body in _usage_posts(client)] == [
+        ("/v1/sessions/conv_nested/events", "nested-model")
+    ]
     assert state.child_usage_coalescers_by_thread == {}
 
 

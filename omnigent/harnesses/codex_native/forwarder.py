@@ -120,8 +120,8 @@ _DELTA_FLUSH_GRACE_SECONDS = 1.0
 # Bound the post-shedding wait below the runner's 10s cancellation budget and
 # above the delta POST deadline.
 _DELTA_MARKER_TIMEOUT_SECONDS = 6.0
-# Bound per-child model recovery at shutdown so teardown cannot stall on a
-# hung thread/resume.
+# Shared budget for recovering child models at shutdown so teardown cannot
+# stall on hung thread/resume calls.
 _CHILD_MODEL_RECOVERY_CLOSE_TIMEOUT_SECONDS = 3.0
 _EXTERNAL_REASONING_EFFORT_CHANGE_TYPE = "external_reasoning_effort_change"
 # Context-compaction progress edge. Publishes the same
@@ -679,16 +679,26 @@ class _CodexForwarderState:
 
     async def close_child_usage_coalescers(self, client: httpx.AsyncClient) -> None:
         """Recover child models, then flush usage owned by this connection."""
-        model_recovery_available = True
-        for thread_id, coalescer in list(self.child_usage_coalescers_by_thread.items()):
+        loop = asyncio.get_running_loop()
+        recovery_deadline = loop.time() + _CHILD_MODEL_RECOVERY_CLOSE_TIMEOUT_SECONDS
+        closed: set[str] = set()
+        # Recovery replays a child's resume, which can register nested children
+        # mid-loop, so keep draining until every coalescer has been closed.
+        while True:
+            unclosed = [t for t in self.child_usage_coalescers_by_thread if t not in closed]
+            if not unclosed:
+                break
+            thread_id = unclosed[0]
+            closed.add(thread_id)
+            coalescer = self.child_usage_coalescers_by_thread[thread_id]
             child_session_id = self.session_for_child_thread(thread_id)
             if (
-                model_recovery_available
-                and coalescer.has_pending_usage
+                coalescer.has_pending_usage
                 and child_session_id is not None
+                and loop.time() < recovery_deadline
             ):
                 try:
-                    async with asyncio.timeout(_CHILD_MODEL_RECOVERY_CLOSE_TIMEOUT_SECONDS):
+                    async with asyncio.timeout_at(recovery_deadline):
                         await _recover_child_usage_model(
                             client,
                             child_session_id=child_session_id,
@@ -696,7 +706,6 @@ class _CodexForwarderState:
                             forwarder_state=self,
                         )
                 except TimeoutError:
-                    model_recovery_available = False
                     _logger.warning(
                         "Codex child model recovery timed out at shutdown: thread_id=%s",
                         thread_id,
@@ -2354,13 +2363,15 @@ async def supervise_forwarder(
                 mcp_settle_timer.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await mcp_settle_timer
+            # Stop the subscribe/replay producer before flushing, so a late
+            # replay cannot record into a coalescer after it has closed.
+            subscribe_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await subscribe_task
             await target.delta_coalescer.close()
             await target.usage_coalescer.close()
             await forwarder_state.close_child_usage_coalescers(ap_client)
             await target.elicitation_tracker.close()
-            subscribe_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await subscribe_task
             side_chat_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await side_chat_task
