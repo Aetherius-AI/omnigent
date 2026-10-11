@@ -887,7 +887,7 @@ async def test_handle_launch_recreates_missing_workspace(
 ) -> None:
     """
     Verify that a launch whose workspace directory has been deleted recreates
-    it (parents included) and spawns the runner there instead of refusing.
+    the leaf and spawns the runner there instead of refusing.
 
     A worktree tool or the agent itself can remove the directory between
     turns; refusing would block the session until someone recreates it by
@@ -896,8 +896,10 @@ async def test_handle_launch_recreates_missing_workspace(
     host = _make_host_process()
     host._auth_token_factory = lambda: "host-bootstrap-bearer"
     host._auth_token_factory_resolved = True
+    # The pruned-worktree case: the container survives, only the leaf is gone.
     workspace = tmp_path / "worktrees" / "feature-x"
-    assert not workspace.parent.exists()
+    workspace.parent.mkdir(parents=True)
+    assert not workspace.exists()
 
     frame = HostLaunchRunnerFrame(
         request_id="req_003",
@@ -941,6 +943,41 @@ async def test_handle_launch_recreates_missing_workspace(
     assert result.error_code is None
     assert result.workspace_recreated is True
     assert str(workspace) in caplog.text, "the host should log which directory it recreated"
+
+    _cleanup_host(host)
+
+
+async def test_handle_launch_refuses_when_workspace_parent_missing(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    Verify that a workspace whose parent chain is gone is refused, not rebuilt.
+
+    Only the leaf is recreated. A missing parent signals a stale path or an
+    unmounted volume rather than a pruned worktree, so the host must refuse
+    with ``workspace_missing`` instead of creating a fresh tree on the wrong
+    filesystem.
+    """
+    host = _make_host_process()
+    workspace = tmp_path / "gone" / "feature-x"
+    assert not workspace.parent.exists()
+
+    frame = HostLaunchRunnerFrame(
+        request_id="req_004",
+        binding_token="test_token_def",
+        workspace=str(workspace),
+        session_id="session_missing_parent",
+    )
+
+    with caplog.at_level(logging.WARNING, logger="omnigent.host.connect"):
+        result = await host._handle_launch(frame)
+
+    assert isinstance(result, HostLaunchRunnerResultFrame)
+    assert result.status == "failed", "a missing parent chain must be refused, not rebuilt"
+    assert result.error_code == WORKSPACE_MISSING_ERROR_CODE
+    assert result.workspace_recreated is False
+    assert not workspace.exists(), "the host must not create a workspace under a missing parent"
 
     _cleanup_host(host)
 

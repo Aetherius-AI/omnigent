@@ -1340,6 +1340,7 @@ def test_host_retry_session_recovers_killed_runner(
                 host_proc.wait()
 
 
+@pytest.mark.min_runner_version("0.18.0")
 def test_host_relaunch_recreates_deleted_workspace(
     live_server: str,
     http_client: httpx.Client,

@@ -3837,7 +3837,9 @@ async def test_concurrent_relaunches_are_single_flight(
     the #5182 incident) — every extra spawn a leaked generation.
 
     Mutation check: remove the relaunch lock / re-read short-circuit and
-    two launch frames arrive — the exactly-one assertion fails.
+    two launch frames arrive — the exactly-one assertion fails. The host
+    reports ``workspace_recreated`` so the same lock must also leave exactly
+    one recovery notice, never one per rider.
     """
     from omnigent.runtime import set_runner_client
     from omnigent.server.routes import sessions as sessions_module
@@ -3906,6 +3908,7 @@ async def test_concurrent_relaunches_are_single_flight(
                                     request_id=frame.request_id,
                                     status="launched",
                                     runner_id="runner_from_host",
+                                    workspace_recreated=True,
                                 )
                             ),
                         }
@@ -3932,6 +3935,20 @@ async def test_concurrent_relaunches_are_single_flight(
     assert len(launches) == 1, (
         f"concurrent relaunches must single-flight into ONE host.launch_runner; "
         f"got {len(launches)} — each extra spawn is a leaked runner (#5182)"
+    )
+
+    # The one launch recreated the workspace; the notice persists under the
+    # relaunch lock, so the rider must not duplicate it.
+    items = await client.get(f"/v1/sessions/{session_id}/items")
+    assert items.status_code == 200, items.text
+    recreated = [
+        item
+        for item in items.json()["data"]
+        if item.get("type") == "error" and item.get("code") == "workspace_recreated"
+    ]
+    assert len(recreated) == 1, (
+        f"concurrent relaunches must leave exactly one workspace-recreated notice; "
+        f"got {len(recreated)}"
     )
 
 

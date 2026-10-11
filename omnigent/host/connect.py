@@ -1893,11 +1893,13 @@ class HostProcess:
         workspace = Path(frame.workspace).expanduser()
         workspace_recreated = False
         if not workspace.is_dir():
-            # The directory can vanish between turns (a pruned worktree, an
-            # agent's rm -rf). Recreate it so the session keeps working; the
-            # server tells the user it is now empty. Refuse only if that fails.
+            # The leaf can vanish between turns (a pruned worktree, an agent's
+            # rm -rf); recreate it so the session keeps working and the server
+            # tells the user it is now empty. A missing *parent* signals a stale
+            # path or unmounted volume, so refuse rather than build the session
+            # on the wrong filesystem.
             try:
-                await asyncio.to_thread(workspace.mkdir, parents=True, exist_ok=True)
+                await asyncio.to_thread(workspace.mkdir, exist_ok=True)
             except OSError as exc:
                 _logger.warning(
                     "Cannot recreate missing workspace %r for session %r: %s",
