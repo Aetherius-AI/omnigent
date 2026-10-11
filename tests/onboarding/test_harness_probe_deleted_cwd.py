@@ -23,9 +23,12 @@ import omnigent._platform as _platform
 from omnigent.onboarding import harness_install as hi
 from omnigent.onboarding.provider_config import ANTHROPIC_FAMILY
 
-# Fake ``claude``: aborts from a deleted cwd like the real binary, else reports
-# a supported version and a logged-in status.
-_FAKE_CLAUDE = f"""#!{sys.executable}
+# Fake ``claude`` body: aborts from a deleted cwd like the real binary, else
+# reports a supported version and a logged-in status. Run via a short
+# ``/bin/sh`` launcher (see ``_install_fake_claude``) so the launcher's shebang
+# stays well under the kernel limit and tolerates an interpreter path with
+# spaces.
+_FAKE_CLAUDE_IMPL = """\
 import json
 import os
 import sys
@@ -40,7 +43,7 @@ args = sys.argv[1:]
 if args == ["--version"]:
     print("2.1.268 (Claude Code)")
 elif args == ["auth", "status"]:
-    print(json.dumps({{"loggedIn": True}}))
+    print(json.dumps({"loggedIn": True}))
 else:
     sys.exit(2)
 """
@@ -50,8 +53,12 @@ def _install_fake_claude(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     """Put a fake ``claude`` first on ``PATH`` and clear the on-disk fallback."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
+    impl = bin_dir / "claude_impl.py"
+    impl.write_text(_FAKE_CLAUDE_IMPL, encoding="utf-8")
     cli = bin_dir / "claude"
-    cli.write_text(_FAKE_CLAUDE, encoding="utf-8")
+    # Quote the interpreter and body paths so a space in either survives; the
+    # ``/bin/sh`` shebang itself stays short enough to avoid the length cap.
+    cli.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{impl}" "$@"\n', encoding="utf-8")
     cli.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
     # A developer's real claude under a fallback dir must not stand in for the fake.
@@ -98,12 +105,12 @@ def test_login_probe_survives_deleted_daemon_cwd(
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX deleted-cwd semantics")
 def test_cli_probe_cwd_only_overrides_when_the_cwd_is_gone(tmp_path: Path) -> None:
-    """A valid cwd is inherited (``None``); a removed one falls back to a dir."""
+    """A valid cwd is inherited (``None``); a removed one falls back to home."""
     assert hi._cli_probe_cwd() is None
+    expected_home = str(Path.home())
     with _deleted_cwd(tmp_path):
         fallback = hi._cli_probe_cwd()
-    assert fallback is not None
-    assert Path(fallback).is_dir()
+    assert fallback == expected_home
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX deleted-cwd semantics")
