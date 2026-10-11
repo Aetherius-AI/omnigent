@@ -3010,8 +3010,6 @@ class SqlAlchemyConversationStore(ConversationStore):
             if title is not None:
                 stmt = stmt.where(SqlConversation.title == title)
             if search_query:
-                # %, _ and backslash in the user's text are literal characters,
-                # not LIKE wildcards or the escape.
                 pattern = substring_like_pattern(search_query.lower())
                 title_match = func.lower(SqlConversation.title).like(
                     pattern, escape=LIKE_ESCAPE_CHAR

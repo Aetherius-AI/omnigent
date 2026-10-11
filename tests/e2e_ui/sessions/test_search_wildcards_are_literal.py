@@ -1,12 +1,14 @@
-"""Browser e2e: the sidebar Search palette matches ``%`` and ``_`` literally.
+"""Browser e2e: the sidebar Search palette matches ``%`` literally.
 
 The palette forwards the query to ``GET /v1/sessions?search_query=…``, a
 case-insensitive substring filter, so ``%`` must only list sessions containing
-``%`` and the dimmed preview must show the text that contains the query. Four
+``%`` and the dimmed preview must show the text that contains the query. Two
 hello_world sessions are seeded once per module through the real composer and
-titled through the sessions API: ``Plain prose`` (``innocent prose``, the decoy),
-``Progress report`` (``innocent first`` then ``literal 50% later``) and the
-title-only look-alikes ``fileXname`` and ``file_name``.
+titled through the sessions API: ``Plain prose`` (``innocent prose``, the decoy)
+and ``Progress report`` (``innocent first`` then ``literal 50% later``).
+Underscores are covered at the store layer: every runner-bound session indexes a
+resource event named ``terminal_tui_main``, so a palette search for ``_``
+correctly lists them all.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from dataclasses import dataclass
 
 import httpx
 import pytest
-from playwright.sync_api import Browser, Locator, Page, expect
+from playwright.sync_api import Browser, Locator, Page, Response, expect
 
 from tests.e2e_ui.conftest import (
     _create_runner_bound_session,
@@ -64,34 +66,36 @@ def seeded_search_sessions(
 ) -> Iterator[SeededSearchSessions]:
     respawned_runner = _ensure_runner_online(live_server, tmp_path_factory)
     runner_id = str(_server_state["runner_id"])
-    set_fallback_mock_llm(mock_llm_server_url, _HELLO_WORLD_MODEL, _REPLY)
-
     marker = uuid.uuid4().hex[:8]
-    names = ("Plain prose", "Progress report", "fileXname", "file_name")
-    ids = {name: _create_runner_bound_session(live_server, runner_id) for name in names}
-    seeded = SeededSearchSessions(base_url=live_server, marker=marker, ids=ids)
-
-    context = browser.new_context()
-    context.add_init_script(_TITLES_OFF_INIT_SCRIPT)
-    page = context.new_page()
+    ids: dict[str, str] = {}
+    # One try/finally around seeding and the yield, so a failure while seeding
+    # still deletes the sessions created so far and stops a respawned runner.
     try:
-        page.goto(f"{live_server}/c/{ids['Plain prose']}")
-        _send_and_wait(page, f"innocent prose {marker}", 1)
-        page.goto(f"{live_server}/c/{ids['Progress report']}")
-        _send_and_wait(page, f"innocent first {marker}", 1)
-        _send_and_wait(page, f"literal 50% later {marker}", 2)
-    finally:
-        context.close()
+        set_fallback_mock_llm(mock_llm_server_url, _HELLO_WORLD_MODEL, _REPLY)
+        for name in ("Plain prose", "Progress report"):
+            ids[name] = _create_runner_bound_session(live_server, runner_id)
+        seeded = SeededSearchSessions(base_url=live_server, marker=marker, ids=ids)
 
-    for name, session_id in ids.items():
-        httpx.patch(
-            f"{live_server}/v1/sessions/{session_id}",
-            json={"title": seeded.title(name)},
-            headers=_TITLES_OFF_HEADERS,
-            timeout=10.0,
-        ).raise_for_status()
+        context = browser.new_context()
+        context.add_init_script(_TITLES_OFF_INIT_SCRIPT)
+        page = context.new_page()
+        try:
+            page.goto(f"{live_server}/c/{ids['Plain prose']}")
+            _send_and_wait(page, f"innocent prose {marker}", 1)
+            page.goto(f"{live_server}/c/{ids['Progress report']}")
+            _send_and_wait(page, f"innocent first {marker}", 1)
+            _send_and_wait(page, f"literal 50% later {marker}", 2)
+        finally:
+            context.close()
 
-    try:
+        for name, session_id in ids.items():
+            httpx.patch(
+                f"{live_server}/v1/sessions/{session_id}",
+                json={"title": seeded.title(name)},
+                headers=_TITLES_OFF_HEADERS,
+                timeout=10.0,
+            ).raise_for_status()
+
         yield seeded
     finally:
         for session_id in ids.values():
@@ -105,68 +109,36 @@ def seeded_search_sessions(
                 respawned_runner.wait(timeout=5)
 
 
-def _open_search_palette(
-    page: Page, seeded: SeededSearchSessions, open_session: str
-) -> tuple[Locator, Locator]:
+def _session_row(dialog: Locator, title: str) -> Locator:
+    return dialog.get_by_role("option").filter(has_text=title)
+
+
+def test_percent_lists_only_the_literal_match_with_its_preview(
+    page: Page,
+    seeded_search_sessions: SeededSearchSessions,
+) -> None:
+    seeded = seeded_search_sessions
     page.add_init_script(_TITLES_OFF_INIT_SCRIPT)
-    page.goto(f"{seeded.base_url}/c/{seeded.ids[open_session]}")
+    page.goto(f"{seeded.base_url}/c/{seeded.ids['Plain prose']}")
     search_button = page.get_by_test_id("sidebar-search-button")
     expect(search_button).to_be_visible(timeout=30_000)
     search_button.click()
     palette_input = page.get_by_test_id("command-palette-input")
     expect(palette_input).to_be_visible()
-    return page.get_by_role("dialog"), palette_input
+    dialog = page.get_by_role("dialog")
 
+    def _is_this_search(response: Response) -> bool:
+        url = urllib.parse.urlparse(response.url)
+        return url.path.endswith("/v1/sessions") and urllib.parse.parse_qs(url.query).get(
+            "search_query"
+        ) == ["%"]
 
-def _session_row(dialog: Locator, title: str) -> Locator:
-    return dialog.get_by_role("option").filter(has_text=title)
+    # The palette empties while the debounced query is in flight, so the
+    # negative assertion is only meaningful once this query's results arrived.
+    with page.expect_response(_is_this_search, timeout=15_000):
+        palette_input.fill("%")
 
-
-def _search(page: Page, palette_input: Locator, query: str) -> None:
-    # The palette empties while the debounced query is in flight, so a negative
-    # assertion is only meaningful once this query's results have arrived.
-    param = urllib.parse.urlencode({"search_query": query})
-    with page.expect_response(
-        lambda response: "/v1/sessions?" in response.url and param in response.url,
-        timeout=15_000,
-    ):
-        palette_input.fill(query)
-
-
-# A bare ``_`` is not asserted in the palette: every runner-bound session indexes
-# a resource event named ``terminal_tui_main``, so listing them all is correct.
-def test_bare_percent_only_lists_sessions_containing_it(
-    page: Page,
-    seeded_search_sessions: SeededSearchSessions,
-) -> None:
-    seeded = seeded_search_sessions
-    dialog, palette_input = _open_search_palette(page, seeded, "Plain prose")
-
-    _search(page, palette_input, "%")
-    expect(_session_row(dialog, seeded.title("Progress report"))).to_be_visible()
-    expect(_session_row(dialog, seeded.title("Plain prose"))).to_have_count(0)
-
-
-def test_underscore_in_query_does_not_match_lookalike_title(
-    page: Page,
-    seeded_search_sessions: SeededSearchSessions,
-) -> None:
-    seeded = seeded_search_sessions
-    dialog, palette_input = _open_search_palette(page, seeded, "fileXname")
-
-    _search(page, palette_input, seeded.title("file_name"))
-    expect(_session_row(dialog, seeded.title("file_name"))).to_be_visible()
-    expect(_session_row(dialog, seeded.title("fileXname"))).to_have_count(0)
-
-
-def test_percent_match_shows_the_literal_content_preview(
-    page: Page,
-    seeded_search_sessions: SeededSearchSessions,
-) -> None:
-    seeded = seeded_search_sessions
-    dialog, palette_input = _open_search_palette(page, seeded, "Progress report")
-
-    _search(page, palette_input, "%")
     row = _session_row(dialog, seeded.title("Progress report"))
     expect(row).to_be_visible()
     expect(row).to_contain_text(f"literal 50% later {seeded.marker}")
+    expect(_session_row(dialog, seeded.title("Plain prose"))).to_have_count(0)
