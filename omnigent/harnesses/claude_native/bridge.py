@@ -4494,16 +4494,12 @@ def _baseline_claude_session_ids(bridge_dir: Path, hook_offset: int) -> frozense
     Collect the Claude session ids recorded through the pre-paste offset.
 
     A restarted Claude announces itself with a startup ``SessionStart``
-    under a **new** session id. The baseline is the set of session ids
-    already in the hook log at or before ``hook_offset``, so an id that
-    first appears only after it reads as that new process instead of
-    being mistaken for an incumbent.
-
-    Derived from the hook log bound by the same offset the delivery
-    watch uses, never the live ``state.json`` seen-ids: the hook writes
-    ``state.json`` from a separate process, so a restart recorded there
-    after the offset snapshot would otherwise be absorbed into the
-    baseline and its message silently dropped. Only ``SessionStart``
+    under a **new** session id, so the baseline is every session id in
+    the hook log at or before ``hook_offset`` — an id first seen past it
+    reads as that new process, not an incumbent. The log is bound by the
+    same offset the delivery watch uses, never the live ``state.json``
+    seen-ids, which a separate process may update with the restart after
+    the snapshot and so absorb it into the baseline. Only ``SessionStart``
     lines are parsed, so the cost tracks session count, not log size.
 
     :param bridge_dir: Bridge directory path.
@@ -4699,6 +4695,19 @@ def _confirm_message_delivery(
     _wait_for_claude_prompt_ready(
         socket_path, tmux_target, timeout_s=_TMUX_READY_TIMEOUT_S, bridge_dir=bridge_dir
     )
+    # The original submit may have recorded its receipt while we waited for the
+    # replacement composer; re-read from the last offset so a receipt arriving
+    # during that wait is honoured instead of pasting the prompt a second time.
+    final = read_hook_events_from_offset(bridge_dir, offset, start_event_count=0)
+    for record in final.records:
+        if _is_subagent_hook_record(record):
+            continue
+        if (
+            record.event_name == "UserPromptSubmit"
+            and record.prompt is not None
+            and _delivery_prompts_match(record.prompt, expected)
+        ):
+            return
     _paste_and_submit(
         bridge_dir,
         socket_path,

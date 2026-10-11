@@ -140,13 +140,9 @@ tty.setcbreak(FD)
 record_hook("SessionStart")
 
 if PHASE == "boot":
-    # The dying pre-restart process renders a prompt but never commits the
-    # message: it drains the injected keystrokes without rendering a draft
-    # and restarts in-pane the instant the submit Enter lands after the
-    # bracketed paste, so the message is lost and the replacement's boot
-    # flush clears the pty. Gating on the submit (not a wall clock) ties
-    # the restart to the delivery, so a slow host cannot let the paste
-    # reach the already-restarted process and pass without recovery.
+    # The dying process drains the injected keystrokes and restarts in-pane
+    # the instant the submit Enter lands after the bracketed paste, losing the
+    # message; gating on the submit, not a clock, keeps the race deterministic.
     draw()
     seen_paste_end = False
     while True:
@@ -292,25 +288,28 @@ def _cleanup(socket: Path, bridge_dir: Path) -> None:
     shutil.rmtree(bridge_dir, ignore_errors=True)
 
 
-def _delivered_count(delivered: Path, *, timeout_s: float = 10.0) -> int:
+def _delivered_count(
+    delivered: Path, *, timeout_s: float = 10.0, settle_s: float = _DUPLICATE_SETTLE_S
+) -> int:
     """Copies of the marker the fake Claude recorded (waits for the first).
 
-    After the first copy lands, settle past the restart receipt grace: a
-    spurious re-delivery in the product only fires once that grace lapses
-    without a receipt, so a shorter settle could miss the duplicate it
-    guards against — the recoverable restart cases must deliver exactly once.
+    After the first copy lands, settle ``settle_s`` before counting. A
+    spurious re-delivery in the product only fires once the restart receipt
+    grace lapses without a receipt, so the restart cases pass the full settle
+    to catch a duplicate; a presence-only check passes ``0``.
     """
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if delivered.exists() and _MARKER in delivered.read_text(encoding="utf-8"):
-            time.sleep(_DUPLICATE_SETTLE_S)
+            if settle_s:
+                time.sleep(settle_s)
             return delivered.read_text(encoding="utf-8").count(_MARKER)
         time.sleep(0.25)
     return 0
 
 
 def _message_recorded(delivered: Path, *, timeout_s: float = 10.0) -> bool:
-    return _delivered_count(delivered, timeout_s=timeout_s) > 0
+    return _delivered_count(delivered, timeout_s=timeout_s, settle_s=0.0) > 0
 
 
 def _inject_outcome(bridge_dir: Path, delivered: Path) -> tuple[bool, int]:

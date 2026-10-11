@@ -5128,7 +5128,7 @@ class _RestartableFakeTui:
         if "paste-buffer" in cmd:
             self.pastes += 1
             self.pane = _composer_pane(self._draft)
-        if cmd[-1] == "Enter":
+        elif cmd[-1] == "Enter":
             self.enters += 1
             self.pane = _composer_pane()
             if self.enters - 1 < len(self._on_enter):
@@ -5156,8 +5156,8 @@ def test_inject_user_message_redelivers_when_inpane_restart_swallows_submit(
         socket_path=Path("/tmp/example/tmux.sock"),
         tmux_target="claude:0.0",
     )
-    # The dying process's boot was already recorded (state.json seen-ids
-    # provide the baseline the restart's fresh id is measured against).
+    # The dying process's boot was already recorded in the hook log, which
+    # supplies the baseline the restart's fresh id is measured against.
     record_hook_event(
         bridge_dir,
         {"hook_event_name": "SessionStart", "source": "startup", "session_id": "boot-1"},
@@ -5244,6 +5244,66 @@ def test_inject_user_message_redelivers_when_restart_leads_hook_log_in_state_fil
     )
 
 
+def test_inject_user_message_does_not_redeliver_when_receipt_lands_during_restart_wait(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A receipt arriving while the replacement composer boots cancels re-delivery.
+
+    After a restart with no receipt, the watch waits for the replacement
+    prompt before re-pasting. The original submit may land its own
+    ``UserPromptSubmit`` during that wait — the first message was
+    delivered after all. One final hook-log read before re-pasting must
+    see that receipt, so the message is not submitted a second time.
+    """
+    _shrink_delivery_watch(monkeypatch)
+    bridge_dir = tmp_path / "bridge"
+    write_tmux_target(
+        bridge_dir,
+        socket_path=Path("/tmp/example/tmux.sock"),
+        tmux_target="claude:0.0",
+    )
+    record_hook_event(
+        bridge_dir,
+        {"hook_event_name": "SessionStart", "source": "startup", "session_id": "boot-1"},
+    )
+    content = "the message delivered a beat before the restart"
+    tui = _RestartableFakeTui(
+        content,
+        on_enter=[
+            lambda: _append_hook_line(
+                bridge_dir,
+                {"hook_event_name": "SessionStart", "source": "startup", "session_id": "boot-2"},
+            ),
+        ],
+    )
+    monkeypatch.setattr("subprocess.run", tui.run)
+    ready_calls = {"n": 0}
+
+    def _ready_then_late_receipt(*args: object, **kwargs: object) -> None:
+        # The pre-paste readiness gate is the first call; the re-delivery
+        # ready-wait is the second, and the original receipt lands then.
+        ready_calls["n"] += 1
+        if ready_calls["n"] == 2:
+            _append_hook_line(
+                bridge_dir,
+                {"hook_event_name": "UserPromptSubmit", "session_id": "boot-1", "prompt": content},
+            )
+
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.bridge._wait_for_claude_prompt_ready",
+        _ready_then_late_receipt,
+    )
+
+    inject_user_message(bridge_dir, content=content)
+
+    assert tui.pastes == 1, (
+        "A receipt that arrives during the post-restart ready-wait must cancel "
+        f"re-delivery; got {tui.pastes} pastes."
+    )
+
+
 def test_inject_user_message_missing_receipt_alone_never_redelivers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5313,6 +5373,58 @@ def test_inject_user_message_late_first_boot_session_start_is_not_a_restart(
 
     assert tui.pastes == 1, (
         f"A late-recorded first boot must not be treated as a restart; got {tui.pastes} pastes."
+    )
+
+
+def test_inject_user_message_redelivers_on_two_startup_ids_without_baseline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Two distinct startup ids with no baseline are a restart, not a boot.
+
+    With an empty hook log the first boot has no earlier identity to
+    differ from, so a lone new id stays a boot. A *second* distinct
+    startup id proves a replacement booted on top of the first: that is
+    the in-pane restart, and the swallowed message must be re-delivered
+    exactly once.
+    """
+    _shrink_delivery_watch(monkeypatch)
+    bridge_dir = tmp_path / "bridge"
+    write_tmux_target(
+        bridge_dir,
+        socket_path=Path("/tmp/example/tmux.sock"),
+        tmux_target="claude:0.0",
+    )
+    (bridge_dir / "hooks.jsonl").touch()
+    content = "the first message with no prior identity"
+
+    def _boot_then_restart() -> None:
+        _append_hook_line(
+            bridge_dir,
+            {"hook_event_name": "SessionStart", "source": "startup", "session_id": "boot-1"},
+        )
+        _append_hook_line(
+            bridge_dir,
+            {"hook_event_name": "SessionStart", "source": "startup", "session_id": "boot-2"},
+        )
+
+    tui = _RestartableFakeTui(
+        content,
+        on_enter=[
+            _boot_then_restart,
+            lambda: _append_hook_line(
+                bridge_dir,
+                {"hook_event_name": "UserPromptSubmit", "session_id": "boot-2", "prompt": content},
+            ),
+        ],
+    )
+    monkeypatch.setattr("subprocess.run", tui.run)
+
+    inject_user_message(bridge_dir, content=content)
+
+    assert tui.pastes == 2, (
+        f"Two startup ids with no baseline must re-deliver exactly once; got {tui.pastes} pastes."
     )
 
 
@@ -5433,7 +5545,7 @@ def test_inject_user_message_raises_after_redelivery_budget_exhausted(
         # CR/CRLF fold to LF: the paste payload carries interior CRs.
         ("line one\r\nline two", "line one\nline two", True),
         # A stripped/kept BOM or reflowed whitespace still matches.
-        ("﻿fix the flaky test", "fix the flaky test", True),
+        ("\ufefffix the flaky test", "fix the flaky test", True),
         ("fix  the\n flaky test", "fix the flaky test", True),
         ("ab c", "a bc", False),
         ("a different message", "fix the flaky test", False),
