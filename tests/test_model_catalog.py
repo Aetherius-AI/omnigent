@@ -1177,6 +1177,84 @@ def test_subscription_listing_is_static_and_unverified(
     assert "static_fallback" not in payload
 
 
+def test_subscription_login_catalog_uses_probed_native_store(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Claude/Codex subscription workers surface the probed native catalog.
+
+    A subscription login resolves to ``kind="subscription"``, whose pre-launch
+    listing is a deliberately empty static shape. The host has already probed
+    and cached the subscription's models in ``model_catalog_store`` — the same
+    rows native routing reads — so ``catalog_for_spec`` must fill the SDK-harness
+    rows from that store instead of leaving Smart Routing's only live catalog
+    empty for ``self``, ``claude_code`` and ``codex``.
+    """
+    from omnigent.harnesses.claude_native.main import claude_catalog_fingerprint
+    from omnigent.harnesses.codex_native import app_server
+    from omnigent.models import model_catalog_store
+
+    _isolate_config(
+        monkeypatch,
+        tmp_path,
+        "providers:\n"
+        "  claude:\n    kind: subscription\n    cli: claude\n    default: anthropic\n"
+        "  codex:\n    kind: subscription\n    cli: codex\n    default: openai\n",
+    )
+    monkeypatch.setattr(model_catalog_store, "_data_dir", lambda: tmp_path / "data")
+
+    # Wire ids as the native probe caches them: claude-family / gpt-family
+    # tokens so the harness family filter keeps them. "fable" is deliberately
+    # not a real tier, proving the rows come from the live store, not a list.
+    claude_models = ["claude-sonnet-5", "claude-fable-5", "claude-opus-5", "claude-haiku-5"]
+    codex_models = ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol"]
+    claude_fingerprint = claude_catalog_fingerprint(None)
+    codex_fingerprint = app_server.codex_catalog_fingerprint(
+        app_server.resolve_native_codex_launch(model=None, spec=_worker_spec("codex-native"))
+    )
+    model_catalog_store.write_catalog(
+        "claude-native", claude_fingerprint, [{"id": m, "model": m} for m in claude_models]
+    )
+    model_catalog_store.write_catalog(
+        "codex-native", codex_fingerprint, [{"id": m, "model": m} for m in codex_models]
+    )
+
+    claude_provider = resolve_model_provider(_worker_spec("claude-native"), "claude-native")
+    codex_provider = resolve_model_provider(_worker_spec("codex-native"), "codex-native")
+    assert claude_provider.kind == "subscription"
+    assert codex_provider.kind == "subscription"
+    # The probes the rows should come from are already cached.
+    assert [
+        row["id"] for row in model_catalog_store.read_catalog("claude-native", claude_fingerprint)
+    ] == claude_models
+    assert [
+        row["id"] for row in model_catalog_store.read_catalog("codex-native", codex_fingerprint)
+    ] == codex_models
+
+    def sub_agent(name: str, harness: str) -> AgentSpec:
+        return AgentSpec(
+            spec_version=1,
+            name=name,
+            executor=ExecutorSpec(type="omnigent", config={"harness": harness}),
+        )
+
+    spec = AgentSpec(
+        spec_version=1,
+        name="polly",
+        executor=ExecutorSpec(type="omnigent", config={"harness": "claude-sdk"}),
+        sub_agents=[
+            sub_agent("claude_code", "claude-native"),
+            sub_agent("codex", "codex-native"),
+        ],
+    )
+    catalog = catalog_for_spec(spec)
+
+    assert [model["id"] for model in catalog["self"]["models"]] == claude_models
+    assert [model["id"] for model in catalog["claude_code"]["models"]] == claude_models
+    assert [model["id"] for model in catalog["codex"]["models"]] == codex_models
+    for name in ("self", "claude_code", "codex"):
+        assert "cannot run here" not in str(catalog[name]["note"])
+
+
 @pytest.mark.parametrize("cache_state", ["fresh", "stale", "empty", "missing"])
 @pytest.mark.parametrize("explicit", [False, True], ids=["default-provider", "spec-provider"])
 def test_codex_cli_config_uses_native_catalog(
