@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import signal
-import subprocess
 import time
 from collections.abc import Callable
 from urllib.parse import urlparse
@@ -13,22 +12,12 @@ import httpx
 import pytest
 from playwright.sync_api import Page
 
+from tests.e2e_ui.conftest import _server_state
+
 # Include the initial fetches and first query retries.
 _OBSERVE_WINDOW_MS = 10_000
 _OFFLINE_POLL_ATTEMPTS = 20
 _OFFLINE_POLL_INTERVAL_S = 0.5
-
-
-def _find_runner_pids() -> list[int]:
-    """Find only this pytest process's child runners before killing them."""
-    result = subprocess.run(
-        ["pgrep", "-P", str(os.getpid()), "-f", "omnigent[.]runner[.]_entry"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        return []
-    return [int(line.strip()) for line in result.stdout.strip().splitlines() if line.strip()]
 
 
 def test_open_offline_session_no_resource_503_burst(
@@ -51,11 +40,8 @@ def test_open_offline_session_no_resource_503_burst(
         f"expected runner_online=true before kill, got: {health_before}"
     )
 
-    runner_pids = _find_runner_pids()
-    assert runner_pids, "no runner process found to kill"
     request.addfinalizer(_recover_shared_runner)
-    for pid in runner_pids:
-        os.kill(pid, signal.SIGKILL)
+    os.kill(int(_server_state["runner_pid"]), signal.SIGKILL)
 
     # Open the page only after the server reports the tunnel down.
     health_after: dict[str, object] = {}

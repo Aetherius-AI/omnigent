@@ -111,7 +111,7 @@ describe("usePullRequestInfo turn-end invalidate", () => {
   });
 });
 
-describe("useGithubInfo liveness gating", () => {
+describe("usePullRequestInfo liveness gating", () => {
   it("holds the fetch until runner liveness resolves, then fires", async () => {
     stubChatStore("conv_open", "idle");
     onlineMock.mockReturnValue(undefined);

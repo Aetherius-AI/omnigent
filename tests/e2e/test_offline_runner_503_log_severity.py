@@ -6,7 +6,6 @@ import json
 import os
 import secrets
 import signal
-import socket
 import subprocess
 import sys
 import time
@@ -17,6 +16,7 @@ import httpx
 import pytest
 
 from omnigent.runner.identity import token_bound_runner_id
+from tests.e2e.conftest import find_free_port
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -38,15 +38,7 @@ os_env:
 _BOOT_TIMEOUT_S = 120.0
 _POLL_INTERVAL_S = 1.0
 _OFFLINE_TIMEOUT_S = 15.0
-
-
-def _find_free_port() -> int:
-    """Pick an OS-assigned loopback port."""
-    sock = socket.socket()
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    sock.close()
-    return port
+_LOG_FLUSH_TIMEOUT_S = 10.0
 
 
 def _subprocess_env(extra: dict[str, str]) -> dict[str, str]:
@@ -79,7 +71,7 @@ def offline_runner_session(
 ) -> Iterator[tuple[str, str, Path]]:
     """Bind a session to an isolated runner, then kill that runner."""
     work = tmp_path_factory.mktemp("offline_503_log")
-    port = _find_free_port()
+    port = find_free_port()
     base_url = f"http://127.0.0.1:{port}"
     binding_token = secrets.token_urlsafe(32)
     runner_id = token_bound_runner_id(binding_token)
@@ -160,12 +152,16 @@ def offline_runner_session(
             )
 
         agents = client.get(f"{base_url}/v1/agents").json()
-        rows = agents.get("data", agents if isinstance(agents, list) else [])
+        rows = agents if isinstance(agents, list) else agents.get("data", [])
         agent_id = next(
-            row.get("agent_id") or row.get("id")
-            for row in rows
-            if row.get("name") == "hello_world"
+            (
+                row.get("agent_id") or row.get("id")
+                for row in rows
+                if row.get("name") == "hello_world"
+            ),
+            None,
         )
+        assert agent_id, f"hello_world agent not registered; got {rows!r}"
         created = client.post(f"{base_url}/v1/sessions", json={"agent_id": agent_id})
         created.raise_for_status()
         payload = created.json()
@@ -221,11 +217,15 @@ def test_offline_runner_resource_503_not_logged_as_error(
     body = json.loads(resp.text)
     assert body["error"]["code"] == "runner_unavailable", body
 
-    # Give the log handler a moment to flush the record for that request.
-    time.sleep(1.0)
-    log_files = sorted(app_log_dir.glob("server-*.log"))
-    assert log_files, f"no server application log found under {app_log_dir}"
-    log_text = "\n".join(path.read_text() for path in log_files)
+    # Poll until the handler flushes the record for that request.
+    deadline = time.monotonic() + _LOG_FLUSH_TIMEOUT_S
+    log_text = ""
+    while time.monotonic() < deadline:
+        log_files = sorted(app_log_dir.glob("server-*.log"))
+        log_text = "\n".join(path.read_text() for path in log_files)
+        if "is offline for conversation" in log_text:
+            break
+        time.sleep(0.1)
     assert "is offline for conversation" in log_text, (
         "expected the server log to mention the offline runner at all — "
         "did the request reach the runner router?"

@@ -351,12 +351,13 @@ export function useDeleteTerminal(conversationId: string) {
  * Two sources feed the same query cache, keyed by ``terminalsQueryKey``:
  *
  * 1. An authoritative HTTP seed (:func:`fetchTerminals`) that runs once
- *    on mount. This makes the Terminal pill reflect an already-running
- *    terminal on a fresh load / refresh, and self-heals the rail if a
- *    live ``session.resource.created`` event was missed (connection
- *    hiccup, or the event landing before the SSE subscription opened).
- *    Without it the pill could stay gray indefinitely despite a running
- *    terminal — there was previously no HTTP fallback or poll.
+ *    the runner is first observed online. This makes the Terminal pill
+ *    reflect an already-running terminal on a fresh load / refresh, and
+ *    self-heals the rail if a live ``session.resource.created`` event was
+ *    missed (connection hiccup, or the event landing before the SSE
+ *    subscription opened). Without it the pill could stay gray indefinitely
+ *    despite a running terminal — there was previously no HTTP fallback or
+ *    poll.
  * 2. Live SSE ``session.resource.{created,deleted}`` deltas, which the
  *    chatStore handler patches in via ``setQueryData``. These arrive
  *    from snapshot-on-connect, the REST endpoint
@@ -380,7 +381,7 @@ export function useTerminals(
   const queryClient = useQueryClient();
   const reconcileWhilePending = options?.reconcileWhilePending ?? false;
   // The terminal list is SSE-primary: live `session.resource.{created,deleted}`
-  // deltas (plus the mount seed) ARE the list, so a terminal becomes openable
+  // deltas (plus the gated seed) ARE the list, so a terminal becomes openable
   // the instant its `created` event lands — no waiting on the runner-liveness
   // poll. The `/health` poll (`runnerOnline`) is only a *corrector* for the
   // statuses the SSE stream can't deliver, applied on its liveness edges in the
@@ -405,7 +406,9 @@ export function useTerminals(
       for (const t of fetched) byId.set(t.id, t);
       return [...byId.values()];
     },
-    // Hold the runner-proxied seed until online; SSE cache writes still land.
+    // Hold the runner-proxied seed (and its self-heal poll) until the runner
+    // is online; SSE cache writes still land. Both resume on the next liveness
+    // edge once the runner comes up.
     enabled: conversationId !== null && runnerOnline === true,
     staleTime: Infinity,
     // One light retry covers a transient network blip during the

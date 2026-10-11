@@ -668,10 +668,11 @@ describe("useWorkspaceDirectory gating", () => {
     );
   });
 
-  it("holds the batched directory listings until runner liveness resolves", async () => {
+  it("holds the batched directory listings until runner liveness resolves, then fires", async () => {
     onlineMock.mockReturnValue(undefined);
+    fetchMock.mockResolvedValue(jsonResponse({ object: "list", data: [] }));
 
-    render(
+    const { rerender } = render(
       <Wrap>
         <DirectoriesProbe id="conv_unknown" paths={["src", "docs"]} />
       </Wrap>,
@@ -679,6 +680,15 @@ describe("useWorkspaceDirectory gating", () => {
     await flushMicrotasks();
 
     expect(fetchMock).not.toHaveBeenCalled();
+
+    // Once liveness resolves online, the held batch listings fire.
+    onlineMock.mockReturnValue(true);
+    rerender(
+      <Wrap>
+        <DirectoriesProbe id="conv_unknown" paths={["src", "docs"]} />
+      </Wrap>,
+    );
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
   });
 
   it("does not fetch when path is null (pre-existing gate)", async () => {
