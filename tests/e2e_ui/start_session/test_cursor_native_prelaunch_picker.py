@@ -106,13 +106,17 @@ def cursor_host(base_url: str, root: Path) -> Iterator[CursorHostRig]:
     env["CURSOR_AGENT_DOUBLE_LOG"] = str(launch_log)
     env["CURSOR_AGENT_DOUBLE_MODELS_FILE"] = str(models_file)
     handle = open(host_log, "w")  # noqa: SIM115 — subprocess lifetime
-    host = subprocess.Popen(
-        [sys.executable, "-m", "omnigent.cli", "host", "--server", base_url, "--no-open"],
-        env=env,
-        cwd=str(_REPO_ROOT),
-        stdout=handle,
-        stderr=subprocess.STDOUT,
-    )
+    try:
+        host = subprocess.Popen(
+            [sys.executable, "-m", "omnigent.cli", "host", "--server", base_url, "--no-open"],
+            env=env,
+            cwd=str(_REPO_ROOT),
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+        )
+    except BaseException:
+        handle.close()
+        raise
     try:
 
         def _ready() -> str | None:
@@ -126,12 +130,16 @@ def cursor_host(base_url: str, root: Path) -> Iterator[CursorHostRig]:
             for row in _hosts(base_url):
                 readiness = row.get("configured_harnesses") or {}
                 if row.get("host_id") == host_id and row.get("status") == "online":
-                    if readiness.get("cursor-native") is True:
+                    state = readiness.get("cursor-native")
+                    if state is True:
                         return host_id
+                    if state is None:
+                        # Readiness can lag the online status while the host is
+                        # still discovering its CLIs; keep polling.
+                        return None
                     raise AssertionError(
                         f"host {host_id} is online but reports cursor-native readiness "
-                        f"{readiness.get('cursor-native')!r}; the double on PATH should "
-                        "read as installed and signed in"
+                        f"{state!r}; the double on PATH should read as installed and signed in"
                     )
             return None
 

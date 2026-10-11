@@ -7495,14 +7495,14 @@ describe("NewChatLandingScreen Cursor launch-time models", () => {
   });
 
   function mockCursorCatalogs(byHost: Record<string, unknown>) {
-    useHostModelOptionsMock.mockImplementation(
-      (hostId, harness, enabled = true) =>
-        (hostId !== null && enabled && harness === "cursor-native"
-          ? (byHost[hostId] ?? DISABLED_QUERY_RESULT)
-          : harness === "claude-native" && hostId !== null && enabled
-            ? CLAUDE_MODEL_OPTIONS_RESULT
-            : DISABLED_QUERY_RESULT) as ReturnType<typeof useHostModelOptions>,
-    );
+    useHostModelOptionsMock.mockImplementation((hostId, harness, enabled = true) => {
+      let result: unknown = DISABLED_QUERY_RESULT;
+      if (hostId !== null && enabled) {
+        if (harness === "cursor-native") result = byHost[hostId] ?? DISABLED_QUERY_RESULT;
+        else if (harness === "claude-native") result = CLAUDE_MODEL_OPTIONS_RESULT;
+      }
+      return result as ReturnType<typeof useHostModelOptions>;
+    });
   }
 
   function sessionCreates() {

@@ -3423,20 +3423,20 @@ export function NewChatLandingScreen() {
     if (supportsCursorMode) {
       const modeValue =
         CURSOR_NATIVE_EXEC_MODES.find((m) => m.value === cursorExecMode)?.label ?? cursorExecMode;
+      // Cursor is not a Smart Routing arm, so its Model row never shows routing.
       const pickedCursorRow = cursorModelOptions.find((m) => m.id === pickedModel);
-      const modelRows = routingOn
-        ? routingRow
-        : [
-            {
-              label: "Model",
-              value: visibleModelLabel(
-                pickedCursorRow
-                  ? nativeModelLabel(pickedCursorRow)
-                  : defaultModelLabel(cursorModelOptions),
-              ),
-            },
-          ];
-      return [...modelRows, { label: "Mode", value: modeValue }, ...sourceRows(cursorModelOptions)];
+      return [
+        {
+          label: "Model",
+          value: visibleModelLabel(
+            pickedCursorRow
+              ? nativeModelLabel(pickedCursorRow)
+              : defaultModelLabel(cursorModelOptions),
+          ),
+        },
+        { label: "Mode", value: modeValue },
+        ...sourceRows(cursorModelOptions),
+      ];
     }
     if (supportsAgySkipPermissions) {
       const skipValue =
