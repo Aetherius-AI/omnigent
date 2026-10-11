@@ -1,22 +1,6 @@
-"""E2E: New Chat offers the selected host's Cursor models before the first message.
+"""E2E: New Chat lists the selected host's Cursor models before the first message.
 
-Journey: a server plus a separately registered execution host whose
-``cursor-agent`` is installed and signed in. In New Chat the user selects that
-host, picks **Cursor** in the harness picker and looks for a model control
-before sending anything. Like Claude Code, Codex, Pi and Devin, the Cursor row
-must offer **Edit → Models** listing what that host's ``cursor-agent models``
-prints, and the host must answer
-``GET /v1/hosts/{id}/harnesses/cursor-native/model-options`` with that catalog.
-
-The rig runs a real ``omnigent host`` daemon against the suite's server with a
-scripted, signed-in ``cursor-agent`` double first on its PATH (the real CLI
-needs a Cursor login). Server, SPA, host daemon and the host→server catalog
-frames are the real product.
-
-Run (SPA built; ``OMNIGENT_E2E_CURSOR_HOST_HOME`` pins the host identity dir)::
-
-    pytest tests/e2e_ui/start_session/test_cursor_native_prelaunch_picker.py --ui-skip-build
-"""
+Real ``omnigent host`` with a signed-in ``cursor-agent`` double, real server route and SPA."""
 
 from __future__ import annotations
 
@@ -24,6 +8,7 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -48,57 +33,24 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _HOST_READY_TIMEOUT_S = 180.0
 _CATALOG_TIMEOUT_MS = 60_000
 
-_CURSOR_MODELS_OUTPUT = """Available models
+_CURSOR_MODELS_OUTPUT = (
+    "Available models\n\n"
+    + "\n".join(
+        (
+            "auto - Auto (default)",
+            "gpt-5.2 - GPT-5.2",
+            "gpt-5.2-high - GPT-5.2 High",
+            "claude-4.5-sonnet - Claude 4.5 Sonnet",
+            "claude-4.5-sonnet-thinking - Claude 4.5 Sonnet Thinking",
+            "gemini-3-pro - Gemini 3 Pro",
+            "composer-1 - Composer 1 (current)",
+        )
+    )
+    + "\n"
+)
 
-auto - Auto (default)
-gpt-5.2 - GPT-5.2
-gpt-5.2-high - GPT-5.2 High
-claude-4.5-sonnet - Claude 4.5 Sonnet
-claude-4.5-sonnet-thinking - Claude 4.5 Sonnet Thinking
-gemini-3-pro - Gemini 3 Pro
-composer-1 - Composer 1 (current)
-"""
-
-# Signed-in Cursor CLI double: version above the harness minimum, authenticated
-# status, a fixed `cursor-agent models` listing, and a TUI launch that logs its
-# argv and stays attached. The real CLI cannot list models without a login.
-_CURSOR_AGENT_DOUBLE = '''#!/usr/bin/env python3
-import json
-import os
-import sys
-import time
-
-ARGS = sys.argv[1:]
-VERSION = "2026.09.26-dd393fe"
-MODELS = """__MODELS__"""
-
-log_path = os.environ.get("CURSOR_AGENT_DOUBLE_LOG")
-if log_path:
-    with open(log_path, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps({"argv": ARGS, "cwd": os.getcwd(), "time": time.time()}) + "\\n")
-
-if "--version" in ARGS or "-v" in ARGS:
-    print(VERSION)
-    raise SystemExit(0)
-if ARGS[:1] == ["status"]:
-    print(json.dumps({"status": "authenticated", "isAuthenticated": True,
-                      "hasAccessToken": True, "hasRefreshToken": True, "version": VERSION}))
-    raise SystemExit(0)
-if ARGS[:1] == ["models"]:
-    sys.stdout.write(MODELS)
-    raise SystemExit(0)
-if ARGS[:1] in (["login"], ["logout"]):
-    print("stub cursor-agent: " + ARGS[0] + " ok")
-    raise SystemExit(0)
-
-print("stub cursor-agent TUI started with: " + " ".join(ARGS))
-sys.stdout.flush()
-try:
-    while sys.stdin.readline():
-        pass
-except KeyboardInterrupt:
-    pass
-'''.replace("__MODELS__", _CURSOR_MODELS_OUTPUT)
+# Stands in for a signed-in Cursor CLI; the real one cannot list models without a login.
+_CURSOR_AGENT_DOUBLE = Path(__file__).with_name("cursor_agent_double.py")
 
 
 @dataclass(frozen=True)
@@ -140,8 +92,10 @@ def cursor_host(base_url: str, root: Path) -> Iterator[CursorHostRig]:
     for path in (stub_bin, config_home, data_dir):
         path.mkdir(parents=True, exist_ok=True)
     stub = stub_bin / "cursor-agent"
-    stub.write_text(_CURSOR_AGENT_DOUBLE)
+    shutil.copy(_CURSOR_AGENT_DOUBLE, stub)
     stub.chmod(0o755)
+    models_file = stub_bin / "models.txt"
+    models_file.write_text(_CURSOR_MODELS_OUTPUT)
     launch_log = root / "cursor-agent-invocations.jsonl"
     host_log = root / "host.log"
 
@@ -150,6 +104,7 @@ def cursor_host(base_url: str, root: Path) -> Iterator[CursorHostRig]:
     env["OMNIGENT_CONFIG_HOME"] = str(config_home)
     env["OMNIGENT_DATA_DIR"] = str(data_dir)
     env["CURSOR_AGENT_DOUBLE_LOG"] = str(launch_log)
+    env["CURSOR_AGENT_DOUBLE_MODELS_FILE"] = str(models_file)
     handle = open(host_log, "w")  # noqa: SIM115 — subprocess lifetime
     host = subprocess.Popen(
         [sys.executable, "-m", "omnigent.cli", "host", "--server", base_url, "--no-open"],
@@ -203,9 +158,7 @@ def cursor_host(base_url: str, root: Path) -> Iterator[CursorHostRig]:
 def cursor_rig(
     live_server: str, tmp_path_factory: pytest.TempPathFactory
 ) -> Iterator[CursorHostRig]:
-    pinned = os.environ.get("OMNIGENT_E2E_CURSOR_HOST_HOME")
-    root = Path(pinned) if pinned else tmp_path_factory.mktemp("cursor_host")
-    with cursor_host(live_server, root) as rig:
+    with cursor_host(live_server, tmp_path_factory.mktemp("cursor_host")) as rig:
         yield rig
 
 

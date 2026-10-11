@@ -3406,17 +3406,9 @@ class HostProcess:
         request_id: str,
         with_source: Callable[[list[dict[str, object]]], list[dict[str, object]]],
     ) -> HostModelOptionsResultFrame:
-        """
-        Preview the Cursor picker by running ``cursor-agent models`` on this host.
+        """Preview the Cursor picker by running ``cursor-agent models`` on this host.
 
-        Uses the same discovery and base-id normalization as the in-session
-        picker, so a pre-launch pick is a value the runner can pass to
-        ``--model`` and the session gear can show once the runner is up.
-
-        :param request_id: The server's model-options request id.
-        :param with_source: Adds the host's model-configuration source.
-        :returns: The catalog, or a failed frame explaining why none exists.
-        """
+        Same discovery and base ids as the in-session picker; a pick is a valid ``--model``."""
         from omnigent.harnesses.cursor_native.main import list_cursor_cli_model_options
 
         def failed(error: str) -> HostModelOptionsResultFrame:

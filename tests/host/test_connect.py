@@ -725,14 +725,19 @@ async def test_handle_model_options_rejects_unsupported_harness() -> None:
     )
 
 
-_CURSOR_MODELS_STDOUT = """Available models
-
-auto - Auto (default)
-gpt-5.3-codex-high - Codex 5.3 High
-claude-opus-5-5-high - Claude Opus 5.5 High
-claude-opus-5-5-max - Claude Opus 5.5 Max
-composer-2.5 - Composer 2.5 (current)
-"""
+_CURSOR_MODELS_STDOUT = (
+    "Available models\n\n"
+    + "\n".join(
+        (
+            "auto - Auto (default)",
+            "gpt-5.3-codex-high - Codex 5.3 High",
+            "claude-opus-5-5-high - Claude Opus 5.5 High",
+            "claude-opus-5-5-max - Claude Opus 5.5 Max",
+            "composer-2.5 - Composer 2.5 (current)",
+        )
+    )
+    + "\n"
+)
 
 
 async def test_handle_model_options_lists_cursor_models_from_host_cli(
