@@ -61,8 +61,8 @@ async def test_compaction_dropped_spawn_stops_full_rereads(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A spawn dropped when the resume path rewrites across a compaction, and a
-    sub-agent nested under it, are both set aside once and stop the re-reads."""
+    """A spawn dropped when the resume path rewrites across a compaction, and the
+    sub-agents nested under it, are all set aside once and stop the re-reads."""
     transcript_path = tmp_path / "session.jsonl"
     external_sid = str(uuid.uuid4())
     items: list[dict[str, Any]] = [
@@ -91,9 +91,9 @@ async def test_compaction_dropped_spawn_stops_full_rereads(
     transcript_path.write_text(body, encoding="utf-8")
     assert "toolu_precompact" not in body, "the resume rewrite unexpectedly kept the spawn id"
 
-    # The compacted sub-agent's spawn id is now in no transcript, and its nested
-    # sub-agent's spawn lives in the compacted transcript, so the nested one
-    # resolves to a parent that is itself never registered.
+    # The compacted sub-agent's spawn id is now in no transcript, and the spawns
+    # nested under it live in transcripts whose owners are never registered. The
+    # descendants sort before their parents, the harder order for the sweep.
     subagents_dir = transcript_path.parent / transcript_path.stem / "subagents"
     subagents_dir.mkdir(parents=True, exist_ok=True)
     (subagents_dir / "agent-compacted.meta.json").write_text(
@@ -107,13 +107,21 @@ async def test_compaction_dropped_spawn_stops_full_rereads(
         encoding="utf-8",
     )
     (subagents_dir / "agent-compacted.jsonl").write_text("", encoding="utf-8")
-    _seed_subagent_on_disk(
+    nested_transcript = _seed_subagent_on_disk(
         transcript_path=transcript_path,
-        subagent_id="nested",
+        subagent_id="b-nested",
         agent_type="general-purpose",
         description="nested; parent never registered",
         tool_use_id="toolu_nested",
         spawn_transcript_path=subagents_dir / "agent-compacted.jsonl",
+    )
+    _seed_subagent_on_disk(
+        transcript_path=transcript_path,
+        subagent_id="a-leaf",
+        agent_type="general-purpose",
+        description="nested two levels down",
+        tool_use_id="toolu_leaf",
+        spawn_transcript_path=nested_transcript,
     )
 
     caplog.set_level(logging.DEBUG, logger="omnigent.harnesses.claude_native.forwarder")
@@ -121,14 +129,18 @@ async def test_compaction_dropped_spawn_stops_full_rereads(
         transcript_path=transcript_path, bridge_dir=tmp_path / "bridge", monkeypatch=monkeypatch
     )
 
-    assert "compacted" not in states[-1].subagents
-    assert "nested" not in states[-1].subagents
+    assert states[-1].subagents == {}
     assert rescan_polls == list(range(1, _BUDGET + 1)), (
         f"full transcript re-scans must stop exactly at the resolve budget: {rescan_polls}"
     )
-    # The nested sub-agent waits for free while its parent spends the budget, then
-    # is set aside with it on the poll that exhausts the parent's budget.
+    # The descendants wait for free while the root spends the budget, then the whole
+    # chain is set aside on the poll that exhausts it.
     assert states[_BUDGET - 2].resolve_misses == {"compacted": _BUDGET - 1}
-    assert states[_BUDGET - 1].resolve_misses == {"compacted": _BUDGET, "nested": _BUDGET}
+    assert states[_BUDGET - 1].resolve_misses == {
+        "compacted": _BUDGET,
+        "b-nested": _BUDGET,
+        "a-leaf": _BUDGET,
+    }
     assert len(_set_aside_warnings(caplog, "compacted", "toolu_precompact")) == 1
-    assert len(_set_aside_warnings(caplog, "nested", "toolu_nested")) == 1
+    assert len(_set_aside_warnings(caplog, "b-nested", "toolu_nested")) == 1
+    assert len(_set_aside_warnings(caplog, "a-leaf", "toolu_leaf")) == 1

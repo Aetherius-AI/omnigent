@@ -1181,3 +1181,57 @@ async def test_chain_parked_under_a_dropped_grandparent_spends_no_resolve_budget
     assert state.resolve_misses == {}
     assert not _set_aside_warnings(caplog)
     assert caplog.text.count("whose parent was dropped") == 2
+
+
+async def test_child_of_a_parent_without_meta_spends_its_own_budget(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child whose spawn lives in a transcript with no meta file has no parent
+    that can ever register, so it spends its own budget, persists the count across
+    a restart, and stops re-reading the transcripts once it is set aside."""
+    bridge_dir = tmp_path / "bridge"
+    transcript_path = tmp_path / "session.jsonl"
+    transcript_path.write_text("", encoding="utf-8")
+    subagents_dir = transcript_path.parent / transcript_path.stem / "subagents"
+    subagents_dir.mkdir(parents=True, exist_ok=True)
+    _seed_subagent_on_disk(
+        transcript_path=transcript_path,
+        subagent_id="a-child",
+        agent_type="general-purpose",
+        description="spawned by a sub-agent that left no meta",
+        tool_use_id="toolu_child",
+        spawn_transcript_path=subagents_dir / "agent-ghost.jsonl",
+    )
+    assert not (subagents_dir / "agent-ghost.meta.json").exists()
+
+    budget = forwarder._SUBAGENT_RESOLVE_MAX_ATTEMPTS
+    spent_before_restart = budget // 2
+    scans = _count_transcript_scans(monkeypatch)
+    caplog.set_level(logging.DEBUG, logger="omnigent.harnesses.claude_native.forwarder")
+    state = forwarder.SubagentForwardState(subagents={})
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_registering_handler), base_url="http://ap"
+    ) as client:
+        for _ in range(spent_before_restart):
+            state = await _poll_subagents(
+                client, bridge_dir=bridge_dir, transcript_path=transcript_path, state=state
+            )
+        assert state.resolve_misses == {"a-child": spent_before_restart}
+        assert not _set_aside_warnings(caplog)
+
+        # A restart reloads the count and gets only the remaining attempts.
+        state = forwarder._read_subagent_forward_state(bridge_dir)
+        assert state.resolve_misses == {"a-child": spent_before_restart}
+        for _ in range(budget):
+            state = await _poll_subagents(
+                client, bridge_dir=bridge_dir, transcript_path=transcript_path, state=state
+            )
+
+    assert state.subagents == {}
+    assert state.resolve_misses == {"a-child": budget}
+    assert len(scans) == budget, (
+        "a child with no registrable parent must stop scanning at its budget"
+    )
+    assert len(_set_aside_warnings(caplog, "a-child", "toolu_child", "ghost")) == 1

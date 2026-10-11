@@ -2816,38 +2816,50 @@ async def _forward_available_subagents(
             # Nothing registered this pass. A deferred child follows a set-aside
             # parent, waits while its parent is registered or still on disk and
             # unsettled, and spends its own budget only once the parent's meta is gone.
-            for meta_path, meta, parent_subagent_id in deferred:
-                subagent_id = _subagent_id_from_meta_path(meta_path)
-                if parent_subagent_id is not None and _subagent_set_aside(
-                    updated, parent_subagent_id
-                ):
-                    updated = _record_unresolved_subagent(
-                        parent_session_id=parent_session_id,
-                        subagent_id=subagent_id,
-                        tool_use_id=meta["toolUseId"],
-                        reason=f"parent {parent_subagent_id} was set aside",
-                        state=updated,
-                        attempts=_SUBAGENT_RESOLVE_MAX_ATTEMPTS,
-                    )
-                elif (
-                    parent_subagent_id in updated.subagents
-                    or parent_subagent_id in meta_ids_on_disk
-                ):
-                    _logger.debug(
-                        "Deferring claude-native sub-agent until its parent registers; "
-                        "parent_session=%s subagent_id=%s parent_subagent_id=%s",
-                        parent_session_id,
-                        subagent_id,
-                        parent_subagent_id,
-                    )
-                else:
-                    updated = _record_unresolved_subagent(
-                        parent_session_id=parent_session_id,
-                        subagent_id=subagent_id,
-                        tool_use_id=meta["toolUseId"],
-                        reason=f"parent {parent_subagent_id} has no meta on disk",
-                        state=updated,
-                    )
+            # Re-sweep until nothing more is set aside, so a whole chain is set aside
+            # in one pass whatever order its meta files sort in.
+            waiting = deferred
+            while waiting:
+                still_waiting: list[tuple[Path, dict[str, str], str | None]] = []
+                swept = False
+                for meta_path, meta, parent_subagent_id in waiting:
+                    subagent_id = _subagent_id_from_meta_path(meta_path)
+                    if parent_subagent_id is not None and _subagent_set_aside(
+                        updated, parent_subagent_id
+                    ):
+                        updated = _record_unresolved_subagent(
+                            parent_session_id=parent_session_id,
+                            subagent_id=subagent_id,
+                            tool_use_id=meta["toolUseId"],
+                            reason=f"parent {parent_subagent_id} was set aside",
+                            state=updated,
+                            attempts=_SUBAGENT_RESOLVE_MAX_ATTEMPTS,
+                        )
+                        swept = True
+                    elif (
+                        parent_subagent_id in updated.subagents
+                        or parent_subagent_id in meta_ids_on_disk
+                    ):
+                        still_waiting.append((meta_path, meta, parent_subagent_id))
+                    else:
+                        updated = _record_unresolved_subagent(
+                            parent_session_id=parent_session_id,
+                            subagent_id=subagent_id,
+                            tool_use_id=meta["toolUseId"],
+                            reason=f"parent {parent_subagent_id} has no meta on disk",
+                            state=updated,
+                        )
+                waiting = still_waiting
+                if not swept:
+                    break
+            for meta_path, _meta, parent_subagent_id in waiting:
+                _logger.debug(
+                    "Deferring claude-native sub-agent until its parent registers; "
+                    "parent_session=%s subagent_id=%s parent_subagent_id=%s",
+                    parent_session_id,
+                    _subagent_id_from_meta_path(meta_path),
+                    parent_subagent_id,
+                )
             break
         pending = deferred
 
