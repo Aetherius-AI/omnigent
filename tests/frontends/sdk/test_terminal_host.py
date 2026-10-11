@@ -1821,13 +1821,94 @@ def test_paused_live_region_renders_collapse_to_the_latest(
     host.pause_rendering()
     host.output(StreamLive(Text("draft one")))
     host.output(StreamLive(Text("draft two")))
-    host.output(StreamReplace(Text("final")))
-    assert len(host._paused_output) == 2
+    host.output(StreamingText(text="tail\n"))
+    assert [type(item) for item in host._paused_output] == [StreamLive, StreamingText]
 
     host.resume_rendering()
     painted = "".join(writes)
     assert "draft one" not in painted
-    assert painted.index("draft two") < painted.index("final")
+    assert painted.index("draft two") < painted.index("tail")
+
+
+def test_paused_stream_replace_drops_the_streaming_it_supersedes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A committed paragraph replaces the deltas and live drafts queued since the last boundary."""
+    host = TerminalHost(model_name="test")
+    writes = _capture_stdout(monkeypatch)
+
+    host.pause_rendering()
+    host.output(StreamingText(text="alpha\n"))
+    host.output(StreamLive(Text("draft")))
+    host.output(StreamReplace(Text("paragraph")))
+    host.output(StreamingText(text="beta\n"))
+    assert [type(item) for item in host._paused_output] == [StreamReplace, StreamingText]
+
+    host.resume_rendering()
+    painted = "".join(writes)
+    assert "alpha" not in painted
+    assert "draft" not in painted
+    assert painted.index("paragraph") < painted.index("beta")
+
+
+def test_paused_non_stream_item_keeps_the_streaming_before_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Streamed text committed by a later tool panel is not dropped by the next paragraph."""
+    host = TerminalHost(model_name="test")
+    writes = _capture_stdout(monkeypatch)
+
+    host.pause_rendering()
+    host.output(StreamingText(text="alpha\n"))
+    host.output(Text("panel"))
+    host.output(StreamReplace(Text("paragraph")))
+    assert [type(item) for item in host._paused_output] == [StreamingText, Text, StreamReplace]
+
+    host.resume_rendering()
+    painted = "".join(writes)
+    assert painted.index("alpha") < painted.index("panel") < painted.index("paragraph")
+
+
+def test_resume_rendering_releases_waiters_when_the_replay_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failing replay must not leave the ticker and overlay loops asleep."""
+    host = TerminalHost(model_name="test")
+    host.pause_rendering()
+    host.output(Text("alpha"))
+
+    def _broken_write(_data: str) -> int:
+        raise RuntimeError("stdout is gone")
+
+    monkeypatch.setattr(sys.stdout, "write", _broken_write)
+    with pytest.raises(RuntimeError):
+        host.resume_rendering()
+    assert not host.rendering_paused
+    assert host._render_resumed.is_set()
+
+
+def test_dropped_notice_replaces_the_pre_pause_live_region(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dropped-items notice first erases the live region it would have replaced."""
+    monkeypatch.setattr("omnigent_ui_sdk.terminal._host._PAUSED_OUTPUT_LIMIT", 1)
+    host = TerminalHost(model_name="test")
+    writes = _capture_stdout(monkeypatch)
+    host.output(StreamLive(Text("draft")))
+    assert host._live_line_count == 1
+
+    host.pause_rendering()
+    host.output(Text("alpha"))
+    host.output(Text("bravo"))
+    writes.clear()
+
+    host.resume_rendering()
+    assert writes[0].startswith("\033[A\033[2K")
+    painted = "".join(writes)
+    assert "1 earlier output item was skipped" in painted
+    assert "alpha" not in painted
+    assert painted.index("skipped") < painted.index("bravo")
+    assert host._live_line_count == 0
 
 
 def test_paused_output_keeps_the_newest_items_and_reports_the_rest(

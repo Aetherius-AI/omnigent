@@ -310,7 +310,10 @@ def test_detached_repl_stops_rendering_after_last_client_leaves(
             break
         time.sleep(0.3)
 
-    cpu_delta = sum(proc.cpu_times()[:2])
+    try:
+        cpu_delta: float | None = sum(proc.cpu_times()[:2])
+    except psutil.NoSuchProcess:
+        cpu_delta = None
     attached = pane.attached_clients()
     assert attached == 0, f"a client re-attached ({attached}); the detached condition was lost"
     assert not rendered, (

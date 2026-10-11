@@ -3143,22 +3143,40 @@ class TerminalHost:
         dropped, self._paused_output_dropped = self._paused_output_dropped, 0
         queued = list(self._paused_output)
         self._paused_output.clear()
-        if dropped:
-            self.output(
-                Text(
-                    f"  … {dropped} earlier output items were skipped while no terminal "
-                    "client was attached",
-                    style=self.theme.muted,
+        try:
+            if dropped:
+                # A StreamReplace also erases the pre-pause live region, whose
+                # replacement is among the dropped items.
+                self.output(
+                    StreamReplace(
+                        Text(
+                            f"  … {dropped} earlier output "
+                            f"{'item was' if dropped == 1 else 'items were'} skipped "
+                            "while no terminal client was attached",
+                            style=self.theme.muted,
+                        )
+                    )
                 )
-            )
-        for item in queued:
-            self.output(item)
-        self._render_resumed.set()
-        self._invalidate_prompt()
+            for item in queued:
+                self.output(item)
+        finally:
+            self._render_resumed.set()
+            self._invalidate_prompt()
 
     def _queue_paused_output(self, item: FormattedItem) -> None:
-        """Queue *item* for replay; consecutive live-region renders keep only the latest."""
-        if (
+        """Queue *item* for replay, dropping what a later item supersedes.
+
+        A ``StreamReplace`` repaints everything streamed since the last commit
+        boundary, so ``StreamingText``/``StreamLive`` items queued since then
+        would only be erased again; consecutive ``StreamLive`` renders keep the
+        latest. This bounds the replay to committed content.
+        """
+        if isinstance(item, StreamReplace):
+            while self._paused_output and isinstance(
+                self._paused_output[-1], StreamingText | StreamLive
+            ):
+                self._paused_output.pop()
+        elif (
             isinstance(item, StreamLive)
             and self._paused_output
             and isinstance(self._paused_output[-1], StreamLive)

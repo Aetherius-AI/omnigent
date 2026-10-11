@@ -687,15 +687,17 @@ async def _tmux_output(*args: str) -> str | None:
 async def _server_signals_client_changes() -> bool:
     """Whether the hosting tmux server wakes :data:`CLIENTS_CHANGED_CHANNEL`.
 
-    Only a runner-launched start-on-attach server carries the hook; the REPL
-    must not park a ``wait-for`` client in a user's own tmux.
+    Only a runner-launched start-on-attach server carries both hooks; the REPL
+    must not park a ``wait-for`` client in a user's own tmux, and must not pause
+    on a server that cannot wake it when a viewer returns.
     """
     hooks = await _tmux_output("show-hooks", "-g")
     if hooks is None:
         return False
-    return any(
-        line.startswith("client-detached[") and CLIENTS_CHANGED_CHANNEL in line
-        for line in hooks.splitlines()
+    lines = hooks.splitlines()
+    return all(
+        any(line.startswith(f"{hook}[") and CLIENTS_CHANGED_CHANNEL in line for line in lines)
+        for hook in ("client-attached", "client-detached")
     )
 
 

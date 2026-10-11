@@ -18,6 +18,7 @@ documented in ``designs/REPL_TMUX_PANE_SPLIT.md`` § 6 phase 5.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import shlex
 import shutil
@@ -1230,20 +1231,21 @@ async def test_watch_tmux_clients_reports_attach_and_last_detach(
         second = scratch_tmux.attach_client()
         await _eventually(lambda: counts[-1] == 2, what="the second viewer")
 
-        # One of two viewers leaving is not a transition the REPL cares about.
+        # One of two viewers leaving is not a transition the REPL cares about:
+        # give a misfiring hook time to be observed, then synchronize on the
+        # last detach so the check runs after every detach event was processed.
         reported = len(counts)
         first.terminate()
         first.wait(timeout=10)
         await asyncio.sleep(1.0)
-        assert 1 not in counts[reported:]
-
         second.terminate()
         second.wait(timeout=10)
         await _eventually(lambda: counts[-1] == 0, what="the last viewer to leave")
+        assert 1 not in counts[reported:]
         assert not watcher.done()
     finally:
         watcher.cancel()
-        with pytest.raises(asyncio.CancelledError):
+        with contextlib.suppress(asyncio.CancelledError):
             await watcher
         for client in (first, second):
             if client is not None and client.poll() is None:
