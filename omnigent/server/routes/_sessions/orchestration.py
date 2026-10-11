@@ -11472,7 +11472,7 @@ async def _descendant_session_summaries_from_conversations(
     for conv, parent_id, depth in rows:
         summary = _child_session_summary_from_conversation(conv, parent_id, previews.get(conv.id))
         summaries.append(
-            DescendantSessionSummary(**summary.model_dump(), depth=depth, archived=conv.archived)
+            DescendantSessionSummary(**dict(summary), depth=depth, archived=conv.archived)
         )
     return summaries
 

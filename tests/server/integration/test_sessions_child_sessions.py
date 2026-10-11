@@ -24,6 +24,7 @@ import json
 import re
 import sqlite3
 import tarfile
+from contextlib import closing
 from dataclasses import dataclass
 from typing import Any, NoReturn
 
@@ -2539,15 +2540,18 @@ async def test_descendants_page_reads_are_bounded_by_the_limit(
 
     # The cursor page (the last statement) must be served by the root index in
     # index order; a temp B-tree would mean the engine sorted the whole tree.
-    assert statements, "the store's page query was not captured"
-    statement, parameters = statements[-1]
-    with sqlite3.connect(db_uri.removeprefix("sqlite:///")) as plan_conn:
-        plan = "\n".join(
-            str(row[-1])
-            for row in plan_conn.execute(f"EXPLAIN QUERY PLAN {statement}", parameters)
-        )
-    assert "ix_conversations_root_conversation_id" in plan, plan
-    assert "TEMP B-TREE" not in plan, plan
+    # The qmark capture and EXPLAIN QUERY PLAN are SQLite's; other engines run
+    # the bounded-row part above only.
+    if db_uri.startswith("sqlite:///"):
+        assert statements, "the store's page query was not captured"
+        statement, parameters = statements[-1]
+        with closing(sqlite3.connect(db_uri.removeprefix("sqlite:///"))) as plan_conn:
+            plan = "\n".join(
+                str(row[-1])
+                for row in plan_conn.execute(f"EXPLAIN QUERY PLAN {statement}", parameters)
+            )
+        assert "ix_conversations_root_conversation_id" in plan, plan
+        assert "TEMP B-TREE" not in plan, plan
 
 
 async def test_descendants_max_depth_caps_the_walk(
