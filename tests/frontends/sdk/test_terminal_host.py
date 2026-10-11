@@ -1887,6 +1887,51 @@ def test_resume_rendering_releases_waiters_when_the_replay_fails(
     assert host._render_resumed.is_set()
 
 
+def test_resume_rendering_preserves_unreplayed_output_when_a_write_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mid-replay write failure keeps the items it never reached for a later resume."""
+    host = TerminalHost(model_name="test")
+    host.pause_rendering()
+    host.output(Text("alpha"))
+    host.output(Text("bravo"))
+    host.output(Text("charlie"))
+
+    def _write(data: str) -> int:
+        if "bravo" in data:
+            raise BrokenPipeError("pane gone mid-replay")
+        return len(data)
+
+    monkeypatch.setattr(sys.stdout, "write", _write)
+    monkeypatch.setattr(sys.stdout, "flush", lambda: None)
+
+    with pytest.raises(BrokenPipeError):
+        host.resume_rendering()
+
+    # alpha painted and bravo failed; only the untouched tail is re-queued, so a
+    # later resume finishes the replay instead of silently dropping it.
+    assert not host.rendering_paused
+    assert host._render_resumed.is_set()
+    assert [item.plain for item in host._paused_output] == ["charlie"]
+
+
+def test_clear_streamed_text_defers_while_paused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clearing while paused writes nothing and keeps the counts resume will erase."""
+    host = TerminalHost(model_name="test")
+    writes = _capture_stdout(monkeypatch)
+    host._streamed_line_count = 3
+    host._text_buffer = "partial tail"
+
+    host.pause_rendering()
+    host.clear_streamed_text()
+
+    assert writes == []
+    assert host._streamed_line_count == 3
+    assert host._text_buffer == ""
+
+
 def test_dropped_notice_replaces_the_pre_pause_live_region(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

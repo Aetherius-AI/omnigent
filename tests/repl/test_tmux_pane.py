@@ -24,6 +24,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -1152,6 +1153,12 @@ class _ScratchTmux:
             timeout=10,
         ).stdout
 
+    def session_attached(self) -> int:
+        """``#{session_attached}`` for this scratch session right now."""
+        return int(
+            self.run("display-message", "-p", "-t", self.session, "#{session_attached}").strip()
+        )
+
     def attach_client(self) -> subprocess.Popen[bytes]:
         """Attach a control-mode client, held open by its stdin like the web bridge's."""
         assert _TMUX_BIN is not None
@@ -1217,8 +1224,10 @@ async def test_watch_tmux_clients_reports_attach_and_last_detach(
     scratch_tmux: _ScratchTmux,
 ) -> None:
     """
-    The runner's exact hook commands wake the watcher on attach and on the last
-    detach, so a drift between the hooks and the REPL's channel shows up here.
+    The runner's exact hook commands wake the watcher only on the transitions
+    the REPL acts on -- the first viewer arriving and the last one leaving. A
+    second viewer joining, or one of two leaving, is silent, so a drift between
+    the hooks and the REPL's channel shows up here.
     """
     for hook in client_hook_commands():
         scratch_tmux.run(*hook)
@@ -1227,21 +1236,30 @@ async def test_watch_tmux_clients_reports_attach_and_last_detach(
     first = scratch_tmux.attach_client()
     second: subprocess.Popen[bytes] | None = None
     try:
-        await _eventually(lambda: bool(counts) and counts[-1] == 1, what="the first viewer")
-        second = scratch_tmux.attach_client()
-        await _eventually(lambda: counts[-1] == 2, what="the second viewer")
-
-        # One of two viewers leaving is not a transition the REPL cares about:
-        # give a misfiring hook time to be observed, then synchronize on the
-        # last detach so the check runs after every detach event was processed.
+        await _eventually(lambda: counts[-1:] == [1], what="the first viewer")
         reported = len(counts)
+
+        # A second viewer joining is not a transition the REPL cares about:
+        # someone is already watching, so the attach hook stays silent.
+        second = scratch_tmux.attach_client()
+        await _eventually(
+            lambda: scratch_tmux.session_attached() == 2,
+            what="tmux to record the second viewer",
+        )
+        # One of two viewers leaving is likewise silent.
         first.terminate()
         first.wait(timeout=10)
-        await asyncio.sleep(1.0)
+        await _eventually(
+            lambda: scratch_tmux.session_attached() == 1,
+            what="tmux to record the intermediate detach",
+        )
+        # Only the last viewer leaving wakes the watcher again, reporting zero.
         second.terminate()
         second.wait(timeout=10)
         await _eventually(lambda: counts[-1] == 0, what="the last viewer to leave")
-        assert 1 not in counts[reported:]
+        # Exactly one wake after the first viewer: the final detach's zero, with
+        # no spurious wake for the silent second attach or intermediate detach.
+        assert counts[reported:] == [0]
         assert not watcher.done()
     finally:
         watcher.cancel()
@@ -1249,6 +1267,56 @@ async def test_watch_tmux_clients_reports_attach_and_last_detach(
             await watcher
         for client in (first, second):
             if client is not None and client.poll() is None:
+                client.kill()
+                client.wait(timeout=10)
+
+
+@requires_tmux
+@pytest.mark.asyncio
+async def test_watch_tmux_clients_recovers_when_viewers_reconnect_during_rearm(
+    scratch_tmux: _ScratchTmux,
+) -> None:
+    """
+    Two viewers reconnecting in the gap between a detach wake-up and the next
+    ``wait-for`` must still wake the watcher. The attach hook signals the change
+    channel only on the first client, so the paired signals cannot cancel each
+    other and leave the pane paused with viewers attached.
+    """
+    for hook in client_hook_commands():
+        scratch_tmux.run(*hook)
+    reconnects: list[subprocess.Popen[bytes]] = []
+    counts: list[int] = []
+
+    def on_change(count: int) -> None:
+        counts.append(count)
+        if count != 0 or reconnects:
+            return
+        # Reconnect two viewers before the watcher re-arms: both land inside the
+        # rearm gap, the window where paired attach signals would collapse.
+        reconnects.append(scratch_tmux.attach_client())
+        reconnects.append(scratch_tmux.attach_client())
+        deadline = time.monotonic() + 10.0
+        while scratch_tmux.session_attached() < 2:
+            if time.monotonic() > deadline:
+                raise TimeoutError("reconnecting viewers never attached")
+            time.sleep(0.02)
+
+    watcher = asyncio.create_task(watch_tmux_clients(on_change))
+    first = scratch_tmux.attach_client()
+    try:
+        await _eventually(lambda: counts[-1:] == [1], what="the first viewer")
+        first.terminate()
+        first.wait(timeout=10)
+        # The detach wakes the watcher with 0; its callback reconnects two
+        # viewers in the gap. The watcher must still report the restored count.
+        await _eventually(lambda: counts[-1] == 2, what="both viewers after reconnect")
+        assert not watcher.done()
+    finally:
+        watcher.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watcher
+        for client in (first, *reconnects):
+            if client.poll() is None:
                 client.kill()
                 client.wait(timeout=10)
 

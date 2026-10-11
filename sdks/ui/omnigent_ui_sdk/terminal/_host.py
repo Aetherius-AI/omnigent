@@ -2039,7 +2039,9 @@ class TerminalHost:
             current_target_key[0] = target_key
             last_signature[0] = signature
             app = app_holder[0]
-            if app is not None:
+            # A rebuild already in flight when the last viewer left must not
+            # repaint the unviewed pane; resume_rendering repaints on return.
+            if app is not None and not self._render_paused:
                 app.invalidate()
 
         await _rebuild_content(force=True)
@@ -2987,14 +2989,21 @@ class TerminalHost:
         (no blank-then-redraw flicker on plain prose). This method is
         kept for callers that need to clear without an immediate
         replacement (e.g. cancel paths).
+
+        While rendering is paused the pre-pause lines are left on the
+        unviewed screen and their counts preserved, so the next replay
+        (:meth:`resume_rendering`) still erases exactly those lines. The
+        held-back buffer is dropped either way, matching the raw-tail
+        guarantee above.
         """
-        total = self._streamed_line_count + self._live_line_count
-        if total > 0:
-            # Move cursor up and clear each line.
-            for _ in range(total):
-                print("\033[A\033[2K", end="", flush=True)
-            self._streamed_line_count = 0
-            self._live_line_count = 0
+        if not self._render_paused:
+            total = self._streamed_line_count + self._live_line_count
+            if total > 0:
+                # Move cursor up and clear each line.
+                for _ in range(total):
+                    print("\033[A\033[2K", end="", flush=True)
+                self._streamed_line_count = 0
+                self._live_line_count = 0
         self._text_buffer = ""
         self._last_was_streaming = False
 
@@ -3157,8 +3166,15 @@ class TerminalHost:
                         )
                     )
                 )
-            for item in queued:
-                self.output(item)
+            for index, item in enumerate(queued):
+                try:
+                    self.output(item)
+                except Exception:
+                    # The pane went away mid-replay. Re-queue the items we never
+                    # reached so a later resume finishes instead of dropping them.
+                    for leftover in reversed(queued[index + 1 :]):
+                        self._paused_output.appendleft(leftover)
+                    raise
         finally:
             self._render_resumed.set()
             self._invalidate_prompt()

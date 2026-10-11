@@ -1,9 +1,11 @@
 """tmux hooks that let a start-on-attach pane follow its viewers.
 
 The pane command waits on :data:`START_ON_ATTACH_CHANNEL` before starting, and
-the hook table wakes :data:`CLIENTS_CHANGED_CHANNEL` after every attach and the
-last detach so the pane application can stop painting an unviewed screen. Shared
-by :mod:`omnigent.inner.terminal` (launch) and :mod:`omnigent.repl._tmux_pane`.
+the hook table wakes :data:`CLIENTS_CHANGED_CHANNEL` only on the transitions
+that change whether anyone is watching -- the first client attaching and the
+last client detaching -- so the pane application can stop painting an unviewed
+screen. Shared by :mod:`omnigent.inner.terminal` (launch) and
+:mod:`omnigent.repl._tmux_pane`.
 """
 
 from __future__ import annotations
@@ -15,9 +17,21 @@ CLIENTS_CHANGED_CHANNEL = "omnigent-clients-changed"
 def client_hook_commands() -> list[list[str]]:
     """Return the ``set-hook`` commands for a start-on-attach tmux server.
 
-    ``client-detached`` signals only once ``#{session_attached}`` is zero, so a
-    viewer leaving while others remain is silent. ``wait-for -S`` remembers a
-    signal nobody awaited yet, so a watcher started late misses nothing.
+    Both hooks signal :data:`CLIENTS_CHANGED_CHANNEL` only on the boundary
+    between zero and one viewer: ``client-attached`` when ``#{session_attached}``
+    becomes ``1`` and ``client-detached`` when it reaches ``0``. A viewer joining
+    or leaving while others remain is silent.
+
+    Signalling only those two transitions is what keeps the watcher reliable. It
+    re-arms a fresh one-shot ``wait-for`` after each wake, and tmux cancels two
+    signals delivered to a channel while nobody is waiting (a later ``wait-for``
+    then blocks instead of returning). Were every attach to signal, two viewers
+    reconnecting in the gap before the watcher re-arms would cancel each other
+    and strand the pane paused with clients attached. One signal per real
+    transition means at most one lands per gap, so ``wait-for`` remembers it.
+
+    ``client-attached`` still signals :data:`START_ON_ATTACH_CHANNEL` on every
+    attach to release the pane's one-shot start gate.
 
     :returns: Argument lists for one tmux command sequence.
     """
@@ -26,7 +40,9 @@ def client_hook_commands() -> list[list[str]]:
             "set-hook",
             "-g",
             "client-attached",
-            f"wait-for -S {START_ON_ATTACH_CHANNEL} ; wait-for -S {CLIENTS_CHANGED_CHANNEL}",
+            f"wait-for -S {START_ON_ATTACH_CHANNEL} ; "
+            f"if-shell -F '#{{==:#{{session_attached}},1}}' "
+            f"'wait-for -S {CLIENTS_CHANGED_CHANNEL}'",
         ],
         [
             "set-hook",

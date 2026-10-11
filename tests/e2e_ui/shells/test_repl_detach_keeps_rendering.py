@@ -66,9 +66,6 @@ class ReplPane:
     def attached_clients(self) -> int:
         return int(self._format("#{session_attached}"))
 
-    def pane_pid(self) -> int:
-        return int(self._format("#{pane_pid}"))
-
     def hooks(self) -> str:
         return _tmux(self.socket, "show-hooks", "-g")
 
@@ -122,7 +119,7 @@ def repl_process(session_id: str) -> psutil.Process | None:
     for proc in psutil.process_iter(["cmdline"]):
         cmdline = proc.info["cmdline"] or []
         if "attach" in cmdline and session_id in cmdline and any("omnigent" in c for c in cmdline):
-            if cmdline[0].endswith("sh") or cmdline[:2] == ["sh", "-c"]:
+            if Path(cmdline[0]).name in ("sh", "bash", "zsh", "dash"):
                 continue
             return proc
     return None
@@ -291,10 +288,14 @@ def test_detached_repl_stops_rendering_after_last_client_leaves(
         key=nonce,
         match=nonce,
     )
-    _post_user_turn(base_url, session_id, f"turn {nonce}. Reply with exactly this token: {reply}")
+    # The prompt names only the nonce, never the reply token, so the token can
+    # reach the transcript or the pane only as the assistant's painted response
+    # -- not by echoing the user's own text.
+    _post_user_turn(base_url, session_id, f"turn {nonce}. Reply with your assigned token.")
 
-    # The turn really ran: the token is in the committed transcript, so a genuine
-    # session event occurred that a correctly paused/stopped REPL would ignore.
+    # The turn really ran: the assistant-only token is in the committed
+    # transcript, so a genuine session event occurred that a correctly
+    # paused/stopped REPL would ignore.
     _wait_until(
         lambda: _token_committed(base_url, session_id, reply),
         timeout_s=60.0,
