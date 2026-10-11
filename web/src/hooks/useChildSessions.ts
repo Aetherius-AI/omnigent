@@ -207,10 +207,13 @@ export function invalidateChildSessions(queryClient: QueryClient, parentId: stri
     const rootId = tree.queryKey[1] as string;
     queryClient.setQueryData<number>(subagentTreeDirtyKey(rootId), (count) => (count ?? 0) + 1);
   }
+  // Only a tree someone is watching refetches now; an unmounted one is marked
+  // stale so it reloads when its rail reopens, and the list's own query still
+  // refreshes for the consumers that stay mounted (the shell's count badge).
   const refreshes = [...covering, ...failedRoots].map((tree) =>
     queryClient.invalidateQueries({ queryKey: tree.queryKey }, { cancelRefetch: false }),
   );
-  if (covering.length === 0) {
+  if (!covering.some((tree) => tree.getObserversCount() > 0)) {
     refreshes.push(queryClient.invalidateQueries({ queryKey: childSessionsQueryKey(parentId) }));
   }
   return Promise.all(refreshes).then(() => undefined);
@@ -408,16 +411,22 @@ export async function fetchSubagentTree(
   const dirtyKey = subagentTreeDirtyKey(rootId);
   let rows: DescendantSessionWire[] = [];
   let startedAt = Date.now();
-  // Bounded so a storm of events cannot keep this fetch running; the next
-  // event refreshes again anyway.
+  let dirty = true;
+  // Bounded so a storm of events cannot keep this fetch running; a change
+  // that lands during the last pass schedules one more refresh instead.
   /* oxlint-disable no-await-in-loop */
-  for (let pass = 0; pass < 3; pass++) {
+  for (let pass = 0; pass < 3 && dirty; pass++) {
     startedAt = Date.now();
     const dirtyAtStart = queryClient.getQueryData<number>(dirtyKey) ?? 0;
     rows = await fetchDescendantRows(rootId);
-    if ((queryClient.getQueryData<number>(dirtyKey) ?? 0) === dirtyAtStart) break;
+    dirty = (queryClient.getQueryData<number>(dirtyKey) ?? 0) !== dirtyAtStart;
   }
   /* oxlint-enable no-await-in-loop */
+  if (dirty) {
+    setTimeout(() => {
+      void queryClient.invalidateQueries({ queryKey: subagentTreeQueryKey(rootId) });
+    }, 0);
+  }
   const byParent = new Map<string, ChildSessionInfo[]>([[rootId, []]]);
   for (const row of withoutSettledArchived(rows)) {
     setSessionParent(row.id, row.parent_session_id);
@@ -428,10 +437,13 @@ export async function fetchSubagentTree(
     // empty one so a childless row never asks the server.
     if (row.depth < MAX_TREE_DEPTH && !byParent.has(row.id)) byParent.set(row.id, []);
   }
-  // Pages come in primary-key order; the rail shows siblings newest-first.
+  // Pages come in primary-key order; the rail shows siblings newest-first,
+  // same-second siblings by descending id so the order is stable.
   const createdAt = new Map(rows.map((row) => [row.id, row.created_at ?? 0]));
   for (const [parentId, children] of byParent) {
-    children.sort((a, b) => (createdAt.get(b.id) ?? 0) - (createdAt.get(a.id) ?? 0));
+    children.sort(
+      (a, b) => (createdAt.get(b.id) ?? 0) - (createdAt.get(a.id) ?? 0) || b.id.localeCompare(a.id),
+    );
     // A list patched by a live event while this fetch was in flight is newer
     // than the snapshot; leave it for the next refresh.
     const updatedAt = queryClient.getQueryState(childSessionsQueryKey(parentId))?.dataUpdatedAt;
@@ -512,9 +524,10 @@ export function useSubagentTree(rootSessionId: string | null): UseSubagentTreeRe
       sessionId === null ? ["conversation", null, "descendants"] : subagentTreeQueryKey(sessionId),
     queryFn: () => fetchSubagentTree(sessionId as string, queryClient),
     enabled: sessionId !== null,
+    // A rail reopened after a refresh marked its unmounted tree stale must
+    // reload it, so mounting refetches whenever the tree is stale.
     staleTime: 60_000,
     retry: false,
-    refetchOnMount: false,
   });
   const legacy = tree.isError && isMissingSubtreeRoute(tree.error);
   const direct = useQuery({

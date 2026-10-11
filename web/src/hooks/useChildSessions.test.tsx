@@ -361,6 +361,88 @@ describe("useSubagentTree", () => {
     ]);
   });
 
+  it("orders same-second siblings by descending id", async () => {
+    const queryClient = newQueryClient();
+    const tied = (id: string) => ({ ...descendantRow(id, "conv_root", 1), created_at: 5_000 });
+    vi.mocked(authenticatedFetch).mockResolvedValueOnce(
+      treePage([tied("conv_b"), tied("conv_c"), tied("conv_a")]),
+    );
+
+    const { result } = renderHook(() => useSubagentTree("conv_root"), {
+      wrapper: wrapperFor(queryClient),
+    });
+
+    await waitFor(() =>
+      expect(ids(result.current.children)).toEqual(["conv_c", "conv_b", "conv_a"]),
+    );
+  });
+
+  it("reloads a stale tree when the rail reopens and keeps the shell's list fresh", async () => {
+    // WHY: switching rail tabs unmounts the panel; a refresh that arrives then
+    // must still reach the mounted root-list consumers and reload the tree
+    // when the panel comes back, not leave it on the old snapshot.
+    const queryClient = newQueryClient();
+    let treeLoads = 0;
+    vi.mocked(authenticatedFetch).mockImplementation(async (url) => {
+      if (String(url).includes("/descendants")) {
+        treeLoads += 1;
+        const rows = [descendantRow("conv_a", "conv_root", 1)];
+        if (treeLoads > 1) rows.push(descendantRow("conv_b", "conv_root", 1));
+        return treePage(rows);
+      }
+      return jsonResponse({ object: "list", data: [legacyRow("conv_a")] });
+    });
+    const badge = renderHook(() => useChildSessions("conv_root"), {
+      wrapper: wrapperFor(queryClient),
+    });
+    await waitFor(() => expect(ids(badge.result.current.children)).toEqual(["conv_a"]));
+    const rail = renderRail(queryClient);
+    await waitFor(() => expect(screen.getByTestId("root")).toHaveTextContent("conv_a"));
+    expect(treeLoads).toBe(1);
+    rail.unmount();
+
+    await act(() => invalidateChildSessions(queryClient, "conv_root"));
+
+    // The shell's own list refetches while the tree is unmounted…
+    await waitFor(() => expect(fetchedUrls()).toHaveLength(3));
+    expect(fetchedUrls()[2]).toBe("/v1/sessions/conv_root/child_sessions");
+    expect(treeLoads).toBe(1);
+    // …and reopening the rail reloads the stale tree.
+    renderRail(queryClient);
+    await waitFor(() => expect(screen.getByTestId("root")).toHaveTextContent("conv_b,conv_a"));
+    expect(treeLoads).toBe(2);
+  });
+
+  it("schedules one more refresh when the last re-read pass is already stale", async () => {
+    // WHY: the in-flight re-read is bounded; a change landing during its last
+    // pass must still reach the cache through a follow-up fetch.
+    const queryClient = newQueryClient();
+    const pending: ((response: Response) => void)[] = [];
+    vi.mocked(authenticatedFetch).mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          pending.push(resolve);
+        }),
+    );
+    queryClient.setQueryData(childSessionsQueryKey("conv_root"), [
+      { ...legacyRow("conv_a"), task_summary: null, labels: {}, last_task_error: null },
+    ] as ChildSessionInfo[]);
+    renderRail(queryClient);
+    const stale = () => treePage([descendantRow("conv_a", "conv_root", 1)]);
+    for (let pass = 0; pass < 3; pass++) {
+      await waitFor(() => expect(pending).toHaveLength(pass + 1));
+      await act(() => invalidateChildSessions(queryClient, "conv_a"));
+      pending[pass](stale());
+    }
+
+    // A fourth request follows the exhausted loop and carries the change.
+    await waitFor(() => expect(pending).toHaveLength(4));
+    pending[3](
+      treePage([descendantRow("conv_a", "conv_root", 1), descendantRow("conv_a1", "conv_a", 2)]),
+    );
+    await waitFor(() => expect(screen.getByTestId("row-conv_a")).toHaveTextContent("conv_a1"));
+  });
+
   it("leaves a list patched while the subtree was loading for the next refresh", async () => {
     // WHY: an SSE patch that lands mid-fetch is newer than the snapshot the
     // server built; seeding over it would show stale status until the next event.
