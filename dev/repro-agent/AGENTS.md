@@ -806,15 +806,21 @@ Check these before debugging a Playwright driver against the SPA:
   Polling for `status == "idle"` right after send false-fires on the pre-turn
   idle, but requiring the session to be *seen* leaving idle is just as broken:
   a fast mocked turn settles between two polls, so the wait can only return at
-  its deadline and a correct fix times out. Snapshot the transcript
-  (`GET /v1/sessions/{id}/items`) or the on-screen reply/error count before
-  sending, then return once a new assistant or error item exists past that
-  snapshot and the status is terminal, or as soon as the status is `failed`
-  (some failures, such as a runner going offline, persist `failed` without
-  appending an item), with a deadline below the enclosing test's budget.
+  its deadline and a correct fix times out. Before sending, snapshot the
+  transcript (`GET /v1/sessions/{id}/items`) or the on-screen reply/error
+  count *and* the session status. Then return once a new assistant or error
+  item exists past that snapshot and the status is terminal, or as soon as the
+  status newly becomes `failed` — some failures, such as a runner going
+  offline, persist `failed` without appending an item. A `failed` already
+  present in the pre-send snapshot belongs to an earlier turn: a session can
+  accept a follow-up while that failure is still cached, so accept it only
+  after a status transition or an item attributable to the new input. Pass an
+  explicit deadline below the enclosing test's remaining budget.
   `poll_session_until_terminal` in `tests/e2e/conftest.py` is the complete
-  pattern (it accepts `idle` after a running edge *or* real turn output, and
-  `failed` immediately); in `tests/e2e_ui/chat/`, `_poll_turn_outcome` in
+  pattern for idle (it accepts `idle` after a running edge *or* real turn
+  output), but it returns on any `failed` and defaults to a 300 s timeout, so
+  pass `timeout=` and apply the pre-send status check around it. In
+  `tests/e2e_ui/chat/`, `_poll_turn_outcome` in
   `test_absolute_watchdog_spares_active_turn.py` shows the transcript check and
   `_wait_for_idle` in `test_acp_catalog_model_selection.py` the status check,
   which its caller reaches only after the reply is visible.
