@@ -2156,8 +2156,9 @@ def _canonical_subagent_workspace(
     if not canonical.is_dir():
         raise ValueError(f"workspace is not a directory: {workspace!r}")
 
-    # A relative os_env.cwd resolves against the runner process cwd — the
-    # same base the harness spawn uses — so boundary and sandbox agree.
+    # Resolve a relative os_env.cwd against the runner process cwd. This is a
+    # fail-fast dispatch boundary, not the authoritative root: a host-launched
+    # runner may start the child under OMNIGENT_RUNNER_WORKSPACE instead.
     root = Path(configured_root).expanduser()
     try:
         canonical_root = root.resolve(strict=True)
@@ -2882,10 +2883,8 @@ async def _execute_subagent_tool(
                     f"Install/upgrade it with: {install} "
                     f"(or don't dispatch to {sub_agent_name!r} here)."
                 )
-        # Canonicalize the per-child workspace only on the create path —
-        # after the existing-child lookup — so a continuation send is
-        # rejected with the create-time-only error above without this
-        # dispatch ever probing the filesystem for the supplied path.
+        # Validate the workspace only on the create path, after the existing-child
+        # lookup, so continuation sends are rejected without probing the filesystem.
         canonical_workspace: str | None = None
         if workspace is not None:
             try:

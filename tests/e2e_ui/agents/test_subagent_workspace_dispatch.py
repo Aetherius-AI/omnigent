@@ -102,88 +102,92 @@ def workspace_subagents(
     task_a.mkdir(parents=True)
     task_b.mkdir()
 
-    configure_mock_llm(
-        mock_llm_server_url,
-        [
-            {
-                "tool_calls": [
-                    {
-                        "call_id": "call_dispatch_task_a",
-                        "name": "sys_session_send",
-                        "arguments": json.dumps(
-                            {
-                                "agent": "worker",
-                                "title": "task-a",
-                                "args": {
-                                    "input": "Print your working directory.",
-                                    "workspace": str(task_a),
-                                },
-                            }
-                        ),
-                    }
-                ]
-            },
-        ],
-        key=orchestrator_model,
-    )
-    set_fallback_mock_llm(mock_llm_server_url, orchestrator_model, _PARENT_REPLY)
-    configure_mock_llm(
-        mock_llm_server_url,
-        [
-            {
-                "tool_calls": [
-                    {
-                        "call_id": "call_pwd",
-                        "name": "sys_os_shell",
-                        "arguments": json.dumps({"command": "pwd"}),
-                    }
-                ]
-            },
-        ],
-        key=worker_model,
-    )
-    set_fallback_mock_llm(mock_llm_server_url, worker_model, _WORKER_REPLY)
-    _recover_shared_runner()
-
-    bundle = bundle_files(
-        {
-            "config.yaml": _ORCHESTRATOR_YAML.format(
-                name=f"ws_orchestrator_{uid}", model=orchestrator_model
-            ).encode(),
-            "agents/worker/config.yaml": _WORKER_YAML.format(
-                model=worker_model, project=project
-            ).encode(),
-        }
-    )
-    created = post_session_bundle(httpx.post, f"{live_server}/v1/sessions", bundle, timeout=30.0)
-    created.raise_for_status()
-    session_id = created.json()["session_id"]
-    agent_id = created.json()["agent_id"]
-    handle = WorkspaceSubagents(
-        base_url=live_server,
-        session_id=session_id,
-        agent_id=agent_id,
-        project=project,
-        task_a=task_a,
-        task_b=task_b,
-    )
     try:
-        bind_session_runner(httpx.patch, live_server, session_id, runner_id, timeout=10.0)
-        yield handle
-    finally:
-        listed = httpx.get(
-            f"{live_server}/v1/sessions/{session_id}/child_sessions",
-            params={"limit": 100},
-            timeout=10.0,
+        configure_mock_llm(
+            mock_llm_server_url,
+            [
+                {
+                    "tool_calls": [
+                        {
+                            "call_id": "call_dispatch_task_a",
+                            "name": "sys_session_send",
+                            "arguments": json.dumps(
+                                {
+                                    "agent": "worker",
+                                    "title": "task-a",
+                                    "args": {
+                                        "input": "Print your working directory.",
+                                        "workspace": str(task_a),
+                                    },
+                                }
+                            ),
+                        }
+                    ]
+                },
+            ],
+            key=orchestrator_model,
         )
-        if listed.status_code == 200:
-            handle.children.extend(
-                str(child.get("id") or child.get("session_id"))
-                for child in listed.json().get("data", [])
+        set_fallback_mock_llm(mock_llm_server_url, orchestrator_model, _PARENT_REPLY)
+        configure_mock_llm(
+            mock_llm_server_url,
+            [
+                {
+                    "tool_calls": [
+                        {
+                            "call_id": "call_pwd",
+                            "name": "sys_os_shell",
+                            "arguments": json.dumps({"command": "pwd"}),
+                        }
+                    ]
+                },
+            ],
+            key=worker_model,
+        )
+        set_fallback_mock_llm(mock_llm_server_url, worker_model, _WORKER_REPLY)
+        _recover_shared_runner()
+
+        bundle = bundle_files(
+            {
+                "config.yaml": _ORCHESTRATOR_YAML.format(
+                    name=f"ws_orchestrator_{uid}", model=orchestrator_model
+                ).encode(),
+                "agents/worker/config.yaml": _WORKER_YAML.format(
+                    model=worker_model, project=project
+                ).encode(),
+            }
+        )
+        created = post_session_bundle(
+            httpx.post, f"{live_server}/v1/sessions", bundle, timeout=30.0
+        )
+        created.raise_for_status()
+        session_id = created.json()["session_id"]
+        agent_id = created.json()["agent_id"]
+        handle = WorkspaceSubagents(
+            base_url=live_server,
+            session_id=session_id,
+            agent_id=agent_id,
+            project=project,
+            task_a=task_a,
+            task_b=task_b,
+        )
+        try:
+            bind_session_runner(httpx.patch, live_server, session_id, runner_id, timeout=10.0)
+            yield handle
+        finally:
+            listed = httpx.get(
+                f"{live_server}/v1/sessions/{session_id}/child_sessions",
+                params={"limit": 100},
+                timeout=10.0,
             )
-        for child_id in dict.fromkeys(handle.children):
-            httpx.delete(f"{live_server}/v1/sessions/{child_id}", timeout=10.0)
-        httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
+            if listed.status_code == 200:
+                handle.children.extend(
+                    str(child.get("id") or child.get("session_id"))
+                    for child in listed.json().get("data", [])
+                )
+            for child_id in dict.fromkeys(handle.children):
+                httpx.delete(f"{live_server}/v1/sessions/{child_id}", timeout=10.0)
+            httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
+    finally:
         shutil.rmtree(project.parent, ignore_errors=True)
 
 
