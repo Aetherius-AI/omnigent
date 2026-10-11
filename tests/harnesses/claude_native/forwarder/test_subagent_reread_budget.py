@@ -1,14 +1,5 @@
-"""Regression coverage for OMNI-10204 (native forwarders re-read whole files
-every poll and retry unresolvable items forever).
-
-When a Claude sub-agent's spawn ``toolUseId`` is in no transcript -- a background
-spawn whose ``Agent`` call was never written, or a spawn dropped when the resume
-path rewrites the transcript across a compaction -- ``_subagent_parents_by_tool_use``
-finds no owner, so ``_forward_available_subagents`` re-reads the main transcript
-and every sub-agent transcript in full on every 0.25s poll, forever, logging only
-at DEBUG. The forwarder should instead set such an item aside after a bounded
-number of attempts, log it once at WARNING, and stop the full re-reads.
-"""
+"""Unowned sub-agent spawns stop triggering full transcript re-scans after a
+bounded resolve budget and are set aside with a single WARNING."""
 
 from __future__ import annotations
 
@@ -25,6 +16,7 @@ import omnigent.harnesses.claude_native.forwarder as forwarder
 import omnigent.harnesses.claude_native.main as claude_main
 from tests.harnesses.claude_native.forwarder._support import _seed_subagent_on_disk
 
+# Well past the forwarder's resolve budget, so a bounded scan leaves idle polls.
 _POLLS = 8
 
 
@@ -71,12 +63,13 @@ async def _poll_until_steady(
     return rescan_polls, state
 
 
-def _warnings_naming(caplog: pytest.LogCaptureFixture, *needles: str) -> list[str]:
+def _set_aside_warnings(caplog: pytest.LogCaptureFixture, *needles: str) -> list[str]:
+    """WARNING-level messages that name every one of ``needles``."""
     return [
         record.getMessage()
         for record in caplog.records
         if record.levelno >= logging.WARNING
-        and any(needle in record.getMessage() for needle in needles)
+        and all(needle in record.getMessage() for needle in needles)
     ]
 
 
@@ -85,8 +78,8 @@ async def test_orphan_subagent_meta_is_set_aside_and_stops_full_rereads(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A ``.meta.json`` whose spawn id is in no transcript must stop driving
-    full re-reads after a few polls and be logged once at WARNING."""
+    """A ``.meta.json`` whose spawn id is in no transcript drives the full re-read
+    exactly as many times as the budget allows, then is set aside with one WARNING."""
     transcript_path = tmp_path / "session.jsonl"
     transcript_path.write_text("", encoding="utf-8")
     subagents_dir = transcript_path.parent / transcript_path.stem / "subagents"
@@ -112,9 +105,11 @@ async def test_orphan_subagent_meta_is_set_aside_and_stops_full_rereads(
     assert len(rescan_polls) < _POLLS, (
         f"unresolvable meta re-scanned all transcripts on every poll: {rescan_polls}"
     )
-    assert _POLLS not in rescan_polls, "the final poll still re-read every transcript"
-    assert _warnings_naming(caplog, "orphan", "toolu_orphan"), (
-        "unresolvable meta was never set aside with a WARNING"
+    assert rescan_polls == list(range(1, forwarder._SUBAGENT_RESOLVE_MAX_ATTEMPTS + 1)), (
+        f"full transcript re-scans must stop exactly at the resolve budget: {rescan_polls}"
+    )
+    assert len(_set_aside_warnings(caplog, "orphan", "toolu_orphan")) == 1, (
+        "an unresolvable spawn must be set aside with exactly one WARNING"
     )
 
 
@@ -123,8 +118,8 @@ async def test_compaction_dropped_spawn_stops_full_rereads(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A spawn dropped when the resume path rewrites across a compaction (plus a
-    sub-agent nested under it) must stop driving full re-reads on later polls."""
+    """A spawn dropped when the resume path rewrites across a compaction, and a
+    sub-agent nested under it, are both set aside once and stop the re-reads."""
     transcript_path = tmp_path / "session.jsonl"
     external_sid = str(uuid.uuid4())
     items: list[dict[str, Any]] = [
@@ -153,10 +148,9 @@ async def test_compaction_dropped_spawn_stops_full_rereads(
     transcript_path.write_text(body, encoding="utf-8")
     assert "toolu_precompact" not in body, "the resume rewrite unexpectedly kept the spawn id"
 
-    # The sub-agent whose spawn was cleared survives on disk; its own spawn id
-    # is now in no transcript. It spawned a nested sub-agent, whose spawn tool
-    # call lives in the compacted sub-agent's own transcript -- so the nested
-    # one resolves to a parent that is itself never registered.
+    # The compacted sub-agent's spawn id is now in no transcript, and its nested
+    # sub-agent's spawn lives in the compacted transcript, so the nested one
+    # resolves to a parent that is itself never registered.
     subagents_dir = transcript_path.parent / transcript_path.stem / "subagents"
     subagents_dir.mkdir(parents=True, exist_ok=True)
     (subagents_dir / "agent-compacted.meta.json").write_text(
@@ -189,4 +183,8 @@ async def test_compaction_dropped_spawn_stops_full_rereads(
     assert len(rescan_polls) < _POLLS, (
         f"compaction-orphaned sub-agents re-scanned every transcript on every poll: {rescan_polls}"
     )
-    assert _POLLS not in rescan_polls, "the final poll still re-read every transcript"
+    assert rescan_polls == list(range(1, forwarder._SUBAGENT_RESOLVE_MAX_ATTEMPTS + 1)), (
+        f"full transcript re-scans must stop exactly at the resolve budget: {rescan_polls}"
+    )
+    assert len(_set_aside_warnings(caplog, "compacted", "toolu_precompact")) == 1
+    assert len(_set_aside_warnings(caplog, "nested", "toolu_nested")) == 1

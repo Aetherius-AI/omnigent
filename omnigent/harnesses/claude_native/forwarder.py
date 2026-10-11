@@ -634,7 +634,8 @@ class SubagentForwardState:
         ``_SUBAGENT_RESOLVE_MAX_ATTEMPTS`` is set aside and no longer
         scanned for. The count is durable so the full re-read does not
         resume after a forwarder restart; set-aside sub-agents are never
-        registered children, so they stay out of ``subagents``.
+        registered children, so they stay out of ``subagents``, and
+        registering or parking a sub-agent forgets its count.
     """
 
     subagents: dict[str, SubagentEntry]
@@ -2529,27 +2530,35 @@ def _subagent_set_aside(state: SubagentForwardState, subagent_id: str) -> bool:
     return state.resolve_misses.get(subagent_id, 0) >= _SUBAGENT_RESOLVE_MAX_ATTEMPTS
 
 
-async def _record_unresolved_subagent(
+def _with_subagent_entry(
+    state: SubagentForwardState, entry: SubagentEntry
+) -> SubagentForwardState:
+    """Return ``state`` with ``entry`` registered or parked and its resolve misses forgotten."""
+    return SubagentForwardState(
+        subagents={**state.subagents, entry.subagent_id: entry},
+        resolve_misses={k: v for k, v in state.resolve_misses.items() if k != entry.subagent_id},
+    )
+
+
+def _record_unresolved_subagent(
     *,
-    bridge_dir: Path,
     parent_session_id: str,
     subagent_id: str,
-    tool_use_id: str | None,
+    tool_use_id: str,
     reason: str,
     state: SubagentForwardState,
     attempts: int | None = None,
 ) -> SubagentForwardState:
     """Count one failed resolve of ``subagent_id`` and set it aside once spent.
 
-    The miss count lives in durable state so it survives a forwarder restart —
-    the transcripts that triggered the re-read are still on disk, so an in-memory
-    budget would let the full re-read resume. Nothing is parked in ``subagents``:
-    a spawn no transcript owns has no correct parent to replay under. The attempt
-    that reaches the budget logs one WARNING.
+    The caller persists the returned state once per poll. The count is durable so
+    a restart, which finds the same transcripts on disk, cannot resume the full
+    re-read. A set-aside sub-agent is not parked in ``subagents``: a spawn no
+    transcript owns has no correct parent to replay under.
 
     :param attempts: Force the stored count, used to set a child aside at once
         when its parent was set aside; defaults to one past the current count.
-    :returns: State with ``subagent_id``'s miss count advanced.
+    :returns: State with the count advanced; reaching the budget logs one WARNING.
     """
     current = state.resolve_misses.get(subagent_id, 0)
     attempts = current + 1 if attempts is None else max(attempts, current + 1)
@@ -2557,7 +2566,6 @@ async def _record_unresolved_subagent(
         subagents=state.subagents,
         resolve_misses={**state.resolve_misses, subagent_id: attempts},
     )
-    await _write_subagent_forward_state_async(bridge_dir, updated)
     if attempts >= _SUBAGENT_RESOLVE_MAX_ATTEMPTS:
         _logger.warning(
             "Setting aside claude-native sub-agent whose spawn never resolved; "
@@ -2642,6 +2650,7 @@ async def _forward_available_subagents(
     # ``glob`` is sync; offload to a thread so we don't stat the
     # filesystem on the event loop.
     meta_paths = await asyncio.to_thread(lambda: sorted(subagents_dir.glob(_SUBAGENT_META_GLOB)))
+    meta_ids_on_disk = {_subagent_id_from_meta_path(path) for path in meta_paths}
     updated = state
     # Read each due meta before correlating: an unreadable or already-set-aside
     # meta must not cost a transcript read, so the full scan below stops running
@@ -2657,14 +2666,8 @@ async def _forward_available_subagents(
             continue
         meta = await asyncio.to_thread(_read_subagent_meta, meta_path)
         if meta is None:
-            updated = await _record_unresolved_subagent(
-                bridge_dir=bridge_dir,
-                parent_session_id=parent_session_id,
-                subagent_id=subagent_id,
-                tool_use_id=None,
-                reason="unreadable meta",
-                state=updated,
-            )
+            # A missing or mid-write meta costs no transcript read and no resolve
+            # budget, so it still registers once it becomes readable.
             continue
         candidates.append((meta_path, meta))
     parents_by_tool_use = (
@@ -2684,8 +2687,7 @@ async def _forward_available_subagents(
             # The spawn record is still mid-write, was dropped as ambiguous, or is
             # gone for good (a compaction rewrite, or a background spawn that never
             # wrote one). The budget tells those apart.
-            updated = await _record_unresolved_subagent(
-                bridge_dir=bridge_dir,
+            updated = _record_unresolved_subagent(
                 parent_session_id=parent_session_id,
                 subagent_id=subagent_id,
                 tool_use_id=tool_use_id,
@@ -2726,18 +2728,13 @@ async def _forward_available_subagents(
                             subagent_id,
                             parent_subagent_id,
                         )
-                        updated = SubagentForwardState(
-                            subagents={
-                                **updated.subagents,
-                                subagent_id: SubagentEntry(
-                                    subagent_id=subagent_id,
-                                    child_conversation_id="",
-                                    parent_subagent_id=parent_subagent_id,
-                                ),
-                            },
-                            resolve_misses={
-                                k: v for k, v in updated.resolve_misses.items() if k != subagent_id
-                            },
+                        updated = _with_subagent_entry(
+                            updated,
+                            SubagentEntry(
+                                subagent_id=subagent_id,
+                                child_conversation_id="",
+                                parent_subagent_id=parent_subagent_id,
+                            ),
                         )
                         await _write_subagent_forward_state_async(bridge_dir, updated)
                         made_progress = True
@@ -2780,18 +2777,13 @@ async def _forward_available_subagents(
                         delivered_ambiguous=False,
                         http_status=_http_status_for_log(exc),
                     )
-                    updated = SubagentForwardState(
-                        subagents={
-                            **updated.subagents,
-                            subagent_id: SubagentEntry(
-                                subagent_id=subagent_id,
-                                child_conversation_id="",
-                                parent_subagent_id=parent_subagent_id,
-                            ),
-                        },
-                        resolve_misses={
-                            k: v for k, v in updated.resolve_misses.items() if k != subagent_id
-                        },
+                    updated = _with_subagent_entry(
+                        updated,
+                        SubagentEntry(
+                            subagent_id=subagent_id,
+                            child_conversation_id="",
+                            parent_subagent_id=parent_subagent_id,
+                        ),
                     )
                     await _write_subagent_forward_state_async(bridge_dir, updated)
                     continue
@@ -2810,32 +2802,26 @@ async def _forward_available_subagents(
                 )
                 continue
             start_retry_tracker.clear(retry_key)
-            updated = SubagentForwardState(
-                subagents={
-                    **updated.subagents,
-                    subagent_id: SubagentEntry(
-                        subagent_id=subagent_id,
-                        child_conversation_id=child_id,
-                        parent_subagent_id=parent_subagent_id,
-                    ),
-                },
-                resolve_misses={
-                    k: v for k, v in updated.resolve_misses.items() if k != subagent_id
-                },
+            updated = _with_subagent_entry(
+                updated,
+                SubagentEntry(
+                    subagent_id=subagent_id,
+                    child_conversation_id=child_id,
+                    parent_subagent_id=parent_subagent_id,
+                ),
             )
             await _write_subagent_forward_state_async(bridge_dir, updated)
             made_progress = True
         if not made_progress:
-            # Nothing registered this pass: a deferred child follows a set-aside
-            # parent, waits while the parent's registration backs off, or else
-            # spends its own budget resolving the missing parent.
+            # Nothing registered this pass. A deferred child follows a set-aside
+            # parent, waits while its parent is registered or still on disk and
+            # unsettled, and spends its own budget only once the parent's meta is gone.
             for meta_path, meta, parent_subagent_id in deferred:
                 subagent_id = _subagent_id_from_meta_path(meta_path)
                 if parent_subagent_id is not None and _subagent_set_aside(
                     updated, parent_subagent_id
                 ):
-                    updated = await _record_unresolved_subagent(
-                        bridge_dir=bridge_dir,
+                    updated = _record_unresolved_subagent(
                         parent_session_id=parent_session_id,
                         subagent_id=subagent_id,
                         tool_use_id=meta["toolUseId"],
@@ -2843,7 +2829,10 @@ async def _forward_available_subagents(
                         state=updated,
                         attempts=_SUBAGENT_RESOLVE_MAX_ATTEMPTS,
                     )
-                elif start_retry_tracker.has_retry_state(f"subagent_start:{parent_subagent_id}"):
+                elif (
+                    parent_subagent_id in updated.subagents
+                    or parent_subagent_id in meta_ids_on_disk
+                ):
                     _logger.debug(
                         "Deferring claude-native sub-agent until its parent registers; "
                         "parent_session=%s subagent_id=%s parent_subagent_id=%s",
@@ -2852,17 +2841,18 @@ async def _forward_available_subagents(
                         parent_subagent_id,
                     )
                 else:
-                    updated = await _record_unresolved_subagent(
-                        bridge_dir=bridge_dir,
+                    updated = _record_unresolved_subagent(
                         parent_session_id=parent_session_id,
                         subagent_id=subagent_id,
                         tool_use_id=meta["toolUseId"],
-                        reason=f"parent {parent_subagent_id} is not registered",
+                        reason=f"parent {parent_subagent_id} has no meta on disk",
                         state=updated,
                     )
             break
         pending = deferred
 
+    if updated.resolve_misses != state.resolve_misses:
+        await _write_subagent_forward_state_async(bridge_dir, updated)
     checkpoint = _SubagentStateCheckpoint(bridge_dir, updated)
     semaphore = asyncio.Semaphore(_SUBAGENT_FORWARD_CONCURRENCY)
 
