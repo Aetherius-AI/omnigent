@@ -4481,42 +4481,66 @@ def _is_subagent_hook_record(record: ClaudeHookRecord) -> bool:
     Return whether a hook record belongs to a Claude subagent.
 
     :param record: Hook record parsed from ``hooks.jsonl``.
-    :returns: ``True`` when the record's transcript path sits under a
-        ``subagents/`` component.
+    :returns: ``True`` when the record carries a subagent ``agent_id`` or
+        its transcript path sits under a ``subagents/`` component.
     """
+    if record.agent_id:
+        return True
     return record.transcript_path is not None and "subagents" in record.transcript_path.parts
 
 
 def _baseline_claude_session_ids(bridge_dir: Path, hook_offset: int) -> frozenset[str]:
     """
-    Collect the Claude session ids already known before a paste.
+    Collect the Claude session ids recorded through the pre-paste offset.
 
     A restarted Claude announces itself with a startup ``SessionStart``
-    under a **new** session id; ids that already existed before the
-    paste are the baseline that separates that announcement from the
-    booting session's own late-recorded start. Prefer the state file's
-    seen-ids (maintained by the hook, cheap); a bridge dir without one
-    (nothing processed yet — a fresh session) falls back to scanning the
-    still-tiny hook log up to the snapshot offset.
+    under a **new** session id. The baseline is the set of session ids
+    already in the hook log at or before ``hook_offset``, so an id that
+    first appears only after it reads as that new process instead of
+    being mistaken for an incumbent.
+
+    Derived from the hook log bound by the same offset the delivery
+    watch uses, never the live ``state.json`` seen-ids: the hook writes
+    ``state.json`` from a separate process, so a restart recorded there
+    after the offset snapshot would otherwise be absorbed into the
+    baseline and its message silently dropped. Only ``SessionStart``
+    lines are parsed, so the cost tracks session count, not log size.
 
     :param bridge_dir: Bridge directory path.
     :param hook_offset: Hook log size snapshot from :func:`_hook_file_size`.
-    :returns: Session ids known before the paste; may be empty.
+    :returns: Session ids recorded at or before the offset; may be empty.
     """
-    seen = read_seen_claude_session_ids(bridge_dir)
-    if seen:
-        return frozenset(seen)
     if hook_offset <= 0:
         return frozenset()
     ids: set[str] = set()
-    result = read_hook_events_from_offset(bridge_dir, 0, start_event_count=0)
-    for record in result.records:
-        if record.byte_offset > hook_offset:
-            break
-        if record.event_name != "SessionStart" or _is_subagent_hook_record(record):
-            continue
-        if record.claude_session_id:
-            ids.add(record.claude_session_id)
+    consumed = 0
+    try:
+        with (bridge_dir / _HOOKS_FILE).open("rb") as handle:
+            for line_number, raw in enumerate(handle, start=1):
+                start = consumed
+                consumed += len(raw)
+                if consumed > hook_offset:
+                    break
+                if b"SessionStart" not in raw:
+                    continue
+                try:
+                    text = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+                record = _hook_record_from_jsonl_record(
+                    _JsonlRecord(
+                        line_number=line_number,
+                        byte_offset=start,
+                        next_byte_offset=consumed,
+                        text=text,
+                    )
+                )
+                if record.event_name != "SessionStart" or _is_subagent_hook_record(record):
+                    continue
+                if record.claude_session_id:
+                    ids.add(record.claude_session_id)
+    except FileNotFoundError:
+        return frozenset()
     return frozenset(ids)
 
 
@@ -4589,13 +4613,14 @@ def _confirm_message_delivery(
 
     Anything less is **not** acted on: with no hook log, or no evidence
     either way within the watch, the pane-level verdict stands and the
-    send stays successful. A missing receipt alone never fails a send
-    and a lone new session id never triggers a re-delivery — the two
-    failure modes that made earlier delivery gates raise false
+    send stays successful. A missing receipt alone never fails a send,
+    and with no baseline a lone new session id never triggers a
+    re-delivery (a genuine first boot looks exactly like that) — the
+    false positives that made earlier delivery gates raise false
     "message may not have been delivered" banners on healthy sessions.
-    The accepted residual gap: a restart that fires before the booting
-    session logged its own id shows a single new id, reads as that boot,
-    and still loses the message.
+    The accepted residual gap: on that first boot a restart firing
+    before the booting session logged its own id shows a single new id,
+    reads as the boot, and still loses the message.
 
     :param bridge_dir: Bridge directory path.
     :param socket_path: Absolute path to the tmux socket.

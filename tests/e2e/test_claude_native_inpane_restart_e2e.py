@@ -63,6 +63,11 @@ from omnigent.harnesses.claude_native.bridge import (
     write_tmux_target,
 )
 
+# A stray re-delivery in the product only fires after the restart receipt
+# grace (``_RESTART_RECEIPT_GRACE_S``, 5s) lapses with no receipt, so the
+# exactly-once settle must outlast it to count a duplicate.
+_DUPLICATE_SETTLE_S = 6.0
+
 
 def _tmux_version() -> tuple[int, ...] | None:
     exe = shutil.which("tmux")
@@ -85,12 +90,10 @@ pytestmark = pytest.mark.skipif(
 
 _MARKER = "the first message must survive an in-pane restart"
 
-# Seconds the pre-restart fake Claude keeps its prompt up before re-exec'ing
-# in place. Must exceed the time the readiness gate needs to pass and paste
-# (< 2s here) so the injection reliably lands in the dying process.
-_RESTART_AFTER_S = 4.0
-# For the "restart after the draft was seen" window the restart fires the
-# instant the paste-end marker lands, before the submit Enter is verified.
+# For the "restart after the draft was seen" window the restart fires a beat
+# after the paste-end marker lands, before the submit Enter is verified. The
+# "boot" window instead restarts off the submit itself (not a wall clock) so
+# a slow host cannot let the paste reach the already-restarted process.
 _DRAFT_RESTART_AFTER_S = 0.3
 
 # A Claude-Code-shaped TUI: a composer box framed by rules with a leading
@@ -137,11 +140,24 @@ tty.setcbreak(FD)
 record_hook("SessionStart")
 
 if PHASE == "boot":
-    # The dying pre-restart process: renders a prompt, never reads its
-    # input, then restarts in-pane. Keystrokes typed at it are stranded in
-    # the pty and discarded by the replacement process's boot-time flush.
+    # The dying pre-restart process renders a prompt but never commits the
+    # message: it drains the injected keystrokes without rendering a draft
+    # and restarts in-pane the instant the submit Enter lands after the
+    # bracketed paste, so the message is lost and the replacement's boot
+    # flush clears the pty. Gating on the submit (not a wall clock) ties
+    # the restart to the delivery, so a slow host cannot let the paste
+    # reach the already-restarted process and pass without recovery.
     draw()
-    time.sleep(RESTART_AFTER)
+    seen_paste_end = False
+    while True:
+        chunk = os.read(FD, 4096).decode("utf-8", "replace")
+        if not chunk:
+            break
+        if "\x1b[201~" in chunk:
+            seen_paste_end = True
+            chunk = chunk.split("\x1b[201~", 1)[1]
+        if seen_paste_end and ("\r" in chunk or "\n" in chunk):
+            break
     os.environ["FAKE_CLAUDE_PHASE"] = "ready"
     os.environ["FAKE_CLAUDE_SESSION_ID"] = "ready-session"
     os.execv(sys.executable, [sys.executable] + sys.argv)
@@ -231,33 +247,38 @@ def _launch_fake_claude(
     script = tmp_path / "fake_claude.py"
     script.write_text(_FAKE_CLAUDE_TUI, encoding="utf-8")
     socket = Path("/tmp") / f"og-claude-{uuid.uuid4().hex[:12]}.sock"
-    restart_after = _DRAFT_RESTART_AFTER_S if phase == "restart_after_draft" else _RESTART_AFTER_S
+    restart_after = _DRAFT_RESTART_AFTER_S if phase == "restart_after_draft" else 0.0
     # Advertise (and create) the bridge dir before the fake TUI starts, so
     # its first hook write finds hooks.jsonl's parent already present. This
     # is also what the runner does when it launches the terminal.
     write_tmux_target(bridge_dir, socket_path=socket, tmux_target="claude")
-    _tmux(
-        socket,
-        "new-session",
-        "-d",
-        "-s",
-        "claude",
-        "-x",
-        "100",
-        "-y",
-        "30",
-        "-e",
-        f"FAKE_CLAUDE_DELIVERED={delivered}",
-        "-e",
-        f"FAKE_CLAUDE_HOOKS={bridge_dir / 'hooks.jsonl'}",
-        "-e",
-        f"FAKE_CLAUDE_RESTART_AFTER={restart_after}",
-        "-e",
-        f"FAKE_CLAUDE_PHASE={phase}",
-        "-e",
-        f"FAKE_CLAUDE_SESSION_ID={'ready-session' if phase == 'ready' else 'boot-session'}",
-        f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}",
-    )
+    try:
+        _tmux(
+            socket,
+            "new-session",
+            "-d",
+            "-s",
+            "claude",
+            "-x",
+            "100",
+            "-y",
+            "30",
+            "-e",
+            f"FAKE_CLAUDE_DELIVERED={delivered}",
+            "-e",
+            f"FAKE_CLAUDE_HOOKS={bridge_dir / 'hooks.jsonl'}",
+            "-e",
+            f"FAKE_CLAUDE_RESTART_AFTER={restart_after}",
+            "-e",
+            f"FAKE_CLAUDE_PHASE={phase}",
+            "-e",
+            f"FAKE_CLAUDE_SESSION_ID={'ready-session' if phase == 'ready' else 'boot-session'}",
+            f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}",
+        )
+    except Exception:
+        # Don't leak the bridge dir / tmux server if the pane never started.
+        _cleanup(socket, bridge_dir)
+        raise
     return bridge_dir, delivered, socket
 
 
@@ -271,28 +292,25 @@ def _cleanup(socket: Path, bridge_dir: Path) -> None:
     shutil.rmtree(bridge_dir, ignore_errors=True)
 
 
-def _message_recorded(delivered: Path, *, timeout_s: float = 10.0) -> bool:
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        if delivered.exists() and _MARKER in delivered.read_text(encoding="utf-8"):
-            return True
-        time.sleep(0.25)
-    return False
-
-
 def _delivered_count(delivered: Path, *, timeout_s: float = 10.0) -> int:
     """Copies of the marker the fake Claude recorded (waits for the first).
 
-    After the first copy lands, settle briefly so a stray duplicate would
-    be counted too — the recoverable restart cases must deliver exactly once.
+    After the first copy lands, settle past the restart receipt grace: a
+    spurious re-delivery in the product only fires once that grace lapses
+    without a receipt, so a shorter settle could miss the duplicate it
+    guards against — the recoverable restart cases must deliver exactly once.
     """
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if delivered.exists() and _MARKER in delivered.read_text(encoding="utf-8"):
-            time.sleep(0.5)
+            time.sleep(_DUPLICATE_SETTLE_S)
             return delivered.read_text(encoding="utf-8").count(_MARKER)
         time.sleep(0.25)
     return 0
+
+
+def _message_recorded(delivered: Path, *, timeout_s: float = 10.0) -> bool:
+    return _delivered_count(delivered, timeout_s=timeout_s) > 0
 
 
 def _inject_outcome(bridge_dir: Path, delivered: Path) -> tuple[bool, int]:

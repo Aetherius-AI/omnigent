@@ -5185,6 +5185,65 @@ def test_inject_user_message_redelivers_when_inpane_restart_swallows_submit(
     )
 
 
+def test_inject_user_message_redelivers_when_restart_leads_hook_log_in_state_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A restart recorded in state.json after the offset snapshot still recovers.
+
+    The hook writes state.json from a separate process, so between the
+    pre-paste hook-log offset snapshot and baseline collection it can add
+    the replacement's session id to state.json while its ``SessionStart``
+    has not reached the hook log yet. Deriving the baseline from the live
+    state file would absorb that id, mask the restart, and silently drop
+    the message. The baseline must come from the hook log bound by the
+    same offset, so the post-offset startup still reads as a restart.
+    """
+    _shrink_delivery_watch(monkeypatch)
+    bridge_dir = tmp_path / "bridge"
+    write_tmux_target(
+        bridge_dir,
+        socket_path=Path("/tmp/example/tmux.sock"),
+        tmux_target="claude:0.0",
+    )
+    # Incumbent boot, recorded in both the hook log and state.json.
+    record_hook_event(
+        bridge_dir,
+        {"hook_event_name": "SessionStart", "source": "startup", "session_id": "boot-1"},
+    )
+    # The hook raced ahead of the log: state.json already carries the
+    # replacement's id, but its SessionStart has not been appended yet.
+    state_path = bridge_dir / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["seen_claude_session_ids"] = sorted(
+        {*state.get("seen_claude_session_ids", []), "boot-2"}
+    )
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    content = "the message that must survive the state-file lead"
+    tui = _RestartableFakeTui(
+        content,
+        on_enter=[
+            lambda: _append_hook_line(
+                bridge_dir,
+                {"hook_event_name": "SessionStart", "source": "startup", "session_id": "boot-2"},
+            ),
+            lambda: _append_hook_line(
+                bridge_dir,
+                {"hook_event_name": "UserPromptSubmit", "session_id": "boot-2", "prompt": content},
+            ),
+        ],
+    )
+    monkeypatch.setattr("subprocess.run", tui.run)
+
+    inject_user_message(bridge_dir, content=content)
+
+    assert tui.pastes == 2, (
+        "A restart whose id reached state.json before its hook-log SessionStart "
+        f"must still re-deliver exactly once; got {tui.pastes} pastes."
+    )
+
+
 def test_inject_user_message_missing_receipt_alone_never_redelivers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5265,9 +5324,9 @@ def test_inject_user_message_ignores_rotation_and_subagent_session_starts(
     Deliberate rotations and subagent boots are not restart evidence.
 
     ``/clear``-style rotations announce themselves with a non-startup
-    source, and a Task subagent's startup lives under a ``subagents/``
-    transcript. Neither means the parent pane's process died, so
-    neither may trigger a re-delivery.
+    source, and a Task subagent's startup is tagged by either a
+    ``subagents/`` transcript or an ``agent_id``. None means the parent
+    pane's process died, so none may trigger a re-delivery.
     """
     _shrink_delivery_watch(monkeypatch)
     bridge_dir = tmp_path / "bridge"
@@ -5293,6 +5352,16 @@ def test_inject_user_message_ignores_rotation_and_subagent_session_starts(
                 "source": "startup",
                 "session_id": "sub-1",
                 "transcript_path": str(tmp_path / "projects" / "subagents" / "sub.jsonl"),
+            },
+        )
+        # A subagent startup tagged only by agent_id (no subagents/ path).
+        _append_hook_line(
+            bridge_dir,
+            {
+                "hook_event_name": "SessionStart",
+                "source": "startup",
+                "session_id": "sub-2",
+                "agent_id": "agent-xyz",
             },
         )
 
