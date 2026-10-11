@@ -93,13 +93,9 @@ _RESTART_AFTER_S = 4.0
 # instant the paste-end marker lands, before the submit Enter is verified.
 _DRAFT_RESTART_AFTER_S = 0.3
 
-# A Claude-Code-shaped TUI: composer box framed by rules with a leading
-# "❯" glyph (what _wait_for_claude_prompt_ready / _draft_in_input_box key
-# on), bracketed paste enabled, drafts rendered in the box, and every
-# submitted (Enter outside a paste) non-empty draft appended to
-# $FAKE_CLAUDE_DELIVERED and recorded as a UserPromptSubmit hook event.
-# Enter may arrive as "\r" or "\n" (cbreak leaves ICRNL on); either
-# submits outside a paste and is a plain line break inside one.
+# A Claude-Code-shaped TUI: a composer box framed by rules with a leading
+# "❯" glyph and bracketed paste. Every submitted non-empty draft is appended
+# to $FAKE_CLAUDE_DELIVERED and recorded as a UserPromptSubmit hook.
 _FAKE_CLAUDE_TUI = r"""
 import json
 import os
@@ -141,11 +137,9 @@ tty.setcbreak(FD)
 record_hook("SessionStart")
 
 if PHASE == "boot":
-    # The dying pre-restart process: renders a real prompt, never reads
-    # its input, then restarts in-pane (like the fullscreen-switch
-    # re-exec of affected claude-code builds). Keystrokes typed at it are
-    # stranded in the pty buffer and discarded by the restarted process's
-    # flush.
+    # The dying pre-restart process: renders a prompt, never reads its
+    # input, then restarts in-pane. Keystrokes typed at it are stranded in
+    # the pty and discarded by the replacement process's boot-time flush.
     draw()
     time.sleep(RESTART_AFTER)
     os.environ["FAKE_CLAUDE_PHASE"] = "ready"
