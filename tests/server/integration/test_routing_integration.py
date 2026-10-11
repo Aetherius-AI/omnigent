@@ -343,6 +343,54 @@ async def test_the_subagent_relay_falls_back_to_the_judge_off_the_gateway(
     assert decisions[-1].data.router_source == "oss-llm"
 
 
+@pytest.mark.parametrize("harness", ["claude-sdk", "pi"])
+async def test_route_subagent_hook_splits_router_source_from_the_static_table_off_gateway(
+    client: httpx.AsyncClient,
+    db_uri: str,
+    harness: str,
+) -> None:
+    """Off the gateway, the route-subagent hook keeps a subscription-only SDK/Pi
+    spawn's router source but withholds the unreachable ``databricks-*`` static
+    table: ``gateway_backed`` stays ``True`` while ``allow_static_fallback`` is
+    ``False``. The host's report names only the native families; ``claude-sdk``
+    and ``pi`` are absent, so neither is proven off the gateway, yet the host is."""
+    from omnigent.runner.subagent_routing import SubagentRouteDecision
+
+    parent, _child, _conv_store = await _parent_and_child(
+        client, db_uri, agent_name=f"routing-subagent-off-gateway-{harness}"
+    )
+    off_gateway = _host_reporting_gateway(
+        {
+            "claude-native": False,
+            "native-claude": False,
+            "codex": False,
+            "codex-native": False,
+            "native-codex": False,
+        }
+    )
+    captured: dict[str, Any] = {}
+
+    async def _spy(session_id: str, req: Any, **kwargs: Any) -> SubagentRouteDecision:
+        captured["gateway_backed"] = kwargs.get("gateway_backed")
+        captured["allow_static_fallback"] = kwargs.get("allow_static_fallback")
+        return SubagentRouteDecision(action="allow", rationale="spy")
+
+    with (
+        patch("omnigent.runtime._globals._caps", new=FakeCaps()),
+        patch.object(
+            orchestration_module, "_session_routing_host", AsyncMock(return_value=off_gateway)
+        ),
+        patch.object(subagent_routing, "resolve_subagent_route", _spy),
+    ):
+        resp = await client.post(
+            f"/v1/sessions/{parent['id']}/hooks/route-subagent",
+            json={"harness": harness, "task_name": "code-reviewer", "prompt": "review the auth"},
+        )
+
+    assert resp.status_code == 200, resp.text
+    assert captured == {"gateway_backed": True, "allow_static_fallback": False}, captured
+
+
 async def test_native_subagent_relay_persists_decision_and_joins_child_row(
     client: httpx.AsyncClient,
     db_uri: str,
