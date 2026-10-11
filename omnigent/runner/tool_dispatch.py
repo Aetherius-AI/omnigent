@@ -2149,12 +2149,6 @@ def _canonical_subagent_workspace(
     requested = Path(workspace)
     if not requested.is_absolute():
         raise ValueError("'workspace' must be an absolute path")
-    try:
-        canonical = requested.resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
-        raise ValueError(f"workspace does not exist or cannot be resolved: {workspace!r}") from exc
-    if not canonical.is_dir():
-        raise ValueError(f"workspace is not a directory: {workspace!r}")
 
     # Only an absolute configured root pins a containment boundary. A relative
     # os_env.cwd (".", "./", a relative subdir) imposes no boundary, matching
@@ -2162,6 +2156,7 @@ def _canonical_subagent_workspace(
     # persisted-workspace context, so resolving a relative root against the
     # runner process cwd would wrongly reject workspaces the runtime accepts.
     root = Path(configured_root).expanduser()
+    canonical_root = None
     if root.is_absolute():
         try:
             canonical_root = root.resolve(strict=True)
@@ -2173,11 +2168,22 @@ def _canonical_subagent_workspace(
             raise ValueError(
                 f"sub-agent {sub_agent_name!r} os_env.cwd is not a directory: {configured_root!r}"
             )
-        if not canonical.is_relative_to(canonical_root):
-            raise ValueError(
-                f"workspace {str(canonical)!r} is outside sub-agent {sub_agent_name!r} "
-                f"root {str(canonical_root)!r}"
-            )
+        # Reject out-of-root requests lexically, before probing the requested
+        # path, so error messages cannot reveal the existence or type of paths
+        # outside the boundary. The strict re-check below still catches a
+        # symlink escape from a lexically in-root path.
+        if not Path(os.path.normpath(workspace)).is_relative_to(canonical_root):
+            raise ValueError(f"workspace is outside sub-agent {sub_agent_name!r} root")
+
+    try:
+        canonical = requested.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"workspace does not exist or cannot be resolved: {workspace!r}") from exc
+    if not canonical.is_dir():
+        raise ValueError(f"workspace is not a directory: {workspace!r}")
+
+    if canonical_root is not None and not canonical.is_relative_to(canonical_root):
+        raise ValueError(f"workspace is outside sub-agent {sub_agent_name!r} root")
     return str(canonical)
 
 

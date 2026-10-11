@@ -4090,6 +4090,48 @@ def test_subagent_workspace_rejects_file_target(
         )
 
 
+def test_subagent_workspace_outside_absolute_root_hides_existence(
+    tmp_path: Path,
+) -> None:
+    """An out-of-root path is rejected uniformly, without a filesystem probe.
+
+    A capable sub-agent's error must not reveal whether an out-of-root path
+    exists or its type, so a nonexistent out-of-root target raises the same
+    "outside root" error as an existing one would, not "does not exist".
+    """
+    from omnigent.runner.tool_dispatch import _canonical_subagent_workspace
+
+    root = tmp_path / "root"
+    root.mkdir()
+    missing_outside = tmp_path / "secret" / "nonexistent"
+    with pytest.raises(ValueError, match="is outside sub-agent"):
+        _canonical_subagent_workspace(
+            str(missing_outside),
+            sub_agent_name="worker",
+            agent_spec=_spec_with_subagent_harness("claude-native", root),
+        )
+
+
+def test_subagent_workspace_symlink_escape_rejected(
+    tmp_path: Path,
+) -> None:
+    """A lexically in-root symlink that resolves outside the root is rejected."""
+    from omnigent.runner.tool_dispatch import _canonical_subagent_workspace
+
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = root / "escape"
+    link.symlink_to(outside)
+    with pytest.raises(ValueError, match="is outside sub-agent"):
+        _canonical_subagent_workspace(
+            str(link),
+            sub_agent_name="worker",
+            agent_spec=_spec_with_subagent_harness("claude-native", root),
+        )
+
+
 @pytest.mark.asyncio
 async def test_sys_session_send_rejects_workspace_outside_worker_root(
     monkeypatch: pytest.MonkeyPatch,
