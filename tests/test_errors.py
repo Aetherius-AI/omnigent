@@ -87,6 +87,7 @@ def test_omnigent_error_with_harness_violation_code_returns_500() -> None:
         (ErrorCode.UPSTREAM_CANCELLED, 499),
         (ErrorCode.UPSTREAM_PERMISSION_DENIED, 403),
         (ErrorCode.STALE_CURSOR, 400),
+        (ErrorCode.QUERY_TIMEOUT, 504),
     ],
 )
 def test_all_error_codes_have_http_status_mapping(code: str, expected_status: int) -> None:
@@ -132,6 +133,7 @@ def test_every_error_code_has_a_concrete_category() -> None:
         (ErrorCode.UPSTREAM_CANCELLED, ErrorCategory.UPSTREAM),
         (ErrorCode.UPSTREAM_PERMISSION_DENIED, ErrorCategory.UPSTREAM),
         (ErrorCode.STALE_CURSOR, ErrorCategory.USER),
+        (ErrorCode.QUERY_TIMEOUT, ErrorCategory.SERVER),
     ],
 )
 def test_code_category_mapping(code: str, expected_category: ErrorCategory) -> None:
@@ -208,6 +210,7 @@ def test_every_error_code_has_an_impact() -> None:
         (ErrorCode.FORBIDDEN, ErrorImpact.BENIGN),
         (ErrorCode.UPSTREAM_PERMISSION_DENIED, ErrorImpact.BENIGN),
         (ErrorCode.STALE_CURSOR, ErrorImpact.BENIGN),
+        (ErrorCode.QUERY_TIMEOUT, ErrorImpact.BENIGN),
     ],
 )
 def test_code_impact_mapping(code: str, expected_impact: ErrorImpact) -> None:
@@ -439,6 +442,7 @@ def test_every_error_code_has_a_phase() -> None:
         (ErrorCode.INTERNAL_ERROR, ErrorPhase.UNKNOWN, False),
         (ErrorCode.UPSTREAM_CANCELLED, ErrorPhase.UNKNOWN, False),
         (ErrorCode.UPSTREAM_PERMISSION_DENIED, ErrorPhase.UNKNOWN, False),
+        (ErrorCode.QUERY_TIMEOUT, ErrorPhase.REQUEST, True),
     ],
 )
 def test_code_phase_and_harness_boundary(

@@ -224,6 +224,18 @@ def is_postgresql_family(dialect_name: str) -> bool:
     return dialect_name in {"postgresql", "cockroachdb"}
 
 
+# SQLSTATE 57014 (query_canceled): the statement outlived ``statement_timeout``
+# or an administrator cancelled it. psycopg 3 exposes it as ``sqlstate``,
+# psycopg 2 as ``pgcode``.
+_QUERY_CANCELED_SQLSTATE = "57014"
+
+
+def is_query_cancelled(error: BaseException | None) -> bool:
+    """Return whether a driver error reports a statement the database cancelled."""
+    sqlstate = getattr(error, "sqlstate", None) or getattr(error, "pgcode", None)
+    return sqlstate == _QUERY_CANCELED_SQLSTATE
+
+
 def _env_int(name: str, default: int, *, minimum: int) -> int:
     """Read an integer environment setting, treating blank as unset."""
     raw = os.environ.get(name)

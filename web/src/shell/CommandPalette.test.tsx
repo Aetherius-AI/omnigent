@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ComponentProps } from "react";
 
 import { CommandPalette } from "./CommandPalette";
+import { ApiError } from "@/lib/sessionsApi";
 
 const navigate = vi.fn();
 vi.mock("@/lib/routing", () => ({
@@ -148,6 +149,57 @@ describe("CommandPalette — sessions", () => {
       expect(refetch).toHaveBeenCalledOnce();
     },
   );
+
+  it("tells the user when a session search timed out", () => {
+    const refetch = vi.fn();
+    useConversations.mockReturnValue({
+      isError: true,
+      error: new DOMException("The operation timed out.", "TimeoutError"),
+      isFetching: false,
+      refetch,
+    });
+    renderPalette();
+    fireEvent.change(screen.getByTestId("command-palette-input"), {
+      target: { value: "rare term" },
+    });
+    const status = screen.getByRole("status").textContent ?? "";
+    expect(status).toMatch(/timed out/i);
+    expect(status).not.toContain("Couldn't load sessions.");
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(refetch).toHaveBeenCalledOnce();
+  });
+
+  it("treats the server's query_timeout answer as a timed-out search", () => {
+    useConversations.mockReturnValue({
+      isError: true,
+      error: new ApiError("The database cancelled this request", 504, "query_timeout"),
+      isFetching: false,
+      refetch: vi.fn(),
+    });
+    renderPalette();
+    fireEvent.change(screen.getByTestId("command-palette-input"), {
+      target: { value: "rare term" },
+    });
+    const status = screen.getByRole("status").textContent ?? "";
+    expect(status).toMatch(/timed out/i);
+    expect(status).not.toContain("Couldn't load sessions.");
+  });
+
+  it("keeps the generic message for a search that failed rather than timed out", () => {
+    useConversations.mockReturnValue({
+      isError: true,
+      error: new ApiError("An internal error occurred.", 500, "internal_error"),
+      isFetching: false,
+      refetch: vi.fn(),
+    });
+    renderPalette();
+    fireEvent.change(screen.getByTestId("command-palette-input"), {
+      target: { value: "rare term" },
+    });
+    const status = screen.getByRole("status").textContent ?? "";
+    expect(status).toContain("Couldn't load sessions.");
+    expect(status).not.toMatch(/timed out/i);
+  });
 
   it("shows only one loading message during the initial session fetch", () => {
     setSessions([], true);

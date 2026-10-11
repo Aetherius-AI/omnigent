@@ -34,6 +34,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from omnigent._platform import resolve_repo_symlink
 from omnigent.db.db_models import InvalidUuidError
+from omnigent.db.utils import is_query_cancelled
 from omnigent.debug_logging import (
     add_audit_attrs,
     audit_event_logger,
@@ -2432,6 +2433,40 @@ def create_app(
             return JSONResponse(
                 status_code=404,
                 content={"error": {"code": ErrorCode.NOT_FOUND, "message": "Not found."}},
+            )
+        if is_query_cancelled(exc.orig):
+            # The database stopped the statement at its statement_timeout (the
+            # content-search bound). A valid request that ran too long is a
+            # timeout the caller can narrow, not an internal fault.
+            timed_out = OmnigentError(
+                "The database cancelled this request because it ran too long. "
+                "Try a narrower request, such as a more specific search term.",
+                code=ErrorCode.QUERY_TIMEOUT,
+            )
+            add_audit_attrs(
+                code=str(timed_out.code),
+                http_status=str(timed_out.http_status),
+                error_category=timed_out.category.value,
+                error_impact=timed_out.impact.value,
+                error_phase=timed_out.phase.value,
+            )
+            _logger.warning(
+                "Database statement cancelled at its time limit: %s",
+                exc.orig,
+                extra=_error_audit_extra(
+                    request,
+                    phase="timeout",
+                    code=str(timed_out.code),
+                    http_status=str(timed_out.http_status),
+                    error_category=timed_out.category.value,
+                    error_impact=timed_out.impact.value,
+                    error_phase=timed_out.phase.value,
+                    error_type=type(exc.orig).__name__,
+                ),
+            )
+            return JSONResponse(
+                status_code=timed_out.http_status,
+                content={"error": {"code": timed_out.code, "message": timed_out.message}},
             )
         _logger.error(
             "Database error: %s",

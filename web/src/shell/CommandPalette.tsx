@@ -32,6 +32,7 @@ import {
 import { useNavigate } from "@/lib/routing";
 import { useConversations } from "@/hooks/useConversations";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
+import { isSearchTimeoutError } from "@/lib/searchTimeout";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
@@ -189,8 +190,16 @@ export function CommandPalette({
     );
   }, [actions, query, sessionsOnly]);
 
-  const { data, isFetching, isError, refetch, hasNextPage, fetchNextPage, isFetchNextPageError } =
-    useConversations(sessionsOnly ? "" : debouncedQuery, false, { enabled: open });
+  const {
+    data,
+    isFetching,
+    isError,
+    error,
+    refetch,
+    hasNextPage,
+    fetchNextPage,
+    isFetchNextPageError,
+  } = useConversations(sessionsOnly ? "" : debouncedQuery, false, { enabled: open });
   const loadedPages = data?.pages.length ?? 0;
   useEffect(() => {
     if (
@@ -249,6 +258,9 @@ export function CommandPalette({
   }, [data, debouncedQuery, query, sessionsOnly]);
   const visibleSessions = sessionsOnly ? sessions.slice(0, SESSION_SEARCH_RESULT_LIMIT) : sessions;
   const loadError = isError || isFetchNextPageError;
+  // A search that hit a deadline (ours or the server's) is not a failed load;
+  // the generic wording would send the user towards connectivity or sign-in.
+  const searchTimedOut = loadError && isSearchTimeoutError(error);
 
   const paletteLabel = sessionsOnly ? "Switch session" : "Command palette";
   const placeholder = sessionsOnly
@@ -336,9 +348,11 @@ export function CommandPalette({
             {(loadError || (sessionsOnly && isFetching)) && (
               <p role="status" className="px-3 py-2 text-xs text-muted-foreground">
                 {loadError
-                  ? isFetchNextPageError
-                    ? "Couldn't load more sessions."
-                    : "Couldn't load sessions."
+                  ? searchTimedOut
+                    ? "Search timed out. Try a more specific search."
+                    : isFetchNextPageError
+                      ? "Couldn't load more sessions."
+                      : "Couldn't load sessions."
                   : "Loading sessions…"}
                 {loadError && (
                   <button

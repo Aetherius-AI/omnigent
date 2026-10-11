@@ -333,6 +333,10 @@ describe("useConversations search timeout", () => {
     const timeoutError = new DOMException("timeout", "TimeoutError");
     expect(retry(0, timeoutError)).toBe(false);
 
+    // The server's own search deadline reads the same way: re-running the
+    // search would hit the same statement_timeout.
+    expect(retry(0, new ApiError("cancelled", 504, "query_timeout"))).toBe(false);
+
     // A genuine server/network error still retries (up to the default cap).
     expect(retry(0, new Error("500 Internal Server Error"))).toBe(true);
     expect(retry(3, new Error("500 Internal Server Error"))).toBe(false);

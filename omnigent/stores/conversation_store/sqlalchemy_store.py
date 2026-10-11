@@ -149,15 +149,15 @@ def _encode_session_state(
 
 
 # Server-side deadline (ms) for the content-search query in
-# ``list_conversations``. Session search matches ``LOWER(search_text) LIKE
-# '%q%'`` across ``conversation_items``; that is index-backed by the pg_trgm
-# GIN index (migration ``d5e9f1a2b3c4``), but if the index is ever missing the
-# scan can run unbounded and — since the query runs in a worker thread — a
-# client disconnect does not stop it. ``SET LOCAL statement_timeout`` caps it so
-# a degraded deployment fails the search fast instead of pinning a DB
-# connection. Postgres-only; ``SET LOCAL`` reverts on commit so it never leaks
-# to the connection's next pooled use. Longer than the client's own
-# ``SEARCH_FETCH_TIMEOUT_MS`` so the browser gives up first on the happy path.
+# ``list_conversations``. Session search matches ``search_text ILIKE '%q%'``
+# across ``conversation_items`` with no index that serves it (see the search
+# block in ``list_conversations``), so a rare term reads every item in the
+# workspace — in a worker thread a client disconnect cannot stop. ``SET LOCAL
+# statement_timeout`` caps it so a large deployment fails the search fast
+# instead of pinning a DB connection; the server reports the cancellation as
+# ``query_timeout`` (HTTP 504). Postgres-only; ``SET LOCAL`` reverts on commit
+# so it never leaks to the connection's next pooled use. Longer than the
+# client's own ``SEARCH_FETCH_TIMEOUT_MS`` so the browser gives up first.
 _SEARCH_STATEMENT_TIMEOUT_MS = 15_000
 
 # Upper bound on rows fetched per SQL statement when listing conversation

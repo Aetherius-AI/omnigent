@@ -32,6 +32,7 @@ from omnigent.db.utils import (
     get_or_create_engine,
     is_cockroachdb,
     is_postgresql_family,
+    is_query_cancelled,
     make_managed_session_maker,
     normalize_database_url,
     run_migrations_with_retry,
@@ -1413,3 +1414,40 @@ def test_run_migrations_with_retry_rejects_bad_max_attempts() -> None:
     """max_attempts < 1 is a programming error, not a runtime retry."""
     with pytest.raises(ValueError, match="max_attempts"):
         run_migrations_with_retry("postgresql://x", max_attempts=0)
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        pytest.param(
+            type("QueryCanceled", (Exception,), {"sqlstate": "57014"})("timeout"),
+            True,
+            id="psycopg3-sqlstate",
+        ),
+        pytest.param(
+            type("QueryCanceled", (Exception,), {"pgcode": "57014"})("timeout"),
+            True,
+            id="psycopg2-pgcode",
+        ),
+        pytest.param(
+            type("TooManyConnections", (Exception,), {"sqlstate": "53300"})("busy"),
+            False,
+            id="other-sqlstate",
+        ),
+        pytest.param(RuntimeError("no sqlstate"), False, id="no-sqlstate"),
+        pytest.param(None, False, id="none"),
+    ],
+)
+def test_is_query_cancelled_reads_sqlstate_57014(
+    error: BaseException | None, expected: bool
+) -> None:
+    """Both psycopg generations report a cancelled statement; other errors are not."""
+    assert is_query_cancelled(error) is expected
+
+
+@pytest.mark.databricks
+def test_is_query_cancelled_matches_psycopg_query_canceled() -> None:
+    """psycopg's real ``QueryCanceled`` carries the SQLSTATE the helper keys on."""
+    errors = pytest.importorskip("psycopg.errors")
+    assert is_query_cancelled(errors.QueryCanceled("canceling statement due to statement timeout"))
+    assert not is_query_cancelled(errors.TooManyConnections("too many clients already"))

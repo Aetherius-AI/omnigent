@@ -233,6 +233,13 @@ class ErrorCode:
         indistinguishable from a completed enumeration, so the caller
         silently loses the remaining rows. The caller's remedy is to
         restart the enumeration without the cursor.
+    :cvar QUERY_TIMEOUT: The database cancelled a statement that ran past
+        its ``statement_timeout`` (HTTP 504). Today only the session content
+        search sets one: an unindexed ``ILIKE`` over a large
+        ``conversation_items`` table can outlive it. The request was valid
+        and the server is healthy, so this is a timeout rather than an
+        ``INTERNAL_ERROR``; the caller's remedy is a narrower request (a
+        more specific search term).
     """
 
     UNAUTHORIZED = "unauthorized"
@@ -254,6 +261,7 @@ class ErrorCode:
     UPSTREAM_CANCELLED = "upstream_cancelled"
     UPSTREAM_PERMISSION_DENIED = "upstream_permission_denied"
     STALE_CURSOR = "stale_cursor"
+    QUERY_TIMEOUT = "query_timeout"
 
 
 # Client-facing text for ``SESSION_AGENT_MISSING``: the session's agent was
@@ -305,6 +313,10 @@ _CODE_TO_HTTP_STATUS: dict[str, int] = {
     # succeed — the fix is to restart the enumeration without the cursor. The
     # distinct code is what a paging client keys that restart off.
     ErrorCode.STALE_CURSOR: 400,
+    # 504: the database gave up on the statement at its time limit. A 5xx
+    # because the caller did nothing wrong, but distinct from INTERNAL_ERROR so
+    # clients can say "timed out" and skip retrying the same slow statement.
+    ErrorCode.QUERY_TIMEOUT: 504,
 }
 
 
@@ -345,6 +357,9 @@ _CODE_TO_CATEGORY: dict[str, ErrorCategory] = {
     # A stale reference: the cursor row was deleted (often by the same user
     # in another client) between two page fetches.
     ErrorCode.STALE_CURSOR: ErrorCategory.USER,
+    # Our own query outgrew the deployment: the server set the bound and its
+    # unindexed scan hit it.
+    ErrorCode.QUERY_TIMEOUT: ErrorCategory.SERVER,
 }
 
 
@@ -388,6 +403,7 @@ _CODE_TO_IMPACT: dict[str, ErrorImpact] = {
     ErrorCode.ALREADY_EXISTS: ErrorImpact.BENIGN,
     ErrorCode.CONFLICT: ErrorImpact.BENIGN,
     ErrorCode.STALE_CURSOR: ErrorImpact.BENIGN,
+    ErrorCode.QUERY_TIMEOUT: ErrorImpact.BENIGN,
 }
 
 
@@ -427,6 +443,7 @@ _CODE_TO_PHASE: dict[str, ErrorPhase] = {
     ErrorCode.UPSTREAM_CANCELLED: ErrorPhase.UNKNOWN,
     ErrorCode.UPSTREAM_PERMISSION_DENIED: ErrorPhase.UNKNOWN,
     ErrorCode.STALE_CURSOR: ErrorPhase.REQUEST,
+    ErrorCode.QUERY_TIMEOUT: ErrorPhase.REQUEST,
 }
 
 
