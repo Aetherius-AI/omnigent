@@ -46,6 +46,7 @@ import { RunningDot } from "@/components/RunningDot";
 import { shortModelName } from "@/components/CostRoutingControl";
 import {
   MAX_TREE_DEPTH,
+  SubagentTreeContext,
   useChildSessions,
   useSubagentTree,
   type ChildSessionInfo,
@@ -88,7 +89,7 @@ interface SubagentsPanelProps {
 type ViewMode = "list" | "graph";
 
 export function SubagentsPanel({ conversationId, rootSessionId }: SubagentsPanelProps) {
-  const { children, isLoading, error } = useSubagentTree(rootSessionId);
+  const { children, isLoading, error, fromTree } = useSubagentTree(rootSessionId);
   const [addOpen, setAddOpen] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("list");
   const [collapsedRows, setCollapsedRows] = useState<Record<string, boolean>>({});
@@ -150,17 +151,19 @@ export function SubagentsPanel({ conversationId, rootSessionId }: SubagentsPanel
       </button>
       <ul className="relative flex min-h-0 flex-1 flex-col gap-px overflow-y-auto px-2 pb-2 pt-2">
         <MainRow rootSessionId={rootSessionId} isActive={conversationId === rootSessionId} />
-        {children.map((child, index) => (
-          <SubagentRow
-            key={child.id}
-            child={child}
-            depth={1}
-            rootGuideContinues={index < children.length - 1}
-            conversationId={conversationId}
-            collapsedRows={collapsedRows}
-            onToggleCollapsed={toggleCollapsedRow}
-          />
-        ))}
+        <SubagentTreeContext.Provider value={fromTree}>
+          {children.map((child, index) => (
+            <SubagentRow
+              key={child.id}
+              child={child}
+              depth={1}
+              rootGuideContinues={index < children.length - 1}
+              conversationId={conversationId}
+              collapsedRows={collapsedRows}
+              onToggleCollapsed={toggleCollapsedRow}
+            />
+          ))}
+        </SubagentTreeContext.Provider>
       </ul>
       {/* Mounted only while open so a closed rail issues no /v1/agents
           fetch and carries none of the dialog's query dependencies. */}

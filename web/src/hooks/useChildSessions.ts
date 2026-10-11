@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
-import { useCallback, useSyncExternalStore } from "react";
+import { createContext, useCallback, useContext, useSyncExternalStore } from "react";
 import { authenticatedFetch } from "@/lib/identity";
 import { setSessionParent } from "@/lib/sessionHost";
 import { isTempConvId } from "@/lib/tempConversationId";
@@ -96,6 +96,7 @@ interface ChildSessionsResponse {
 interface DescendantSessionWire extends ChildSessionWire {
   parent_session_id: string;
   depth: number;
+  archived?: boolean;
 }
 
 interface DescendantsResponse {
@@ -123,6 +124,76 @@ function isChildSessionsQueryKey(key: readonly unknown[]): boolean {
 /** TanStack Query key for a root session's whole sub-agent subtree. */
 export function subagentTreeQueryKey(rootId: string): readonly unknown[] {
   return ["conversation", rootId, "descendants"];
+}
+
+/** True for any key built by ``subagentTreeQueryKey``. */
+function isSubagentTreeQueryKey(key: readonly unknown[]): boolean {
+  return key.length === 3 && key[0] === "conversation" && key[2] === "descendants";
+}
+
+/**
+ * Cached result of one subtree fetch: the parents whose ``child_sessions``
+ * lists it seeded. A list is "covered" by the tree while its parent is here,
+ * so refreshes of that list reload the tree instead of fetching the node.
+ */
+interface SubagentTreeData {
+  parents: string[];
+}
+
+/** Thrown by ``fetchSubagentTree`` so callers can tell a missing route apart. */
+export class SubagentTreeFetchError extends Error {
+  readonly status: number;
+
+  constructor(status: number, statusText: string) {
+    super(`${status} ${statusText}`);
+    this.name = "SubagentTreeFetchError";
+    this.status = status;
+  }
+}
+
+/** Only a 404 means the server predates the subtree route. */
+function isMissingSubtreeRoute(error: unknown): boolean {
+  return error instanceof SubagentTreeFetchError && error.status === 404;
+}
+
+/**
+ * True beneath a ``useSubagentTree`` that owns the per-parent caches (any
+ * state but a server without the subtree route). ``useChildSessions`` then
+ * reads its list from cache instead of fetching, so a rendered tree never
+ * issues one request per node, not even while the subtree is still loading.
+ */
+export const SubagentTreeContext = createContext(false);
+
+/**
+ * Refresh a parent's child list. When a loaded subtree covers the parent the
+ * tree is reloaded instead (one request re-seeds every list, including this
+ * one); otherwise the list's own query refetches as before. A tree whose
+ * last load failed for its root is retried the same way.
+ *
+ * @param queryClient - The app QueryClient holding child-session caches.
+ * @param parentId - Parent whose child list changed, e.g. ``"conv_root"``.
+ */
+export function invalidateChildSessions(queryClient: QueryClient, parentId: string): Promise<void> {
+  const cache = queryClient.getQueryCache();
+  const covering = cache.findAll({
+    queryKey: ["conversation"],
+    predicate: (query) =>
+      isSubagentTreeQueryKey(query.queryKey) &&
+      query.state.status === "success" &&
+      ((query.state.data as SubagentTreeData | undefined)?.parents.includes(parentId) ?? false),
+  });
+  const failedRoots = cache.findAll({
+    queryKey: subagentTreeQueryKey(parentId),
+    predicate: (query) =>
+      query.state.status === "error" && !isMissingSubtreeRoute(query.state.error),
+  });
+  const refreshes = [...covering, ...failedRoots].map((tree) =>
+    queryClient.invalidateQueries({ queryKey: tree.queryKey }, { cancelRefetch: false }),
+  );
+  if (covering.length === 0) {
+    refreshes.push(queryClient.invalidateQueries({ queryKey: childSessionsQueryKey(parentId) }));
+  }
+  return Promise.all(refreshes).then(() => undefined);
 }
 
 /**
@@ -255,6 +326,19 @@ function childInfoFromWire(row: ChildSessionWire): ChildSessionInfo {
 }
 
 /**
+ * Drop archived rows unless live work sits beneath them, so an archived
+ * session stays in the tree only while it connects a live descendant.
+ */
+function withoutSettledArchived(rows: DescendantSessionWire[]): DescendantSessionWire[] {
+  const liveBelow = new Set<string>();
+  // Deepest rows first, so every child is seen before its parent.
+  for (const row of [...rows].sort((a, b) => b.depth - a.depth)) {
+    if (!row.archived || liveBelow.has(row.id)) liveBelow.add(row.parent_session_id);
+  }
+  return rows.filter((row) => !row.archived || liveBelow.has(row.id));
+}
+
+/**
  * Fetch every sub-agent under ``rootId`` down to ``MAX_TREE_DEPTH`` through
  * ``GET /v1/sessions/{id}/descendants`` — one request per page, not one per
  * node — and seed each parent's ``child_sessions`` cache from the result, so
@@ -264,13 +348,14 @@ function childInfoFromWire(row: ChildSessionWire): ChildSessionInfo {
  *
  * @param rootId - Root session whose subtree to load, e.g. ``"conv_root"``.
  * @param queryClient - The app QueryClient whose child-session caches to seed.
- * @returns The root's direct children.
+ * @returns The parents whose child lists were seeded.
  */
 export async function fetchSubagentTree(
   rootId: string,
   queryClient: QueryClient,
-): Promise<ChildSessionInfo[]> {
-  const byParent = new Map<string, ChildSessionInfo[]>([[rootId, []]]);
+): Promise<SubagentTreeData> {
+  const startedAt = Date.now();
+  const rows: DescendantSessionWire[] = [];
   let after: string | null = null;
   // Each page's cursor comes from the previous response, so the awaits
   // cannot be parallelized.
@@ -281,24 +366,32 @@ export async function fetchSubagentTree(
     const res = await authenticatedFetch(
       `/v1/sessions/${encodeURIComponent(rootId)}/descendants?${params.toString()}`,
     );
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    if (!res.ok) throw new SubagentTreeFetchError(res.status, res.statusText);
     const json = (await res.json()) as DescendantsResponse;
-    for (const row of json.data) {
-      setSessionParent(row.id, row.parent_session_id);
-      const siblings = byParent.get(row.parent_session_id) ?? [];
-      siblings.push(childInfoFromWire(row));
-      byParent.set(row.parent_session_id, siblings);
-      // Rows above the depth cap render a child list of their own; seeding
-      // an empty one keeps a childless row from asking the server.
-      if (row.depth < MAX_TREE_DEPTH && !byParent.has(row.id)) byParent.set(row.id, []);
-    }
-    after = json.has_more ? json.last_id : null;
+    rows.push(...json.data);
+    const next = json.has_more ? json.last_id : null;
+    if (next !== null && next === after) throw new Error("descendants cursor did not advance");
+    after = next;
   } while (after !== null);
   /* oxlint-enable no-await-in-loop */
+  const byParent = new Map<string, ChildSessionInfo[]>([[rootId, []]]);
+  for (const row of withoutSettledArchived(rows)) {
+    setSessionParent(row.id, row.parent_session_id);
+    const siblings = byParent.get(row.parent_session_id) ?? [];
+    siblings.push(childInfoFromWire(row));
+    byParent.set(row.parent_session_id, siblings);
+    // Rows within the depth cap render a child list of their own; seed an
+    // empty one so a childless row never asks the server.
+    if (row.depth < MAX_TREE_DEPTH && !byParent.has(row.id)) byParent.set(row.id, []);
+  }
   for (const [parentId, children] of byParent) {
+    // A list patched by a live event while this fetch was in flight is newer
+    // than the snapshot; leave it for the next refresh.
+    const updatedAt = queryClient.getQueryState(childSessionsQueryKey(parentId))?.dataUpdatedAt;
+    if (updatedAt !== undefined && updatedAt > startedAt) continue;
     queryClient.setQueryData(childSessionsQueryKey(parentId), children);
   }
-  return byParent.get(rootId) ?? [];
+  return { parents: [...byParent.keys()] };
 }
 
 /**
@@ -322,13 +415,16 @@ export function useChildSessions(
   pollMs?: number | null,
 ): UseChildSessionsResult {
   const sessionId = isTempConvId(conversationId) ? null : conversationId;
+  // Under a subtree fetch the list comes from its cache; stay subscribed to
+  // it without fetching, so invalidations never fan out one request per node.
+  const fromTree = useContext(SubagentTreeContext);
   const { data, isLoading, error } = useQuery({
     queryKey:
       sessionId === null
         ? ["conversation", null, "child_sessions"]
         : childSessionsQueryKey(sessionId),
     queryFn: () => fetchChildSessions(sessionId as string),
-    enabled: sessionId !== null,
+    enabled: sessionId !== null && !fromTree,
     staleTime: 60_000,
     retry: false,
     refetchOnMount: false,
@@ -341,16 +437,27 @@ export function useChildSessions(
   };
 }
 
+interface UseSubagentTreeResult extends UseChildSessionsResult {
+  /**
+   * True while the subtree fetch owns the per-parent caches, i.e. unless the
+   * server has no subtree route. Provide it through ``SubagentTreeContext``.
+   */
+  fromTree: boolean;
+}
+
 /**
  * Child-session list for the root of the Agents rail, loaded with the whole
  * subtree in one request so the per-row ``useChildSessions`` calls beneath
- * it are served from cache instead of fetching once per node. The root list
- * is held back until the tree has seeded those caches; when the server has
- * no subtree endpoint the hook falls back to the per-node fetch.
+ * it are served from cache instead of fetching once per node. Render those
+ * rows inside ``SubagentTreeContext`` with ``fromTree`` so they never fetch
+ * for themselves and refreshes (``invalidateChildSessions``) reload the tree
+ * rather than each node. When the server has no subtree endpoint the hook
+ * falls back to the per-node fetch; any other failure is surfaced as
+ * ``error`` and retried on the next refresh.
  *
  * @param rootSessionId - Root session id, or ``null`` to disable the query.
  */
-export function useSubagentTree(rootSessionId: string | null): UseChildSessionsResult {
+export function useSubagentTree(rootSessionId: string | null): UseSubagentTreeResult {
   const queryClient = useQueryClient();
   const sessionId = isTempConvId(rootSessionId) ? null : rootSessionId;
   const tree = useQuery({
@@ -362,12 +469,23 @@ export function useSubagentTree(rootSessionId: string | null): UseChildSessionsR
     retry: false,
     refetchOnMount: false,
   });
-  const settled = tree.isSuccess || tree.isError;
-  const direct = useChildSessions(settled ? sessionId : null);
+  const legacy = tree.isError && isMissingSubtreeRoute(tree.error);
+  const direct = useQuery({
+    queryKey:
+      sessionId === null
+        ? ["conversation", null, "child_sessions"]
+        : childSessionsQueryKey(sessionId),
+    queryFn: () => fetchChildSessions(sessionId as string),
+    enabled: sessionId !== null && legacy,
+    staleTime: 60_000,
+    retry: false,
+    refetchOnMount: false,
+  });
   return {
-    children: direct.children,
+    children: direct.data ?? [],
     isLoading: (sessionId !== null && tree.isPending) || direct.isLoading,
-    error: direct.error,
+    error: ((legacy ? direct.error : tree.error) as Error | null) ?? null,
+    fromTree: sessionId !== null && !legacy,
   };
 }
 

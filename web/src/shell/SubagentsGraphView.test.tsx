@@ -143,7 +143,7 @@ beforeEach(() => {
   useSubagentTreeMock.mockReset();
   // The root's subtree hook answers from the same id-keyed map as the
   // per-node collector, so each case states its tree once.
-  useSubagentTreeMock.mockImplementation((id) => useChildSessionsMock(id));
+  useSubagentTreeMock.mockImplementation((id) => ({ ...useChildSessionsMock(id), fromTree: true }));
   useSessionMock.mockReset();
   useSessionMock.mockReturnValue(defaultSession());
 });

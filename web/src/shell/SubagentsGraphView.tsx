@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { ZoomInIcon, ZoomOutIcon, Maximize2Icon } from "lucide-react";
 import {
   MAX_TREE_DEPTH,
+  SubagentTreeContext,
   useChildSessions,
   useSubagentTree,
   type ChildSessionInfo,
@@ -168,7 +169,7 @@ interface SubagentsGraphViewProps {
 
 export function SubagentsGraphView({ conversationId, rootSessionId }: SubagentsGraphViewProps) {
   const { session } = useSession(rootSessionId);
-  const { children: rootChildren } = useSubagentTree(rootSessionId);
+  const { children: rootChildren, fromTree } = useSubagentTree(rootSessionId);
 
   const [childrenMap, setChildrenMap] = useState<Map<string, ChildSessionInfo[]>>(() => new Map());
 
@@ -256,14 +257,16 @@ export function SubagentsGraphView({ conversationId, rootSessionId }: SubagentsG
           <ZoomControls />
         </ReactFlow>
       </div>
-      {rootChildren.map((child) => (
-        <ChildCollector
-          key={child.id}
-          parentId={child.id}
-          depth={1}
-          onCollected={handleCollected}
-        />
-      ))}
+      <SubagentTreeContext.Provider value={fromTree}>
+        {rootChildren.map((child) => (
+          <ChildCollector
+            key={child.id}
+            parentId={child.id}
+            depth={1}
+            onCollected={handleCollected}
+          />
+        ))}
+      </SubagentTreeContext.Provider>
     </div>
   );
 }
