@@ -353,7 +353,19 @@ describe("SessionUpdatesProvider snapshot timestamps", () => {
       filterHonored: true,
     });
     renderProvider(client, ["/"]);
+    const invalidate = vi.spyOn(client, "invalidateQueries");
 
+    // A pinned row outside the list window has no list refetch to converge
+    // through, so an unchanged timestamp must not refetch the pinned query...
+    act(() =>
+      frameHandler()({
+        type: "snapshot",
+        items: [{ ...conv("old-pin"), pending_elicitations_count: 1 }],
+      }),
+    );
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["pinned-conversations"] });
+
+    // ...while a restated timestamp it kept does.
     act(() =>
       frameHandler()({
         type: "snapshot",
@@ -377,6 +389,7 @@ describe("SessionUpdatesProvider snapshot timestamps", () => {
       updated_at: 0,
       pending_elicitations_count: 2,
     });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["pinned-conversations"] });
   });
 });
 

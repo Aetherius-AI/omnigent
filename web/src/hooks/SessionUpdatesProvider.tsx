@@ -61,9 +61,10 @@ const PROJECT_FOLDER_FILTERS = { searchQuery: "", includeArchived: false } as co
  * @param items - Wire items from a snapshot/changed frame.
  * @param options - Merge options applied to every listed row (see
  *   {@link MergeItemsOptions}).
- * @returns Ids not found in any cached page and whether any patched row
- *   needs a server refetch to preserve filtered-query membership or sort
- *   order.
+ * @returns Ids not found in any cached page, whether any patched row needs a
+ *   server refetch to preserve filtered-query membership or sort order, and
+ *   whether a pinned row kept a restated `updated_at` that differs from the
+ *   wire value, so only the pinned query can reconcile it.
  */
 function applyItemsToCache(
   queryClient: QueryClient,
@@ -71,7 +72,7 @@ function applyItemsToCache(
   activeId: string | undefined,
   viewerId?: string | null,
   options: MergeItemsOptions = {},
-): { missingIds: string[]; needsRefetch: boolean } {
+): { missingIds: string[]; needsRefetch: boolean; pinnedNeedsRefetch: boolean } {
   // Frames are full rows with explicit nulls; convert null → undefined so a
   // cleared field overlays the cache in the same shape GET /v1/sessions
   // produces (absent), without tripping the permission_level === null sentinel.
@@ -139,6 +140,7 @@ function applyItemsToCache(
     if (queryNeedsRefetch) needsRefetch = true;
     if (next !== data) queryClient.setQueryData(key, next);
   }
+  let pinnedNeedsRefetch = false;
   queryClient.setQueryData<PinnedConversationsResult>(PINNED_CONVERSATIONS_KEY, (previous) => {
     if (!previous) return previous;
     let changed = false;
@@ -148,6 +150,13 @@ function applyItemsToCache(
         if (!item) return row;
         foundAnywhere.add(row.id);
         changed = true;
+        if (
+          options.keepUpdatedAt &&
+          item.updated_at !== undefined &&
+          item.updated_at !== row.updated_at
+        ) {
+          pinnedNeedsRefetch = true;
+        }
         // Pin membership and pin timestamps reconcile through the pinned query.
         return {
           ...row,
@@ -165,6 +174,7 @@ function applyItemsToCache(
   return {
     missingIds: [...itemsById.keys()].filter((id) => !foundAnywhere.has(id)),
     needsRefetch,
+    pinnedNeedsRefetch,
   };
 }
 
@@ -425,13 +435,18 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
           // A snapshot restates the watch-set (connect, or a watch-set change such
           // as an archive) rather than reporting activity, and its timestamps can
           // lead the list's; keep the listed updated_at so read rows stay read.
-          const { missingIds, needsRefetch } = applyItemsToCache(
+          const { missingIds, needsRefetch, pinnedNeedsRefetch } = applyItemsToCache(
             queryClient,
             frame.items,
             activeIdRef.current,
             getCurrentUserId(),
             { keepUpdatedAt: frame.type === "snapshot" },
           );
+          // A pinned row outside the loaded list window converges only through
+          // its own query, so a restated timestamp it kept asks for that refetch.
+          if (pinnedNeedsRefetch) {
+            void queryClient.invalidateQueries({ queryKey: PINNED_CONVERSATIONS_KEY });
+          }
           // A watched id absent from every page is a new session whose sort
           // position we can't place locally. Membership-affecting deltas
           // (archive/search/connected filters) and updated_at resorting need

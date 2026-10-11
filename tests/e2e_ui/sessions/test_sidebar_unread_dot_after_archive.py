@@ -5,15 +5,15 @@ baseline, seeded from the first ``GET /v1/sessions`` page. Archiving changes the
 session-updates watch-set and the server answers with a ``snapshot`` restating
 the remaining rows; where streamed timestamps lead the list values (the managed
 deployment serves the list from MySQL and the stream from WHS) already-read rows
-would light until the list refetch wrote the list timestamps back.
-
-The first test drives the plain journey against the real server. The second
-re-creates the timestamp split in the browser: a WebSocket route adds a few
-seconds to every streamed ``updated_at`` while ``GET /v1/sessions`` is untouched.
+would light until the list refetch wrote the list timestamps back. The OSS server
+returns one timestamp on both paths, so the test re-creates the split in the
+browser: a WebSocket route adds a few seconds to every streamed ``updated_at``
+while ``GET /v1/sessions`` is untouched.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 import uuid
@@ -43,14 +43,17 @@ _OBSERVE_UNSEEN_ROWS = """
   const log = [];
   let last = JSON.stringify(rows());
   log.push({ t: performance.now(), rows: JSON.parse(last) });
-  new MutationObserver(() => {
+  window.__unseenObserver?.disconnect();
+  const observer = new MutationObserver(() => {
     const cur = JSON.stringify(rows());
     if (cur === last) return;
     last = cur;
     log.push({ t: performance.now(), rows: JSON.parse(cur) });
-  }).observe(document.body, {
+  });
+  observer.observe(document.body, {
     subtree: true, childList: true, attributes: true, attributeFilter: ['data-state'],
   });
+  window.__unseenObserver = observer;
   window.__unseenRowsLog = log;
 }
 """
@@ -76,7 +79,8 @@ def seeded_sessions(
         yield live_server, ids
     finally:
         for sid in ids:
-            httpx.delete(f"{live_server}/v1/sessions/{sid}", timeout=10.0)
+            with contextlib.suppress(httpx.HTTPError):
+                httpx.delete(f"{live_server}/v1/sessions/{sid}", timeout=10.0)
         if respawned is not None:
             respawned.terminate()
             respawned.wait(timeout=10)
@@ -108,7 +112,7 @@ def _count_snapshots(page: Page) -> list[dict[str, Any]]:
     snapshots: list[dict[str, Any]] = []
 
     def on_websocket(ws: Any) -> None:
-        if not ws.url.rstrip("/").endswith("/v1/sessions/updates"):
+        if not ws.url.split("?", 1)[0].rstrip("/").endswith("/v1/sessions/updates"):
             return
 
         def on_frame(payload: Any) -> None:
@@ -148,6 +152,10 @@ def _wait_until(predicate: Callable[[], bool], page: Page, timeout_s: float, wha
         page.wait_for_timeout(100)
 
 
+def _wait_for_snapshot_after(snapshots: list[dict[str, Any]], seen: int, page: Page) -> None:
+    _wait_until(lambda: len(snapshots) > seen, page, 10.0, "the snapshot after archiving")
+
+
 def _observe_dots(page: Page, seconds: float) -> list[dict[str, Any]]:
     """Keep the page alive for ``seconds`` and return the observer's row-set log."""
     deadline = time.monotonic() + seconds
@@ -183,26 +191,14 @@ def _drive_archive_journey(page: Page, base_url: str, ids: list[str]) -> dict[st
     lit_after_archive: dict[str, dict[str, Any]] = {}
     for target in ids[-1:-3:-1]:
         page.evaluate(_OBSERVE_UNSEEN_ROWS)
+        seen = len(snapshots)
         t_click_ms = page.evaluate("() => performance.now()")
         _archive_from_row(page, target)
         expect(page.locator(f'a[href="/c/{target}"]')).to_have_count(0)
+        _wait_for_snapshot_after(snapshots, seen, page)
         log = _observe_dots(page, WATCH_S)
         lit_after_archive[target] = _other_rows_lit(log, t_click_ms, f"/c/{target}")
     return lit_after_archive
-
-
-def test_archiving_a_session_leaves_other_rows_unread_dots_off(
-    request: pytest.FixtureRequest,
-    seeded_sessions: tuple[str, list[str]],
-) -> None:
-    base_url, ids = seeded_sessions
-    page: Page = request.getfixturevalue("page")
-
-    lit = _drive_archive_journey(page, base_url, ids)
-
-    assert all(rows == {} for rows in lit.values()), (
-        f"unread dot lit on other rows after archiving: {json.dumps(lit, indent=1)}"
-    )
 
 
 def test_archiving_leaves_other_rows_dots_off_when_stream_timestamps_lead_the_list(
