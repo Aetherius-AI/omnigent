@@ -1121,6 +1121,62 @@ class FakeCaps:
     default_policies: Any = ()  # type: ignore[explicit-any]
 
 
+def routing_decisions(conv_store: Any, session_id: str) -> list[Any]:
+    """Return a session's persisted ``routing_decision`` items, oldest first.
+
+    :param conv_store: The conversation store holding the session.
+    :param session_id: The session whose decision cards to list.
+    :returns: The ``routing_decision`` items in list order.
+    """
+    return [
+        item
+        for item in conv_store.list_items(session_id).data
+        if getattr(item, "type", None) == "routing_decision"
+    ]
+
+
+class RoutingCaptureRunnerClient:
+    """Runner-client stub: records forwarded turns, reports no catalog.
+
+    The empty ``/models`` catalog makes routing fall back to the static
+    gateway candidates, the exact shape that lets the judge pick an
+    unrunnable ``databricks-*`` model.
+
+    :param forwarded: List the stub appends each forwarded event body to.
+    """
+
+    def __init__(self, forwarded: list[dict[str, Any]]) -> None:
+        self._forwarded = forwarded
+
+    async def post(self, path: str, *, json: dict[str, Any], **_: Any) -> Any:
+        """Record the forwarded body and return a fake 202."""
+        del path
+        self._forwarded.append(json)
+
+        class _Resp:
+            status_code = 202
+            headers: dict[str, str] = {}
+            text = ""
+
+        return _Resp()
+
+    async def get(self, *_: Any, **__: Any) -> Any:
+        """Report no runner catalog, so static fallback offers candidates."""
+
+        class _Resp:
+            status_code = 200
+
+            @staticmethod
+            def raise_for_status() -> None:
+                return None
+
+            @staticmethod
+            def json() -> dict[str, Any]:
+                return {}
+
+        return _Resp()
+
+
 def echo_runner_client() -> httpx.AsyncClient:
     """A runner client that acks every forwarded turn 202, like the runner."""
 

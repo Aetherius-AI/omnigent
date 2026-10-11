@@ -6127,18 +6127,11 @@ _GATEWAY_MODEL_PREFIXES: tuple[str, ...] = ("databricks-", "databricks/", "syste
 def _session_uses_direct_vendor_transport(spec: AgentSpec, harness: str | None) -> bool:
     """Whether this session reaches its model direct from the vendor.
 
-    A direct pane — a subscription login, or an ``api_key`` whose launch
-    endpoint is the vendor default — has no gateway transport, so a routed
-    gateway-hosted (``databricks-*``) pick raises at construction and, once
-    pinned, disables routing for every later turn. The decision follows the
-    single launch-path resolution
+    Follows the launch-path resolution
     (:func:`~omnigent.models.model_catalog.resolve_model_provider`) with no
-    second credential read: a subscription is always direct, and a ``key``
-    provider is direct only when the endpoint launch uses — its
-    ``launch_base_url`` when the legacy api-key path sets one, else its
-    ``base_url`` — is the family's vendor default. Any other kind (databricks /
-    gateway / local / none) is treated as not direct, so launch-time resolution
-    stays the authority (fail open).
+    second credential read: subscription providers are direct; key providers
+    are direct when their launch endpoint (``launch_base_url``, else
+    ``base_url``) is the family's vendor default. Other kinds fail open.
 
     :param spec: The session's resolved agent spec.
     :param harness: The session's harness id, e.g. ``"claude-sdk"``.
@@ -6828,8 +6821,6 @@ async def _forward_event_to_runner(
                     _routed_model, _verdict = _unavailable_routing_card(_turn_route_err)
                     _route_failed = True
                 if _routed_model is not None and not _route_failed:
-                    # An unapplicable model must not be pinned — the pin
-                    # disables routing for every later turn — nor reported here.
                     _turn_spelling = _routed_turn_model_spelling(session_id, conv, _routed_model)
                     # A declared sub-agent session runs its own child spec,
                     # whose executor auth can differ from the parent's; resolve

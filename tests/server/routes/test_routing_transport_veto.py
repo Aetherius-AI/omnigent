@@ -181,27 +181,6 @@ def test_explicit_default_key_provider_is_direct_despite_legacy_gateway_api_key(
     assert orchestration._session_uses_direct_vendor_transport(spec, "claude-sdk") is True
 
 
-@pytest.mark.parametrize(
-    "routed_model",
-    ["databricks-claude-opus-4-8", "databricks/claude-opus-4-8", "system.ai.claude-opus-4-8"],
-    ids=["dash", "slash", "system-ai"],
-)
-def test_every_gateway_spelling_is_declined_on_a_direct_vendor_pane(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, routed_model: str
-) -> None:
-    """Each catalog spelling of a gateway model fails the veto on a direct pane.
-
-    Model discovery lists the same gateway endpoints under more than one
-    spelling (``databricks-``, ``databricks/``, ``system.ai.``). The decline
-    predicate — a gateway-prefixed pick on a direct-vendor pane — must hold for
-    every one.
-    """
-    _isolate_config(monkeypatch, tmp_path, "{}")
-    spec = _claude_sdk_spec(auth=ApiKeyAuth(api_key="mock-key"))
-    assert routed_model.startswith(orchestration._GATEWAY_MODEL_PREFIXES)
-    assert orchestration._session_uses_direct_vendor_transport(spec, "claude-sdk") is True
-
-
 def test_gateway_model_prefixes_cover_every_catalog_spelling() -> None:
     """The veto's gateway prefixes track every Unity Catalog spelling.
 

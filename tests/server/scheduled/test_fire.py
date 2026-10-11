@@ -2122,3 +2122,41 @@ async def test_public_grant_failure_does_not_cancel_run() -> None:
     assert len(launched) == 1
     assert store.runs and store.runs[0]["status"] == "running"
     assert not any(r.get("error_code") == "owner_grant_failed" for r in store.runs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("agent", "expand_env"),
+    [
+        (_FakeAgent("ag_1", bundle_location="ag_1/rev1"), True),
+        (
+            _FakeAgent(
+                "ag_1", bundle_location="ag_1/rev1", session_id="sess_1", created_by="user_1"
+            ),
+            False,
+        ),
+    ],
+    ids=["operator-authored", "session-authored"],
+)
+async def test_launch_arg_spec_loads_match_the_agents_provenance(
+    agent: _FakeAgent, expand_env: bool
+) -> None:
+    """The permission-mode and reasoning-effort loads use the agent's provenance.
+
+    They share the spec cache with the routing load, and a tier-1 hit ignores
+    ``expand_env``, so whichever load runs first fixes the expansion for all.
+    """
+    agent_cache = FakeAgentCache(harness="claude-native", reasoning_effort="high")
+    deps = _deps(
+        FakeScheduledTaskStore(rows={"task_1": _task(permission_mode="acceptEdits")}),
+        agent_store=FakeAgentStore({"ag_1": agent}),
+        agent_cache=agent_cache,
+    )
+    task = _task(permission_mode="acceptEdits")
+
+    launch_args = await fire_mod._permission_mode_launch_args(deps, task)
+    effort = await fire_mod._spec_reasoning_effort(deps, task)
+
+    assert launch_args == ["--permission-mode", "acceptEdits"]
+    assert effort == "high"
+    assert agent_cache.load_calls == [("ag_1", "ag_1/rev1", expand_env)] * 2
