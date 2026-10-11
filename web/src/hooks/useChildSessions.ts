@@ -189,9 +189,12 @@ export function invalidateChildSessions(queryClient: QueryClient, parentId: stri
     queryKey: ["conversation"],
     predicate: (query) => isSubagentTreeQueryKey(query.queryKey),
   });
+  // Membership survives a failed refresh (the last good data is kept), so a
+  // tree keeps owning its rows through a transient error; only a server
+  // without the route hands them back to per-node fetching.
   const covering = trees.filter(
     (tree) =>
-      tree.state.status === "success" &&
+      !(tree.state.status === "error" && isMissingSubtreeRoute(tree.state.error)) &&
       ((tree.state.data as SubagentTreeData | undefined)?.members.includes(parentId) ?? false),
   );
   const failedRoots = trees.filter(
@@ -311,6 +314,10 @@ interface UseChildSessionsResult {
   isLoading: boolean;
   error: Error | null;
 }
+
+// One shared empty list, so a consumer comparing identities between renders
+// (the graph view's collector map) sees no change while a list is unloaded.
+const NO_CHILDREN: ChildSessionInfo[] = [];
 
 /**
  * Fetch child sessions for a parent session.
@@ -493,7 +500,7 @@ export function useChildSessions(
     refetchInterval: pollMs ?? false,
   });
   return {
-    children: data ?? [],
+    children: data ?? NO_CHILDREN,
     isLoading,
     error: (error as Error | null) ?? null,
   };
@@ -545,7 +552,7 @@ export function useSubagentTree(rootSessionId: string | null): UseSubagentTreeRe
     refetchOnMount: false,
   });
   return {
-    children: direct.data ?? [],
+    children: direct.data ?? NO_CHILDREN,
     isLoading: (sessionId !== null && tree.isPending) || direct.isLoading,
     error: ((legacy ? direct.error : tree.error) as Error | null) ?? null,
     fromTree: sessionId !== null && !legacy,

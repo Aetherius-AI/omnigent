@@ -530,6 +530,63 @@ describe("useSubagentTree", () => {
     expect(fetchedUrls()).toEqual(["/v1/sessions/conv_root/descendants?max_depth=3&limit=1000"]);
   });
 
+  it("retries a failed subtree when a nested parent's list is refreshed", async () => {
+    // WHY: a refresh that failed on a transient error keeps the last good tree;
+    // the next nested event must reload it, not fall into the disabled
+    // per-row query and leave the new descendant hidden.
+    const queryClient = newQueryClient();
+    vi.mocked(authenticatedFetch)
+      .mockResolvedValueOnce(treePage([descendantRow("conv_a", "conv_root", 1)]))
+      .mockResolvedValueOnce(
+        new Response("boom", { status: 500, statusText: "Internal Server Error" }),
+      )
+      .mockResolvedValueOnce(
+        treePage([descendantRow("conv_a", "conv_root", 1), descendantRow("conv_a1", "conv_a", 2)]),
+      );
+    renderRail(queryClient);
+    await waitFor(() => expect(screen.getByTestId("root")).toHaveTextContent("conv_a"));
+
+    await act(() => invalidateChildSessions(queryClient, "conv_a"));
+    await waitFor(() =>
+      expect(screen.getByTestId("error")).toHaveTextContent("500 Internal Server Error"),
+    );
+    await act(() => invalidateChildSessions(queryClient, "conv_a"));
+
+    await waitFor(() => expect(screen.getByTestId("row-conv_a")).toHaveTextContent("conv_a1"));
+    expect(fetchedUrls()).toEqual([
+      "/v1/sessions/conv_root/descendants?max_depth=3&limit=1000",
+      "/v1/sessions/conv_root/descendants?max_depth=3&limit=1000",
+      "/v1/sessions/conv_root/descendants?max_depth=3&limit=1000",
+    ]);
+  });
+
+  it("lets rendered rows fetch their own children on a server without the route", async () => {
+    // WHY: against an older server the rail must still show grandchildren,
+    // which only the per-node child_sessions lists can provide.
+    const queryClient = newQueryClient();
+    vi.mocked(authenticatedFetch).mockImplementation(async (url) => {
+      const path = String(url);
+      if (path.includes("/descendants")) {
+        return new Response("Not Found", { status: 404, statusText: "Not Found" });
+      }
+      if (path.includes("/conv_root/")) {
+        return jsonResponse({ object: "list", data: [legacyRow("conv_a")] });
+      }
+      if (path.includes("/conv_a/")) {
+        return jsonResponse({ object: "list", data: [legacyRow("conv_a1")] });
+      }
+      return jsonResponse({ object: "list", data: [] });
+    });
+    renderRail(queryClient);
+
+    await waitFor(() => expect(screen.getByTestId("row-conv_a")).toHaveTextContent("conv_a1"));
+    expect(fetchedUrls()).toEqual([
+      "/v1/sessions/conv_root/descendants?max_depth=3&limit=1000",
+      "/v1/sessions/conv_root/child_sessions",
+      "/v1/sessions/conv_a/child_sessions",
+    ]);
+  });
+
   it("retries a failed subtree when its root's list is refreshed", async () => {
     const queryClient = newQueryClient();
     vi.mocked(authenticatedFetch)
