@@ -154,7 +154,10 @@ Cross-harness journeys:
 - **`model-and-effort`:**
   `tests/e2e_ui/start_session/test_native_picker_cli_parity.py::test_claude_picker_omits_aliases_the_cli_picker_does_not_offer`,
   `tests/e2e_ui/start_session/test_native_picker_cli_parity.py::test_codex_picker_offers_the_clis_catalog_and_default`
-  (real host API and Codex CLI, with custom/bundled catalogs and a hidden default; desktop and mobile);
+  (real host API and Codex CLI, with custom/bundled catalogs and a hidden default; desktop and mobile),
+  `tests/e2e_ui/start_session/test_cursor_native_prelaunch_picker.py::test_host_serves_the_cursor_catalog_before_launch`
+  (the host answers `GET /v1/hosts/{id}/harnesses/cursor-native/model-options` from `cursor-agent models`;
+  a missing or signed-out CLI is a failed lookup with a reason — the cursor cases in `tests/host/test_connect.py`);
   see also [composer](./composer.md) for effort.
 - **`model-and-effort`, Codex runtime settings:**
   `tests/e2e/test_codex_native_supported_efforts_e2e.py::test_codex_clamps_unsupported_effort`,

@@ -28,7 +28,11 @@ if ARGS[:1] == ["status"]:
     print(json.dumps(status))
     raise SystemExit(0)
 if ARGS[:1] == ["models"]:
-    with open(os.environ["CURSOR_AGENT_DOUBLE_MODELS_FILE"], encoding="utf-8") as fh:
+    models_file = os.environ.get("CURSOR_AGENT_DOUBLE_MODELS_FILE")
+    if not models_file:
+        print("stub cursor-agent: CURSOR_AGENT_DOUBLE_MODELS_FILE is not set", file=sys.stderr)
+        raise SystemExit(1)
+    with open(models_file, encoding="utf-8") as fh:
         sys.stdout.write(fh.read())
     raise SystemExit(0)
 if ARGS[:1] in (["login"], ["logout"]):

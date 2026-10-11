@@ -2149,6 +2149,7 @@ async def _drive_cursor_model(base_url: str, session_id: str) -> None:
             body = create_bodies[0]
             assert body["agent_id"] == agent_id, body
             assert body["host_id"] == _HOST_ID, body
+            assert body["workspace"] == "/work/repo", body
             assert body.get("model_override") == "grok-4.7", body
             assert body.get("reasoning_effort") is None, body
             assert body.get("terminal_launch_args") == ["--mode", "plan"], body

@@ -179,14 +179,19 @@ def _select_host_workspace(page: Page) -> None:
     expect(page.get_by_test_id("workspace-picker")).to_be_hidden()
 
 
-def _select_harness(page: Page, agent_id: str) -> None:
+def _select_harness(page: Page, agent_id: str, label: str) -> None:
     _open_agent_menu(page)
     row = page.get_by_test_id(f"new-chat-landing-agent-{agent_id}")
     if row.count() == 0:
         page.get_by_test_id("new-chat-landing-harness-more").click()
     expect(row).to_be_visible(timeout=10_000)
     row.click()
-    page.wait_for_timeout(800)
+    # The trigger names the picked harness in its accessible label (its visible
+    # text is the picked/default model once a catalog exists, like the other
+    # model pickers), so the pick has been applied once that label updates.
+    expect(page.get_by_test_id("new-chat-landing-agent-select")).to_have_attribute(
+        "aria-label", re.compile(rf"^{re.escape(label)}\b"), timeout=10_000
+    )
 
 
 def _close_menus(page: Page) -> None:
@@ -214,13 +219,15 @@ def test_new_chat_offers_the_hosts_cursor_models_before_launch(
     _dismiss_setup_review(page)
     _select_host_workspace(page)
 
-    _select_harness(page, cursor_id)
+    _select_harness(page, cursor_id, "Cursor")
     _close_menus(page)
-    # The trigger shows the picked/default model once a catalog exists; the
-    # harness is named in its accessible label, like the other model pickers.
-    expect(page.get_by_test_id("new-chat-landing-agent-select")).to_have_attribute(
-        "aria-label", re.compile(r"^Cursor\b")
-    )
+
+    def cursor_catalog_requests() -> list[str]:
+        return [
+            url
+            for url in catalog_requests
+            if f"/hosts/{cursor_rig.host_id}/harnesses/cursor-native/" in url
+        ]
 
     # Reopen the picker on the selected Cursor row and look for its model control.
     _open_agent_menu(page)
@@ -229,21 +236,18 @@ def test_new_chat_offers_the_hosts_cursor_models_before_launch(
         page.get_by_test_id("new-chat-landing-harness-more").click()
     expect(row).to_be_visible(timeout=10_000)
     expect(row).not_to_have_attribute("aria-disabled", "true")
-    page.wait_for_timeout(1_500)
 
     edit = page.get_by_test_id(f"new-chat-landing-agent-config-{cursor_id}")
-    cursor_catalog_requests = [
-        url
-        for url in catalog_requests
-        if f"/hosts/{cursor_rig.host_id}/harnesses/cursor-native/" in url
-    ]
-    assert edit.count() == 1, (
-        "the selected Cursor row offers no Edit / model control before the first message "
-        f"(config entries: {edit.count()}, models section present: "
-        f"{page.get_by_test_id(_MODELS_SECTION_TESTID).count() > 0}); catalog requests the "
-        f"page issued: {sorted(set(catalog_requests))}; cursor-native requests: "
-        f"{cursor_catalog_requests}\n{cursor_rig.log_tail()}"
-    )
+    try:
+        expect(edit).to_have_count(1, timeout=10_000)
+    except AssertionError as exc:
+        raise AssertionError(
+            "the selected Cursor row offers no Edit / model control before the first message "
+            f"(config entries: {edit.count()}, models section present: "
+            f"{page.get_by_test_id(_MODELS_SECTION_TESTID).count() > 0}); catalog requests the "
+            f"page issued: {sorted(set(catalog_requests))}; cursor-native requests: "
+            f"{cursor_catalog_requests()}\n{cursor_rig.log_tail()}"
+        ) from exc
     edit.get_by_text("Edit", exact=True).click()
     models = page.get_by_test_id(_MODELS_SECTION_TESTID)
     expect(models).to_be_visible(timeout=_CATALOG_TIMEOUT_MS)
@@ -251,7 +255,9 @@ def test_new_chat_offers_the_hosts_cursor_models_before_launch(
         expect(page.get_by_test_id(f"new-chat-landing-agent-model-{model['id']}")).to_be_visible(
             timeout=_CATALOG_TIMEOUT_MS
         )
-    assert cursor_catalog_requests, (
+    # Filtered now rather than before the Edit click, so a catalog request the
+    # Models section itself triggers still counts.
+    assert cursor_catalog_requests(), (
         "New Chat never requested the host's cursor-native catalog; requests issued: "
         f"{sorted(set(catalog_requests))}"
     )
