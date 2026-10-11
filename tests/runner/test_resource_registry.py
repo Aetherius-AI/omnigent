@@ -549,6 +549,7 @@ class _FakeStatusPoller:
     def __init__(self, on_status: object) -> None:
         self._on_status = on_status
         self.active = False
+        self.reports_idle = False
         self.blocked_on: str | None = None
         self.ticks = 0
         self.retired = False
@@ -612,11 +613,12 @@ async def _observe_native_with_fake_poller(
         idle_poll_backoff_allowed: object | None = None,
         replace: bool = False,
     ) -> None:
-        del idle_threshold_s, poll_interval_s, idle_poll_backoff_allowed, replace
+        del idle_threshold_s, poll_interval_s, replace
         callbacks["on_idle"] = on_idle
         callbacks["on_activity"] = on_activity
         callbacks["on_exit"] = on_exit
         callbacks["on_tick"] = on_tick
+        callbacks["idle_poll_backoff_allowed"] = idle_poll_backoff_allowed
 
     instance.start_idle_watcher_thread = _capture_watcher  # type: ignore[attr-defined]
     await registry.observe_required_terminal(
@@ -638,6 +640,37 @@ async def test_claude_native_wires_status_poller_tick(tmp_path: Path) -> None:
     on_tick()
     on_tick()
     assert pollers[0].ticks == 2
+
+
+@pytest.mark.asyncio
+async def test_claude_native_backoff_predicate_tracks_file_idle(tmp_path: Path) -> None:
+    """Native idle-poll backoff is gated on the status file's idle reading.
+
+    While the file owns the session's status the predicate holds the base
+    cadence until Claude itself reads idle, so a quiet-but-working pane never
+    delays the file-driven turn edge. Without the file, pane quiescence alone
+    governs backoff.
+    """
+    callbacks, _statuses, pollers, _registry = await _observe_native_with_fake_poller(
+        tmp_path, "conv_backoff"
+    )
+    allowed = callbacks["idle_poll_backoff_allowed"]
+    assert callable(allowed)
+    poller = pollers[0]
+
+    # File unresolved: pane quiescence governs, so backoff is allowed.
+    poller.active = False
+    poller.reports_idle = False
+    assert allowed()
+
+    # File owns status while Claude runs (or is unknown): hold the base cadence.
+    poller.active = True
+    poller.reports_idle = False
+    assert not allowed()
+
+    # File owns status and Claude reads idle: allow backoff.
+    poller.reports_idle = True
+    assert allowed()
 
 
 @pytest.mark.asyncio

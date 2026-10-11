@@ -1363,11 +1363,12 @@ def test_capture_pane_state_or_none_folds_liveness_and_capture(tmp_path: Path) -
 def test_threaded_watcher_reduces_tmux_forks_once_pane_is_quiet(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An idle pane makes the watcher fork tmux far less than once per base tick."""
+    """An idle pane bounds the watcher's tmux forks near the backed-off ceiling."""
     monkeypatch.setattr(terminal_mod, "_IDLE_POLL_BACKOFF_AFTER_SECONDS", 0.03)
+    monkeypatch.setattr(terminal_mod, "_IDLE_POLL_BACKOFF_MAX_MULTIPLE", 1000.0)
     monkeypatch.setattr(terminal_mod, "_IDLE_POLL_MAX_INTERVAL_SECONDS", 0.2)
 
-    def forks_over_half_second(*, backoff: bool) -> int:
+    def forks_over_window(*, backoff: bool) -> int:
         monkeypatch.setenv(terminal_mod._IDLE_POLL_BACKOFF_ENV_VAR, "1" if backoff else "0")
         instance = _idle_watch_instance(tmp_path)
         count = {"n": 0}
@@ -1378,20 +1379,24 @@ def test_threaded_watcher_reduces_tmux_forks_once_pane_is_quiet(
 
         instance._capture_pane_state_or_none = _capture  # type: ignore[method-assign]
         instance.start_idle_watcher_thread(on_tick=lambda: None, poll_interval_s=0.01)
-        time.sleep(0.5)
+        time.sleep(1.0)
         instance._stop_idle_watcher_thread()
         return count["n"]
 
-    without_backoff = forks_over_half_second(backoff=False)
-    with_backoff = forks_over_half_second(backoff=True)
-    assert with_backoff * 2 < without_backoff
+    without_backoff = forks_over_window(backoff=False)
+    with_backoff = forks_over_window(backoff=True)
+    # Backoff must strictly cut forks and bound them near the ceiling rate
+    # (window / max interval plus the geometric ramp), not the base-tick rate.
+    assert with_backoff < without_backoff
+    assert with_backoff <= 15
 
 
 def test_threaded_watcher_wakes_promptly_from_backoff(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A wake pulls a backed-off watcher back to its base cadence at once."""
+    """A wake interrupts a backed-off watcher's multi-second sleep at once."""
     monkeypatch.setattr(terminal_mod, "_IDLE_POLL_BACKOFF_AFTER_SECONDS", 0.02)
+    monkeypatch.setattr(terminal_mod, "_IDLE_POLL_BACKOFF_MAX_MULTIPLE", 1000.0)
     monkeypatch.setattr(terminal_mod, "_IDLE_POLL_MAX_INTERVAL_SECONDS", 2.0)
     instance = _idle_watch_instance(tmp_path)
     ticks = {"n": 0}
@@ -1403,18 +1408,23 @@ def test_threaded_watcher_wakes_promptly_from_backoff(
     instance._capture_pane_state_or_none = _capture  # type: ignore[method-assign]
     instance.start_idle_watcher_thread(on_tick=lambda: None, poll_interval_s=0.01)
     try:
-        time.sleep(0.5)  # grow the interval toward ~2s
+        # Grow the interval to the 2s ceiling, then align to the start of a
+        # fresh backed-off sleep so the wake has the full ceiling to beat.
+        time.sleep(1.5)
+        start = ticks["n"]
+        while ticks["n"] == start:
+            time.sleep(0.01)
         before = ticks["n"]
         woke_at = time.monotonic()
         instance.wake_idle_watcher()
-        deadline = woke_at + 0.2
+        deadline = woke_at + 1.0
         while ticks["n"] == before and time.monotonic() < deadline:
             time.sleep(0.005)
         latency = time.monotonic() - woke_at
     finally:
         instance._stop_idle_watcher_thread()
     assert ticks["n"] > before
-    assert latency < 0.2
+    assert latency < 1.0  # far below the ~2s sleep the wake interrupted
 
 
 @pytest.mark.asyncio

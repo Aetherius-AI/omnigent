@@ -1537,11 +1537,9 @@ class SessionResourceRegistry:
                 self._status_pollers[session_id] = status_poller
 
         def _idle_poll_backoff_allowed() -> bool:
-            # The claude-native status file is authoritative for idleness, so
-            # only back off its tmux polling once Claude itself reads idle; a
-            # quiet-but-working pane then keeps the base cadence so the
-            # file-driven turn edge is never delayed. Without an authoritative
-            # file, pane quiescence alone governs backoff.
+            # The status file is authoritative, so back off its tmux polling only
+            # once Claude reads idle, keeping the file-driven turn edge timely;
+            # without the file, pane quiescence alone governs backoff.
             if not _file_owns_status():
                 return True
             assert status_poller is not None

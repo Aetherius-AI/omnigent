@@ -466,13 +466,9 @@ _IDLE_WATCHER_JOIN_TIMEOUT_S = 1.0
 # pane in submission order, so the program sees one contiguous stream.
 _SEND_KEYS_LITERAL_CHARS_PER_CALL = 1024
 
-# Idle poll backoff. Once a pane has been quiet for
-# _IDLE_POLL_BACKOFF_AFTER_SECONDS the threaded watcher grows its poll interval
-# geometrically toward a ceiling, so an idle terminal stops fork+exec'ing tmux
-# every tick. Any pane change, a wake (turn start / client interaction / send /
-# close), or the kill switch resets it to the base cadence. This only slows
-# polling while nothing happens; it does not move the user-facing idle edge
-# (_IDLE_THRESHOLD_SECONDS), which still fires on its own schedule.
+# Idle poll backoff: after _IDLE_POLL_BACKOFF_AFTER_SECONDS of quiet the watcher
+# grows its poll interval toward a ceiling (any pane change, wake, or kill switch
+# resets it), so idle/exit edges can be reported up to one backed-off interval late.
 _IDLE_POLL_BACKOFF_AFTER_SECONDS = 2.0
 _IDLE_POLL_BACKOFF_FACTOR = 2.0
 # Cap growth per watcher relative to its base so the fast claude-native watcher
@@ -836,8 +832,9 @@ def _tmux_executable_for_path(path_env: str) -> str:
     """Resolve tmux against one ``PATH`` value, cached so repeated idle polls
     don't re-walk every ``PATH`` entry on each fork+exec.
 
-    *path_env* is only the cache key; resolution reads the live ``PATH`` (equal
-    to the key), so a changed ``PATH`` produces a fresh lookup.
+    *path_env* is the cache key: a changed ``PATH`` re-resolves, but a tmux moved
+    within an unchanged ``PATH`` keeps the cached path for the process lifetime.
+    ``_require_supported_tmux`` still does a live ``shutil.which`` at setup.
     """
     del path_env
     return shutil.which("tmux") or "tmux"
