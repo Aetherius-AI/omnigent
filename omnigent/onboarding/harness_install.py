@@ -800,6 +800,28 @@ _LOGIN_PROBE_CACHE_TTL_S = 120.0
 _PROBE_CACHE_MAX_ENTRIES = 64
 
 
+def _cli_probe_cwd() -> str | None:
+    """Return a stable cwd for a harness CLI probe, or ``None`` to inherit it.
+
+    A long-lived daemon can outlive the directory it was started from (a temp
+    checkout or a removed git worktree). A probe subprocess inherits that
+    deleted cwd, where ``claude`` exits non-zero, so a present CLI reads as
+    unavailable. Return ``None`` while the cwd is intact (inherit it, no
+    change); fall back to home, else the filesystem root, once it is gone.
+    """
+    try:
+        os.getcwd()
+        return None
+    except OSError:
+        for candidate in (Path.home(), Path(os.path.abspath(os.sep))):
+            try:
+                if candidate.is_dir():
+                    return str(candidate)
+            except OSError:
+                continue
+        return None
+
+
 def _binary_signature(binary: str) -> tuple[str, int, int] | None:
     """Return *binary*'s identity signature for the version cache.
 
@@ -988,6 +1010,7 @@ def _harness_cli_version_string(
             text=True,
             timeout=timeout,
             check=False,
+            cwd=_cli_probe_cwd(),
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -1191,6 +1214,7 @@ def harness_cli_logged_in(key: str, timeout: float = _DEFAULT_CLI_PROBE_TIMEOUT_
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
+            cwd=_cli_probe_cwd(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return False
