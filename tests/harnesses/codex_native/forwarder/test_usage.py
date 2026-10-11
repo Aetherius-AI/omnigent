@@ -121,65 +121,6 @@ async def test_usage_coalescer_seeded_model_rides_along_so_child_usage_prices() 
 
 
 @pytest.mark.asyncio
-async def test_child_usage_post_carries_child_thread_model() -> None:
-    """A child thread's usage is attributed to the child's own model, not the parent's.
-
-    Codex reports a child's model on its ``thread/resume`` result, while its
-    ``thread/tokenUsage/updated`` frames carry no model. The usage post to the
-    child session must name the child's model so its tokens land in the
-    child-model bucket and are priced at that model's rates.
-    """
-    client = _RecordingClient()
-    state = fwd._CodexForwarderState(parent_session_id="conv_parent", model="gpt-5.6-sol")
-    state.note_child_thread("thread_child", "conv_child")
-    await fwd._apply_child_resume(
-        client,
-        parent_session_id="conv_parent",
-        child_session_id="conv_child",
-        child_thread_id="thread_child",
-        response={
-            "result": {"model": "gpt-5.6-luna", "thread": {"id": "thread_child", "turns": []}}
-        },
-        forwarder_state=state,
-    )
-    tracker = fwd._CodexElicitationTaskTracker()
-    try:
-        await fwd._handle_event(
-            client,
-            session_id="conv_parent",
-            bridge_dir=Path(),
-            event={
-                "method": "thread/tokenUsage/updated",
-                "params": {
-                    "threadId": "thread_child",
-                    "turnId": "turn_child",
-                    "tokenUsage": {
-                        "total": {
-                            "inputTokens": 20280,
-                            "cachedInputTokens": 9984,
-                            "outputTokens": 23,
-                        }
-                    },
-                },
-            },
-            usage_coalescer=fwd._SessionUsageCoalescer(client, "conv_parent"),
-            elicitation_tracker=tracker,
-            expected_thread_id="thread_parent",
-            forwarder_state=state,
-        )
-    finally:
-        await tracker.close()
-
-    usage_posts = [
-        (url, body) for url, body in client.posts if body["type"] == "external_session_usage"
-    ]
-    assert [url for url, _body in usage_posts] == ["/v1/sessions/conv_child/events"]
-    data = usage_posts[0][1]["data"]
-    assert data["cumulative_input_tokens"] == 20280
-    assert data["model"] == "gpt-5.6-luna"
-
-
-@pytest.mark.asyncio
 async def test_child_usage_uses_each_child_resume_model_not_the_parent_model() -> None:
     """Sibling usage is routed and attributed by each child resume model.
 
@@ -223,6 +164,7 @@ async def test_child_usage_uses_each_child_resume_model_not_the_parent_model() -
         "/v1/sessions/conv_a/events": "model-a",
         "/v1/sessions/conv_b/events": "model-b",
     }
+    assert usage_by_session["/v1/sessions/conv_a/events"]["cumulative_input_tokens"] == 20_280
     assert (
         usage_by_session["/v1/sessions/conv_a/events"]["cumulative_cache_read_input_tokens"]
         == 9_984
@@ -267,6 +209,74 @@ async def test_child_usage_retries_model_discovery_after_initial_resume_race() -
     assert [(url, body["data"]["model"]) for url, body in _usage_posts(client)] == [
         ("/v1/sessions/conv_child/events", "child-model")
     ]
+    await tracker.close()
+
+
+@pytest.mark.asyncio
+async def test_child_usage_frame_survives_recovery_connection_error() -> None:
+    """Counts received with an unknown model stay buffered when the live resume fails."""
+    client = _RecordingClient()
+    codex_client = MagicMock()
+    codex_client.request = AsyncMock(
+        side_effect=[
+            ConnectionError("connection closed"),
+            _resume_response("thread_child", "child-model"),
+        ]
+    )
+    state = _child_state(codex_client)
+    tracker = fwd._CodexElicitationTaskTracker()
+
+    await _handle_child_event(
+        client,
+        state,
+        tracker,
+        _usage_event("thread_child", input_tokens=20_280, cached_input_tokens=9_984),
+    )
+
+    assert _usage_posts(client) == []
+    assert state.child_usage_coalescers_by_thread["thread_child"].has_pending_usage
+
+    await state.close_child_usage_coalescers(client)
+
+    assert codex_client.request.await_count == 2
+    posted = _usage_posts(client)[0][1]["data"]
+    assert (posted["model"], posted["cumulative_input_tokens"]) == ("child-model", 20_280)
+    await tracker.close()
+
+
+@pytest.mark.asyncio
+async def test_child_usage_frame_survives_cancelled_recovery() -> None:
+    """Cancelling event handling mid-recovery propagates but keeps the counts buffered."""
+    client = _RecordingClient()
+    codex_client = MagicMock()
+    resume_started = asyncio.Event()
+
+    async def hang(*_args: object, **_kwargs: object) -> None:
+        resume_started.set()
+        await asyncio.Event().wait()
+
+    codex_client.request = AsyncMock(side_effect=hang)
+    state = _child_state(codex_client)
+    tracker = fwd._CodexElicitationTaskTracker()
+
+    handling = asyncio.create_task(
+        _handle_child_event(
+            client, state, tracker, _usage_event("thread_child", cached_input_tokens=80)
+        )
+    )
+    await resume_started.wait()
+    handling.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await handling
+
+    assert _usage_posts(client) == []
+    assert state.child_usage_coalescers_by_thread["thread_child"].has_pending_usage
+
+    codex_client.request = AsyncMock(return_value=_resume_response("thread_child", "child-model"))
+    await state.close_child_usage_coalescers(client)
+
+    posted = _usage_posts(client)[0][1]["data"]
+    assert (posted["model"], posted["cumulative_cache_read_input_tokens"]) == ("child-model", 80)
     await tracker.close()
 
 
@@ -328,6 +338,7 @@ async def test_child_usage_close_continues_after_recovery_exception() -> None:
 @pytest.mark.asyncio
 async def test_child_usage_close_bounds_hung_model_recovery(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A hung app-server request cannot block child usage cleanup indefinitely."""
 
@@ -352,6 +363,12 @@ async def test_child_usage_close_bounds_hung_model_recovery(
     codex_client.request.assert_awaited_once_with("thread/resume", {"threadId": "thread_a"})
     assert state.child_usage_coalescers_by_thread == {}
     assert client.posts == []
+    unposted = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("Codex child usage remained unposted at shutdown")
+    ]
+    assert len(unposted) == 2
 
 
 @pytest.mark.asyncio

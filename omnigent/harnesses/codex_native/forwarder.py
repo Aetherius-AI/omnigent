@@ -3233,18 +3233,6 @@ async def _handle_event(
     event_thread_id = _thread_id_from_params(params)
     if is_child and method == "thread/settings/updated" and forwarder_state is not None:
         forwarder_state.note_child_thread_settings_updated(params)
-    if (
-        is_child
-        and method == "thread/tokenUsage/updated"
-        and forwarder_state is not None
-        and event_thread_id is not None
-    ):
-        await _recover_child_usage_model(
-            client,
-            child_session_id=route_session_id,
-            child_thread_id=event_thread_id,
-            forwarder_state=forwarder_state,
-        )
     # Keep one coalescer per child so early usage can wait for that thread's
     # authoritative model instead of inheriting the parent's attribution.
     child_coalescer = (
@@ -3256,6 +3244,27 @@ async def _handle_event(
         if is_child and forwarder_state is not None and event_thread_id is not None
         else None
     )
+    if (
+        child_coalescer is not None
+        and forwarder_state is not None
+        and event_thread_id is not None
+        and method == "thread/tokenUsage/updated"
+    ):
+        # Buffer the counts first so a failed or cancelled resume cannot lose them.
+        child_coalescer.record(params)
+        try:
+            await _recover_child_usage_model(
+                client,
+                child_session_id=route_session_id,
+                child_thread_id=event_thread_id,
+                forwarder_state=forwarder_state,
+            )
+        except Exception:  # noqa: BLE001 - the counts stay buffered for a later retry.
+            _logger.warning(
+                "Codex child model recovery failed; usage stays buffered: thread_id=%s",
+                event_thread_id,
+                exc_info=True,
+            )
     if await _maybe_handle_turn_event(
         client,
         session_id=route_session_id,
