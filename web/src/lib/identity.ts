@@ -664,6 +664,9 @@ export async function authenticatedFetch(
     ensureSameServer();
     clearHostKeyless(derivedHostId);
   }
+  // A wrong-replica body read can span a switch without entering a guarded
+  // branch, so re-check before handing the answer back.
+  ensureSameServer();
 
   if (
     // When embedded, the host owns auth (e.g. cookie/session via

@@ -116,7 +116,9 @@ export interface OmnigentHostConfig {
    * Stable server/workspace identity. Scopes browser-local state to one backend:
    * extension storage, and the cached user identity and admin flag, which are
    * dropped when it changes (several backends can share one origin). A host that
-   * changes it must remount `OmnigentApp` so mounted consumers re-read it.
+   * changes it must remount `OmnigentApp` so mounted consumers re-read it. Hosts
+   * that can point at more than one backend must set a distinct, non-empty value
+   * per backend; an unset or reused value makes a switch undetectable.
    */
   serverIdentity?: string;
   /**
