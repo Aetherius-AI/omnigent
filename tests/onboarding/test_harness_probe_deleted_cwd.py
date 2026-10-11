@@ -143,3 +143,46 @@ def test_login_probe_execs_discovered_absolute_binary(
         assert hi.harness_cli_logged_in(ANTHROPIC_FAMILY) is True
     assert executed == [discovered]
     assert os.path.isabs(executed[0])
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX deleted-cwd semantics")
+def test_login_probe_refuses_relative_discovery_under_deleted_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When discovery yields a relative path (a ``.``-style PATH entry) and the
+    daemon's cwd is gone, running it under the fallback cwd would exec a
+    different executable. The status probe must refuse rather than probe it."""
+    monkeypatch.setattr(hi.shutil, "which", lambda name: f"./{name}")
+    executed: list[str] = []
+
+    def _run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess:
+        executed.append(argv[0])
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout='{"loggedIn": true}', stderr=""
+        )
+
+    monkeypatch.setattr(hi.subprocess, "run", _run)
+    with _deleted_cwd(tmp_path):
+        assert hi.harness_cli_logged_in(ANTHROPIC_FAMILY) is False
+    assert executed == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX deleted-cwd semantics")
+def test_version_probe_refuses_relative_discovery_under_deleted_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The version probe applies the same relative-path protection."""
+    monkeypatch.setattr(hi, "resolve_cli_binary", lambda name, **_kwargs: f"./{name}")
+    executed: list[str] = []
+
+    def _run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess:
+        executed.append(argv[0])
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="2.1.268 (Claude Code)", stderr=""
+        )
+
+    monkeypatch.setattr(hi.subprocess, "run", _run)
+    with _deleted_cwd(tmp_path):
+        version, _range = hi.harness_cli_version(ANTHROPIC_FAMILY)
+    assert version is None
+    assert executed == []

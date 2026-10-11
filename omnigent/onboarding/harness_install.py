@@ -998,6 +998,12 @@ def _harness_cli_version_string(
     :param timeout: Seconds to wait for the ``--version`` subprocess, e.g.
         :data:`READINESS_CLI_PROBE_TIMEOUT_S` on the readiness path.
     """
+    probe_cwd = _cli_probe_cwd()
+    if probe_cwd is not None and not os.path.isabs(binary):
+        # The daemon's starting cwd is gone, so the probe would run under a
+        # fallback dir; a relative discovered path re-resolves there to a
+        # different executable, so report unverifiable instead of probing it.
+        return None
     sig = _binary_signature(binary)
     if sig is not None:
         with _PROBE_CACHE_LOCK:
@@ -1012,7 +1018,7 @@ def _harness_cli_version_string(
             text=True,
             timeout=timeout,
             check=False,
-            cwd=_cli_probe_cwd(),
+            cwd=probe_cwd,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -1198,6 +1204,12 @@ def harness_cli_logged_in(key: str, timeout: float = _DEFAULT_CLI_PROBE_TIMEOUT_
     binary = resolve_cli_binary(spec.binary) if key == GEMINI_FAMILY else shutil.which(spec.binary)
     if binary is None:
         return False
+    probe_cwd = _cli_probe_cwd()
+    if probe_cwd is not None and not os.path.isabs(binary):
+        # The daemon's starting cwd is gone, so the probe would run under a
+        # fallback dir; a relative discovered path re-resolves there to a
+        # different executable, so report not-logged-in instead of probing it.
+        return False
     # Positive verdicts are TTL-cached (see the cache block above): logins
     # are sticky, and the readiness loop re-probing a logged-in CLI every
     # refresh is the ambient storm. Negatives always re-probe so a login
@@ -1208,8 +1220,6 @@ def harness_cli_logged_in(key: str, timeout: float = _DEFAULT_CLI_PROBE_TIMEOUT_
             return True
     try:
         result = subprocess.run(
-            # Exec the discovered absolute path so a relative PATH entry can't
-            # re-resolve the bare name against the probe's fallback cwd.
             [binary, *spec.status_args],
             check=False,
             timeout=timeout,
@@ -1217,7 +1227,7 @@ def harness_cli_logged_in(key: str, timeout: float = _DEFAULT_CLI_PROBE_TIMEOUT_
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
-            cwd=_cli_probe_cwd(),
+            cwd=probe_cwd,
         )
     except (OSError, subprocess.TimeoutExpired):
         return False
