@@ -5,6 +5,7 @@ matched; agy cannot sign in from CI, so the real reader drives this module's own
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
 import json
 import signal
@@ -208,4 +209,5 @@ def test_antigravity_gemini_usage_shows_cost_in_agent_info(
         expect(page.get_by_test_id("agent-info-session-cost")).to_be_visible(timeout=15_000)
     finally:
         for sid in (control_id, bug_id):
-            httpx.delete(f"{base_url}/v1/sessions/{sid}", timeout=10.0)
+            with contextlib.suppress(httpx.HTTPError):
+                httpx.delete(f"{base_url}/v1/sessions/{sid}", timeout=10.0)

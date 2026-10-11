@@ -4,6 +4,7 @@ and hands the returned env to its own server subprocess only."""
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -13,11 +14,11 @@ import pytest
 
 from omnigent.onboarding import providers
 
-# The catalog cache ignores ``XDG_CACHE_HOME`` on macOS, where a seeded catalog
-# would land in the developer's real cache.
+# The catalog cache ignores ``XDG_CACHE_HOME`` on macOS and Windows, where a
+# seeded catalog would land in the developer's real cache.
 offline_catalog_isolated = pytest.mark.skipif(
-    sys.platform == "darwin",
-    reason="the model-catalog cache cannot be redirected on macOS",
+    sys.platform == "darwin" or os.name == "nt",
+    reason="the model-catalog cache cannot be redirected on macOS or Windows",
 )
 
 

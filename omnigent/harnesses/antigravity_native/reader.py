@@ -394,7 +394,16 @@ def _catalog_model_id(display_name: str) -> str:
     prices with (``"gemini-3.8-flash"``): tier dropped, lowercased, hyphenated; Claude version
     dots become hyphens. A label with no spaces or tier is returned unchanged."""
     label = _MODEL_TIER_SUFFIX_RE.sub("", display_name).strip()
-    if not label or (label == display_name and not any(ch.isspace() for ch in label)):
+    if not label:
+        return display_name
+    # An unresolved raw enum (no spaces, UPPER_SNAKE or all-caps) matches no
+    # catalog id, so report it verbatim rather than lowercasing it into a
+    # different non-id; a one-word human label is still normalized.
+    if (
+        label == display_name
+        and not any(ch.isspace() for ch in label)
+        and ("_" in label or label.isupper())
+    ):
         return display_name
     slug = "-".join(label.lower().split())
     if slug.startswith("claude"):
@@ -2669,6 +2678,7 @@ async def _maybe_emit_session_usage(
     if isinstance(model_enum, str) and model_enum:
         catalog = await _ensure_catalog(state)
         model_id = _catalog_model_id(_resolve_display_name(model_enum, catalog))
+        _logger.debug("agy usage model enum=%r priced as id=%r", model_enum, model_id)
     # Build the cumulative payload (SET-semantics running totals).
     payload: dict[str, object] = {}
     if state.cumulative_input_tokens > 0:

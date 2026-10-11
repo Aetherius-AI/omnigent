@@ -2754,6 +2754,8 @@ async def test_tiered_display_name_usage_posts_catalog_id(
         ("Gemini 3.1 Flash Lite (Low)", "gemini-3.1-flash-lite"),
         ("Claude Sonnet 4.6 (Thinking)", "claude-sonnet-4-6"),
         ("GPT-OSS 120B", "gpt-oss-120b"),
+        # A one-word human label is lowercased to its catalog id.
+        ("Codestral", "codestral"),
         # Id-shaped labels and unresolved raw enums pass through untouched.
         ("gemini-3.8-flash", "gemini-3.8-flash"),
         ("MODEL_PLACEHOLDER_M20", "MODEL_PLACEHOLDER_M20"),
