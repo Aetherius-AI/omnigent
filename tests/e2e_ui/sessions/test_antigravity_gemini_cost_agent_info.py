@@ -150,12 +150,12 @@ def _emit_usage_via_reader(
 
     # The sync Playwright API runs inside a live event loop, so the reader's
     # async emission gets its own loop on a worker thread.
-    error: list[BaseException] = []
+    error: list[Exception] = []
 
     def _target() -> None:
         try:
             asyncio.run(_drive())
-        except BaseException as exc:  # surface to the test thread
+        except Exception as exc:  # surface to the test thread
             error.append(exc)
 
     worker = threading.Thread(target=_target)
