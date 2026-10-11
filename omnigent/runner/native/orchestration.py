@@ -4806,6 +4806,7 @@ async def _auto_create_codex_terminal(
         codex_session_meta_model_provider,
         fresh_codex_launch_catalog,
         is_unreadable_thread_error,
+        native_codex_launch_pins_model_provider,
         preload_codex_thread_for_resume,
         resolve_native_codex_launch,
     )
@@ -5371,6 +5372,11 @@ async def _auto_create_codex_terminal(
                 launch_config.external_session_id,
                 terminal_launch_args=launch_config.terminal_launch_args,
                 cwd=Path(workspace),
+                model_provider=(
+                    _session_meta_provider
+                    if native_codex_launch_pins_model_provider(_codex_launch)
+                    else None
+                ),
                 retain_client=codex_remote_resume_omits_permission_args(
                     app_server.codex_cli_version
                 ),
@@ -10189,6 +10195,8 @@ async def _session_labels_for_runner_spawn(
         ``"conv_abc123"``.
     :returns: String label mapping. Empty on lookup failure.
     """
+    from omnigent.inner.databricks_executor import DatabricksAuthError
+
     path = f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}/labels"
     try:
         resp = await server_client.get(
@@ -10203,7 +10211,9 @@ async def _session_labels_for_runner_spawn(
             extra={"session_id": session_id},
         )
         return {}
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, DatabricksAuthError) as exc:
+        # DatabricksAuthError: the host credential service couldn't sign the
+        # request. Like any other lookup failure, that must not fail the turn.
         _logger.warning(
             "Failed to resolve session labels; session=%s error=%s",
             session_id,
