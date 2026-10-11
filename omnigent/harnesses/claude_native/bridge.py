@@ -335,10 +335,9 @@ _SUBMIT_RETRY_INTERVAL_S = 1.0
 # Enter sent into a stalled TUI queues in the pty and replays when it
 # recovers, so retries slow down instead of piling up there.
 _SUBMIT_RETRY_MAX_INTERVAL_S = 8.0
-# After the submit, how long the delivery watch reads the hook log for
-# evidence either way (a matching ``UserPromptSubmit`` receipt, or the
-# fresh ``SessionStart`` of an in-pane restart) before accepting the
-# submit as delivered. Absence of evidence never fails the send.
+# After the submit, how long the delivery watch reads the hook log for a
+# matching ``UserPromptSubmit`` receipt or an in-pane-restart
+# ``SessionStart`` before accepting delivery. Absence never fails a send.
 _DELIVERY_CONFIRM_WATCH_S = 2.0
 # Once an in-pane restart is positively identified, how long the watch
 # keeps waiting for a delivery receipt (the restart may have landed just
@@ -4129,10 +4128,9 @@ def inject_user_message(
     # ``/model``, ``/fork``, skills, etc.) pass through unchanged.
     injected_text = _escape_unsupported_slash_command(content)
     needle = _submit_needle(content)
-    # Built-in lifecycle commands (``/clear``, ``/model``, …) rotate
-    # sessions on purpose and do not consistently emit UserPromptSubmit;
-    # whitespace-only content has no identifiable receipt. Skip delivery
-    # confirmation for both — everything else gets the restart watch.
+    # Lifecycle commands (``/clear``, ``/model``, …) rotate sessions on
+    # purpose and don't reliably emit UserPromptSubmit; whitespace-only text
+    # has no receipt. Skip confirmation for both; others get the restart watch.
     confirm_delivery = bool(needle) and (
         _first_slash_command_name(content) not in _CLAUDE_NATIVE_ALLOWED_USER_SLASH_COMMANDS
     )
@@ -4321,9 +4319,8 @@ def _paste_and_submit(
     delivery_diagnostics.record_details(submit_sent=True)
     if not draft_seen:
         delivery_diagnostics.record_details(verification="unverified")
-        # The draft was never observed, so its absence proves nothing —
-        # verification would trivially "pass". Submit blind as before;
-        # the delivery watch below still catches an in-pane restart
+        # Draft never observed, so its absence proves nothing — submit
+        # blind. The delivery watch below still catches an in-pane restart
         # having eaten the paste (the common way the draft never shows).
         if confirm_delivery:
             _confirm_message_delivery(
@@ -4545,7 +4542,7 @@ def _collapsed_delivery_prompt(prompt: str) -> str:
     :param prompt: Injected text or a ``UserPromptSubmit`` prompt.
     :returns: The collapsed key; empty for whitespace-only text.
     """
-    return " ".join(prompt.replace("﻿", "").replace("​", "").split())
+    return " ".join(prompt.replace("\ufeff", "").replace("\u200b", "").split())
 
 
 def _delivery_prompts_match(prompt: str, expected: str) -> bool:
@@ -4621,6 +4618,7 @@ def _confirm_message_delivery(
     offset = hook_offset
     startup_ids: set[str] = set()
     restart_seen = False
+    restart_seen_at: float | None = None
     start = time.monotonic()
     while True:
         _check_injection_cancelled()
@@ -4649,11 +4647,15 @@ def _confirm_message_delivery(
                 restart_seen = bool(startup_ids - baseline_session_ids)
             else:
                 restart_seen = len(startup_ids) >= 2
-        elapsed = time.monotonic() - start
+        now = time.monotonic()
         if restart_seen:
-            if elapsed >= _RESTART_RECEIPT_GRACE_S:
+            # Measure the grace from when the restart was detected, not the
+            # start of the watch, so a late-detected restart gets a full window.
+            if restart_seen_at is None:
+                restart_seen_at = now
+            if now - restart_seen_at >= _RESTART_RECEIPT_GRACE_S:
                 break
-        elif elapsed >= _DELIVERY_CONFIRM_WATCH_S:
+        elif now - start >= _DELIVERY_CONFIRM_WATCH_S:
             return
         time.sleep(_CLAUDE_READY_POLL_INTERVAL_S)
     if redelivery_budget <= 0:

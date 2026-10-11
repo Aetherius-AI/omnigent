@@ -15,21 +15,16 @@ build without delivery recovery marks the turn injected, surfaces no error
 in the web UI, and the message never reaches Claude: the first web-UI
 message is silently dropped.
 
-One historical trigger (a fullscreen-mode re-exec ~12s into boot) is
-fixed in current claude-code builds, but the race *class* remains
-reachable via any in-pane relaunch during boot (auto-update restart,
-crash-restart, a future TUI transition). An earlier guard that raised
-whenever the pasted draft never became visible was reverted for false
-positives (large pastes legitimately render as a collapsed placeholder),
-which restored the blind-submit behavior this test locks out.
+The same race is reachable through any in-pane relaunch during boot: an
+auto-update or crash restart, or a TUI mode transition.
 
 Making the race deterministic
 -----------------------------
 The genuine web journey needs an interactive Claude login (see
 ``test_host_claude_native_e2e.py``, opt-in for that reason) and a
 claude-code build whose boot restarts in-pane — a combination not
-reproducible in CI (the historical trigger is fixed upstream; the
-installed claude-code does not restart in-pane). So, following that
+reproducible in CI (the installed claude-code does not restart in-pane
+during boot). So, following that
 test's wrapper pattern, this test drives the *real* delivery path —
 ``inject_user_message``, the exact function the claude-native executor's
 web turn calls — against a real tmux pane running a scripted
@@ -44,14 +39,15 @@ Claude-Code-shaped TUI that:
    genuinely-submitted draft to a delivered-messages file.
 
 The control proves the same fake TUI accepts and records an ordinary
-message with no restart. The two restart cases must NOT report silent
-success without delivery: a correct build either delivers the message
-(e.g. by re-delivering it into the replacement process) or raises a
-delivery error — never returns success while the message vanishes.
+message with no restart. The two restart cases are recoverable, so a
+correct build must re-deliver the message exactly once with no error; a
+silent success that returns while the message vanishes is the bug.
 """
 
 from __future__ import annotations
 
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -67,15 +63,31 @@ from omnigent.harnesses.claude_native.bridge import (
     write_tmux_target,
 )
 
-pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="requires tmux")
+
+def _tmux_version() -> tuple[int, ...] | None:
+    exe = shutil.which("tmux")
+    if exe is None:
+        return None
+    try:
+        out = subprocess.run([exe, "-V"], capture_output=True, text=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    match = re.search(r"(\d+)\.(\d+)", out)
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
+# ``new-session -e`` (per-session environment) requires tmux >= 3.2.
+_TMUX_VERSION = _tmux_version()
+pytestmark = pytest.mark.skipif(
+    _TMUX_VERSION is None or _TMUX_VERSION < (3, 2),
+    reason="requires tmux >= 3.2 (new-session -e)",
+)
 
 _MARKER = "the first message must survive an in-pane restart"
 
-# Seconds the pre-restart fake Claude keeps its prompt on screen before
-# re-exec'ing in place. Must comfortably exceed the time the readiness
-# gate needs to pass and paste (< 2s here), so the injection reliably
-# lands in the dying process — modeling the ~12s fullscreen re-exec of
-# affected claude-code builds.
+# Seconds the pre-restart fake Claude keeps its prompt up before re-exec'ing
+# in place. Must exceed the time the readiness gate needs to pass and paste
+# (< 2s here) so the injection reliably lands in the dying process.
 _RESTART_AFTER_S = 4.0
 # For the "restart after the draft was seen" window the restart fires the
 # instant the paste-end marker lands, before the submit Enter is verified.
@@ -171,9 +183,16 @@ while True:
                 os.execv(sys.executable, [sys.executable] + sys.argv)
             continue
         if pending.startswith("\x1b"):
-            if len(pending) < 6:
-                break  # possibly a split escape sequence; read more
-            pending = pending[1:]
+            # Drop a whole CSI/escape sequence (``ESC [ … final``), not just
+            # the ESC, so stray key-report sequences never leak into the
+            # draft as literal text.
+            end = next(
+                (i for i, c in enumerate(pending) if i >= 2 and "@" <= c <= "~"),
+                None,
+            )
+            if end is None:
+                break  # final byte not here yet; read more
+            pending = pending[end + 1 :]
             continue
         ch = pending[0]
         pending = pending[1:]
@@ -219,6 +238,10 @@ def _launch_fake_claude(
     script.write_text(_FAKE_CLAUDE_TUI, encoding="utf-8")
     socket = Path("/tmp") / f"og-claude-{uuid.uuid4().hex[:12]}.sock"
     restart_after = _DRAFT_RESTART_AFTER_S if phase == "restart_after_draft" else _RESTART_AFTER_S
+    # Advertise (and create) the bridge dir before the fake TUI starts, so
+    # its first hook write finds hooks.jsonl's parent already present. This
+    # is also what the runner does when it launches the terminal.
+    write_tmux_target(bridge_dir, socket_path=socket, tmux_target="claude")
     _tmux(
         socket,
         "new-session",
@@ -239,10 +262,8 @@ def _launch_fake_claude(
         f"FAKE_CLAUDE_PHASE={phase}",
         "-e",
         f"FAKE_CLAUDE_SESSION_ID={'ready-session' if phase == 'ready' else 'boot-session'}",
-        f"{sys.executable} {script}",
+        f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}",
     )
-    # What the runner does when it launches the terminal.
-    write_tmux_target(bridge_dir, socket_path=socket, tmux_target="claude")
     return bridge_dir, delivered, socket
 
 
@@ -265,20 +286,35 @@ def _message_recorded(delivered: Path, *, timeout_s: float = 10.0) -> bool:
     return False
 
 
-def _inject_outcome(bridge_dir: Path, delivered: Path) -> tuple[bool, bool]:
-    """Run the real web-turn delivery and report ``(raised, delivered)``.
+def _delivered_count(delivered: Path, *, timeout_s: float = 10.0) -> int:
+    """Copies of the marker the fake Claude recorded (waits for the first).
+
+    After the first copy lands, settle briefly so a stray duplicate would
+    be counted too — the recoverable restart cases must deliver exactly once.
+    """
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if delivered.exists() and _MARKER in delivered.read_text(encoding="utf-8"):
+            time.sleep(0.5)
+            return delivered.read_text(encoding="utf-8").count(_MARKER)
+        time.sleep(0.25)
+    return 0
+
+
+def _inject_outcome(bridge_dir: Path, delivered: Path) -> tuple[bool, int]:
+    """Run the real web-turn delivery and report ``(raised, delivered_count)``.
 
     Mirrors the claude-native executor's web turn, which delegates the
     first message straight to :func:`inject_user_message`. ``raised`` is
-    whether the call surfaced a delivery error; ``delivered`` is whether
-    the fake Claude actually recorded (submitted) the message.
+    whether the call surfaced a delivery error; ``delivered_count`` is how
+    many times the fake Claude recorded (submitted) the message.
     """
     raised = False
     try:
         inject_user_message(bridge_dir, content=_MARKER, timeout_s=20.0)
     except RuntimeError:
         raised = True
-    return raised, _message_recorded(delivered, timeout_s=2.0)
+    return raised, _delivered_count(delivered)
 
 
 def test_control_message_delivered_without_restart(tmp_path: Path) -> None:
@@ -295,20 +331,20 @@ def test_control_message_delivered_without_restart(tmp_path: Path) -> None:
 
 
 def test_first_web_message_survives_inpane_claude_restart(tmp_path: Path) -> None:
-    """A first message injected across an in-pane restart must not vanish silently.
+    """A first message injected across an in-pane restart must be re-delivered.
 
     Restart fires before the pre-restart process ever consumes the paste
-    (the ``boot`` window). A correct build either delivers the message or
-    raises a delivery error; the bug is a silent success with no delivery.
+    (the ``boot`` window). This scenario is recoverable, so a correct
+    build must re-deliver the message exactly once with no error — not
+    merely avoid a silent success.
     """
     bridge_dir, delivered, socket = _launch_fake_claude(tmp_path, phase="boot")
     try:
-        raised, was_delivered = _inject_outcome(bridge_dir, delivered)
-        assert raised or was_delivered, (
-            "silent drop reproduced: inject_user_message reported success "
-            "(no delivery error) but the message never reached Claude "
-            "(no UserPromptSubmit, no transcript entry) after an in-pane "
-            "restart during boot"
+        raised, delivered_count = _inject_outcome(bridge_dir, delivered)
+        assert not raised and delivered_count == 1, (
+            "the first message must be re-delivered exactly once across an "
+            "in-pane restart during boot, with no delivery error; got "
+            f"raised={raised}, delivered_count={delivered_count}"
         )
     finally:
         _cleanup(socket, bridge_dir)
@@ -317,20 +353,20 @@ def test_first_web_message_survives_inpane_claude_restart(tmp_path: Path) -> Non
 def test_restart_after_draft_visibility_does_not_report_silent_success(
     tmp_path: Path,
 ) -> None:
-    """A restart after the draft was seen but before submit must not vanish silently.
+    """A restart after the draft was seen but before submit must be re-delivered.
 
     The draft is pasted and rendered (the readiness/draft gate is
     satisfied), then the process restarts and flushes stdin before the
     submit Enter takes — the second race window in the report. A correct
-    build must not report success while the message is lost.
+    build must re-deliver the message exactly once with no error.
     """
     bridge_dir, delivered, socket = _launch_fake_claude(tmp_path, phase="restart_after_draft")
     try:
-        raised, was_delivered = _inject_outcome(bridge_dir, delivered)
-        assert raised or was_delivered, (
-            "silent drop reproduced: inject_user_message reported success "
-            "(no delivery error) but the message never reached Claude after "
-            "an in-pane restart that fired once the draft was visible"
+        raised, delivered_count = _inject_outcome(bridge_dir, delivered)
+        assert not raised and delivered_count == 1, (
+            "the message must be re-delivered exactly once after an in-pane "
+            "restart that fired once the draft was visible, with no delivery "
+            f"error; got raised={raised}, delivered_count={delivered_count}"
         )
     finally:
         _cleanup(socket, bridge_dir)
