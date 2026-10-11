@@ -459,6 +459,8 @@ struct OmnigentWebView: UIViewRepresentable {
     private var reportedWorkspaceReady = false
     /// Temporary destinations owned by in-flight native WebKit downloads.
     private var downloadDestinations: [ObjectIdentifier: URL] = [:]
+    /// WebKit transfers each download to its delegate; retain it until completion.
+    private var activeDownloads: [ObjectIdentifier: WKDownload] = [:]
 
     init(
       _ parent: OmnigentWebView, context: DatabricksWebContext? = nil,
@@ -1617,13 +1619,13 @@ struct OmnigentWebView: UIViewRepresentable {
     func webView(
       _ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload
     ) {
-      download.delegate = self
+      start(download)
     }
 
     func webView(
       _ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload
     ) {
-      download.delegate = self
+      start(download)
     }
 
     func download(
@@ -1645,7 +1647,9 @@ struct OmnigentWebView: UIViewRepresentable {
     }
 
     func downloadDidFinish(_ download: WKDownload) {
-      guard let destination = downloadDestinations.removeValue(forKey: ObjectIdentifier(download))
+      let identifier = ObjectIdentifier(download)
+      activeDownloads.removeValue(forKey: identifier)
+      guard let destination = downloadDestinations.removeValue(forKey: identifier)
       else { return }
       guard let presenter = topViewController() else {
         try? FileManager.default.removeItem(at: destination.deletingLastPathComponent())
@@ -1662,7 +1666,9 @@ struct OmnigentWebView: UIViewRepresentable {
     }
 
     func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
-      guard let destination = downloadDestinations.removeValue(forKey: ObjectIdentifier(download))
+      let identifier = ObjectIdentifier(download)
+      activeDownloads.removeValue(forKey: identifier)
+      guard let destination = downloadDestinations.removeValue(forKey: identifier)
       else { return }
       try? FileManager.default.removeItem(at: destination.deletingLastPathComponent())
     }
@@ -1670,6 +1676,11 @@ struct OmnigentWebView: UIViewRepresentable {
     static func safeDownloadFilename(_ suggestedFilename: String) -> String {
       let filename = (suggestedFilename as NSString).lastPathComponent
       return filename.isEmpty || filename == "." || filename == ".." ? "download" : filename
+    }
+
+    private func start(_ download: WKDownload) {
+      activeDownloads[ObjectIdentifier(download)] = download
+      download.delegate = self
     }
 
     func webView(
