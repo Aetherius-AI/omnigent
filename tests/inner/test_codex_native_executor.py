@@ -458,6 +458,58 @@ def test_slash_skill_command_sends_structured_skill_input(
     ]
 
 
+def test_slash_skill_resolves_symlinked_skill_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A symlinked skill dir is sent as its real resolved path.
+
+    The launch path symlinks each registered skill into
+    ``$CODEX_HOME/skills``; Codex matches skill items by canonical path, so
+    the item must carry the symlink's resolved target rather than the link
+    under ``skills/`` — otherwise the skill silently fails to match.
+    """
+    _FakeCodexNativeClient.requests = []
+    _FakeCodexNativeClient.created = []
+    _FakeCodexNativeClient.next_turn = 1
+    monkeypatch.setattr(
+        "omnigent.harnesses.codex_native.app_server.CodexAppServerClient",
+        _FakeCodexNativeClient,
+    )
+    write_bridge_state(
+        tmp_path,
+        CodexNativeBridgeState(
+            session_id="conv_123",
+            socket_path=str(tmp_path / "app-server.sock"),
+            thread_id="thread_123",
+            codex_home=str(tmp_path / "codex-home"),
+            active_turn_id=None,
+            cwd=str(tmp_path),
+        ),
+    )
+    # The real skill lives outside the per-session skills dir; skills/<name> is
+    # the symlink the launch path creates when registering it.
+    real_skill = tmp_path / "shared-skills" / "ask-matt"
+    real_skill.mkdir(parents=True)
+    (real_skill / "SKILL.md").write_text(
+        "---\nname: ask-matt\n---\nDo the thing.", encoding="utf-8"
+    )
+    skills_root = tmp_path / "codex-home" / "skills"
+    skills_root.mkdir(parents=True)
+    (skills_root / "ask-matt").symlink_to(real_skill, target_is_directory=True)
+    executor = CodexNativeExecutor(bridge_dir=tmp_path)
+
+    events = _collect_turn_events(executor, "/ask-matt verify this service")
+
+    assert [type(event) for event in events] == [TurnComplete]
+    skill_item = _FakeCodexNativeClient.requests[0][1]["input"][0]
+    assert skill_item["type"] == "skill"
+    assert skill_item["name"] == "ask-matt"
+    # The item carries the canonical target, not the symlink under skills/.
+    assert skill_item["path"] == str((real_skill / "SKILL.md").resolve())
+    assert Path(skill_item["path"]) != skills_root / "ask-matt" / "SKILL.md"
+
+
 def test_slash_skill_command_without_args_sends_skill_item_only(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -651,16 +703,26 @@ def test_path_like_slash_text_is_not_intercepted(
     ]
 
 
-def test_dot_segment_slash_text_is_not_intercepted(
+@pytest.mark.parametrize(
+    ("name", "target_parts"),
+    [
+        pytest.param("..", ("SKILL.md",), id="parent-dir"),
+        pytest.param(".", ("skills", "SKILL.md"), id="current-dir"),
+        pytest.param("..\\x", ("skills", "..\\x", "SKILL.md"), id="backslash-name"),
+    ],
+)
+def test_dot_segment_or_backslash_slash_text_is_not_intercepted(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    name: str,
+    target_parts: tuple[str, ...],
 ) -> None:
-    """A dot-segment name such as ``/..`` never escapes the skills root.
+    """A dot-segment or backslash name never escapes the skills root.
 
-    ``skills/../SKILL.md`` resolves to a file one level up, so a bare
-    ``is_file`` check would hand Codex a skill item pointing outside the
-    per-session skills directory. The name guard must reject the dot
-    segment first and leave the text untouched.
+    ``skills/<name>/SKILL.md`` for ``name`` of ``..``, ``.`` or a value
+    carrying a backslash resolves to (or names) a file the unguarded path
+    would hand to Codex. Each branch of the name guard must reject it first
+    and leave the text untouched, even when that would-be target exists.
     """
     _FakeCodexNativeClient.requests = []
     _FakeCodexNativeClient.created = []
@@ -680,15 +742,17 @@ def test_dot_segment_slash_text_is_not_intercepted(
             cwd=str(tmp_path),
         ),
     )
-    # The traversal target exists, so only the guard — not a missing file —
-    # keeps "/.." from being treated as a skill.
-    escaped = tmp_path / "codex-home" / "SKILL.md"
-    escaped.parent.mkdir(parents=True)
-    escaped.write_text("---\nname: escaped\n---\nEscaped.", encoding="utf-8")
-    (tmp_path / "codex-home" / "skills").mkdir()
+    codex_home = tmp_path / "codex-home"
+    (codex_home / "skills").mkdir(parents=True)
+    # Make the file the unguarded path would resolve to actually exist, so only
+    # the name guard — not a missing file — keeps "/<name>" from being a skill.
+    target = codex_home.joinpath(*target_parts)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("---\nname: escaped\n---\nEscaped.", encoding="utf-8")
     executor = CodexNativeExecutor(bridge_dir=tmp_path)
 
-    events = _collect_turn_events(executor, "/.. do something")
+    text = f"/{name} do something"
+    events = _collect_turn_events(executor, text)
 
     assert [type(event) for event in events] == [TurnComplete]
     assert _FakeCodexNativeClient.requests == [
@@ -696,7 +760,7 @@ def test_dot_segment_slash_text_is_not_intercepted(
             "turn/start",
             {
                 "threadId": "thread_123",
-                "input": [{"type": "text", "text": "/.. do something"}],
+                "input": [{"type": "text", "text": text}],
                 "environments": [{"environmentId": "local", "cwd": str(tmp_path)}],
             },
         ),

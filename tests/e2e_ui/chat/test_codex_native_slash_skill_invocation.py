@@ -30,6 +30,7 @@ the menu reads.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -108,10 +109,13 @@ def installed_codex_skills() -> Iterator[_InstalledSkills]:
         shared=f"shared-skill-{suffix}",
         shared_marker=f"SHAREDBODY{uuid.uuid4().hex[:10]}",
     )
-    codex_root = Path.home() / ".codex" / "skills"
+    codex_home = os.environ.get("CODEX_HOME")
+    codex_root = (Path(codex_home) if codex_home else Path.home() / ".codex") / "skills"
     shared_root = Path.home() / ".agents" / "skills"
-    # Record each directory as it is written so a failure partway through
-    # setup still tears down whatever was already created.
+    # Track dirs as they are written (so a mid-setup failure still cleans up)
+    # and roots this fixture created (so an interrupted run leaves no empty
+    # skills tree behind).
+    roots_created = [root for root in (codex_root, shared_root) if not root.exists()]
     created: list[Path] = []
     try:
         for root, name, marker in (
@@ -124,6 +128,11 @@ def installed_codex_skills() -> Iterator[_InstalledSkills]:
     finally:
         for skill_dir in created:
             shutil.rmtree(skill_dir, ignore_errors=True)
+        for root in roots_created:
+            # rmdir only removes an empty dir, so a concurrent session's skills
+            # are never deleted.
+            with contextlib.suppress(OSError):
+                root.rmdir()
 
 
 def _open_chat_composer(page: Page, base_url: str, session_id: str) -> Locator:
@@ -168,17 +177,24 @@ def _send_and_capture_marker(
     token = f"ack-{nonce}"
     configure_mock_llm(mock_url, [{"text": token}], key=f"turn-{nonce}", match=nonce)
     composer.fill(text)
-    page.wait_for_timeout(400)
-    page.get_by_role("button", name="Send", exact=True).click()
+    send_button = page.get_by_role("button", name="Send", exact=True)
+    expect(send_button).to_be_enabled()
+    send_button.click()
     expect(page.locator(_ASSISTANT, has_text=token).first).to_be_visible(
         timeout=_MOCK_TURN_TIMEOUT_MS
     )
     expect(page.locator(_WORKING)).to_have_count(0, timeout=_MOCK_TURN_TIMEOUT_MS)
     # The turn's model request can land in the capture log slightly after the
-    # reply renders, so poll to a deadline instead of a single fixed wait.
+    # reply renders, so poll to a deadline instead of a single fixed wait; a
+    # transient mock-server error just retries until that deadline.
     deadline = time.monotonic() + 10.0
     while True:
-        captured = httpx.get(f"{mock_url}/mock/requests", timeout=10).json()["requests"]
+        try:
+            captured = httpx.get(f"{mock_url}/mock/requests", timeout=10, trust_env=False).json()[
+                "requests"
+            ]
+        except httpx.HTTPError:
+            captured = []
         if any(nonce in (blob := json.dumps(req)) and marker in blob for req in captured):
             return True
         if time.monotonic() >= deadline:
