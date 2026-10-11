@@ -44,6 +44,7 @@ import httpx
 import pytest
 from playwright.sync_api import Locator, Page, expect
 
+from omnigent.inner.codex_executor import _codex_home_config_source_from_env
 from tests.e2e_ui.conftest import configure_mock_llm, reset_mock_llm, set_fallback_mock_llm
 from tests.e2e_ui.messages.test_message_render_parity import (
     _ASSISTANT,
@@ -93,10 +94,14 @@ def installed_codex_skills() -> Iterator[_InstalledSkills]:
     """Install the journey's skills before the session launches.
 
     Declare this fixture ahead of ``native_codex_mock_session`` in a test
-    signature: the codex-native launch seeds ``$CODEX_HOME/skills`` once, so
-    the skills must already be on disk. Two distinct ``~/.codex/skills``
-    skills keep the control turn's marker out of the slash turn's check; the
-    third lives only in the shared ``~/.agents/skills`` tree.
+    signature: the codex-native launch seeds its ``$CODEX_HOME/skills`` once,
+    so the skills must already be on disk. Host skills are written under the
+    same config source the launch reads from — the resolver the runner itself
+    uses, which maps an inherited Omnigent-private ``CODEX_HOME`` back to the
+    user's real ``~/.codex`` — so the seeded host skills match what the CLI
+    loads in a plain, custom-``CODEX_HOME``, or nested session. Two distinct
+    host skills keep the control turn's marker out of the slash turn's check;
+    the third lives only in the shared ``~/.agents/skills`` tree.
 
     :returns: The installed skill names and markers.
     """
@@ -109,13 +114,17 @@ def installed_codex_skills() -> Iterator[_InstalledSkills]:
         shared=f"shared-skill-{suffix}",
         shared_marker=f"SHAREDBODY{uuid.uuid4().hex[:10]}",
     )
-    codex_home = os.environ.get("CODEX_HOME")
-    codex_root = (Path(codex_home) if codex_home else Path.home() / ".codex") / "skills"
+    codex_root = _codex_home_config_source_from_env() / "skills"
     shared_root = Path.home() / ".agents" / "skills"
-    # Track dirs as they are written (so a mid-setup failure still cleans up)
-    # and roots this fixture created (so an interrupted run leaves no empty
-    # skills tree behind).
-    roots_created = [root for root in (codex_root, shared_root) if not root.exists()]
+    # Record every ancestor each root is missing so teardown removes exactly
+    # the directories this fixture created (deepest first), never a shared
+    # tree a concurrent session already relies on.
+    roots_created: list[Path] = []
+    for root in (codex_root, shared_root):
+        ancestor = root
+        while not ancestor.exists() and ancestor not in roots_created:
+            roots_created.append(ancestor)
+            ancestor = ancestor.parent
     created: list[Path] = []
     try:
         for root, name, marker in (
@@ -128,11 +137,11 @@ def installed_codex_skills() -> Iterator[_InstalledSkills]:
     finally:
         for skill_dir in created:
             shutil.rmtree(skill_dir, ignore_errors=True)
-        for root in roots_created:
+        for leftover in sorted(roots_created, key=lambda p: len(p.parts), reverse=True):
             # rmdir only removes an empty dir, so a concurrent session's skills
             # are never deleted.
             with contextlib.suppress(OSError):
-                root.rmdir()
+                leftover.rmdir()
 
 
 def _open_chat_composer(page: Page, base_url: str, session_id: str) -> Locator:
