@@ -69,6 +69,13 @@ before Step 1.
    - For an existence-check or weak assertion, preserve the original and rewrite
      a behavioral test that exercises the real journey; confirm it fails for
      the right reason. Disclose the change and rationale in `test_audit`.
+   - A wait that can only return after catching a transient state (for
+     example, the session must be *seen* leaving `idle`), or whose deadlines
+     sum past the repository's `pytest-timeout` (300 s), sleeps its full
+     budget on a correct fix and times out the lane. Rewrite it to return on
+     evidence the turn leaves behind — a new transcript item, a rendered
+     reply, a terminal status past a pre-send snapshot — confirm the fail
+     reason is unchanged on the base, and disclose the change in `test_audit`.
    - If the test passes but the journey still misbehaves, the test is too loose:
      strengthen it and re-establish the failure.
    - A passing test alone does not establish that main has fixed the bug.

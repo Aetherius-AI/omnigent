@@ -559,6 +559,18 @@ For instruction-only changes, reuse applicable contract/bundle checks when
 sufficient; do not create a module that matches prose verbatim or invent a
 behavioral failure. If the journey remains unverified, report that honestly.
 
+**Bound every wait so the test can pass well inside the per-test timeout.**
+`pyproject.toml` caps each test at 300 s (`pytest-timeout`), the lane that
+reruns your test on a candidate fix has the same cap, and some e2e workflows
+use 180 s. A wait must return as soon as its outcome is observable — a new
+transcript item, a rendered reply or error pill, a terminal status past a
+pre-send snapshot (see the Appendix) — never only when its deadline expires,
+and the per-step deadlines must sum to well under the cap. The unfixed build
+often fails fast, so a quick failing run proves nothing about the passing
+path: time each wait helper on a turn that completes normally (the journey's
+healthy first turn will do) and treat one that returns only at its deadline
+as a defect in the test to fix before handing off.
+
 In `evidence`, briefly identify existing coverage, the smallest useful check,
 and any e2e needed only for investigation or recording. Resolve chooses which
 tests ship permanently. The e2e itself may be the minimal reliable test; do not
@@ -789,9 +801,16 @@ Check these before debugging a Playwright driver against the SPA:
   placeholder** — the placeholder mutates with state ("Send a follow-up
   (queued)…" while streaming; "Respond to the pending request above…" during a
   pending elicitation, which also DISABLES the textarea).
-- **Turn waits need the working→idle transition.** Polling for
-  `status == "idle"` right after send false-fires on the pre-turn idle;
-  require the session to leave idle first.
+- **Wait for what the turn leaves behind, never for catching it in flight.**
+  Polling for `status == "idle"` right after send false-fires on the pre-turn
+  idle, but requiring the session to be *seen* leaving idle is just as broken:
+  a fast mocked turn settles between two polls, so the wait can only return at
+  its deadline and a correct fix times out. Snapshot the transcript
+  (`GET /v1/sessions/{id}/items`) or the on-screen reply/error count before
+  sending, then return once a new assistant or error item exists past that
+  snapshot and the status is terminal — see `_wait_for_idle` in
+  `tests/e2e_ui/chat/test_acp_catalog_model_selection.py` and
+  `_poll_turn_outcome` in `test_absolute_watchdog_spares_active_turn.py`.
 - **`main-terminal-view` mounts hidden** (`data-visible="false"`) while chat is
   shown, so a bare visibility wait on it hangs. Switch views via the header
   `view-mode-toggle` (buttons labelled "Chat view" / "Terminal view").
