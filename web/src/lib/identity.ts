@@ -315,7 +315,7 @@ let identityServer: string | null | undefined;
  * per page). Only a change here is a switch, so same-Server remounts keep the
  * cache. Read from the config so partial `./host` mocks need no extra export.
  */
-function configuredServer(): string | null {
+export function getConfiguredServer(): string | null {
   return getOmnigentHostConfig().serverIdentity?.trim() || null;
 }
 
@@ -325,7 +325,7 @@ function configuredServer(): string | null {
  * user or admin flag; standalone has one Server per page, so it never fires.
  */
 function syncIdentityServer(): void {
-  const server = configuredServer();
+  const server = getConfiguredServer();
   if (identityServer === undefined) {
     identityServer = server;
     return;
@@ -398,21 +398,17 @@ export async function resolveIdentity(): Promise<string | null> {
   syncIdentityServer();
   if (identityResolved) return currentUserId;
   if (identityPromise) return identityPromise;
-  // The Server this probe is asking. Compared against the live host config
-  // when it answers, so a reply that lands after the host switched Servers is
-  // discarded instead of being cached for the Server that never sent it.
-  // An answer counts only while this probe still owns the identity slot: a
-  // switch away drops it, and a switch back starts a newer probe that an older
-  // one must not overwrite.
-  const probeServer = configuredServer();
-  const isStale = () => configuredServer() !== probeServer || identityPromise !== probe;
-  // A stale answer also frees the slot it holds; otherwise switching back to
-  // this Server before any reader ran would keep returning the settled null.
+  // Accept replies only while this Server is active and this probe owns the
+  // slot; otherwise release the slot for another probe. Declared before the
+  // adapter runs so a synchronous throw inside it still sees `probe`.
+  let probe: Promise<string | null> | undefined;
+  const probeServer = getConfiguredServer();
+  const isStale = () => getConfiguredServer() !== probeServer || identityPromise !== probe;
   const discard = (): null => {
     if (identityPromise === probe) identityPromise = null;
     return null;
   };
-  const probe: Promise<string | null> = (async () => {
+  probe = (async () => {
     try {
       const res = await hostFetch("/v1/me");
       if (isStale()) return discard();
@@ -521,9 +517,9 @@ export async function authenticatedFetch(
   syncIdentityServer();
   // A switch while this request waits means it was meant for the previous
   // Server; dispatching it through the new fetcher would forward that user.
-  const requestServer = configuredServer();
+  const requestServer = getConfiguredServer();
   const ensureSameServer = () => {
-    if (configuredServer() !== requestServer) {
+    if (getConfiguredServer() !== requestServer) {
       throw new DOMException(
         "The host switched Servers while the request was pending",
         "AbortError",
@@ -596,6 +592,9 @@ export async function authenticatedFetch(
     headers,
     cache: "no-store",
   });
+  // Nothing below may act on a previous Server's answer, including the shared
+  // session-host and keyless-host caches the replica fallbacks update.
+  ensureSameServer();
 
   // Wrong-replica fallback: a keyed request that reached the wrong replica comes
   // back 400 wrong_replica. Re-address ONCE with the key removed so it routes by

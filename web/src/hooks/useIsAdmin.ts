@@ -1,6 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { getOmnigentServerIdentity } from "@/lib/host";
-import { getCurrentIsAdmin, resolveIdentity } from "@/lib/identity";
+import { getConfiguredServer, getCurrentIsAdmin, resolveIdentity } from "@/lib/identity";
 
 // Mode-agnostic admin gate, sourced from the `/v1/me` identity probe
 // (the shared `users.is_admin` column). Unlike `useMe`, which reads the
@@ -10,6 +9,11 @@ import { getCurrentIsAdmin, resolveIdentity } from "@/lib/identity";
 // doesn't exist.
 const QUERY_KEY = ["identity-is-admin"];
 
+/** Cache key for one Server's admin flag; tests address the same entry through it. */
+export function isAdminQueryKey(server: string | null): (string | null)[] {
+  return [...QUERY_KEY, server];
+}
+
 /**
  * Whether the current user is an admin, per `GET /v1/me`. Returns false
  * until identity resolves. Server enforces the flag on every admin route
@@ -18,14 +22,14 @@ const QUERY_KEY = ["identity-is-admin"];
 export function useIsAdmin(): boolean {
   // Identity is per-Server, and an embedded host can repoint the app at
   // another Server in place (remounting it, which re-reads this), so the
-  // cached flag is keyed by its Server.
-  const serverIdentity = getOmnigentServerIdentity();
+  // cached flag is keyed by the Server identity.ts binds its cache to.
+  const server = getConfiguredServer();
   const { data } = useQuery<boolean>({
-    queryKey: [...QUERY_KEY, serverIdentity],
+    queryKey: isAdminQueryKey(server),
     queryFn: async () => {
       await resolveIdentity();
       // A switch mid-probe would file the new Server's flag under this key.
-      if (getOmnigentServerIdentity() !== serverIdentity) {
+      if (getConfiguredServer() !== server) {
         throw new Error("host switched Servers during the identity probe");
       }
       return getCurrentIsAdmin();

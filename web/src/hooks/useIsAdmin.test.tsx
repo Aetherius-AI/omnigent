@@ -76,7 +76,7 @@ it("settles to the resolved admin flag instead of a pre-resolution seed", async 
 
 it("does not file the new Server's flag under the previous Server's key", async () => {
   const { setOmnigentHostConfig } = await import("@/lib/host");
-  const { useIsAdmin } = await import("./useIsAdmin");
+  const { isAdminQueryKey, useIsAdmin } = await import("./useIsAdmin");
   let answerA!: (response: Response) => void;
   const serverA = vi.fn((path: string, _init?: RequestInit) =>
     path === "/v1/me"
@@ -86,7 +86,7 @@ it("does not file the new Server's flag under the previous Server's key", async 
       : Promise.resolve(jsonResponse({})),
   );
   const client = new QueryClient();
-  const keyA = ["identity-is-admin", "server-a"];
+  const keyA = isAdminQueryKey("server-a");
 
   setOmnigentHostConfig({ serverIdentity: "server-a", fetcher: serverA });
   const onA = renderHook(() => useIsAdmin(), { wrapper: wrapperFor(client) });

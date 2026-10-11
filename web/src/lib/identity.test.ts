@@ -108,6 +108,21 @@ describe("resolveIdentity", () => {
     expect(getCurrentUserId()).toBeNull();
   });
 
+  it("swallows a host adapter that throws synchronously and resolves to null", async () => {
+    const { setOmnigentHostConfig } = await import("./host");
+    const { resolveIdentity, getCurrentUserId } = await import("./identity");
+    setOmnigentHostConfig({
+      serverIdentity: "server-a",
+      fetcher: () => {
+        throw new Error("adapter exploded");
+      },
+    });
+
+    expect(await resolveIdentity()).toBeNull();
+    expect(getCurrentUserId()).toBeNull();
+    expect(await resolveIdentity()).toBeNull();
+  });
+
   it("treats non-2xx as null without throwing", async () => {
     fetchMock.mockResolvedValueOnce(mockJsonResponse({}, { ok: false, status: 500 }));
     const { resolveIdentity } = await import("./identity");
@@ -870,6 +885,67 @@ describe("host Server switch", () => {
     expect(getCurrentUserId()).toBe("alice");
     expect(await resolveIdentity()).toBe("alice");
     expect(serverA).toHaveBeenCalledTimes(2);
+  });
+
+  it("aborts instead of retrying on the new Server after a wrong-replica answer", async () => {
+    const { setOmnigentHostConfig } = await import("./host");
+    const { setSessionHost } = await import("./sessionHost");
+    const { authenticatedFetch, resolveIdentity } = await import("./identity");
+    let readBody!: () => void;
+    const wrongReplica = {
+      ok: false,
+      status: 400,
+      // The replica check reads a clone; hold that read so the host can switch meanwhile.
+      clone: () => ({
+        json: () =>
+          new Promise<unknown>((resolve) => {
+            readBody = () => resolve({ error: { code: "wrong_replica" } });
+          }),
+      }),
+    } as unknown as Response;
+    const serverA = vi.fn(async (path: string) =>
+      path === "/v1/me" ? mockJsonResponse({ user_id: "alice" }) : wrongReplica,
+    );
+    const serverB = serverFetcher("bob");
+
+    setOmnigentHostConfig({ serverIdentity: "server-a", fetcher: serverA });
+    await resolveIdentity();
+    setSessionHost("session-a", "host-a");
+    const pending = authenticatedFetch("/v1/sessions/session-a/items");
+    await vi.waitFor(() => expect(readBody).toBeDefined());
+
+    setOmnigentHostConfig({ serverIdentity: "server-b", fetcher: serverB });
+    readBody();
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(serverA.mock.calls.filter((c) => c[0] === "/v1/sessions/session-a/items")).toHaveLength(
+      1,
+    );
+    expect(serverB).not.toHaveBeenCalled();
+  });
+
+  it("aborts a request whose answer lands after the host switched Servers", async () => {
+    const { setOmnigentHostConfig } = await import("./host");
+    const { authenticatedFetch, resolveIdentity } = await import("./identity");
+    let answerA: ((r: Response) => void) | null = null;
+    const serverA = vi.fn((path: string) =>
+      path === "/v1/me"
+        ? Promise.resolve(mockJsonResponse({ user_id: "alice" }))
+        : new Promise<Response>((r) => {
+            answerA = r;
+          }),
+    );
+    const serverB = serverFetcher("bob");
+
+    setOmnigentHostConfig({ serverIdentity: "server-a", fetcher: serverA });
+    await resolveIdentity();
+    const pending = authenticatedFetch("/v1/sessions");
+
+    setOmnigentHostConfig({ serverIdentity: "server-b", fetcher: serverB });
+    answerA!(mockJsonResponse({ sessions: [] }));
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(serverB).not.toHaveBeenCalled();
   });
 
   it("aborts a request still waiting for its session host when the host switches Servers", async () => {
