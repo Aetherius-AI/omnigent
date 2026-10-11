@@ -282,10 +282,8 @@ describe("sessionUpdatesSocket visibility-aware reconnect", () => {
     vi.advanceTimersByTime(HIDDEN_RECONNECT_MS * 2);
     expect(FakeWebSocket.instances.length).toBe(1);
 
-    // A fresh start() ramps from the base again, not the saturated hidden delay.
-    // Pin the jitter so this reliably detects a dropped reset: a base-ramp
-    // (attempt 1) delay stays under the advance below, while a carried-over
-    // attempt-2 delay would not.
+    // A fresh start() ramps from the base; pin the jitter so an attempt-1 delay
+    // fits the advance below while a carried-over attempt-2 delay would not.
     vi.spyOn(Math, "random").mockReturnValue(0.5);
     setPageHidden(false);
     sessionUpdatesSocket.start();

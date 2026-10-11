@@ -1,6 +1,6 @@
 // Reconnect backoff shared by the session-updates WebSocket and the chat SSE
-// pump. A visible page ramps 250 ms → 5 s with ±50% jitter; a hidden page has
-// nothing to refresh, so every retry waits a stretched 45–60 s.
+// pump. Visible retries jitter to 50–100% of the capped 250 ms → 5 s delay; a
+// hidden page has nothing to refresh, so every retry waits a stretched 45–60 s.
 
 export const RECONNECT_BASE_MS = 250;
 export const RECONNECT_MAX_MS = 5_000;
