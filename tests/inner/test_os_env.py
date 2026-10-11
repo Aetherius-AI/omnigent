@@ -14,6 +14,7 @@ import pytest
 
 from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 from omnigent.inner.os_env import (
+    CallerProcessOSEnvironment,
     _child_shell_env,
     _project_root,
     _read_impl,
@@ -517,49 +518,28 @@ def test_shell_command_does_not_see_omnigent_project_root(
     assert str(_project_root()) not in out
 
 
-def test_helper_windows_config_delivery_without_active_sandbox(tmp_path: Path) -> None:
-    """Windows config delivery must create its own scratch directory."""
-    from unittest import mock
-
-    from omnigent.inner import os_env as os_env_mod
-    from omnigent.inner.sandbox import resolve_sandbox
-
-    spec = OSEnvSpec(sandbox=OSEnvSandboxSpec(type="none"))
-    sandbox = resolve_sandbox(spec, tmp_path)
-    assert not sandbox.active
-
-    client = os_env_mod._HelperProcessClient(
-        cwd=tmp_path,
-        shell_path=shutil.which("sh") or "/bin/sh",
-        sandbox=sandbox,
-    )
-    try:
-        with mock.patch.object(os_env_mod, "IS_WINDOWS", True):
-            result = client.request({"op": "shell", "command": "echo tmpdir-ok", "timeout": 30})
-        assert not result.get("error"), result
-        assert "tmpdir-ok" in result.get("stdout", "")
-        created = client._tmpdir
-        assert created is not None and created.exists()
-    finally:
-        client.close()
-    assert client._tmpdir is None
-    assert not created.exists()
-
-
 def test_windows_os_env_helper_starts_without_sandbox_tmpdir(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A ``sandbox: none`` environment runs a shell through Windows config delivery."""
+    """A ``sandbox: none`` environment runs a shell through Windows config delivery.
+
+    Without an active sandbox the helper must create its own scratch directory
+    for the Windows config file, then remove it on close.
+    """
     monkeypatch.setattr("omnigent.inner.os_env.IS_WINDOWS", True)
 
     os_env = create_os_environment(
         OSEnvSpec(type="caller_process", sandbox=OSEnvSandboxSpec(type="none"))
     )
-    assert os_env is not None
+    assert isinstance(os_env, CallerProcessOSEnvironment)
     try:
         result = asyncio.run(os_env.shell("echo degraded-mode-shell-ok"))
+        created = os_env._helper._tmpdir
+        assert created is not None and created.exists()
     finally:
         os_env.close()
 
     assert "degraded-mode-shell-ok" in result.get("stdout", "")
     assert result.get("exit_code") == 0
+    assert os_env._helper._tmpdir is None
+    assert not created.exists()
