@@ -92,6 +92,7 @@ from omnigent.server.routes._sessions.orchestration import (
     _publish_and_wait_for_harness_elicitation,
     _spawn_gateway_backed,
     _spawn_native_blocked_notice_forward,
+    _spawn_static_table_backed,
 )
 from omnigent.server.schemas import (
     ElicitationRequestParams,
@@ -1642,11 +1643,11 @@ def register_hooks_routes(
         # Which families the spawn may land on decides which router can serve it:
         # off the Unity Gateway the built-in judge answers, from the live catalog
         # alone (the static table's databricks-* ids are unreachable there).
-        gateway_backed = await _spawn_gateway_backed(
-            request,
-            conv,
-            (AUTO_NATIVE_ROUTING_HARNESSES if cross_harness else (route_request.harness,)),
+        _spawn_harnesses = (
+            AUTO_NATIVE_ROUTING_HARNESSES if cross_harness else (route_request.harness,)
         )
+        gateway_backed = await _spawn_gateway_backed(request, conv, _spawn_harnesses)
+        allow_static_fallback = await _spawn_static_table_backed(request, conv, _spawn_harnesses)
         # Offer the live catalog: the static table lags model generations, and
         # a pick the workspace serves must not look unservable and get
         # substituted down a tier.
@@ -1658,7 +1659,7 @@ def register_hooks_routes(
             catalog=catalog,
             cross_harness=cross_harness,
             gateway_backed=gateway_backed,
-            allow_static_fallback=gateway_backed,
+            allow_static_fallback=allow_static_fallback,
             persist=store_persister(session_id, conversation_store),
         )
         return Response(
@@ -1765,6 +1766,11 @@ def register_hooks_routes(
             if conv is not None
             else True
         )
+        turn_static_backed = (
+            await _spawn_static_table_backed(request, conv, (route_request.harness,))
+            if conv is not None
+            else True
+        )
 
         async def _route(
             harness: str | None, prompt: str
@@ -1776,7 +1782,7 @@ def register_hooks_routes(
                 runner_client=runner_client,
                 catalog=catalog,
                 gateway_backed=turn_gateway_backed,
-                allow_static_fallback=turn_gateway_backed,
+                allow_static_fallback=turn_static_backed,
             )
 
         async def _pin(model: str) -> bool:

@@ -2232,3 +2232,78 @@ async def test_an_auto_harness_outage_leaves_the_route_once_label_unclaimed(
     assert routed is not None
     assert routed.model_override == GPT_MODEL
     assert routed.labels.get(ROUTING_DECISION_LABEL_KEY)
+
+
+# ── Off-gateway host: the static table is never a turn candidate ────
+
+
+@pytest.mark.parametrize("harness", ["claude-sdk", "pi"])
+async def test_an_off_gateway_host_never_offers_the_static_table_to_a_turn(
+    client: httpx.AsyncClient,
+    db_uri: str,
+    harness: str,
+) -> None:
+    """A host off the gateway cannot run databricks-* ids, whatever harness asks.
+
+    The host's gateway report names only the native Claude and Codex spellings
+    (all ``False``); ``claude-sdk`` and ``pi`` are absent from it. With an
+    empty live catalog the turn must decline rather than fill its menu from the
+    static ``databricks-*`` table and pin a model this host cannot serve.
+    """
+    from omnigent.server import smart_routing as smart_routing_module
+
+    agent = await create_test_agent(
+        client,
+        name=f"routing-off-gateway-{harness}",
+        executor={"type": "omnigent", "config": {"harness": harness}},
+        include_llm=False,
+    )
+    created = await client.post(
+        "/v1/sessions",
+        json={"agent_id": agent["id"], "cost_control_mode_override": "on"},
+    )
+    assert created.status_code == 201, created.text
+    conv_store = SqlAlchemyConversationStore(db_uri)
+    conv = conv_store.get_conversation(created.json()["id"])
+    assert conv is not None
+
+    off_gateway = _host_reporting_gateway(
+        {
+            "claude-native": False,
+            "native-claude": False,
+            "codex": False,
+            "codex-native": False,
+            "native-codex": False,
+        }
+    )
+    judge = FakeRoutingClient(
+        RoutingResult(model="databricks-claude-haiku-4-5", rationale="cheap", harness=harness)
+    )
+
+    async def _empty_catalog(*_args: Any, **_kwargs: Any) -> dict[str, list[str]]:
+        return {"self": []}
+
+    body = SessionEventInput(
+        type="message",
+        data={"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+    )
+    with (
+        patch("omnigent.runtime._globals._caps", new=FakeCaps(routing_client=judge)),
+        patch.object(
+            orchestration_module, "_session_routing_host", AsyncMock(return_value=off_gateway)
+        ),
+        patch.object(smart_routing_module, "fetch_runner_models", _empty_catalog),
+    ):
+        async with echo_runner_client() as runner_client:
+            await orchestration_module._forward_event_to_runner(
+                conv.id, conv, body, conv_store, runner_client
+            )
+
+    offered = [model for offer in judge.offered for models in offer.values() for model in models]
+    assert not any(model.startswith("databricks-") for model in offered), offered
+    decisions = _routing_decisions(conv_store, conv.id)
+    pinned = [d.data.model for d in decisions if str(d.data.model).startswith("databricks-")]
+    assert pinned == [], [d.data for d in decisions]
+    refreshed = conv_store.get_conversation(conv.id)
+    assert refreshed is not None
+    assert refreshed.model_override is None, refreshed.model_override
