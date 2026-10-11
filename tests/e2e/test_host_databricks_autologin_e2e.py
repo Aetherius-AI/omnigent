@@ -155,6 +155,7 @@ def edge_no_o_403(edge_cert: Path) -> Iterator[str]:
     httpd, url = _serve_edge(edge_cert, "no-o-403")
     yield url
     httpd.shutdown()
+    httpd.server_close()
 
 
 @pytest.fixture()
@@ -163,6 +164,7 @@ def edge_always_403(edge_cert: Path) -> Iterator[str]:
     httpd, url = _serve_edge(edge_cert, "always-403")
     yield url
     httpd.shutdown()
+    httpd.server_close()
 
 
 _STUB_DATABRICKS_CLI = """#!/usr/bin/env bash

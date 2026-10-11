@@ -26,11 +26,12 @@ CLAUDE_STARTUP_PROFILE_ENV_VAR = "OMNIGENT_CLAUDE_STARTUP_PROFILE"
 
 
 class AuthFailure(click.ClickException):
-    """A sign-in or credential failure; the recovery is re-authenticating.
+    """A login-flow failure that stale-host recovery cannot fix.
 
     ``main()`` appends the stale-host recovery hint to command errors because
-    stale host processes can cause runner tunnel rejections. Login and token
-    verification failures have a different cause, so they opt out of it.
+    stale host processes can cause runner tunnel rejections. Sign-in, token
+    verification and their setup failures have a different cause, so they opt
+    out of it.
     """
 
     # Attribute name is cli_diagnostics.SUPPRESS_RECOVERY_HINT_ATTR.

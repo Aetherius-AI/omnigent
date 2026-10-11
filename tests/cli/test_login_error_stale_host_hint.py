@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
+from types import SimpleNamespace
 
 import click
+import httpx
 import pytest
 
 from omnigent import cli as cli_module
@@ -92,3 +95,98 @@ def test_login_command_never_gets_stale_host_hint(
     assert code == 1
     assert "Could not reach" in err
     assert "runner tunnel rejection" not in err
+
+
+SERVER = "https://srv.example"
+WORKSPACE = "https://ws.example"
+
+
+def _auth_info(*_args: object, **_kwargs: object) -> cli_module._DatabricksWorkspaceAuthInfo:
+    return cli_module._DatabricksWorkspaceAuthInfo(token="workspace-token", profile_name="ws")
+
+
+def _unreachable(*_args: object, **_kwargs: object) -> httpx.Response:
+    raise httpx.ConnectError("connection refused")
+
+
+def _sdk_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "omnigent.onboarding.databricks_config.databricks_sdk_installed", lambda: False
+    )
+
+
+def _token_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "omnigent.onboarding.databricks_config.databricks_sdk_installed", lambda: True
+    )
+    monkeypatch.setattr(cli_module, "_databricks_workspace_auth_info", _auth_info)
+    monkeypatch.setattr(cli_module, "_login_and_mint_workspace_auth_info", _auth_info)
+    monkeypatch.setattr(
+        cli_module, "_verify_databricks_server_token", lambda *a, **k: httpx.Response(403)
+    )
+
+
+def _no_token_after_login(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli_module, "_run_databricks_browser_login", lambda *a, **k: None)
+    monkeypatch.setattr(cli_module, "_databricks_workspace_auth_info", lambda *a, **k: None)
+
+
+def _cli_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli_module.shutil, "which", lambda name: None)
+
+
+def _cli_login_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli_module.shutil, "which", lambda name: "/usr/bin/databricks")
+    monkeypatch.setattr(
+        cli_module.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=1)
+    )
+
+
+def _verify_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(httpx, "get", _unreachable)
+
+
+def _headless_not_signed_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("omnigent.chat._remote_headers", lambda **kwargs: {})
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: httpx.Response(401))
+    monkeypatch.setattr(
+        cli_module, "_databricks_workspace_login_target", lambda *a, **k: WORKSPACE
+    )
+    monkeypatch.setattr("omnigent.cli_auth.load_databricks_org_id", lambda server: None)
+    monkeypatch.setattr(cli_module, "_databricks_workspace_auth_info", lambda *a, **k: None)
+
+
+@pytest.mark.parametrize(
+    ("prepare", "call"),
+    [
+        (_sdk_missing, lambda: cli_module._databricks_login(SERVER, WORKSPACE, "123")),
+        (_token_rejected, lambda: cli_module._databricks_login(SERVER, WORKSPACE, "123")),
+        (_no_token_after_login, lambda: cli_module._login_and_mint_workspace_auth_info(WORKSPACE)),
+        (_cli_missing, lambda: cli_module._run_databricks_browser_login(WORKSPACE)),
+        (_cli_login_failed, lambda: cli_module._run_databricks_browser_login(WORKSPACE)),
+        (_verify_unreachable, lambda: cli_module._verify_databricks_server_token(SERVER, "tok")),
+        (
+            _headless_not_signed_in,
+            lambda: cli_module._ensure_databricks_server_auth(SERVER, non_interactive=True),
+        ),
+    ],
+    ids=[
+        "sdk-missing",
+        "token-rejected",
+        "no-token-after-login",
+        "cli-missing",
+        "cli-login-failed",
+        "verify-unreachable",
+        "headless-not-signed-in",
+    ],
+)
+def test_login_flow_failures_are_auth_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    prepare: Callable[[pytest.MonkeyPatch], None],
+    call: Callable[[], object],
+) -> None:
+    """Every production login/verify raise site classifies its failure as AuthFailure."""
+    prepare(monkeypatch)
+    with pytest.raises(AuthFailure) as exc_info:
+        call()
+    assert suppresses_recovery_hint(exc_info.value)
