@@ -290,3 +290,19 @@ def test_load_reparses_reader_errors_for_diagnostics() -> None:
     # Raised by the pure-Python retry (``from None``), not by libyaml's first attempt.
     assert excinfo.value.__cause__ is None
     assert excinfo.value.__suppress_context__ is True
+
+
+def test_load_names_the_source_in_parse_errors() -> None:
+    """Error marks report the caller's source name instead of ``<unicode string>``."""
+    for parse in (
+        lambda s: load(s, _ConfigYamlLoader, name="agents/alpha.yaml"),
+        lambda s: safe_load(s, name="agents/alpha.yaml"),
+    ):
+        with pytest.raises(yaml.MarkedYAMLError) as excinfo:
+            parse(_BROKEN)
+        assert excinfo.value.problem_mark is not None
+        assert excinfo.value.problem_mark.name == "agents/alpha.yaml"
+        message = str(excinfo.value)
+        assert 'in "agents/alpha.yaml", line 2' in message, message
+        # Naming the source must not cost the excerpt and caret.
+        assert "description: has: unquoted colon" in message and "^" in message, message

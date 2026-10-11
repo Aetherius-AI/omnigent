@@ -7,6 +7,7 @@ import importlib
 import io
 import logging
 import os
+import shutil
 import signal
 import sys
 import tarfile
@@ -2935,6 +2936,53 @@ async def test_resolve_agent_spec_from_server_separates_env_expansion_modes(
 
 
 @pytest.mark.asyncio
+async def test_resolve_agent_spec_from_server_reextracts_a_pruned_bundle_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A memo hit whose extracted directory vanished re-extracts instead of pointing at nothing."""
+    import omnigent.spec as spec_pkg
+    import omnigent.spec.parser as spec_parser
+
+    config_bytes = (
+        b"spec_version: 1\nname: cached-agent\nexecutor:\n  config:\n    harness: claude-sdk\n"
+    )
+    bundle_buf = io.BytesIO()
+    with tarfile.open(fileobj=bundle_buf, mode="w:gz") as tf:
+        info = tarfile.TarInfo(name="config.yaml")
+        info.size = len(config_bytes)
+        tf.addfile(info, io.BytesIO(config_bytes))
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=bundle_buf.getvalue(), headers={"X-Agent-Version": "1"})
+
+    parse_roots: list[Path] = []
+    real_parse = spec_parser.parse
+
+    def _counting_parse(root: Path, **kwargs: Any) -> Any:
+        parse_roots.append(root)
+        return real_parse(root, **kwargs)
+
+    monkeypatch.setattr(spec_parser, "parse", _counting_parse)
+    monkeypatch.setattr(spec_pkg, "parse", _counting_parse)
+    monkeypatch.setattr("omnigent.runner._entry._SPEC_PARSE_CACHE", {})
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_handler), base_url="http://server.test"
+    ) as client:
+        first = await _resolve_agent_spec_from_server(
+            client, tmp_path, "ag_pruned", session_id="conv_a"
+        )
+        assert first is not None
+        shutil.rmtree(first.workdir)
+        second = await _resolve_agent_spec_from_server(
+            client, tmp_path, "ag_pruned", session_id="conv_b"
+        )
+    assert second is not None
+    assert second.workdir == first.workdir
+    assert (second.workdir / "config.yaml").is_file()
+    assert parse_roots == [first.workdir, first.workdir]
+
+
+@pytest.mark.asyncio
 async def test_resolve_agent_spec_from_server_bounds_memo_across_agents(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2953,7 +3001,7 @@ async def test_resolve_agent_spec_from_server_bounds_memo_across_agents(
     def _handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=bundle_buf.getvalue(), headers={"X-Agent-Version": "1"})
 
-    monkeypatch.setattr("omnigent.runner._entry._SPEC_PARSE_CACHE_MAX_AGENTS", 2)
+    monkeypatch.setattr("omnigent.runner._entry._SPEC_PARSE_CACHE_MAX_ENTRIES", 2)
     cache: dict[tuple[str, Path, bool], Any] = {}
     monkeypatch.setattr("omnigent.runner._entry._SPEC_PARSE_CACHE", cache)
     async with httpx.AsyncClient(

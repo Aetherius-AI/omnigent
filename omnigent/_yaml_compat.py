@@ -65,7 +65,36 @@ def narrow_bools_to_yaml_1_2(loader: type[yaml.SafeLoader]) -> None:
 # YAML documents are open-ended trees whose shape is only known after the
 # caller's isinstance checks, so the return type is the same ``Any`` that
 # ``yaml.safe_load`` itself returns.
-def load(text: str, loader: type[yaml.SafeLoader]) -> Any:  # type: ignore[explicit-any]
+def _named_mark(mark: yaml.Mark | None, name: str) -> yaml.Mark | None:
+    # libyaml's marks are read-only extension objects; rebuild them as the
+    # pure-Python Mark, keeping the position and any excerpt buffer.
+    if mark is None:
+        return None
+    pointer = getattr(mark, "pointer", None)
+    return yaml.Mark(
+        name,
+        mark.index,
+        mark.line,
+        mark.column,
+        getattr(mark, "buffer", None),
+        0 if pointer is None else pointer,  # unused without a buffer
+    )
+
+
+def _name_source(error: yaml.YAMLError, name: str | None) -> None:
+    """Point *error* at *name* instead of PyYAML's ``<unicode string>``.
+
+    Parsing the text (not a named stream) keeps the source excerpt in marks."""
+    if name is None:
+        return
+    if isinstance(error, yaml.reader.ReaderError):
+        error.name = name
+    elif isinstance(error, yaml.MarkedYAMLError):
+        error.problem_mark = _named_mark(error.problem_mark, name)
+        error.context_mark = _named_mark(error.context_mark, name)
+
+
+def load(text: str, loader: type[yaml.SafeLoader], *, name: str | None = None) -> Any:  # type: ignore[explicit-any]
     """Parse text with loader, retaining detailed structural-error diagnostics.
 
     Retry only reader, scanner, parser and composer errors with stock
@@ -75,16 +104,20 @@ def load(text: str, loader: type[yaml.SafeLoader]) -> Any:  # type: ignore[expli
     stock SafeLoader lacks the caller's resolver narrowing and so cannot stand
     in for a successful parse.
 
+    :param name: Source name for error marks, e.g. the file path. ``None``
+        keeps PyYAML's ``<unicode string>``.
     :returns: Parsed document, or None for empty input.
     :raises yaml.YAMLError: If parsing fails."""
     try:
         return yaml.load(text, Loader=loader)
     except _PARSE_STAGE_ERRORS as fast_error:
+        _name_source(fast_error, name)
         if not USING_LIBYAML:
             raise
         try:
             yaml.load(text, Loader=yaml.SafeLoader)
         except _PARSE_STAGE_ERRORS as detailed_error:
+            _name_source(detailed_error, name)
             # Same failure, better message. Drop the libyaml error from the
             # chain so the traceback shows one diagnosis, not two.
             raise detailed_error from None
@@ -97,11 +130,15 @@ def load(text: str, loader: type[yaml.SafeLoader]) -> Any:  # type: ignore[expli
         # error is the accurate one; surface it rather than pretending the
         # document was fine or reporting an unrelated failure.
         raise fast_error from None
+    except yaml.MarkedYAMLError as error:
+        # Constructor errors keep their own diagnosis; only the source name changes.
+        _name_source(error, name)
+        raise
 
 
-def safe_load(text: str) -> Any:  # type: ignore[explicit-any]
+def safe_load(text: str, *, name: str | None = None) -> Any:  # type: ignore[explicit-any]
     """Prefer libyaml while preserving yaml.safe_load YAML 1.1 semantics.
 
     For YAML 1.2 booleans, subclass SafeLoaderBase and narrow its resolver.
     Returns None for empty input."""
-    return load(text, SafeLoaderBase)
+    return load(text, SafeLoaderBase, name=name)

@@ -280,12 +280,16 @@ def diagnose_yaml_rejection(path: Path) -> str:
     """
     if path.suffix.lower() not in {".yaml", ".yml"}:
         return f"file extension is {path.suffix!r}, expected '.yaml' or '.yml'"
+    text = path.read_text(encoding="utf-8")
     try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        raw = yaml.safe_load(text)
+        # ``is_omnigent_yaml`` parses with the libyaml-backed loader; a document
+        # only that loader rejects must still read as a parse error here.
+        _yaml_safe_load(text)
     except yaml.YAMLError as exc:
-        # Pure-Python loader on purpose: its error echoes the offending source
-        # line with a caret, which libyaml drops. Strip trailing whitespace so
-        # the message (with PyYAML's embedded source location) stays one line.
+        # Pure-Python loader first on purpose: its error echoes the offending
+        # source line with a caret, which libyaml drops. Strip trailing
+        # whitespace so the message (with its source location) stays one line.
         return f"YAML parse error: {exc!s}".replace("\n", " ").rstrip()
     if raw is None:
         return "file is empty (or contains only YAML comments / null)"

@@ -4572,6 +4572,7 @@ def test_config_yaml_parsed_with_libyaml_when_available(
     monkeypatch.setattr(parser.yaml, "load", _capturing_load)
     parse(tmp_path)
 
+    assert "loader" in captured, "parse() did not hand config.yaml to yaml.load"
     loader = captured["loader"]
     assert issubclass(loader, yaml.CSafeLoader), (
         f"config.yaml parsed with pure-Python {loader.__name__} "

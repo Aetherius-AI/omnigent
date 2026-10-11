@@ -178,7 +178,9 @@ def parse(root: Path, *, expand_env: bool = True) -> AgentSpec:
     if not config_path.exists():
         raise AgentImageConfigMissingError(root)
 
-    raw = _yaml_load(config_path.read_text(encoding="utf-8"), _ConfigYamlLoader)
+    raw = _yaml_load(
+        config_path.read_text(encoding="utf-8"), _ConfigYamlLoader, name=str(config_path)
+    )
     if not isinstance(raw, dict):
         raise OmnigentError(
             f"config.yaml must be a YAML mapping, got {type(raw).__name__}",

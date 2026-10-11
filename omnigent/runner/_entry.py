@@ -1282,9 +1282,9 @@ def _agent_cache_dest(spec_cache_root: Path, agent_id: str, version: str) -> Pat
 
 # Parsed specs shared by every session this runner resolves, keyed by agent id,
 # extracted bundle directory (its name carries the version header and content
-# digest) and env-expansion mode. One revision per agent; LRU-bounded across agents.
+# digest) and env-expansion mode. One revision per agent; LRU-bounded entries.
 _SPEC_PARSE_CACHE: dict[tuple[str, Path, bool], AgentSpec] = {}
-_SPEC_PARSE_CACHE_MAX_AGENTS = 32
+_SPEC_PARSE_CACHE_MAX_ENTRIES = 32
 
 
 async def _resolve_agent_spec_from_server(
@@ -1360,9 +1360,12 @@ async def _resolve_agent_spec_from_server(
     # *does* support, rather than failing every dispatch of the agent.
     # See omnigent.spec.load.
     cache_key = (agent_id, dest, expand_env)
-    master = _SPEC_PARSE_CACHE.get(cache_key)
+    # A memo entry is only as good as its extracted directory: if that was
+    # pruned behind the runner's back, extract and parse again.
+    extracted = dest.exists()
+    master = _SPEC_PARSE_CACHE.get(cache_key) if extracted else None
     if master is None:
-        if dest.exists():
+        if extracted:
             master = load(dest, expand_env=expand_env, prune_invalid_sub_agents=True)
         else:
             # Extraction already parses and validates the bundle; reuse that spec.
@@ -1374,9 +1377,10 @@ async def _resolve_agent_spec_from_server(
         # modes of the current revision may coexist.
         for stale in [k for k in _SPEC_PARSE_CACHE if k[0] == agent_id and k[1] != dest]:
             del _SPEC_PARSE_CACHE[stale]
+        _SPEC_PARSE_CACHE.pop(cache_key, None)
         _SPEC_PARSE_CACHE[cache_key] = master
-        # LRU bound across distinct agents (dict insertion order is recency).
-        while len(_SPEC_PARSE_CACHE) > _SPEC_PARSE_CACHE_MAX_AGENTS:
+        # LRU bound on entries (dict insertion order is recency).
+        while len(_SPEC_PARSE_CACHE) > _SPEC_PARSE_CACHE_MAX_ENTRIES:
             del _SPEC_PARSE_CACHE[next(iter(_SPEC_PARSE_CACHE))]
     else:
         # Re-insert the hit so recently used agents stay cached.

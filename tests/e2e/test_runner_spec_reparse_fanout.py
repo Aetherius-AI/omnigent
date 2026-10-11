@@ -518,29 +518,10 @@ def test_subagent_fanout_does_not_reparse_shared_bundle(
         f"parse() calls during the fan-out: {len(new_parses)}; runner call paths: {call_paths})"
     )
 
-
-def test_runner_parses_spec_yaml_with_libyaml_loader(instrumented_stack: _Stack) -> None:
-    """The runner's spec YAML loader must be libyaml-backed when libyaml is available."""
-    stack = instrumented_stack
-    deadline = time.monotonic() + HEALTH_TIMEOUT_S
-    loader: dict[str, Any] | None = None
-    while loader is None and time.monotonic() < deadline:
-        loader = next(
-            (
-                r
-                for r in _read_records(stack.parse_log, pid=stack.runner_pid)
-                if r["kind"] == "loader"
-            ),
-            None,
-        )
-        time.sleep(POLL_INTERVAL_S)
-    assert loader is not None, (
-        f"parse recorder did not report the runner's loader\nrunner log:\n"
-        f"{stack.runner_log.read_text()[-3000:]}"
-    )
-    if not loader["with_libyaml"]:
-        pytest.skip("libyaml is not available in the runner's runtime")
-    assert loader["is_csafeloader"], (
+    # Facet A, observed inside the same runner process: with libyaml available,
+    # the spec loader must be libyaml-backed.
+    loader = next(r for r in records_after if r["kind"] == "loader")
+    assert loader["is_csafeloader"] or not loader["with_libyaml"], (
         f"the runner parses agent-bundle YAML with the pure-Python SafeLoader although libyaml "
         f"is available; _ConfigYamlLoader MRO: {loader['mro']}"
     )
