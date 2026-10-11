@@ -57,7 +57,13 @@ export interface Branding {
 }
 
 /** Release features understood by this frontend build. */
-export type FeatureKey = "usage_page" | "harness_install" | "canvas" | "arca_shutdown_warnings";
+export type FeatureKey =
+  | "usage_page"
+  | "harness_install"
+  | "canvas"
+  | "arca_shutdown_warnings"
+  | "import_review"
+  | "custom_agents_settings_ui";
 
 /** Deployment-wide release-feature values advertised by the server. */
 export type FeatureValues = Record<string, boolean>;
@@ -210,6 +216,8 @@ export interface ServerInfo {
    * and the Import bundle button. Absent on older servers (off).
    */
   agent_install?: boolean;
+  /** True when GET /v1/agents/{id} is available; absent on older servers (off). */
+  agent_detail?: boolean;
   /** Operator branding, or null when the built-in identity should be used. */
   branding?: Branding | null;
 }
@@ -307,6 +315,14 @@ export function isFeatureEnabled(info: ServerInfo | "loading", feature: FeatureK
   return info !== "loading" && info.features?.[feature] === true;
 }
 
+export function customAgentsSettingsEnabled(info: ServerInfo | "loading"): boolean {
+  return (
+    isFeatureEnabled(info, "custom_agents_settings_ui") &&
+    info !== "loading" &&
+    info.agent_install === true
+  );
+}
+
 let cachedServerInfo: ServerInfo | null = null;
 let pendingServerInfo: Promise<ServerInfo> | null = null;
 
@@ -374,6 +390,7 @@ export async function resolveServerInfo(): Promise<ServerInfo> {
           dictation_available: data.dictation_available === true,
           archive_worktree_cleanup: data.archive_worktree_cleanup === true,
           agent_install: data.agent_install === true,
+          agent_detail: data.agent_detail === true,
           branding: parseBranding(data.branding),
         };
         return cachedServerInfo;

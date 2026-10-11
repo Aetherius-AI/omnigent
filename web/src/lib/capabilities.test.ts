@@ -248,3 +248,22 @@ describe("resolveServerInfo branding", () => {
     expect(malformed.branding).toBeNull();
   });
 });
+
+describe("custom agents settings capability", () => {
+  it.each([undefined, false, "true", true])("parses agent_detail strictly: %s", async (detail) => {
+    const parsed = await probe({ agent_detail: detail });
+    expect(parsed.agent_detail).toBe(detail === true);
+  });
+
+  it.each([undefined, false, "true", true])(
+    "requires a boolean install capability: %s",
+    async (install) => {
+      const parsed = await probe({
+        features: { custom_agents_settings_ui: true },
+        agent_install: install,
+      });
+      const { customAgentsSettingsEnabled } = await import("./capabilities");
+      expect(customAgentsSettingsEnabled(parsed)).toBe(install === true);
+    },
+  );
+});
