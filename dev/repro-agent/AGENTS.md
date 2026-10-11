@@ -809,10 +809,12 @@ Check these before debugging a Playwright driver against the SPA:
   its deadline and a correct fix times out. Snapshot the transcript
   (`GET /v1/sessions/{id}/items`) or the on-screen reply/error count before
   sending, then return once a new assistant or error item exists past that
-  snapshot and the status is terminal, with a deadline below the enclosing
-  test's budget. `poll_session_until_terminal` in `tests/e2e/conftest.py` is
-  the complete pattern (it accepts `idle` after a running edge *or* real turn
-  output); in `tests/e2e_ui/chat/`, `_poll_turn_outcome` in
+  snapshot and the status is terminal, or as soon as the status is `failed`
+  (some failures, such as a runner going offline, persist `failed` without
+  appending an item), with a deadline below the enclosing test's budget.
+  `poll_session_until_terminal` in `tests/e2e/conftest.py` is the complete
+  pattern (it accepts `idle` after a running edge *or* real turn output, and
+  `failed` immediately); in `tests/e2e_ui/chat/`, `_poll_turn_outcome` in
   `test_absolute_watchdog_spares_active_turn.py` shows the transcript check and
   `_wait_for_idle` in `test_acp_catalog_model_selection.py` the status check,
   which its caller reaches only after the reply is visible.

@@ -76,9 +76,10 @@ before Step 1.
      the sandbox lane caps a command at 300 s) with margin for setup and
      teardown, sleeps its full budget on a correct fix and times out the
      lane. Rewrite it to return on evidence the turn leaves behind — a new
-     transcript item, a rendered reply, a terminal status past a pre-send
-     snapshot — with deadlines below that cap, confirm the fail reason is
-     unchanged on the base, and disclose the change in `test_audit`.
+     transcript item or rendered reply past a pre-send snapshot, or a
+     `failed` status, which some failures persist without appending an item —
+     with deadlines below that cap, confirm the fail reason is unchanged on
+     the base, and disclose the change in `test_audit`.
    - If the test passes but the journey still misbehaves, the test is too loose:
      strengthen it and re-establish the failure.
    - A passing test alone does not establish that main has fixed the bug.
