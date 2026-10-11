@@ -29,6 +29,7 @@ import {
 } from "@/hooks/useConversations";
 import {
   type ConversationsInfiniteData,
+  type MergeItemsOptions,
   type SessionListWireItem,
   collectConversationIds,
   filtersFromConversationQueryKey,
@@ -58,6 +59,8 @@ const PROJECT_FOLDER_FILTERS = { searchQuery: "", includeArchived: false } as co
  *
  * @param queryClient - The app QueryClient.
  * @param items - Wire items from a snapshot/changed frame.
+ * @param options - Merge options applied to every listed row (see
+ *   {@link MergeItemsOptions}).
  * @returns Ids not found in any cached page and whether any patched row
  *   needs a server refetch to preserve filtered-query membership or sort
  *   order.
@@ -67,6 +70,7 @@ function applyItemsToCache(
   items: SessionListWireItem[],
   activeId: string | undefined,
   viewerId?: string | null,
+  options: MergeItemsOptions = {},
 ): { missingIds: string[]; needsRefetch: boolean } {
   // Frames are full rows with explicit nulls; convert null → undefined so a
   // cleared field overlays the cache in the same shape GET /v1/sessions
@@ -91,7 +95,7 @@ function applyItemsToCache(
       data: merged,
       found,
       needsRefetch: queryNeedsRefetch,
-    } = mergeItemsIntoPages(data, itemsById, filters, activeId);
+    } = mergeItemsIntoPages(data, itemsById, filters, activeId, options);
     for (const id of found) foundAnywhere.add(id);
     if (queryNeedsRefetch) needsRefetch = true;
     // Surface a brand-new watched session (a create here or elsewhere, a share)
@@ -130,7 +134,7 @@ function applyItemsToCache(
       data: next,
       found,
       needsRefetch: queryNeedsRefetch,
-    } = mergeItemsIntoPages(data, itemsById, PROJECT_FOLDER_FILTERS, activeId);
+    } = mergeItemsIntoPages(data, itemsById, PROJECT_FOLDER_FILTERS, activeId, options);
     for (const id of found) foundAnywhere.add(id);
     if (queryNeedsRefetch) needsRefetch = true;
     if (next !== data) queryClient.setQueryData(key, next);
@@ -148,6 +152,7 @@ function applyItemsToCache(
         return {
           ...row,
           ...item,
+          ...(options.keepUpdatedAt ? { updated_at: row.updated_at } : {}),
           labels: {
             ...(item.labels ?? row.labels),
             ["omnigent.pinned"]: row.labels["omnigent.pinned"],
@@ -417,11 +422,15 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
           for (const parentId of parentIds) {
             void queryClient.invalidateQueries({ queryKey: childSessionsQueryKey(parentId) });
           }
+          // A snapshot restates the watch-set (connect, or a watch-set change such
+          // as an archive) rather than reporting activity, and its timestamps can
+          // lead the list's; keep the listed updated_at so read rows stay read.
           const { missingIds, needsRefetch } = applyItemsToCache(
             queryClient,
             frame.items,
             activeIdRef.current,
             getCurrentUserId(),
+            { keepUpdatedAt: frame.type === "snapshot" },
           );
           // A watched id absent from every page is a new session whose sort
           // position we can't place locally. Membership-affecting deltas

@@ -305,6 +305,81 @@ describe("SessionUpdatesProvider comments fingerprint", () => {
   });
 });
 
+describe("SessionUpdatesProvider snapshot timestamps", () => {
+  // A snapshot restates the watch-set after a connect or a watch-set change
+  // (archive, next page, reconnect). Where the stream's updated_at leads the
+  // list's for an unchanged row, overlaying it lit the dot on every read row.
+  it("keeps a listed row's updated_at on a snapshot and still schedules the list refetch", async () => {
+    const client = new QueryClient();
+    seedConversations(client, ["conv_a", "conv_b"]);
+    renderProvider(client, ["/"]);
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+
+    act(() =>
+      frameHandler()({
+        type: "snapshot",
+        items: [{ ...conv("conv_a"), updated_at: 5, runner_online: true }, conv("conv_b")],
+      }),
+    );
+
+    const row = client.getQueryData<ConversationsInfiniteData>(["conversations", "", false])!
+      .pages[0].data[0];
+    expect(row).toMatchObject({ id: "conv_a", updated_at: 0, runner_online: true });
+    await waitFor(() =>
+      expect(invalidate).toHaveBeenCalledWith(
+        expect.objectContaining({ queryKey: ["conversations"] }),
+      ),
+    );
+  });
+
+  it("still overlays updated_at from a changed frame so a finished turn lights the dot", () => {
+    const client = new QueryClient();
+    seedConversations(client, ["conv_a"]);
+    renderProvider(client, ["/"]);
+
+    act(() => frameHandler()({ type: "changed", items: [{ ...conv("conv_a"), updated_at: 5 }] }));
+
+    expect(
+      client.getQueryData<ConversationsInfiniteData>(["conversations", "", false])!.pages[0].data[0]
+        .updated_at,
+    ).toBe(5);
+  });
+
+  it("keeps project folder and pinned rows' updated_at on a snapshot", () => {
+    const client = new QueryClient();
+    seedProjectFolder(client, "Sprint 42", ["conv_filed"]);
+    client.setQueryData(["pinned-conversations"], {
+      conversations: [{ ...conv("old-pin"), labels: { "omnigent.pinned": "123" } }],
+      filterHonored: true,
+    });
+    renderProvider(client, ["/"]);
+
+    act(() =>
+      frameHandler()({
+        type: "snapshot",
+        items: [
+          { ...conv("conv_filed"), updated_at: 7, pending_elicitations_count: 1 },
+          { ...conv("old-pin"), updated_at: 7, pending_elicitations_count: 2 },
+        ],
+      }),
+    );
+
+    const folder = client.getQueryData<ConversationsInfiniteData>([
+      "project-sessions",
+      "Sprint 42",
+    ]);
+    expect(folder!.pages[0].data[0]).toMatchObject({
+      updated_at: 0,
+      pending_elicitations_count: 1,
+    });
+    const pinned = client.getQueryData<{ conversations: Conversation[] }>(["pinned-conversations"]);
+    expect(pinned!.conversations[0]).toMatchObject({
+      updated_at: 0,
+      pending_elicitations_count: 2,
+    });
+  });
+});
+
 describe("SessionUpdatesProvider project folders", () => {
   it("watches sessions that live only in a project folder's cache", () => {
     // A project folder fetches its members into ["project-sessions", <name>],

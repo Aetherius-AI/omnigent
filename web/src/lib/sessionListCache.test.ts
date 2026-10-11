@@ -248,6 +248,55 @@ describe("mergeItemsIntoPages", () => {
   });
 });
 
+describe("mergeItemsIntoPages snapshot timestamps", () => {
+  // keepUpdatedAt backs snapshot frames: a restated updated_at must not rewrite
+  // a listed row (the unseen dot reads it), but a differing value still asks
+  // the list to reconcile order and timestamps.
+  const KEEP = { keepUpdatedAt: true };
+
+  it("leaves the row untouched when only the restated updated_at leads, yet asks for the refetch", () => {
+    const before = data([conv("a", { updated_at: 1 }), conv("b", { updated_at: 1 })]);
+    const items = new Map<string, SessionListWireItem>([["a", { id: "a", updated_at: 3 }]]);
+
+    const {
+      data: after,
+      found,
+      needsRefetch,
+    } = mergeItemsIntoPages(before, items, DEFAULT_FILTERS, NO_ACTIVE, KEEP);
+
+    expect(after).toBe(before);
+    expect(found).toEqual(new Set(["a"]));
+    expect(needsRefetch).toBe(true);
+  });
+
+  it("overlays the other fields while keeping the listed updated_at", () => {
+    const before = data([conv("a", { updated_at: 1 })]);
+    const items = new Map<string, SessionListWireItem>([
+      ["a", { id: "a", updated_at: 3, runner_online: true }],
+    ]);
+
+    const { data: after } = mergeItemsIntoPages(before, items, DEFAULT_FILTERS, NO_ACTIVE, KEEP);
+
+    expect(after!.pages[0].data[0]).toMatchObject({ updated_at: 1, runner_online: true });
+  });
+
+  it("skips the refetch for the active row's restated updated_at", () => {
+    const before = data([conv("a", { updated_at: 1 }), conv("b", { updated_at: 1 })]);
+    const items = new Map<string, SessionListWireItem>([["a", { id: "a", updated_at: 3 }]]);
+
+    const { data: after, needsRefetch } = mergeItemsIntoPages(
+      before,
+      items,
+      DEFAULT_FILTERS,
+      "a",
+      KEEP,
+    );
+
+    expect(after).toBe(before);
+    expect(needsRefetch).toBe(false);
+  });
+});
+
 describe("nullsToUndefined", () => {
   it("converts null values to undefined while keeping the keys", () => {
     const result = nullsToUndefined({ id: "a", runner_id: null, title: "kept" });

@@ -248,6 +248,16 @@ function changedFieldsNeedRefetch(changed: Set<string>, isActiveRow: boolean): b
   return false;
 }
 
+/** Options for {@link mergeItemsIntoPages}. */
+export interface MergeItemsOptions {
+  /**
+   * Keep each listed row's cached `updated_at` instead of the wire value: a
+   * `snapshot` restates the watch-set rather than reporting activity, and the
+   * unseen dot reads `updated_at` against the viewer's baseline.
+   */
+  keepUpdatedAt?: boolean;
+}
+
 /**
  * Overlay incoming wire items onto matching rows of one infinite query's
  * cached pages.
@@ -267,6 +277,7 @@ function changedFieldsNeedRefetch(changed: Set<string>, isActiveRow: boolean): b
  * @param activeId - The active chat's conversation id (`/c/:id`), or
  *   `undefined` when not on a chat route. Its `updated_at` bumps don't force
  *   a refetch because `ActiveChatOverride` pins its visible position.
+ * @param options - See {@link MergeItemsOptions}.
  * @returns The possibly updated data, ids found in it, and whether this
  *   query needs a server refetch after the local patch.
  */
@@ -275,6 +286,7 @@ export function mergeItemsIntoPages(
   itemsById: Map<string, SessionListWireItem>,
   filters: ConversationListFilters,
   activeId: string | undefined,
+  options: MergeItemsOptions = {},
 ): { data: ConversationsInfiniteData | undefined; found: Set<string>; needsRefetch: boolean } {
   const found = new Set<string>();
   if (!data) return { data, found, needsRefetch: false };
@@ -296,6 +308,7 @@ export function mergeItemsIntoPages(
         continue;
       }
       const nextConv = { ...conv, ...wire };
+      if (options.keepUpdatedAt) nextConv.updated_at = conv.updated_at;
       if (violatesKnownMembership(nextConv, filters)) {
         rowChanged = true;
         needsRefetch = true;
@@ -303,6 +316,11 @@ export function mergeItemsIntoPages(
       }
       if (changedFieldsNeedRefetch(changed, conv.id === activeId)) {
         needsRefetch = true;
+      }
+      if (options.keepUpdatedAt && changed.size === 1 && changed.has("updated_at")) {
+        // Only the restated timestamp differed: the row stays as listed.
+        nextData.push(conv);
+        continue;
       }
       rowChanged = true;
       nextData.push(nextConv);
