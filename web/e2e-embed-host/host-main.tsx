@@ -43,16 +43,12 @@ const SERVERS: Record<ServerKey, HostServer> = {
 
 interface SentRequest {
   path: string;
-  method: string;
   /** `X-Forwarded-Email` as stamped by the embed, before the gateway overrides it. */
   embedUser: string | null;
-  at: number;
 }
 
 interface AnsweredRequest {
   path: string;
-  status: number;
-  at: number;
 }
 
 const params = new URLSearchParams(window.location.search);
@@ -89,17 +85,12 @@ function hostConfigFor(server: HostServer): OmnigentHostConfig {
     serverIdentity: server.serverIdentity,
     fetcher: async (path, init) => {
       const headers = new Headers(init?.headers);
-      transportLog.sent[server.key].push({
-        path,
-        method: init?.method ?? "GET",
-        embedUser: headers.get("X-Forwarded-Email"),
-        at: Date.now(),
-      });
+      transportLog.sent[server.key].push({ path, embedUser: headers.get("X-Forwarded-Email") });
       const response = await window.fetch(server.prefix + path, { ...init, headers });
       if (server.key === "a" && holdMeA && path.startsWith("/v1/me")) {
         await meGateA;
       }
-      transportLog.answered[server.key].push({ path, status: response.status, at: Date.now() });
+      transportLog.answered[server.key].push({ path });
       return response;
     },
     resolveWebSocketUrl: (path) => {

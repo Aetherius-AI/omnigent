@@ -37,12 +37,9 @@ SERVER_B_STATUS = f"Server B — signed in as {SERVER_B_USER}"
 
 @dataclass(frozen=True)
 class EmbedHost:
-    """Addresses of a running host page and the two Servers behind it."""
+    """A running host page with the two Servers proxied behind it."""
 
     url: str
-    server_a_url: str
-    server_b_url: str
-    log_dir: Path
 
 
 def build_host_page(dist: Path) -> None:
@@ -204,4 +201,4 @@ def embed_host(tmp_path: Path) -> Iterator[EmbedHost]:
         _omnigent_server(tmp_path, "server-b", SERVER_B_USER, []) as server_b,
         _preview_server(tmp_path, dist, server_a, server_b) as url,
     ):
-        yield EmbedHost(url=url, server_a_url=server_a, server_b_url=server_b, log_dir=tmp_path)
+        yield EmbedHost(url=url)

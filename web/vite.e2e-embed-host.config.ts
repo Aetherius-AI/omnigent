@@ -1,7 +1,6 @@
-// Build + preview config for the e2e embed host page (`e2e-embed-host/`): the
-// preview proxies two Servers behind one origin, authenticated as the host's user.
-// The harness (tests/e2e_ui/embed/_embed_host_harness.py) supplies every
-// OMNIGENT_E2E_* variable below, including a per-run output directory.
+// Build + preview config for the e2e embed host page (`e2e-embed-host/`): the preview
+// proxies two Servers behind one origin, authenticated as the host's signed-in user.
+// The harness (tests/e2e_ui/embed/_embed_host_harness.py) sets every OMNIGENT_E2E_* var.
 import fs from "node:fs";
 import path from "node:path";
 import tailwindcss from "@tailwindcss/vite";
