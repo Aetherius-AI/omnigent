@@ -29,6 +29,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 pexpect = pytest.importorskip("pexpect")
+pytest.importorskip("databricks.sdk")
 
 _WORKSPACE_ID = "1234567890123456"
 _USER = "test-user@example.com"
@@ -45,7 +46,7 @@ class _FakeDatabricksEdge(http.server.BaseHTTPRequestHandler):
 
     - ``"no-o-403"``: an authenticated mount request succeeds only when it
       carries ``?o=<_WORKSPACE_ID>``; without the selector the account host
-      rejects the workspace token with 403 (the reported shape).
+      rejects the workspace token with 403.
     - ``"always-403"``: the mount rejects every bearer with 403 (the user
       has no access to the app).
     """
@@ -202,8 +203,8 @@ exit 1
 def host_env(edge_cert: Path, tmp_path: Path) -> dict[str, str]:
     """Env for the spawned CLI: logged-out state, stub `databricks` on PATH.
 
-    - Fresh ``HOME`` / ``OMNIGENT_CONFIG_HOME`` so no prior login record or
-      default server leaks in (the reported machine had never logged in).
+    - Fresh ``HOME`` / ``OMNIGENT_CONFIG_HOME`` / ``OMNIGENT_DATA_DIR`` so no
+      prior login record, default server or runtime record leaks in.
     - Fresh ``DATABRICKS_CONFIG_FILE`` (no cached workspace grant), which the
       stub CLI populates when the auto-login invokes it.
     - The edge's self-signed cert as the trust root for httpx and the
@@ -242,9 +243,11 @@ def host_env(edge_cert: Path, tmp_path: Path) -> dict[str, str]:
         {
             "HOME": str(fake_home),
             "OMNIGENT_CONFIG_HOME": str(config_home),
+            "OMNIGENT_DATA_DIR": str(config_home),
+            "OMNIGENT_NO_UPDATE_CHECK": "1",
             "OMNIGENT_SKIP_ONBOARD": "1",
             "DATABRICKS_CONFIG_FILE": str(tmp_path / "databrickscfg"),
-            "PATH": f"{stub_bin}{os.pathsep}{os.environ['PATH']}",
+            "PATH": f"{stub_bin}{os.pathsep}{env.get('PATH', '')}",
             "SSL_CERT_FILE": str(edge_cert / "cert.pem"),
             "REQUESTS_CA_BUNDLE": str(edge_cert / "cert.pem"),
             # Loopback must bypass any egress proxy the CI sandbox injects.
