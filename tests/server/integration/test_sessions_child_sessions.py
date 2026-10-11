@@ -22,13 +22,16 @@ import asyncio
 import io
 import json
 import re
+import sqlite3
 import tarfile
 from dataclasses import dataclass
 from typing import Any, NoReturn
 
 import httpx
 import pytest
+import sqlalchemy
 import yaml
+from sqlalchemy.engine import Engine
 
 from omnigent.entities import Conversation
 from omnigent.entities.conversation import MessageData, NewConversationItem
@@ -2486,7 +2489,9 @@ async def test_descendants_page_reads_are_bounded_by_the_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    Each page reads ``limit`` tree rows from the store, never the whole tree.
+    Each page reads ``limit`` tree rows from the store, never the whole tree,
+    and the page query itself is one range scan of the root index: SQLite's
+    plan for the statement the store emits uses that index and needs no sort.
 
     :param client: The test HTTP client.
     :param db_uri: Per-test SQLite database URI.
@@ -2494,34 +2499,55 @@ async def test_descendants_page_reads_are_bounded_by_the_limit(
     """
     conv_store = SqlAlchemyConversationStore(db_uri)
     session, rows = await _seed_subtree(client, conv_store)
-    listed: list[tuple[int, int]] = []
+    listed: list[tuple[int, str, int]] = []
     original = SqlAlchemyConversationStore.list_conversations
 
     def counting(self: SqlAlchemyConversationStore, **kwargs: Any) -> Any:
         page = original(self, **kwargs)
-        listed.append((kwargs["limit"], len(page.data)))
+        listed.append((kwargs["limit"], kwargs["sort_by"], len(page.data)))
         return page
 
     monkeypatch.setattr(SqlAlchemyConversationStore, "list_conversations", counting)
+    statements: list[tuple[str, Any]] = []
 
-    url = f"/v1/sessions/{session['id']}/descendants"
-    seen: list[str] = []
-    after: str | None = None
-    for _ in range(10):
-        params: dict[str, str | int] = {"limit": 1}
-        if after is not None:
-            params["after"] = after
-        resp = await client.get(url, params=params)
-        assert resp.status_code == 200, resp.text
-        body = resp.json()
-        seen.extend(r["id"] for r in body["data"])
-        if not body["has_more"]:
-            break
-        after = body["last_id"]
+    def capture(_conn: Any, _cursor: Any, statement: str, parameters: Any, *_: Any) -> None:
+        if "root_conversation_id = ?" in statement and "LIMIT" in statement:
+            statements.append((statement, parameters))
+
+    sqlalchemy.event.listen(Engine, "before_cursor_execute", capture)
+    try:
+        url = f"/v1/sessions/{session['id']}/descendants"
+        seen: list[str] = []
+        after: str | None = None
+        for _ in range(10):
+            params: dict[str, str | int] = {"limit": 1}
+            if after is not None:
+                params["after"] = after
+            resp = await client.get(url, params=params)
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+            seen.extend(r["id"] for r in body["data"])
+            if not body["has_more"]:
+                break
+            after = body["last_id"]
+    finally:
+        sqlalchemy.event.remove(Engine, "before_cursor_execute", capture)
 
     assert set(seen) == {conv.id for conv in rows.values()}
     assert len(listed) == 4
-    assert all(call == (1, 1) for call in listed), listed
+    assert all(call == (1, "id", 1) for call in listed), listed
+
+    # The cursor page (the last statement) must be served by the root index in
+    # index order; a temp B-tree would mean the engine sorted the whole tree.
+    assert statements, "the store's page query was not captured"
+    statement, parameters = statements[-1]
+    with sqlite3.connect(db_uri.removeprefix("sqlite:///")) as plan_conn:
+        plan = "\n".join(
+            str(row[-1])
+            for row in plan_conn.execute(f"EXPLAIN QUERY PLAN {statement}", parameters)
+        )
+    assert "ix_conversations_root_conversation_id" in plan, plan
+    assert "TEMP B-TREE" not in plan, plan
 
 
 async def test_descendants_max_depth_caps_the_walk(
@@ -2564,7 +2590,7 @@ async def test_descendants_max_depth_caps_the_walk(
         assert body["last_id"] is not None
         after = body["last_id"]
     assert pages == 4
-    assert seen == [rows["c2"].id, rows["c1"].id]
+    assert set(seen) == {rows["c1"].id, rows["c2"].id}
 
 
 async def test_descendants_list_archived_nodes_flagged(

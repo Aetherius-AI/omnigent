@@ -44,19 +44,23 @@ _DEFAULT_SUBTREE_DEPTH = 3
 
 
 def _without_settled_archived(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Drop archived rows unless live work sits beneath them.
+    """Drop archived rows that are settled and have no live work beneath them.
+
+    Archiving does not end a session's work, so a busy archived row counts as
+    live, as does any archived row with a live descendant.
 
     :param nodes: Breadth-first descendant rows carrying ``parent_id``.
-    :returns: The same rows minus archived ones with no live descendant.
+    :returns: The same rows minus the settled archived ones.
     """
-    live_below: set[str] = set()
+    live: set[str] = set()
     # Reverse breadth-first order visits every child before its parent.
     for row in reversed(nodes):
-        if not row.get("archived") or row["id"] in live_below:
+        if not row.get("archived") or row["id"] in live or child_summary_busy(row):
+            live.add(row["id"])
             parent_id = row.get("parent_id")
             if isinstance(parent_id, str):
-                live_below.add(parent_id)
-    return [row for row in nodes if not row.get("archived") or row["id"] in live_below]
+                live.add(parent_id)
+    return [row for row in nodes if row["id"] in live]
 
 
 # Adapter that validates a single SSE ``data:`` payload against the
@@ -1010,10 +1014,10 @@ class SessionsNamespace:
         try:
             nodes = await self._descendants(session_id, max_depth=max_depth, limit=limit)
         except OmnigentError as exc:
-            if exc.status_code != 404:
+            # A missing session answers with the server's not_found code; a
+            # server without the route answers a bare 404.
+            if exc.status_code != 404 or exc.code == "not_found":
                 raise
-            # Either the server lacks the route or the session is gone; the
-            # per-node walk raises the genuine 404 in the latter case.
             nodes = await self._child_sessions_walk(session_id, max_depth=max_depth, limit=limit)
         return nodes if include_archived else _without_settled_archived(nodes)
 
@@ -1047,8 +1051,14 @@ class SessionsNamespace:
             if not body.get("has_more") or not isinstance(last_id, str) or last_id == after:
                 break
             after = last_id
-        # Pages arrive newest-first across the tree; callers expect levels in order.
-        nodes.sort(key=lambda row: row["depth"] if isinstance(row.get("depth"), int) else 0)
+        # Pages arrive in primary-key order; callers expect levels in order and
+        # siblings newest-first, as child_sessions lists them.
+        nodes.sort(
+            key=lambda row: (
+                row["depth"] if isinstance(row.get("depth"), int) else 0,
+                -(row["created_at"] if isinstance(row.get("created_at"), int) else 0),
+            )
+        )
         return nodes
 
     async def _child_sessions_walk(

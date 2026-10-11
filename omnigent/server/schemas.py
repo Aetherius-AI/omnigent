@@ -2873,7 +2873,7 @@ class ChildSessionList(BaseModel):
 
 
 class DescendantSessionList(BaseModel):
-    """Paginated sub-agent subtree; ``data`` is a breadth-first page of descendant summaries."""
+    """Paginated sub-agent subtree; ``data`` is a newest-first page of descendant summaries."""
 
     object: Literal["list"] = "list"
     data: list[DescendantSessionSummary] = Field(default_factory=list)

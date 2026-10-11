@@ -85,6 +85,10 @@ def _descendant_rows(
             chain: list[str] = []
             cursor: str | None = conv.id
             while cursor is not None and cursor not in depth_of:
+                if cursor in chain:
+                    # A corrupt parent cycle: treat the row as outside the tree.
+                    cursor = None
+                    break
                 chain.append(cursor)
                 ancestor = known.get(cursor)
                 if ancestor is None:
@@ -298,13 +302,15 @@ def register_items_routes(
         navigator, the SDK ``child_sessions_tree`` / ``subtree_busy``
         helpers and the web Agents panel read this).
 
-        Each page is one store page of the spawn tree the store indexes by
-        ``root_conversation_id``, newest-first across the whole tree, so
-        the rows read per request stay bounded by ``limit`` rather than by
-        the tree size. Rows from sibling branches or below ``max_depth``
-        are dropped from the page but still advance the cursor: a page can
-        be shorter than ``limit`` — even empty — while ``has_more`` is
-        true, and ``last_id`` is always the cursor for the next page.
+        Each page is one store page of the spawn tree in primary-key order,
+        the order the ``root_conversation_id`` index serves as a single
+        range scan, so the rows read per request stay bounded by ``limit``
+        rather than by the tree size; clients order siblings newest-first
+        from ``created_at``. Rows from sibling branches or below
+        ``max_depth`` are dropped from the page but still advance the
+        cursor: a page can be shorter than ``limit`` — even empty — while
+        ``has_more`` is true, and ``last_id`` is always the cursor for the
+        next page.
 
         Archived descendants are listed too, flagged ``archived``, so live
         work under an archived session stays reachable; clients hide the
@@ -340,6 +346,7 @@ def register_items_routes(
             after=after,
             kind="sub_agent",
             root_conversation_id=parent.root_conversation_id,
+            sort_by="id",
             include_archived=True,
         )
         rows = await asyncio.to_thread(

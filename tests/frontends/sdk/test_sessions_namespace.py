@@ -1315,12 +1315,68 @@ async def test_child_sessions_tree_follows_the_page_cursor() -> None:
 
 
 @pytest.mark.asyncio
+async def test_child_sessions_tree_walks_past_an_empty_page_that_continues() -> None:
+    """A page whose rows were all filtered out still advances the cursor: the
+    walk follows ``last_id`` instead of treating the empty page as the end."""
+    pages = [
+        {"data": [], "last_id": "filtered", "has_more": True},
+        {
+            "data": [
+                _child("a", parent_session_id="root", depth=1, created_at=10),
+                _child("b", parent_session_id="root", depth=1, created_at=20),
+            ],
+            "last_id": "b",
+            "has_more": False,
+        },
+    ]
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=pages.pop(0))
+
+    ns, client = _make_namespace(handler)
+    try:
+        nodes = await ns.child_sessions_tree("root")
+    finally:
+        await client.aclose()
+
+    # Siblings come back newest-first, whatever order the pages used.
+    assert [n["id"] for n in nodes] == ["b", "a"]
+    assert [r.url.params.get("after") for r in requests] == [None, "filtered"]
+
+
+@pytest.mark.asyncio
+async def test_child_sessions_tree_fallback_stops_at_a_back_edge() -> None:
+    """On an older server the per-node walk never re-enters a session it has
+    already listed, so a child that lists its own ancestor terminates."""
+    tree = {
+        "root": [_child("a")],
+        "a": [_child("root"), _child("a1")],
+        "a1": [_child("a")],
+    }
+    requests: list[httpx.Request] = []
+    ns, client = _make_namespace(_legacy_handler(tree, page_size=5, requests=requests))
+    try:
+        nodes = await ns.child_sessions_tree("root")
+    finally:
+        await client.aclose()
+
+    assert [(n["id"], n["parent_id"]) for n in nodes] == [("a", "root"), ("a1", "a")]
+    assert [r.url.path.split("/")[-2] for r in requests[1:]] == ["root", "a", "a1"]
+
+
+@pytest.mark.asyncio
 async def test_child_sessions_tree_hides_settled_archived_rows_unless_asked() -> None:
     """The server lists archived descendants flagged; by default the walk keeps an
     archived node only while live work sits beneath it, so the tree the REPL
     renders stays connected without resurfacing settled archived sub-agents."""
     tree = {
-        "root": [_child("mid", archived=True), _child("settled", archived=True)],
+        "root": [
+            _child("mid", archived=True),
+            _child("settled", archived=True),
+            _child("working", archived=True, busy=True),
+        ],
         "mid": [_child("leaf", archived=False)],
     }
     requests: list[httpx.Request] = []
@@ -1328,11 +1384,15 @@ async def test_child_sessions_tree_hides_settled_archived_rows_unless_asked() ->
     try:
         pruned = await ns.child_sessions_tree("root")
         everything = await ns.child_sessions_tree("root", include_archived=True)
+        busy = await ns.subtree_busy("root")
     finally:
         await client.aclose()
 
-    assert [n["id"] for n in pruned] == ["mid", "leaf"]
-    assert [n["id"] for n in everything] == ["mid", "settled", "leaf"]
+    # Archiving does not end a session's work: a busy archived leaf stays, so
+    # the rollup still reports the subtree busy.
+    assert [n["id"] for n in pruned] == ["mid", "working", "leaf"]
+    assert [n["id"] for n in everything] == ["mid", "settled", "working", "leaf"]
+    assert busy is True
     assert all("include_archived" not in r.url.params for r in requests)
 
 
@@ -1418,8 +1478,31 @@ async def test_child_sessions_tree_falls_back_to_paged_child_lists_on_an_older_s
 
 @pytest.mark.asyncio
 async def test_child_sessions_tree_keeps_a_missing_session_404() -> None:
-    """A 404 for the session itself is not mistaken for a missing route: the
-    fallback walk raises the genuine not-found error."""
+    """A 404 carrying the server's not_found code is the session being gone, not
+    a missing route: it is raised as is, without a per-node fallback walk."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            404, json={"error": {"code": "not_found", "message": "Session not found"}}
+        )
+
+    ns, client = _make_namespace(handler)
+    try:
+        with pytest.raises(OmnigentError) as excinfo:
+            await ns.child_sessions_tree("gone")
+    finally:
+        await client.aclose()
+
+    assert excinfo.value.status_code == 404
+    assert excinfo.value.code == "not_found"
+    assert [r.url.path.rsplit("/", 1)[1] for r in requests] == ["descendants"]
+
+
+@pytest.mark.asyncio
+async def test_child_sessions_tree_fallback_still_raises_a_missing_session() -> None:
+    """On an older server the fallback walk raises the genuine not-found error."""
     requests: list[httpx.Request] = []
     ns, client = _make_namespace(
         _legacy_handler({}, page_size=5, requests=requests, missing_session="gone")
