@@ -2826,8 +2826,8 @@ def _transcript_cost_size_cached(
         computed :class:`_TranscriptCostCacheEntry`. Mutated in place.
     :returns: Per-model USD cost (e.g. ``{"claude-opus-4-8": 0.0135}``;
         the flat cumulative cost is the sum of the values), or ``None``
-        when nothing is priceable (missing file included). The mapping
-        aliases the cache entry; callers must treat it as read-only.
+        when nothing is priceable (missing file included). A fresh copy;
+        the cache keeps its own, so callers may mutate the result.
     """
     try:
         size = transcript_path.stat().st_size
@@ -2835,12 +2835,12 @@ def _transcript_cost_size_cached(
         return None
     cached = cache.get(transcript_path)
     if cached is not None and cached.size == size:
-        return cached.cost_by_model or None
+        return dict(cached.cost_by_model) or None
     cost_by_model = compute_transcript_cost_by_model(
         transcript_path, include_sidechains=include_sidechains
     )
     cache[transcript_path] = _TranscriptCostCacheEntry(size=size, cost_by_model=cost_by_model)
-    return cost_by_model or None
+    return dict(cost_by_model) or None
 
 
 def _session_cost_by_model_estimate(

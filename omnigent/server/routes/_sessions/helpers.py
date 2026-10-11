@@ -2287,8 +2287,8 @@ def _coerce_cost_by_model(data: dict[str, Any]) -> dict[str, float] | None:
         return None
     if not isinstance(value, dict):
         raise OmnigentError(
-            "external_session_usage data.cost_by_model must be a dict of "
-            "model ids to finite non-negative numbers",
+            "external_session_usage data.cost_by_model must be a dict of non-empty "
+            "model ids to finite non-negative numbers (booleans rejected)",
             code=ErrorCode.INVALID_INPUT,
         )
     weights: dict[str, float] = {}
@@ -2302,8 +2302,8 @@ def _coerce_cost_by_model(data: dict[str, Any]) -> dict[str, float] | None:
             or weight < 0
         ):
             raise OmnigentError(
-                "external_session_usage data.cost_by_model must be a dict of "
-                "model ids to finite non-negative numbers",
+                "external_session_usage data.cost_by_model must be a dict of non-empty "
+                "model ids to finite non-negative numbers (booleans rejected)",
                 code=ErrorCode.INVALID_INPUT,
             )
         if weight > 0:

@@ -93,7 +93,10 @@ def _spawn_tool_name(mock_llm_server_url: str) -> str:
             for candidate in ("Task", "Agent"):
                 if candidate in names:
                     return candidate
-    return "Agent"
+    pytest.fail(
+        "no captured request advertised a Task/Agent spawn tool — the CLI never "
+        "made a tool-bearing request (a harness problem, not the attribution bug)"
+    )
 
 
 def _models_asked_with_user_marker(mock_llm_server_url: str, marker: str) -> list[str]:
@@ -279,9 +282,7 @@ def test_subagent_on_other_model_has_its_own_cost_row(
         final = _session_snapshot(base_url, session_id)
         api_by_model = final.get("usage_by_model") or {}
         _save_evidence("final-snapshot", final, page)
-        # At least one opus row: the bug folded the sub-agent's spend into the
-        # orchestrator bucket, so the fix must surface a distinct opus row (the
-        # harness may report more than one opus variant, so don't pin the count).
+        # Don't pin the count: the harness may report more than one opus variant.
         opus_rows = model_rows.filter(has_text=re.compile("opus"))
         expect(
             opus_rows.first,
