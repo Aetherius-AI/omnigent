@@ -1,5 +1,6 @@
 // Test host: embeds Omnigent through the public embed API and repoints it at
 // another Server the way a production host does (new host config + remount).
+// The identity probes below are test-only reads of internals, not part of it.
 import { StrictMode, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";

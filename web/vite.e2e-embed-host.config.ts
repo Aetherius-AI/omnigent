@@ -1,12 +1,15 @@
 // Build + preview config for the e2e embed host page (`e2e-embed-host/`): the
 // preview proxies two Servers behind one origin, authenticated as the host's user.
+// The harness points `OMNIGENT_E2E_HOST_DIST` at a per-run output directory.
 import fs from "node:fs";
 import path from "node:path";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig, type Plugin, type ProxyOptions } from "vite";
 
-const OUT_DIR = path.resolve(__dirname, "dist-e2e-embed-host");
+const OUT_DIR = process.env.OMNIGENT_E2E_HOST_DIST
+  ? path.resolve(process.env.OMNIGENT_E2E_HOST_DIST)
+  : path.resolve(__dirname, "dist-e2e-embed-host");
 
 function serverProxy(prefix: string, target: string, user: string): Record<string, ProxyOptions> {
   return {

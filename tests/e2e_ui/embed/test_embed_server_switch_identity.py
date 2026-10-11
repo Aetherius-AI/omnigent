@@ -1,6 +1,6 @@
 """An embedded host that switches Servers in place must get a fresh identity on the new Server.
 
-Part of the gated e2e suite; see this package's ``conftest`` module docstring.
+Part of the gated e2e suite; see the ``tests/e2e_ui/conftest.py`` module docstring.
 """
 
 from __future__ import annotations
@@ -26,13 +26,8 @@ _IDENTITY_SETTLE_MS = 10_000
 
 
 @pytest.fixture(scope="module")
-def embed_host_env(
-    request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory
-) -> Iterator[EmbedHost]:
-    with embed_host(
-        tmp_path_factory.mktemp("embed_host"),
-        rebuild_host_page=not request.config.getoption("--ui-skip-build"),
-    ) as host:
+def embed_host_env(tmp_path_factory: pytest.TempPathFactory) -> Iterator[EmbedHost]:
+    with embed_host(tmp_path_factory.mktemp("embed_host")) as host:
         yield host
 
 

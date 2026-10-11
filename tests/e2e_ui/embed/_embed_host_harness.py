@@ -1,10 +1,10 @@
 """Stand up a host page that embeds Omnigent and can switch between two Servers.
 
 Two multi-user header-auth ``omnigent server`` processes run from this checkout.
-A ``vite preview`` server serves the built host page (``web/e2e-embed-host``)
-and proxies ``/server-a`` and ``/server-b`` to them, authenticating every
-proxied request as the host's signed-in user on that Server — alice (an admin)
-on Server A, bob (not an admin) on Server B.
+A ``vite preview`` server serves the host page (``web/e2e-embed-host``, built into
+the run's temp dir) and proxies ``/server-a`` and ``/server-b`` to them,
+authenticating every proxied request as the host's signed-in user on that
+Server — alice (an admin) on Server A, bob (not an admin) on Server B.
 """
 
 from __future__ import annotations
@@ -18,14 +18,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-import filelock
 import httpx
 
 from tests._helpers.live_server import find_free_port, local_server_env, terminate_process
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _WEB_DIR = _REPO_ROOT / "web"
-_HOST_DIST = _WEB_DIR / "dist-e2e-embed-host"
 _VITE = _WEB_DIR / "node_modules" / ".bin" / "vite"
 _HOST_VITE_CONFIG = "vite.e2e-embed-host.config.ts"
 _READY_TIMEOUT_S = 120.0
@@ -47,21 +45,19 @@ class EmbedHost:
     log_dir: Path
 
 
-def build_host_page(*, force: bool = True) -> None:
-    """Build ``web/e2e-embed-host`` into ``web/dist-e2e-embed-host``.
-
-    Without *force*, an existing build is reused (``--ui-skip-build``).
-    """
-    # Serialize with other workers and the SPA build, which share the output tree.
-    with filelock.FileLock(str(_WEB_DIR / ".build.lock"), timeout=600):
-        if (_HOST_DIST / "index.html").exists() and not force:
-            return
-        subprocess.run(
-            [str(_VITE), "build", "--config", _HOST_VITE_CONFIG],
-            cwd=_WEB_DIR,
-            check=True,
-            stdin=subprocess.DEVNULL,
+def build_host_page(dist: Path) -> None:
+    """Build ``web/e2e-embed-host`` into *dist*, a directory private to this run."""
+    if not _VITE.exists():
+        raise RuntimeError(
+            f"{_VITE} not found; run `pnpm install --frozen-lockfile --filter web` first."
         )
+    subprocess.run(
+        [str(_VITE), "build", "--config", _HOST_VITE_CONFIG],
+        cwd=_WEB_DIR,
+        check=True,
+        stdin=subprocess.DEVNULL,
+        env={**os.environ, "OMNIGENT_E2E_HOST_DIST": str(dist)},
+    )
 
 
 def _wait_until_ready(
@@ -150,11 +146,14 @@ def _omnigent_server(tmp_path: Path, name: str, user: str, admins: list[str]) ->
 
 
 @contextmanager
-def _preview_server(tmp_path: Path, server_a_url: str, server_b_url: str) -> Iterator[str]:
+def _preview_server(
+    tmp_path: Path, dist: Path, server_a_url: str, server_b_url: str
+) -> Iterator[str]:
     port = find_free_port()
     base_url = f"http://127.0.0.1:{port}"
     env = {
         **os.environ,
+        "OMNIGENT_E2E_HOST_DIST": str(dist),
         "OMNIGENT_E2E_SERVER_A_URL": server_a_url,
         "OMNIGENT_E2E_SERVER_B_URL": server_b_url,
         "OMNIGENT_E2E_SERVER_A_USER": SERVER_A_USER,
@@ -191,12 +190,13 @@ def _preview_server(tmp_path: Path, server_a_url: str, server_b_url: str) -> Ite
 
 
 @contextmanager
-def embed_host(tmp_path: Path, *, rebuild_host_page: bool = True) -> Iterator[EmbedHost]:
+def embed_host(tmp_path: Path) -> Iterator[EmbedHost]:
     """Run the host page with Server A (alice, admin) and Server B (bob) behind it."""
-    build_host_page(force=rebuild_host_page)
+    dist = tmp_path / "host-dist"
+    build_host_page(dist)
     with (
         _omnigent_server(tmp_path, "server-a", SERVER_A_USER, [SERVER_A_USER]) as server_a,
         _omnigent_server(tmp_path, "server-b", SERVER_B_USER, []) as server_b,
-        _preview_server(tmp_path, server_a, server_b) as url,
+        _preview_server(tmp_path, dist, server_a, server_b) as url,
     ):
         yield EmbedHost(url=url, server_a_url=server_a, server_b_url=server_b, log_dir=tmp_path)
