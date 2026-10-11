@@ -159,9 +159,8 @@ _FORK_COMMAND_NAMES = frozenset({"/branch", "/fork"})
 _HTTP_POST_MAX_PERMANENT_FAILURES = 3
 _HTTP_POST_RETRY_BASE_DELAY_S = 1.0
 _HTTP_POST_RETRY_MAX_DELAY_S = 30.0
-# Full transcript-tree scans a sub-agent's unresolved spawn may trigger before it
-# is set aside. A legitimately mid-write spawn resolves well inside this budget;
-# the count persists in the forward state (see _record_unresolved_subagent).
+# Unsuccessful spawn-owner scans a sub-agent gets before it is set aside; a
+# mid-write spawn resolves well inside this budget.
 _SUBAGENT_RESOLVE_MAX_ATTEMPTS = 6
 # Ceiling for the backoff exponent. Transient failures retry with no give-up
 # budget (by design — see _PostRetryTracker), so ``attempts`` is unbounded, and
@@ -2549,16 +2548,15 @@ def _record_unresolved_subagent(
     state: SubagentForwardState,
     attempts: int | None = None,
 ) -> SubagentForwardState:
-    """Count one failed resolve of ``subagent_id`` and set it aside once spent.
+    """Record a miss for ``subagent_id`` and warn once when its budget is exhausted.
 
-    The caller persists the returned state once per poll. The count is durable so
-    a restart, which finds the same transcripts on disk, cannot resume the full
-    re-read. A set-aside sub-agent is not parked in ``subagents``: a spawn no
-    transcript owns has no correct parent to replay under.
+    The caller persists the returned state once per poll. A set-aside sub-agent is
+    not parked in ``subagents``: a spawn no transcript owns has no parent to replay
+    under.
 
     :param attempts: Force the stored count, used to set a child aside at once
         when its parent was set aside; defaults to one past the current count.
-    :returns: State with the count advanced; reaching the budget logs one WARNING.
+    :returns: State with the count advanced.
     """
     current = state.resolve_misses.get(subagent_id, 0)
     attempts = current + 1 if attempts is None else max(attempts, current + 1)
@@ -2566,7 +2564,7 @@ def _record_unresolved_subagent(
         subagents=state.subagents,
         resolve_misses={**state.resolve_misses, subagent_id: attempts},
     )
-    if attempts >= _SUBAGENT_RESOLVE_MAX_ATTEMPTS:
+    if current < _SUBAGENT_RESOLVE_MAX_ATTEMPTS <= attempts:
         _logger.warning(
             "Setting aside claude-native sub-agent whose spawn never resolved; "
             "parent_session=%s subagent_id=%s tool_use_id=%s reason=%s attempts=%s",
@@ -2861,6 +2859,11 @@ async def _forward_available_subagents(
             break
         pending = deferred
 
+    # A count whose meta left the disk has nothing left to resolve.
+    updated = SubagentForwardState(
+        subagents=updated.subagents,
+        resolve_misses={k: v for k, v in updated.resolve_misses.items() if k in meta_ids_on_disk},
+    )
     if updated.resolve_misses != state.resolve_misses:
         await _write_subagent_forward_state_async(bridge_dir, updated)
     checkpoint = _SubagentStateCheckpoint(bridge_dir, updated)

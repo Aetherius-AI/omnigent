@@ -887,6 +887,47 @@ async def test_resolve_misses_survive_a_forwarder_restart(
     assert not _set_aside_warnings(caplog)
 
 
+async def test_resolve_misses_of_a_vanished_meta_are_dropped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A persisted count whose meta file is gone has nothing left to resolve and is
+    dropped from the state on the next poll."""
+    bridge_dir = tmp_path / "bridge"
+    transcript_path = tmp_path / "session.jsonl"
+    transcript_path.write_text("", encoding="utf-8")
+    subagents_dir = transcript_path.parent / transcript_path.stem / "subagents"
+    subagents_dir.mkdir(parents=True, exist_ok=True)
+    (subagents_dir / "agent-orphan.meta.json").write_text(
+        json.dumps(
+            {
+                "agentType": "general-purpose",
+                "description": "spawn is in no transcript",
+                "toolUseId": "toolu_orphan",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (subagents_dir / "agent-orphan.jsonl").write_text("", encoding="utf-8")
+    budget = forwarder._SUBAGENT_RESOLVE_MAX_ATTEMPTS
+    state = forwarder.SubagentForwardState(
+        subagents={}, resolve_misses={"gone": budget, "orphan": budget // 2}
+    )
+    forwarder._write_subagent_forward_state(bridge_dir, state)
+
+    scans = _count_transcript_scans(monkeypatch)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_registering_handler), base_url="http://ap"
+    ) as client:
+        state = await _poll_subagents(
+            client, bridge_dir=bridge_dir, transcript_path=transcript_path, state=state
+        )
+
+    assert len(scans) == 1
+    assert state.resolve_misses == {"orphan": budget // 2 + 1}
+    assert forwarder._read_subagent_forward_state(bridge_dir) == state
+
+
 async def test_unreadable_meta_never_spends_the_resolve_budget(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
@@ -1094,23 +1135,41 @@ def _grandparent_failing_handler(
 async def test_child_waits_while_its_grandparent_backs_off(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A child whose parent is itself deferred behind a transiently failing
-    grandparent waits at no budget cost and registers once the chain recovers."""
+    """A child whose parent is itself deferred behind a grandparent held in
+    registration backoff waits at no budget cost and registers once the chain
+    recovers."""
     bridge_dir = tmp_path / "bridge"
     transcript_path = tmp_path / "session.jsonl"
     transcript_path.write_text("", encoding="utf-8")
     _seed_registration_chain(transcript_path)
 
-    failing_polls = forwarder._SUBAGENT_RESOLVE_MAX_ATTEMPTS + 1
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(forwarder.time, "monotonic", lambda: clock["now"])
+    failing = _grandparent_failing_handler(502, 1)
+    grandparent_starts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal grandparent_starts
+        body = json.loads(request.content)
+        if (
+            body.get("type") == "external_subagent_start"
+            and body["data"]["subagent_id"] == "z-grandparent"
+        ):
+            grandparent_starts += 1
+        return failing(request)
+
+    gated_polls = forwarder._SUBAGENT_RESOLVE_MAX_ATTEMPTS + 1
     caplog.set_level(logging.DEBUG, logger="omnigent.harnesses.claude_native.forwarder")
-    tracker = forwarder._PostRetryTracker(base_delay_s=0.0)
+    tracker = forwarder._PostRetryTracker(base_delay_s=1.0)
     state = forwarder.SubagentForwardState(subagents={})
     async with httpx.AsyncClient(
-        transport=httpx.MockTransport(_grandparent_failing_handler(502, failing_polls)),
-        base_url="http://ap",
+        transport=httpx.MockTransport(handler), base_url="http://ap"
     ) as client:
-        for _ in range(failing_polls):
+        # One failed start puts the grandparent into a one-second backoff; with the
+        # clock frozen, every later poll skips it without another POST.
+        for _ in range(1 + gated_polls):
             state = await _poll_subagents(
                 client,
                 bridge_dir=bridge_dir,
@@ -1118,8 +1177,12 @@ async def test_child_waits_while_its_grandparent_backs_off(
                 state=state,
                 start_retry_tracker=tracker,
             )
-        assert state.subagents == {}
-        assert state.resolve_misses == {}
+            assert state.subagents == {}
+            assert state.resolve_misses == {}
+        assert grandparent_starts == 1
+        assert tracker.retry_delay_s("subagent_start:z-grandparent") == pytest.approx(1.0)
+
+        clock["now"] += 1.0
         state = await _poll_subagents(
             client,
             bridge_dir=bridge_dir,
@@ -1128,6 +1191,7 @@ async def test_child_waits_while_its_grandparent_backs_off(
             start_retry_tracker=tracker,
         )
 
+    assert grandparent_starts == 2
     assert state.subagents["z-grandparent"].child_conversation_id == "conv_z-grandparent"
     assert state.subagents["m-parent"].parent_subagent_id == "z-grandparent"
     assert state.subagents["a-child"].parent_subagent_id == "m-parent"
