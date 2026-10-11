@@ -6125,18 +6125,12 @@ _GATEWAY_MODEL_PREFIXES: tuple[str, ...] = ("databricks-", "databricks/", "syste
 
 
 def _api_key_auth_has_gateway_base_url(spec: AgentSpec) -> bool:
-    """
-    Whether the session's effective ``api_key`` auth names a gateway endpoint.
+    """Whether the session's effective ``api_key`` auth names a gateway endpoint.
 
-    The launch builders enable the harness gateway for an ``ApiKeyAuth``
-    whose ``base_url`` is set (see
-    :func:`omnigent.runtime.workflow._build_claude_sdk_spawn_env`), so such a
-    pane reaches gateway-hosted models instead of the vendor default. The
-    effective auth is the spec's own ``executor.auth`` or, when it declares
-    none, the global ``auth:`` block — the same precedence the builders use.
-
-    :param spec: The session's resolved agent spec.
-    :returns: ``True`` when the effective api-key auth carries a ``base_url``.
+    The claude-sdk launch builder enables the harness gateway for an
+    ``ApiKeyAuth`` whose ``base_url`` is set, so such a pane reaches
+    gateway-hosted models. The effective auth is the spec's own
+    ``executor.auth`` or, when it declares none, the global ``auth:`` block.
     """
     from omnigent.runtime.workflow import _load_global_auth
     from omnigent.spec.types import ApiKeyAuth
@@ -6148,41 +6142,45 @@ def _api_key_auth_has_gateway_base_url(spec: AgentSpec) -> bool:
 
 
 def _session_uses_direct_vendor_transport(spec: AgentSpec, harness: str | None) -> bool:
-    """
-    Whether this session reaches its model direct from the vendor.
+    """Whether this session reaches its model direct from the vendor.
 
-    A bare subscription login or an ``api_key`` with no ``base_url`` talks
-    direct to the vendor and has no gateway transport. A direct
-    ``claude-sdk`` pane rejects a gateway-hosted (``databricks-*``) model at
-    construction — see
-    :class:`omnigent.inner.claude_sdk_executor.ClaudeSDKExecutor`; other
-    transports may surface the mismatch later instead. Pinning such a pick
-    as the session ``model_override`` would both fail this turn and disable
-    routing for every later one.
-
-    An ``api_key`` that carries a ``base_url`` is the exception: the launch
-    builders point the harness gateway at that endpoint, so the pane reaches
-    gateway-hosted models and the pick is runnable. The catalog lookup
-    (:func:`omnigent.models.model_catalog.resolve_model_provider`) folds a
-    ``base_url`` into the resolved provider for some harnesses but not for
-    ``claude-sdk``, so the effective api-key auth is inspected directly to
-    mirror the launch decision. A provider that does not resolve to direct
-    key or subscription auth is treated as *not* direct, so launch-time
-    resolution stays the authority (fail open).
+    A direct pane — a subscription login, or an ``api_key`` with no gateway
+    ``base_url`` — has no gateway transport, so a routed gateway-hosted
+    (``databricks-*``) pick raises at construction and, once pinned, disables
+    routing for every later turn. The decision follows the single launch-path
+    resolution (:func:`~omnigent.models.model_catalog.resolve_model_provider`),
+    never a second credential read: a subscription is always direct, and a
+    resolved ``key`` provider is direct only when neither its own endpoint nor
+    the selected api-key auth names a gateway. Any other kind (databricks /
+    gateway / local / none) is treated as not direct, so launch-time resolution
+    stays the authority (fail open).
 
     :param spec: The session's resolved agent spec.
     :param harness: The session's harness id, e.g. ``"claude-sdk"``.
-    :returns: ``True`` when the session reaches its model direct from the
-        vendor with no gateway transport.
+    :returns: ``True`` when the session reaches its model direct from the vendor.
     """
     from omnigent.models.model_catalog import (
         KEY_KIND,
         SUBSCRIPTION_KIND,
         resolve_model_provider,
     )
+    from omnigent.onboarding.configure_models import default_base_url_for_family
 
-    if resolve_model_provider(spec, harness).kind not in {KEY_KIND, SUBSCRIPTION_KIND}:
+    provider = resolve_model_provider(spec, harness)
+    if provider.kind == SUBSCRIPTION_KIND:
+        return True
+    if provider.kind != KEY_KIND:
         return False
+    # A provider-backed key carries its own endpoint; a non-vendor one reaches
+    # gateway-hosted models. The claude-sdk legacy api-key path reports the
+    # vendor default here regardless of the key's own base_url, so that case
+    # falls through to the auth inspection below.
+    if provider.base_url and provider.family:
+        try:
+            if provider.base_url != default_base_url_for_family(provider.family):
+                return False
+        except KeyError:
+            return False
     return not _api_key_auth_has_gateway_base_url(spec)
 
 
@@ -6848,10 +6846,8 @@ async def _forward_event_to_runner(
                     _routed_model, _verdict = _unavailable_routing_card(_turn_route_err)
                     _route_failed = True
                 if _routed_model is not None and not _route_failed:
-                    # Whether the session can actually be switched onto the
-                    # pick decides everything downstream: an unapplicable
-                    # model must not be pinned (the pin disables routing for
-                    # every later turn) nor reported as this turn's model.
+                    # An unapplicable model must not be pinned — the pin
+                    # disables routing for every later turn — nor reported here.
                     _turn_spelling = _routed_turn_model_spelling(session_id, conv, _routed_model)
                     # A declared sub-agent session runs its own child spec,
                     # whose executor auth can differ from the parent's; resolve

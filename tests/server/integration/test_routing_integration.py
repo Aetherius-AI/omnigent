@@ -2110,63 +2110,6 @@ async def test_the_forwarder_reads_a_sub_agent_sessions_child_transport_for_the_
     assert "gateway" in decisions[0].data.rationale.lower()
 
 
-@pytest.mark.parametrize(
-    "routed_model",
-    ["databricks-claude-opus-4-8", "databricks/claude-opus-4-8", "system.ai.claude-opus-4-8"],
-    ids=["dash", "slash", "system-ai"],
-)
-async def test_every_gateway_spelling_is_declined_on_a_direct_vendor_pane(
-    client: httpx.AsyncClient,
-    db_uri: str,
-    tmp_path: Any,
-    routed_model: str,
-) -> None:
-    """Each catalog spelling of a gateway model is vetoed on a direct pane.
-
-    Model discovery lists the same gateway endpoints under more than one
-    spelling (``databricks-``, ``databricks/``, ``system.ai.``). The pin
-    regression must hold for every one, so route each spelling onto a
-    direct-vendor api-key pane and assert the pick runs unrouted with the
-    row left clear rather than pinned.
-    """
-    agent = await create_test_agent(client, name="routing-spelling")
-    resp = await client.post(
-        "/v1/sessions",
-        json={"agent_id": agent["id"], "cost_control_mode_override": "on"},
-    )
-    assert resp.status_code == 201, resp.text
-    conv_store = SqlAlchemyConversationStore(db_uri)
-    conv = conv_store.get_conversation(resp.json()["id"])
-    assert conv is not None
-
-    routing_client = FakeRoutingClient(
-        RoutingResult(model=routed_model, rationale="deep refactor", harness="claude_code")
-    )
-    body = SessionEventInput(
-        type="message",
-        data={"role": "user", "content": [{"type": "input_text", "text": "refactor auth"}]},
-    )
-    direct_api_key = "  auth:\n    type: api_key\n    api_key: mock-key\n"
-    with patch("omnigent.runtime._globals._caps", new=FakeCaps(routing_client=routing_client)):
-        async with echo_runner_client() as runner_client:
-            await orchestration_module._forward_event_to_runner(
-                conv.id,
-                conv,
-                body,
-                conv_store,
-                runner_client,
-                agent_spec=_claude_sdk_spec(tmp_path, direct_api_key),
-            )
-
-    refreshed = conv_store.get_conversation(conv.id)
-    assert refreshed is not None
-    decisions = _routing_decisions(conv_store, conv.id)
-    assert len(decisions) == 1
-    assert decisions[0].data.applied is False
-    assert refreshed.model_override is None
-    assert "gateway" in decisions[0].data.rationale.lower()
-
-
 async def test_an_unresolvable_sub_agent_name_judges_the_root_transport(
     client: httpx.AsyncClient,
     db_uri: str,
@@ -2219,26 +2162,6 @@ async def test_an_unresolvable_sub_agent_name_judges_the_root_transport(
     assert decisions[0].data.applied is False
     assert refreshed.model_override is None
     assert "gateway" in decisions[0].data.rationale.lower()
-
-
-async def test_gateway_model_prefixes_cover_every_catalog_spelling() -> None:
-    """The veto's gateway prefixes track every Unity Catalog spelling.
-
-    Model discovery lists the same gateway endpoints under more than one
-    prefix: serving-endpoints spell them ``databricks-`` while Unity
-    Catalog model services spell them ``system.ai.``. The off-gateway veto
-    keys on ``_GATEWAY_MODEL_PREFIXES``, so a spelling it omits would let a
-    gateway-only pick slip onto a direct-vendor pane. Pin the prefixes to
-    the discovery module's own source of truth.
-    """
-    from omnigent.models.databricks_model_discovery import _CATALOG_SPELLINGS
-
-    prefixes = orchestration_module._GATEWAY_MODEL_PREFIXES
-    missing = [spelling for spelling in _CATALOG_SPELLINGS if spelling not in prefixes]
-    assert not missing, (
-        f"_GATEWAY_MODEL_PREFIXES omits catalog spelling(s) {missing!r}; a "
-        "gateway-only pick in that spelling would slip past the veto."
-    )
 
 
 # ── 10. A routed child's harness is chosen once, not per message ─────

@@ -2824,6 +2824,7 @@ def register_events_routes(
                     agent_cache.load,
                     _agent.id,
                     _agent.bundle_location,
+                    expand_env=_agent.operator_authored,
                 )
                 _agent_spec = _loaded_agent.spec
                 _has_mcp_servers = bool(_loaded_agent.spec.mcp_servers)

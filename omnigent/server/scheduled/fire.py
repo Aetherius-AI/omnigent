@@ -728,7 +728,12 @@ async def _permission_mode_launch_args(deps: FireDeps, task: ScheduledTask) -> l
         agent = await asyncio.to_thread(deps.agent_store.get, task.agent_id)
         if agent is None or getattr(agent, "bundle_location", None) is None:
             return None
-        loaded = await asyncio.to_thread(deps.agent_cache.load, agent.id, agent.bundle_location)
+        loaded = await asyncio.to_thread(
+            deps.agent_cache.load,
+            agent.id,
+            agent.bundle_location,
+            expand_env=agent.operator_authored,
+        )
         executor = getattr(loaded.spec, "executor", None)
         raw_harness = (executor.config.get("harness") or executor.type) if executor else None
         harness = canonicalize_harness(raw_harness) or raw_harness
@@ -757,7 +762,12 @@ async def _spec_reasoning_effort(deps: FireDeps, task: ScheduledTask) -> str | N
         agent = await asyncio.to_thread(deps.agent_store.get, task.agent_id)
         if agent is None or getattr(agent, "bundle_location", None) is None:
             return None
-        loaded = await asyncio.to_thread(deps.agent_cache.load, agent.id, agent.bundle_location)
+        loaded = await asyncio.to_thread(
+            deps.agent_cache.load,
+            agent.id,
+            agent.bundle_location,
+            expand_env=agent.operator_authored,
+        )
         executor = getattr(loaded.spec, "executor", None)
         return getattr(executor, "reasoning_effort", None) if executor else None
     except Exception:
@@ -1221,7 +1231,7 @@ def _make_connected_host_dispatch(deps: FireDeps) -> LaunchDispatch:
         await _ensure_runner_session_initialized(
             conv.id, conv_for_dispatch, runner_client, deps.conversation_store
         )
-        _revision, _spec = await _agent_binding(deps, conv_for_dispatch)
+        revision, spec = await _agent_binding(deps, conv_for_dispatch)
         await _dispatch_session_event_to_runner(
             conv.id,
             conv_for_dispatch,
@@ -1233,8 +1243,8 @@ def _make_connected_host_dispatch(deps: FireDeps) -> LaunchDispatch:
             artifact_store=deps.artifact_store,
             created_by=owner,
             runner_router=deps.runner_router,
-            agent_revision=_revision,
-            agent_spec=_spec,
+            agent_revision=revision,
+            agent_spec=spec,
         )
 
     return _dispatch
@@ -1304,7 +1314,7 @@ def _make_managed_sandbox_dispatch(deps: FireDeps) -> LaunchDispatch:
         await _ensure_runner_session_initialized(
             conv.id, fresh, runner_client, deps.conversation_store
         )
-        _revision, _spec = await _agent_binding(deps, fresh)
+        revision, spec = await _agent_binding(deps, fresh)
         await _dispatch_session_event_to_runner(
             conv.id,
             fresh,
@@ -1316,8 +1326,8 @@ def _make_managed_sandbox_dispatch(deps: FireDeps) -> LaunchDispatch:
             artifact_store=deps.artifact_store,
             created_by=owner,
             runner_router=deps.runner_router,
-            agent_revision=_revision,
-            agent_spec=_spec,
+            agent_revision=revision,
+            agent_spec=spec,
         )
 
     return _dispatch
