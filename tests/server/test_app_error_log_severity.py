@@ -21,8 +21,14 @@ def erroring_client(app: FastAPI) -> httpx.AsyncClient:
     async def _raise(code: str) -> None:
         raise OmnigentError(f"synthetic {code} for log-severity test", code=code)
 
-    # The SPA catch-all can shadow appended routes.
-    app.router.routes.insert(0, app.router.routes.pop())
+    # Appended routes sit behind the SPA catch-all, which would shadow them.
+    # Move the just-registered test route to the front, asserting it is the one
+    # we added so a future registration-order change fails loudly here.
+    test_route = app.router.routes.pop()
+    assert getattr(test_route, "path", None) == "/test/raise/{code}", (
+        f"expected to move the synthetic test route to the front, got {test_route!r}"
+    )
+    app.router.routes.insert(0, test_route)
 
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
     return httpx.AsyncClient(transport=transport, base_url="http://server")
@@ -48,9 +54,10 @@ async def test_transient_runner_503_logs_below_error_without_traceback(
 
     records = [r for r in caplog.records if r.name == _LOGGER_NAME]
     assert records, "expected the handler to log the runner-unavailable 503"
-    assert all(r.levelno < logging.ERROR for r in records), (
-        f"transient runner 503 ({code}) logged at ERROR: "
-        f"{[r.getMessage() for r in records if r.levelno >= logging.ERROR]}"
+    assert all(r.levelno == logging.WARNING for r in records), (
+        f"transient runner 503 ({code}) must log at WARNING without escalating "
+        f"to ERROR or dropping to INFO/DEBUG, got "
+        f"{[(logging.getLevelName(r.levelno), r.getMessage()) for r in records]}"
     )
     assert all(r.exc_info is None for r in records), (
         f"transient runner 503 ({code}) logged with a stack trace"

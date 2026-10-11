@@ -33,10 +33,9 @@ import {
   withAttachParams,
 } from "@/lib/terminals";
 
-// useTerminals reads runner liveness and only runs the HTTP seed once the
-// runner is observed online. Mock it so we can drive that signal directly; it
-// defaults to `undefined` (the no-provider value), which keeps the seed query
-// disabled, so suites that need the seed to run force `true` explicitly.
+// useTerminals gates the HTTP seed on runner liveness; mock it so tests can
+// drive that signal. The `undefined` default (the no-provider value) keeps the
+// seed disabled, so suites that need it force `true` explicitly.
 vi.mock("@/hooks/RunnerHealthProvider", () => ({
   useSessionRunnerOnline: vi.fn(() => undefined),
 }));

@@ -8,7 +8,7 @@
 //
 // The query is disabled unless the file appears in the changed-files list
 // (only files that were created, modified, or deleted this session have diff
-// data) and the runner is online.
+// data) and the workspace is known serveable (runner or host online).
 
 import { useQuery } from "@tanstack/react-query";
 import { authenticatedFetch } from "@/lib/identity";
@@ -54,7 +54,8 @@ async function fetchFileDiff(conversationId: string, path: string): Promise<File
  *
  * Disabled (no request made) when:
  * - `conversationId` or `path` is null / undefined
- * - the runner is offline
+ * - the workspace is not known serveable (runner and host offline, or
+ *   liveness not yet resolved)
  * - the file does not appear in the session's changed-files list
  */
 export function useFileDiff(conversationId: string | undefined, path: string | null) {

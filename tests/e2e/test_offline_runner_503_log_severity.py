@@ -79,56 +79,58 @@ def offline_runner_session(
     agent_yaml.write_text(_HELLO_WORLD_YAML)
     data_dir = work / "data"
 
-    server_log = open(work / "server.log", "w")  # noqa: SIM115 — lives for Popen lifetime; closed in teardown
-    server = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "omnigent.cli",
-            "server",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(port),
-            "--database-uri",
-            f"sqlite:///{work / 'test.db'}",
-            "--artifact-location",
-            str(work / "artifacts"),
-            "--agent",
-            str(agent_yaml),
-        ],
-        env=_subprocess_env(
-            {
-                "OMNIGENT_RUNNER_TUNNEL_TOKEN": binding_token,
-                "OMNIGENT_DATA_DIR": str(data_dir),
-                # Block accidental provider calls; this test drives no LLM turn.
-                "OPENAI_BASE_URL": "http://127.0.0.1:9/v1",
-                "OPENAI_API_KEY": "test-key",
-            }
-        ),
-        stdout=server_log,
-        stderr=subprocess.STDOUT,
-    )
-
-    runner_log = open(work / "runner.log", "w")  # noqa: SIM115 — lives for Popen lifetime; closed in teardown
-    runner = subprocess.Popen(
-        [sys.executable, "-m", "omnigent.runner._entry"],
-        env=_subprocess_env(
-            {
-                "OMNIGENT_RUNNER_ID": runner_id,
-                "OMNIGENT_RUNNER_TUNNEL_BINDING_TOKEN": binding_token,
-                "OMNIGENT_RUNNER_PARENT_PID": str(os.getpid()),
-                "RUNNER_SERVER_URL": base_url,
-                "OPENAI_BASE_URL": "http://127.0.0.1:9/v1",
-                "OPENAI_API_KEY": "test-key",
-            }
-        ),
-        stdout=runner_log,
-        stderr=subprocess.STDOUT,
-    )
-
-    client = httpx.Client(timeout=5.0, trust_env=False)
+    server_log = runner_log = None
+    server = runner = client = None
     try:
+        server_log = open(work / "server.log", "w")  # noqa: SIM115 — closed in teardown
+        server = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "omnigent.cli",
+                "server",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+                "--database-uri",
+                f"sqlite:///{work / 'test.db'}",
+                "--artifact-location",
+                str(work / "artifacts"),
+                "--agent",
+                str(agent_yaml),
+            ],
+            env=_subprocess_env(
+                {
+                    "OMNIGENT_RUNNER_TUNNEL_TOKEN": binding_token,
+                    "OMNIGENT_DATA_DIR": str(data_dir),
+                    # Block accidental provider calls; this test drives no LLM turn.
+                    "OPENAI_BASE_URL": "http://127.0.0.1:9/v1",
+                    "OPENAI_API_KEY": "test-key",
+                }
+            ),
+            stdout=server_log,
+            stderr=subprocess.STDOUT,
+        )
+
+        runner_log = open(work / "runner.log", "w")  # noqa: SIM115 — closed in teardown
+        runner = subprocess.Popen(
+            [sys.executable, "-m", "omnigent.runner._entry"],
+            env=_subprocess_env(
+                {
+                    "OMNIGENT_RUNNER_ID": runner_id,
+                    "OMNIGENT_RUNNER_TUNNEL_BINDING_TOKEN": binding_token,
+                    "OMNIGENT_RUNNER_PARENT_PID": str(os.getpid()),
+                    "RUNNER_SERVER_URL": base_url,
+                    "OPENAI_BASE_URL": "http://127.0.0.1:9/v1",
+                    "OPENAI_API_KEY": "test-key",
+                }
+            ),
+            stdout=runner_log,
+            stderr=subprocess.STDOUT,
+        )
+
+        client = httpx.Client(timeout=5.0, trust_env=False)
         deadline = time.monotonic() + _BOOT_TIMEOUT_S
         online = False
         while time.monotonic() < deadline:
@@ -185,18 +187,22 @@ def offline_runner_session(
 
         yield base_url, session_id, data_dir / "logs" / "server"
     finally:
-        client.close()
-        if runner.poll() is None:
+        if client is not None:
+            client.close()
+        if runner is not None and runner.poll() is None:
             runner.kill()
             runner.wait(timeout=5)
-        runner_log.close()
-        server.terminate()
-        try:
-            server.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            server.kill()
-            server.wait(timeout=5)
-        server_log.close()
+        if runner_log is not None:
+            runner_log.close()
+        if server is not None:
+            server.terminate()
+            try:
+                server.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                server.kill()
+                server.wait(timeout=5)
+        if server_log is not None:
+            server_log.close()
 
 
 def test_offline_runner_resource_503_not_logged_as_error(
@@ -236,7 +242,10 @@ def test_offline_runner_resource_503_not_logged_as_error(
         for line in log_text.splitlines()
         if "ERROR" in line and "Internal error" in line and "is offline for conversation" in line
     ]
-    traceback_hit = "omnigent.errors.OmnigentError: runner" in log_text
+    traceback_hit = (
+        "omnigent.errors.OmnigentError: runner" in log_text
+        or "Traceback (most recent call last)" in log_text
+    )
     assert not error_lines and not traceback_hit, (
         "an expected offline-runner 503 (runner_unavailable) was logged as an "
         "internal error: found "

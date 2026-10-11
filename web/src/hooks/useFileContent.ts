@@ -153,7 +153,9 @@ export async function downloadWorkspaceFile(conversationId: string, path: string
  * Fetch the content of a workspace file for the given conversation.
  *
  * Disabled (no request made) when `conversationId` or `path` is
- * null / undefined.
+ * null / undefined, or until the workspace is known serveable
+ * (`useWorkspaceServeable` → `true`): it stays idle while liveness is
+ * unresolved and when neither the runner nor a host tunnel can serve.
  *
  * Fires one trailing invalidation when the session transitions from active
  * (running/waiting) to idle so the viewer picks up any file writes the agent

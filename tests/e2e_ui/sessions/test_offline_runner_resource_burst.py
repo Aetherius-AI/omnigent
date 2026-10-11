@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 
 import httpx
 import pytest
-from playwright.sync_api import Page
+from playwright.sync_api import Page, expect
 
 from tests.e2e_ui.conftest import _server_state
 
@@ -77,7 +77,17 @@ def test_open_offline_session_no_resource_503_burst(
 
     page.on("response", _on_response)
     page.goto(f"{base_url}/c/{session_id}")
+    # Session chrome is session metadata and renders even with the runner
+    # offline; wait for it so the observe window covers a mounted session.
+    expect(page.get_by_test_id("agent-info-trigger")).to_be_visible(timeout=30_000)
     page.wait_for_timeout(_OBSERVE_WINDOW_MS)
+
+    health_polls = [path for _when, _status, path in observed if path.startswith("/health")]
+    assert health_polls, (
+        "expected at least one /health poll during the observe window; without "
+        "it the session never checked runner liveness and a zero resource-503 "
+        f"count would be vacuous. Observed paths: {[p for _w, _s, p in observed]}"
+    )
 
     resource_503s = [
         (when, status, path)
