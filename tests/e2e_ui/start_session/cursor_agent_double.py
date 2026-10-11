@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Signed-in ``cursor-agent`` double: version, status, a fixed model list, and a TUI."""
+"""Signed-in ``cursor-agent`` double: version, auth status and a fixed model list."""
 
 import json
 import os
@@ -35,15 +35,5 @@ if ARGS[:1] == ["models"]:
     with open(models_file, encoding="utf-8") as fh:
         sys.stdout.write(fh.read())
     raise SystemExit(0)
-if ARGS[:1] in (["login"], ["logout"]):
-    print("stub cursor-agent: " + ARGS[0] + " ok")
-    raise SystemExit(0)
-
-# A launched TUI stays attached until stdin closes.
-print("stub cursor-agent TUI started with: " + " ".join(ARGS))
-sys.stdout.flush()
-try:
-    while sys.stdin.readline():
-        pass
-except KeyboardInterrupt:
-    pass
+print("stub cursor-agent: unsupported invocation: " + " ".join(ARGS), file=sys.stderr)
+raise SystemExit(2)

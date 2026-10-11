@@ -783,6 +783,53 @@ describe("ForkSessionDialog", () => {
         }),
       );
     });
+
+    it("drops a picked Cursor model when the switched host's catalog lacks it", async () => {
+      setHosts([host(), host({ host_id: "host_2", name: "other-laptop" })]);
+      useHostModelOptionsMock.mockImplementation(
+        (hostId) =>
+          ({
+            data: hostId === "host_2" ? CURSOR_MODELS.slice(0, 1) : CURSOR_MODELS,
+            isLoading: false,
+            error: null,
+          }) as unknown as ReturnType<typeof useHostModelOptions>,
+      );
+      renderDialog(CURSOR_SOURCE);
+      openAgentSelect();
+      fireEvent.click(screen.getByTestId("fork-session-agent-option-ag_cursor_native"));
+      fireEvent.click(screen.getByTestId("fork-session-config-model"));
+      fireEvent.click(screen.getByRole("option", { name: "Grok 4.7" }));
+      expect(screen.getByTestId("fork-session-config-model")).toHaveTextContent("Grok 4.7");
+
+      // host_2's Cursor catalog has no grok-4.7, so the pick falls back to an
+      // explicit Default: neither the stale id nor the source model rides the fork.
+      const hostTrigger = screen.getByTestId("fork-session-host-select");
+      fireEvent.pointerDown(
+        hostTrigger,
+        new MouseEvent("pointerdown", { bubbles: true, button: 0 }),
+      );
+      fireEvent.click(hostTrigger);
+      fireEvent.click(screen.getByTestId("fork-session-host-option-host_2"));
+      await waitFor(() =>
+        expect(screen.getByTestId("fork-session-config-model")).toHaveTextContent("Default (Auto)"),
+      );
+
+      // A different host needs a directory before the fork can start.
+      const input = await screen.findByTestId("workspace-path-input");
+      fireEvent.change(input, { target: { value: "~/git/omnigent" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+      fireEvent.click(screen.getByTestId("mock-pick-workspace"));
+      fireEvent.click(screen.getByTestId("fork-session-submit"));
+
+      await waitFor(() => expect(forkSessionMock).toHaveBeenCalledTimes(1));
+      expect(forkSessionMock).toHaveBeenCalledWith(
+        "conv_src",
+        expect.objectContaining({
+          agentId: "ag_cursor_native",
+          config: { modelOverride: "default" },
+        }),
+      );
+    });
   });
 
   it("labels the keep-current option with the source agent's name, not generic text", () => {
