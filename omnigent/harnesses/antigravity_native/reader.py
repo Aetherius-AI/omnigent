@@ -392,18 +392,20 @@ _MODEL_TIER_SUFFIX_RE = re.compile(r"\s*\([^()]*\)\s*$")
 def _catalog_model_id(display_name: str) -> str:
     """Normalize an agy display name (``"Gemini 3.8 Flash (Medium)"``) to the id the server
     prices with (``"gemini-3.8-flash"``): tier dropped, lowercased, hyphenated; Claude version
-    dots become hyphens. A label with no spaces or tier is returned unchanged."""
-    label = _MODEL_TIER_SUFFIX_RE.sub("", display_name).strip()
+    dots become hyphens. An unresolved raw enum (``MODEL_PLACEHOLDER_M20``) is returned
+    unchanged, since it matches no catalog id either way."""
+    label = display_name
+    while True:
+        stripped = _MODEL_TIER_SUFFIX_RE.sub("", label).strip()
+        if stripped == label:
+            break
+        label = stripped
     if not label:
         return display_name
-    # An unresolved raw enum (no spaces, UPPER_SNAKE or all-caps) matches no
+    # An unresolved raw enum (UPPER_SNAKE, e.g. MODEL_PLACEHOLDER_M20) matches no
     # catalog id, so report it verbatim rather than lowercasing it into a
-    # different non-id; a one-word human label is still normalized.
-    if (
-        label == display_name
-        and not any(ch.isspace() for ch in label)
-        and ("_" in label or label.isupper())
-    ):
+    # different non-id; a human label (even one word) is still normalized.
+    if label == display_name and not any(ch.isspace() for ch in label) and "_" in label:
         return display_name
     slug = "-".join(label.lower().split())
     if slug.startswith("claude"):
