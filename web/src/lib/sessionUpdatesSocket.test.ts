@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  HIDDEN_RECONNECT_JITTER_MS,
+  HIDDEN_RECONNECT_MS,
+  RECONNECT_BASE_MS,
+} from "./reconnectBackoff";
+import {
   HEARTBEAT_WATCHDOG_MS,
   nextPushedSession,
   sessionUpdatesSocket,
@@ -148,6 +153,132 @@ describe("sessionUpdatesSocket heartbeat watchdog", () => {
 // Reconnect backoff is capped at 5 s + jitter; advancing past 5 s guarantees
 // the scheduled reconnect timer has fired regardless of the random jitter.
 const RECONNECT_CEILING_MS = 5_001;
+
+function setPageHidden(hidden: boolean): void {
+  Object.defineProperty(document, "visibilityState", {
+    configurable: true,
+    get: () => (hidden ? "hidden" : "visible"),
+  });
+  Object.defineProperty(document, "hidden", { configurable: true, get: () => hidden });
+}
+
+describe("sessionUpdatesSocket reconnect backoff while the page is hidden", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    FakeWebSocket.instances = [];
+    vi.stubGlobal("WebSocket", FakeWebSocket as unknown as typeof WebSocket);
+  });
+
+  afterEach(() => {
+    sessionUpdatesSocket.stop();
+    Reflect.deleteProperty(document, "visibilityState");
+    Reflect.deleteProperty(document, "hidden");
+    vi.clearAllTimers();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("waits longer than the visible 5 s cap before redialing an unreachable server", () => {
+    setPageHidden(true);
+    sessionUpdatesSocket.start();
+    // Every dial is refused before it opens, until the backoff has reached its cap.
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      latestWs().close();
+      vi.advanceTimersByTime(RECONNECT_CEILING_MS);
+    }
+
+    const dialsBefore = FakeWebSocket.instances.length;
+    latestWs().close();
+    vi.advanceTimersByTime(RECONNECT_CEILING_MS);
+    expect(FakeWebSocket.instances.length).toBe(dialsBefore);
+  });
+});
+
+describe("sessionUpdatesSocket visibility-aware reconnect", () => {
+  const HIDDEN_FLOOR_MS = HIDDEN_RECONNECT_MS - HIDDEN_RECONNECT_JITTER_MS;
+
+  function fireVisibilityChange(hidden: boolean): void {
+    setPageHidden(hidden);
+    document.dispatchEvent(new Event("visibilitychange"));
+  }
+
+  /** Refuse `count` dials in a row, letting each visible retry fire. */
+  function refuseDials(count: number): void {
+    for (let attempt = 0; attempt < count; attempt += 1) {
+      latestWs().close();
+      vi.advanceTimersByTime(RECONNECT_CEILING_MS);
+    }
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    FakeWebSocket.instances = [];
+    vi.stubGlobal("WebSocket", FakeWebSocket as unknown as typeof WebSocket);
+    setPageHidden(false);
+  });
+
+  afterEach(() => {
+    sessionUpdatesSocket.stop();
+    Reflect.deleteProperty(document, "visibilityState");
+    Reflect.deleteProperty(document, "hidden");
+    vi.clearAllTimers();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("fires only the retry already pending when the page hides mid-outage", () => {
+    sessionUpdatesSocket.start();
+    refuseDials(6);
+    const dialsBefore = FakeWebSocket.instances.length;
+
+    // The retry scheduled while visible still fires once after hiding...
+    latestWs().close();
+    fireVisibilityChange(true);
+    vi.advanceTimersByTime(RECONNECT_CEILING_MS);
+    expect(FakeWebSocket.instances.length).toBe(dialsBefore + 1);
+
+    // ...but the retry scheduled while hidden waits the stretched cadence.
+    latestWs().close();
+    vi.advanceTimersByTime(HIDDEN_FLOOR_MS - 1);
+    expect(FakeWebSocket.instances.length).toBe(dialsBefore + 1);
+    vi.advanceTimersByTime(HIDDEN_RECONNECT_MS - HIDDEN_FLOOR_MS + 1);
+    expect(FakeWebSocket.instances.length).toBe(dialsBefore + 2);
+  });
+
+  it("reconnects at once when the page becomes visible with a hidden retry pending", () => {
+    setPageHidden(true);
+    sessionUpdatesSocket.start();
+    latestWs().close();
+    vi.advanceTimersByTime(RECONNECT_CEILING_MS);
+    expect(FakeWebSocket.instances.length).toBe(1);
+
+    fireVisibilityChange(false);
+    expect(FakeWebSocket.instances.length).toBe(2);
+    // The stretched timer was cancelled, not left to dial a second time.
+    vi.advanceTimersByTime(HIDDEN_RECONNECT_MS);
+    expect(FakeWebSocket.instances.length).toBe(2);
+  });
+
+  it("does not redial on visibility while a socket is already open or connecting", () => {
+    sessionUpdatesSocket.start();
+    latestWs().open();
+    fireVisibilityChange(true);
+    fireVisibilityChange(false);
+    expect(FakeWebSocket.instances.length).toBe(1);
+  });
+
+  it("ramps from the base again after stop() and a fresh start()", () => {
+    sessionUpdatesSocket.start();
+    refuseDials(6);
+    sessionUpdatesSocket.stop();
+
+    sessionUpdatesSocket.start();
+    const dialsBefore = FakeWebSocket.instances.length;
+    latestWs().close();
+    vi.advanceTimersByTime(RECONNECT_BASE_MS + 1);
+    expect(FakeWebSocket.instances.length).toBe(dialsBefore + 1);
+  });
+});
 
 describe("nextPushedSession", () => {
   beforeEach(() => {
