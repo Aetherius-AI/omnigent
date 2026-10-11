@@ -1051,6 +1051,11 @@ class CreateResponseRequest(BaseModel):
     # the message, so the runner can drop the buffered copy and not
     # re-deliver it in a continuation turn. ``None`` for fresh turns.
     injection_id: str | None = None
+    # Server-side identity of the native web input, independent of native transcript matching.
+    input_stable_id: str | None = None
+    pending_id: str | None = None
+    delivery_attempt_id: str | None = None
+    input_enqueued_at_ms: int | None = None
     conversation: ConversationRef | None = None
     # Reasoning config, e.g. {"effort": "low"|"medium"|"high"}
     reasoning: dict[str, str] | None = None
@@ -2615,7 +2620,7 @@ class SessionForkRequest(BaseModel):
     workspace: str | None = None
     # Marks the fork as a side chat: it is stamped with the side-chat label so
     # it is hidden from the left sidebar (it surfaces only as a Workspace-rail
-    # side-chat tab). The fork otherwise behaves normally (its own runner).
+    # side-chat tab). It may share its parent's runner.
     side_chat: bool = False
 
     model_config = ConfigDict(extra="forbid")
@@ -2938,7 +2943,7 @@ class GrantPermissionRequest(BaseModel):
 
     :param user_id: The user to grant access to, e.g.
         ``"alice@example.com"`` or ``"__public__"`` for public
-        read access.
+        access subject to the server's public permission ceiling.
     :param level: Numeric permission level: ``1`` = read,
         ``2`` = edit, ``3`` = manage.
     """
