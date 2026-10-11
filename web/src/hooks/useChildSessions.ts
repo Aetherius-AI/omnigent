@@ -90,6 +90,22 @@ interface ChildSessionsResponse {
 }
 
 /**
+ * Wire shape of one ``GET /v1/sessions/{id}/descendants`` row: a child
+ * summary that also names its own parent and its depth below the root.
+ */
+interface DescendantSessionWire extends ChildSessionWire {
+  parent_session_id: string;
+  depth: number;
+}
+
+interface DescendantsResponse {
+  object: "list";
+  data: DescendantSessionWire[];
+  last_id: string | null;
+  has_more: boolean;
+}
+
+/**
  * TanStack Query key for a session's child sessions.
  *
  * Exported so the SSE handler can invalidate the same cache entry
@@ -102,6 +118,11 @@ export function childSessionsQueryKey(conversationId: string): readonly unknown[
 /** True for any key built by ``childSessionsQueryKey``. */
 function isChildSessionsQueryKey(key: readonly unknown[]): boolean {
   return key.length === 3 && key[0] === "conversation" && key[2] === "child_sessions";
+}
+
+/** TanStack Query key for a root session's whole sub-agent subtree. */
+export function subagentTreeQueryKey(rootId: string): readonly unknown[] {
+  return ["conversation", rootId, "descendants"];
 }
 
 /**
@@ -213,7 +234,11 @@ export async function fetchChildSessions(sessionId: string): Promise<ChildSessio
   // session-scoped requests key by this session's host before their own
   // snapshot loads.
   for (const row of json.data) setSessionParent(row.id, sessionId);
-  return json.data.map((row) => ({
+  return json.data.map(childInfoFromWire);
+}
+
+function childInfoFromWire(row: ChildSessionWire): ChildSessionInfo {
+  return {
     id: row.id,
     title: row.title,
     task_summary: row.task_summary ?? null,
@@ -226,7 +251,54 @@ export async function fetchChildSessions(sessionId: string): Promise<ChildSessio
     last_message_preview: row.last_message_preview ?? null,
     pending_elicitations_count: row.pending_elicitations_count ?? 0,
     routed_model: row.routed_model ?? null,
-  }));
+  };
+}
+
+/**
+ * Fetch every sub-agent under ``rootId`` down to ``MAX_TREE_DEPTH`` through
+ * ``GET /v1/sessions/{id}/descendants`` — one request per page, not one per
+ * node — and seed each parent's ``child_sessions`` cache from the result, so
+ * the rows the Agents rail renders find their children already cached.
+ *
+ * Exported for unit testing; production code should call ``useSubagentTree``.
+ *
+ * @param rootId - Root session whose subtree to load, e.g. ``"conv_root"``.
+ * @param queryClient - The app QueryClient whose child-session caches to seed.
+ * @returns The root's direct children.
+ */
+export async function fetchSubagentTree(
+  rootId: string,
+  queryClient: QueryClient,
+): Promise<ChildSessionInfo[]> {
+  const byParent = new Map<string, ChildSessionInfo[]>([[rootId, []]]);
+  let after: string | null = null;
+  // Each page's cursor comes from the previous response, so the awaits
+  // cannot be parallelized.
+  /* oxlint-disable no-await-in-loop */
+  do {
+    const params = new URLSearchParams({ max_depth: String(MAX_TREE_DEPTH), limit: "1000" });
+    if (after !== null) params.set("after", after);
+    const res = await authenticatedFetch(
+      `/v1/sessions/${encodeURIComponent(rootId)}/descendants?${params.toString()}`,
+    );
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    const json = (await res.json()) as DescendantsResponse;
+    for (const row of json.data) {
+      setSessionParent(row.id, row.parent_session_id);
+      const siblings = byParent.get(row.parent_session_id) ?? [];
+      siblings.push(childInfoFromWire(row));
+      byParent.set(row.parent_session_id, siblings);
+      // Rows above the depth cap render a child list of their own; seeding
+      // an empty one keeps a childless row from asking the server.
+      if (row.depth < MAX_TREE_DEPTH && !byParent.has(row.id)) byParent.set(row.id, []);
+    }
+    after = json.has_more ? json.last_id : null;
+  } while (after !== null);
+  /* oxlint-enable no-await-in-loop */
+  for (const [parentId, children] of byParent) {
+    queryClient.setQueryData(childSessionsQueryKey(parentId), children);
+  }
+  return byParent.get(rootId) ?? [];
 }
 
 /**
@@ -266,6 +338,36 @@ export function useChildSessions(
     children: data ?? [],
     isLoading,
     error: (error as Error | null) ?? null,
+  };
+}
+
+/**
+ * Child-session list for the root of the Agents rail, loaded with the whole
+ * subtree in one request so the per-row ``useChildSessions`` calls beneath
+ * it are served from cache instead of fetching once per node. The root list
+ * is held back until the tree has seeded those caches; when the server has
+ * no subtree endpoint the hook falls back to the per-node fetch.
+ *
+ * @param rootSessionId - Root session id, or ``null`` to disable the query.
+ */
+export function useSubagentTree(rootSessionId: string | null): UseChildSessionsResult {
+  const queryClient = useQueryClient();
+  const sessionId = isTempConvId(rootSessionId) ? null : rootSessionId;
+  const tree = useQuery({
+    queryKey:
+      sessionId === null ? ["conversation", null, "descendants"] : subagentTreeQueryKey(sessionId),
+    queryFn: () => fetchSubagentTree(sessionId as string, queryClient),
+    enabled: sessionId !== null,
+    staleTime: 60_000,
+    retry: false,
+    refetchOnMount: false,
+  });
+  const settled = tree.isSuccess || tree.isError;
+  const direct = useChildSessions(settled ? sessionId : null);
+  return {
+    children: direct.children,
+    isLoading: (sessionId !== null && tree.isPending) || direct.isLoading,
+    error: direct.error,
   };
 }
 

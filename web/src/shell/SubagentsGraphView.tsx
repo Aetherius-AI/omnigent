@@ -5,7 +5,12 @@ import { useLocation, useNavigate } from "@/lib/routing";
 import { RunningDot } from "@/components/RunningDot";
 import { Badge } from "@/components/ui/badge";
 import { ZoomInIcon, ZoomOutIcon, Maximize2Icon } from "lucide-react";
-import { MAX_TREE_DEPTH, useChildSessions, type ChildSessionInfo } from "@/hooks/useChildSessions";
+import {
+  MAX_TREE_DEPTH,
+  useChildSessions,
+  useSubagentTree,
+  type ChildSessionInfo,
+} from "@/hooks/useChildSessions";
 import { useSession } from "@/hooks/useSession";
 import { cn } from "@/lib/utils";
 import { nativeCodingAgentForWrapper, WRAPPER_LABEL_KEY } from "@/lib/nativeCodingAgents";
@@ -163,7 +168,7 @@ interface SubagentsGraphViewProps {
 
 export function SubagentsGraphView({ conversationId, rootSessionId }: SubagentsGraphViewProps) {
   const { session } = useSession(rootSessionId);
-  const { children: rootChildren } = useChildSessions(rootSessionId);
+  const { children: rootChildren } = useSubagentTree(rootSessionId);
 
   const [childrenMap, setChildrenMap] = useState<Map<string, ChildSessionInfo[]>>(() => new Map());
 
