@@ -48,6 +48,8 @@ def _subprocess_env(extra: dict[str, str]) -> dict[str, str]:
         if key.startswith(("OMNIGENT_RUNNER_", "OMNIGENT_HOST_")) or key in (
             "RUNNER_SERVER_URL",
             "OMNIGENT_REMOTE_AUTH_TOKEN",
+            # Pin each child's data dir to the test's tmp; never inherit it.
+            "OMNIGENT_DATA_DIR",
             # Keep the application log in the test's data directory.
             "OMNIGENT_PROCESS_LOG_FILE",
         ):
@@ -122,6 +124,7 @@ def offline_runner_session(
                     "OMNIGENT_RUNNER_TUNNEL_BINDING_TOKEN": binding_token,
                     "OMNIGENT_RUNNER_PARENT_PID": str(os.getpid()),
                     "RUNNER_SERVER_URL": base_url,
+                    "OMNIGENT_DATA_DIR": str(data_dir),
                     "OPENAI_BASE_URL": "http://127.0.0.1:9/v1",
                     "OPENAI_API_KEY": "test-key",
                 }
@@ -183,7 +186,13 @@ def offline_runner_session(
         deadline = time.monotonic() + _OFFLINE_TIMEOUT_S
         offline = False
         while time.monotonic() < deadline:
-            health = client.get(f"{base_url}/health", params={"session_id": session_id}).json()
+            try:
+                health = client.get(f"{base_url}/health", params={"session_id": session_id}).json()
+            except (httpx.HTTPError, ValueError):
+                # A transient hiccup right after SIGKILL shouldn't abort the
+                # fixture; keep polling until the deadline.
+                time.sleep(0.5)
+                continue
             if health.get("session", {}).get("runner_online") is False:
                 offline = True
                 break

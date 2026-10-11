@@ -170,9 +170,9 @@ export function useFileContent(conversationId: string | undefined, path: string 
     !!conversationId &&
     conversationId === focusedId &&
     (sessionStatus === "running" || sessionStatus === "waiting");
-  // Serveable when the runner is online OR (runner offline but) the host can
-  // read the workspace from disk — keeps the viewer live while the agent is
-  // asleep. `false` only when neither source can answer.
+  // Serveable is tri-state: `true` when the runner is online or the host can
+  // read the workspace from disk, `false` when neither can, `undefined` until
+  // liveness resolves. The query below stays idle unless it is `true`.
   const serveable = useWorkspaceServeable(conversationId);
   const queryClient = useQueryClient();
 
