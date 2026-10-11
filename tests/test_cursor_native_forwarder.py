@@ -379,10 +379,9 @@ class TestDiscoverRotatedStore:
     def test_transient_meta_read_never_self_rotates(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # If the bound chat's meta.json reads as missing (0) while computing the
-        # floor but is readable during the scan, the floor would otherwise
-        # re-admit the bound store itself — rotating onto it would re-mirror the
-        # whole chat from rowid 0. The guard must return None, not the bound store.
+        # A transient meta.json miss (0) while computing the floor would re-admit
+        # the bound store and re-mirror it from rowid 0; the guard must return
+        # None, not the bound store.
         ws = "/home/u/proj"
         bound = self._seed_chat(tmp_path, ws, _CHAT_ID, 5_000)
         real = fwd._chat_created_ms
@@ -1708,11 +1707,9 @@ class TestForwardLoopClearRotation:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        # After binding chat A (write-once PATCH), an earlier concurrent session
-        # claims it and this session yields. When /clear starts chat B, the mirror
-        # re-discovers B through the empty-store branch; the cold-resume target
-        # must re-point through the rotation EVENT, never a second write-once
-        # PATCH (which the server rejects, stranding the resume).
+        # An earlier concurrent session claims bound chat A and this session
+        # yields; when /clear starts chat B, re-discovery must re-point the
+        # cold-resume target via the rotation EVENT, not a second write-once PATCH.
         caplog.set_level(logging.WARNING)
         chats_root = tmp_path / "chats"
         first = self._seed_chat(

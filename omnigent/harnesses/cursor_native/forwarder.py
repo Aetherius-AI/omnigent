@@ -1149,10 +1149,9 @@ async def forward_cursor_store_to_session(
                         )
                         store_path = None
                     else:
-                        # A /clear rotation re-points the cold-resume target via
-                        # the rotation event (posted at rotation time below);
-                        # retried here only while a transport failure left it
-                        # unacknowledged.
+                        # A /clear rotation re-points the cold-resume target via the
+                        # rotation event (posted below); retried here only while a
+                        # transport failure left it unacknowledged.
                         chat_id_val = store_path.parent.name
                         if patched_chat_id is not None and patched_chat_id != chat_id_val:
                             settled = await _post_external_session_rotated(
@@ -1316,10 +1315,9 @@ async def forward_cursor_store_to_session(
                             state=model_state,
                             model=observed_model,
                         )
-                        # Rotate only after draining the backlog, with a fresh cursor/model
-                        # state and cold-resume target. Never take a live sibling's chat.
-                        # A row landing in the old store between the drain and this rebind
-                        # would be lost, but /clear freezes the old chat, so it never is.
+                        # Rotate only after draining the backlog; never take a live
+                        # sibling's chat. /clear freezes the old chat, so no row can
+                        # land between the drain and this rebind.
                         if not retrying_items:
                             rotated = await asyncio.to_thread(
                                 _discover_rotated_store, store_path, launch_epoch_ms
@@ -1346,11 +1344,9 @@ async def forward_cursor_store_to_session(
                                         launch_epoch_ms=launch_epoch_ms,
                                     ),
                                 )
-                                # Re-point the cold-resume target at the new
-                                # chat. The PATCH contract is write-once, so
-                                # this rides the explicit rotation event; a
-                                # transport failure retries at the top of the
-                                # bound branch next poll.
+                                # Re-point the cold-resume target via the rotation
+                                # event (PATCH is write-once); a transport failure
+                                # retries at the top of the bound branch next poll.
                                 chat_id_val = store_path.parent.name
                                 if chat_id_val != patched_chat_id:
                                     settled = await _post_external_session_rotated(

@@ -49,11 +49,9 @@ pytestmark = pytest.mark.skipif(
     reason="cursor-native drives a runner-owned tmux pane; needs `tmux` on PATH",
 )
 
-# The first mirrored reply proves the whole cold path (runner respawn + TUI
-# auto-launch + injection + store discovery + mirror), so it gets the most
-# headroom. The post-/clear reply rides an already-warm mirror loop (~0.7s
-# poll cadence), so 90s is far beyond any healthy latency — when this expires
-# the reply is not merely slow, it is never coming.
+# The first mirrored reply proves the whole cold path (respawn + auto-launch +
+# injection + discovery + mirror), so it gets the most headroom; the post-/clear
+# reply rides a warm ~0.7s poll loop, so 90s means it is never coming.
 _FIRST_MIRROR_TIMEOUT_MS = 180_000
 _POST_CLEAR_MIRROR_TIMEOUT_MS = 90_000
 # Filesystem-side waits (the fake's state file / chat store writes).
@@ -61,16 +59,9 @@ _FS_TIMEOUT_S = 60.0
 _RUNNER_SWAP_TIMEOUT_S = 120.0
 _POLL_S = 0.5
 
-# A scripted stand-in for the ``cursor-agent`` TUI (CI provisions no Cursor
-# account). Line-oriented: the pty's canonical mode echoes input (so tmux
-# paste needles render) and delivers one line per submit. It prints the idle
-# markers the injection path settles on ("Plan, search, build" /
-# "Add a follow-up"), persists every turn into the same
-# ``~/.cursor/chats/<md5(cwd)>/<chat-id>/store.db`` blobs layout the real CLI
-# writes (user turns wrapped in ``<user_query>``), and on ``/clear`` (and its
-# aliases) starts a new chat exactly like the vendor TUI: new chat dir + new
-# store while the old store stays on disk. A ``fake-cursor-state.json`` under
-# ``$HOME/.cursor`` exposes the current chat id so the test can synchronize.
+# Scripted stand-in for the ``cursor-agent`` TUI (CI has no Cursor account): a
+# line-oriented pty that persists turns into the real ``store.db`` layout and,
+# on ``/clear``, starts a new chat dir+store like the vendor TUI.
 _FAKE_CURSOR_AGENT = r'''#!/usr/bin/env python3
 """Scripted cursor-agent TUI stand-in for e2e tests (no Cursor account)."""
 import hashlib
