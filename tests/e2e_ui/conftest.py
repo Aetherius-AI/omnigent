@@ -44,7 +44,6 @@ import signal
 import socket
 import subprocess
 import sys
-import tarfile
 import time
 import warnings
 from collections.abc import Callable, Generator, Iterator
@@ -58,9 +57,17 @@ import pytest
 from playwright.sync_api import APIResponse, Error, Locator, Page, Route, expect
 
 from tests._helpers.compat import (
+    apply_runner_env,
     apply_server_env,
+    compat_runner_cwd,
     compat_server_cwd,
+    runner_executable,
     server_executable,
+)
+from tests._helpers.native_session import create_native_session
+from tests._helpers.session import bind_session_runner, bundle_files, post_session_bundle
+from tests._helpers.workspace_geometry import (
+    workspace_bar_needs_collapse as workspace_bar_needs_collapse,
 )
 from tests.codex_parity.helpers import ev_assistant_message, ev_completed, ev_response_created
 from tests.codex_parity.sidecar_harness import (
@@ -124,30 +131,6 @@ def fetch_with_retry(route: Route, *, attempts: int = 3) -> APIResponse:
             if not any(marker in str(exc) for marker in _TRANSIENT_FETCH_ERRORS):
                 raise
     return route.fetch()
-
-
-def workspace_bar_needs_collapse(bar: Locator) -> bool:
-    """Whether the composer workspace bar's full labels would overflow or truncate.
-
-    Mirrors the bar's own rule (any ``[data-workspace-collapse-label]`` wider
-    than its box, or the row wider than the bar) by probing the expanded layout
-    in place and restoring the current verdict within the same evaluation, so a
-    test can assert the icon collapse is justified — and absent when everything fits.
-
-    :param bar: Locator for ``composer-workspace-controls``.
-    :returns: ``True`` when the bar must show icons only.
-    """
-    return bar.evaluate(
-        """bar => {
-          const verdict = bar.dataset.labels;
-          delete bar.dataset.labels;
-          const labels = [...bar.querySelectorAll('[data-workspace-collapse-label]')];
-          const cramped = bar.scrollWidth > bar.clientWidth + 1
-            || labels.some(el => el.scrollWidth > el.clientWidth + 1);
-          if (verdict !== undefined) bar.dataset.labels = verdict;
-          return cramped;
-        }"""
-    )
 
 
 def open_right_rail(page: Page) -> None:
@@ -272,10 +255,8 @@ def _build_hello_world_bundle() -> bytes:
 _HEALTH_TIMEOUT_S = 30.0
 _HEALTH_POLL_INTERVAL_S = 0.5
 
-# Switch-target built-ins for the Files-tab os_env-boundary test
-# (test_switch_agent_files_tab.py). The in-place switch dialog lists
-# BUILT-IN agents only (``session_id IS NULL`` — see
-# ``switch_session_agent``), and built-ins can only be seeded at server
+# Fork-into-another-agent target built-ins (test_fork_switch_agent.py).
+# Built-ins can only be seeded at server
 # startup via ``OMNIGENT_BUILTIN_AGENT_DIRS``, so ``live_server`` writes
 # these two specs to disk and threads them through that env var. Both run
 # the same openai-agents harness as ``hello_world`` (same provider family
@@ -456,21 +437,11 @@ def _register_agent_yaml(
     Returns the new agent id on 201, or None on 409 (already registered against
     a long-lived ``--ui-base-url`` server).
     """
-    import json as _json
 
     yaml_bytes = yaml_text.encode()
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        info = tarfile.TarInfo(arcname)
-        info.size = len(yaml_bytes)
-        tar.addfile(info, io.BytesIO(yaml_bytes))
+    bundle_bytes = bundle_files({arcname: yaml_bytes})
 
-    resp = httpx.post(
-        f"{base_url}/v1/sessions",
-        data={"metadata": _json.dumps({})},
-        files={"bundle": ("agent.tar.gz", buf.getvalue(), "application/gzip")},
-        timeout=10.0,
-    )
+    resp = post_session_bundle(httpx.post, f"{base_url}/v1/sessions", bundle_bytes, timeout=10.0)
     if resp.status_code == 409:
         return None
     resp.raise_for_status()
@@ -886,8 +857,9 @@ def _spawn_runner_against_external_server(
     }
     log_handle = open(log_path, "w")  # noqa: SIM115 — closed in finally
     proc = subprocess.Popen(
-        [sys.executable, "-m", "omnigent.runner._entry"],
-        env=env,
+        [runner_executable(), "-m", "omnigent.runner._entry"],
+        env=apply_runner_env(env),
+        cwd=compat_runner_cwd(),
         stdout=log_handle,
         stderr=subprocess.STDOUT,
     )
@@ -1126,8 +1098,9 @@ def live_server(
         "OPENAI_API_KEY": "mock-key",
     }
     runner_proc = subprocess.Popen(
-        [sys.executable, "-m", "omnigent.runner._entry"],
-        env=runner_env,
+        [runner_executable(), "-m", "omnigent.runner._entry"],
+        env=apply_runner_env(runner_env),
+        cwd=compat_runner_cwd(),
         stdout=runner_log_handle,
         stderr=subprocess.STDOUT,
     )
@@ -1306,7 +1279,6 @@ def seeded_session(
     :returns: ``(base_url, session_id)``. Tests typically navigate to
         ``f"{base_url}/c/{session_id}"``.
     """
-    import json as _json
 
     respawned_runner = _ensure_runner_online(live_server, tmp_path_factory)
     runner_id = str(_server_state["runner_id"])
@@ -1314,21 +1286,13 @@ def seeded_session(
     # pre-registered the agent via --agent, but since /api/agents is
     # removed we create a fresh session-scoped agent via multipart.
     bundle = _build_hello_world_bundle()
-    create_resp = httpx.post(
-        f"{live_server}/v1/sessions",
-        data={"metadata": _json.dumps({})},
-        files={"bundle": ("agent.tar.gz", bundle, "application/gzip")},
-        timeout=30.0,
+    create_resp = post_session_bundle(
+        httpx.post, f"{live_server}/v1/sessions", bundle, timeout=30.0
     )
     create_resp.raise_for_status()
     session_id = create_resp.json()["session_id"]
 
-    patch_resp = httpx.patch(
-        f"{live_server}/v1/sessions/{session_id}",
-        json={"runner_id": runner_id},
-        timeout=10.0,
-    )
-    patch_resp.raise_for_status()
+    bind_session_runner(httpx.patch, live_server, session_id, runner_id, timeout=10.0)
 
     try:
         yield (live_server, session_id)
@@ -1357,24 +1321,13 @@ def _create_runner_bound_session(base_url: str, runner_id: str) -> str:
         e.g. ``"runner_token_abc123"``.
     :returns: The new session/conversation id, e.g. ``"conv_abc123"``.
     """
-    import json as _json
 
     bundle = _build_hello_world_bundle()
-    create_resp = httpx.post(
-        f"{base_url}/v1/sessions",
-        data={"metadata": _json.dumps({})},
-        files={"bundle": ("agent.tar.gz", bundle, "application/gzip")},
-        timeout=30.0,
-    )
+    create_resp = post_session_bundle(httpx.post, f"{base_url}/v1/sessions", bundle, timeout=30.0)
     create_resp.raise_for_status()
     session_id = create_resp.json()["session_id"]
 
-    patch_resp = httpx.patch(
-        f"{base_url}/v1/sessions/{session_id}",
-        json={"runner_id": runner_id},
-        timeout=10.0,
-    )
-    patch_resp.raise_for_status()
+    bind_session_runner(httpx.patch, base_url, session_id, runner_id, timeout=10.0)
     return session_id
 
 
@@ -1438,8 +1391,9 @@ def _ensure_runner_online(
         ),
     }
     proc = subprocess.Popen(
-        [sys.executable, "-m", "omnigent.runner._entry"],
-        env=env,
+        [runner_executable(), "-m", "omnigent.runner._entry"],
+        env=apply_runner_env(env),
+        cwd=compat_runner_cwd(),
         stdout=log_handle,
         stderr=subprocess.STDOUT,
     )
@@ -1692,21 +1646,13 @@ def terminal_session(
         info = tarfile.TarInfo(name=f"{_TERMINAL_AGENT_NAME}.yaml")
         info.size = len(data)
         tar.addfile(info, io.BytesIO(data))
-    create_resp = httpx.post(
-        f"{live_server}/v1/sessions",
-        data={"metadata": _json.dumps({})},
-        files={"bundle": ("agent.tar.gz", buf.getvalue(), "application/gzip")},
-        timeout=10.0,
+    create_resp = post_session_bundle(
+        httpx.post, f"{live_server}/v1/sessions", buf.getvalue(), timeout=10.0
     )
     create_resp.raise_for_status()
     session_id = create_resp.json()["session_id"]
 
-    patch_resp = httpx.patch(
-        f"{live_server}/v1/sessions/{session_id}",
-        json={"runner_id": runner_id},
-        timeout=10.0,
-    )
-    patch_resp.raise_for_status()
+    bind_session_runner(httpx.patch, live_server, session_id, runner_id, timeout=10.0)
 
     try:
         yield (live_server, session_id)
@@ -1846,7 +1792,6 @@ def two_agent_chat_session(
     :param tmp_path_factory: Pytest temp path factory (for a respawn log).
     :returns: A :class:`TwoAgentChatSession` handle.
     """
-    import json as _json
     import uuid
 
     verification_code = f"vogon-{uuid.uuid4().hex[:10]}"
@@ -1915,29 +1860,17 @@ def two_agent_chat_session(
     runner_id = str(_server_state["runner_id"])
 
     yaml_bytes = yaml_text.encode()
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        # Non-config.yaml arcname routes the bundle through the omnigent
-        # compat adapter, whose loader parses the inline `type: agent`
-        # tool. The spec_version:1 parser does not accept this shorthand.
-        info = tarfile.TarInfo(name=f"{_TWO_AGENT_PARENT_NAME}.yaml")
-        info.size = len(yaml_bytes)
-        tar.addfile(info, io.BytesIO(yaml_bytes))
-    create_resp = httpx.post(
-        f"{live_server}/v1/sessions",
-        data={"metadata": _json.dumps({})},
-        files={"bundle": ("agent.tar.gz", buf.getvalue(), "application/gzip")},
-        timeout=10.0,
+    # Non-config.yaml arcname routes the bundle through the omnigent
+    # compat adapter, whose loader parses the inline `type: agent`
+    # tool. The spec_version:1 parser does not accept this shorthand.
+    bundle_bytes = bundle_files({f"{_TWO_AGENT_PARENT_NAME}.yaml": yaml_bytes})
+    create_resp = post_session_bundle(
+        httpx.post, f"{live_server}/v1/sessions", bundle_bytes, timeout=10.0
     )
     create_resp.raise_for_status()
     session_id = create_resp.json()["session_id"]
 
-    patch_resp = httpx.patch(
-        f"{live_server}/v1/sessions/{session_id}",
-        json={"runner_id": runner_id},
-        timeout=10.0,
-    )
-    patch_resp.raise_for_status()
+    bind_session_runner(httpx.patch, live_server, session_id, runner_id, timeout=10.0)
 
     try:
         yield TwoAgentChatSession(
@@ -2079,28 +2012,16 @@ def approval_session(
     runner_id = str(_server_state["runner_id"])
 
     yaml_bytes = agent_yaml_text.encode()
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        # Strict path: arcname config.yaml keeps it on the spec_version:1
-        # parser, which is the one that honors `guardrails`.
-        info = tarfile.TarInfo(name="config.yaml")
-        info.size = len(yaml_bytes)
-        tar.addfile(info, io.BytesIO(yaml_bytes))
-    create_resp = httpx.post(
-        f"{live_server}/v1/sessions",
-        data={"metadata": _json.dumps({})},
-        files={"bundle": ("agent.tar.gz", buf.getvalue(), "application/gzip")},
-        timeout=30.0,
+    # Strict path: arcname config.yaml keeps it on the spec_version:1
+    # parser, which is the one that honors `guardrails`.
+    bundle_bytes = bundle_files({"config.yaml": yaml_bytes})
+    create_resp = post_session_bundle(
+        httpx.post, f"{live_server}/v1/sessions", bundle_bytes, timeout=30.0
     )
     create_resp.raise_for_status()
     session_id = create_resp.json()["session_id"]
 
-    patch_resp = httpx.patch(
-        f"{live_server}/v1/sessions/{session_id}",
-        json={"runner_id": runner_id},
-        timeout=10.0,
-    )
-    patch_resp.raise_for_status()
+    bind_session_runner(httpx.patch, live_server, session_id, runner_id, timeout=10.0)
 
     try:
         yield (live_server, session_id)
@@ -2606,12 +2527,7 @@ def _bind_session_runner(base_url: str, session_id: str, runner_id: str) -> None
     :param session_id: The session/conversation id to bind.
     :param runner_id: The token-bound runner id the session dispatches to.
     """
-    patch = httpx.patch(
-        f"{base_url}/v1/sessions/{session_id}",
-        json={"runner_id": runner_id},
-        timeout=10.0,
-    )
-    patch.raise_for_status()
+    bind_session_runner(httpx.patch, base_url, session_id, runner_id, timeout=10.0)
 
 
 def _create_bundled_session(base_url: str, runner_id: str, yaml_text: str) -> str:
@@ -2626,21 +2542,11 @@ def _create_bundled_session(base_url: str, runner_id: str, yaml_text: str) -> st
     :param yaml_text: The agent spec body.
     :returns: The new session/conversation id.
     """
-    import json as _json
 
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        data = yaml_text.encode()
-        info = tarfile.TarInfo("config.yaml")
-        info.size = len(data)
-        tar.addfile(info, io.BytesIO(data))
+    data = yaml_text.encode()
+    bundle_bytes = bundle_files({"config.yaml": data})
 
-    create = httpx.post(
-        f"{base_url}/v1/sessions",
-        data={"metadata": _json.dumps({})},
-        files={"bundle": ("agent.tar.gz", buf.getvalue(), "application/gzip")},
-        timeout=30.0,
-    )
+    create = post_session_bundle(httpx.post, f"{base_url}/v1/sessions", bundle_bytes, timeout=30.0)
     create.raise_for_status()
     session_id = str(create.json()["session_id"])
     _bind_session_runner(base_url, session_id, runner_id)
@@ -2703,45 +2609,11 @@ def _create_native_claude_session(
         launches with the production defaults.
     :returns: The new session/conversation id.
     """
-    import json as _json
-    import tempfile
-
-    from omnigent._wrapper_labels import (
-        CLAUDE_NATIVE_WRAPPER_VALUE,
-        UI_MODE_LABEL_KEY,
-        UI_MODE_TERMINAL_VALUE,
-        WRAPPER_LABEL_KEY,
-    )
-    from omnigent.harnesses.claude_native.main import _materialize_claude_agent_spec
-
-    with tempfile.TemporaryDirectory() as _tmp:
-        spec_path = _materialize_claude_agent_spec(Path(_tmp))
-        yaml_text = spec_path.read_text()
-
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        data = yaml_text.encode()
-        # Non-config.yaml arcname → omnigent compat translator (the spec has
-        # no spec_version), matching the terminal_session fixture.
-        info = tarfile.TarInfo("claude-native-ui.yaml")
-        info.size = len(data)
-        tar.addfile(info, io.BytesIO(data))
-
-    labels = {
-        UI_MODE_LABEL_KEY: UI_MODE_TERMINAL_VALUE,
-        WRAPPER_LABEL_KEY: CLAUDE_NATIVE_WRAPPER_VALUE,
-    }
-    metadata: dict[str, object] = {"labels": labels}
+    metadata: dict[str, object] = {}
     if terminal_launch_args:
         metadata["terminal_launch_args"] = terminal_launch_args
-    create = httpx.post(
-        f"{base_url}/v1/sessions",
-        data={"metadata": _json.dumps(metadata)},
-        files={"bundle": ("claude-native-ui.tar.gz", buf.getvalue(), "application/gzip")},
-        timeout=30.0,
-    )
-    create.raise_for_status()
-    session_id = str(create.json()["session_id"])
+    created = create_native_session(httpx, base_url, harness="claude", metadata=metadata)
+    session_id = str(created["session_id"])
     _bind_session_runner(base_url, session_id, runner_id)
     return session_id
 
@@ -2871,52 +2743,15 @@ def _create_native_codex_session(
     :param model: Optional Codex model to pin in the wrapper spec.
     :returns: The new session/conversation id.
     """
-    import json as _json
-    import tempfile
-
-    from omnigent._wrapper_labels import (
-        CODEX_NATIVE_WRAPPER_VALUE,
-        UI_MODE_LABEL_KEY,
-        UI_MODE_TERMINAL_VALUE,
-        WRAPPER_LABEL_KEY,
+    # Keep workspace session-local; runner-wide cwd changes other file surfaces.
+    created = create_native_session(
+        httpx,
+        base_url,
+        harness="codex",
+        model=model,
+        metadata={"workspace": str(_REPO_ROOT)},
     )
-    from omnigent.harnesses.codex_native.main import _materialize_codex_agent_spec
-
-    with tempfile.TemporaryDirectory() as _tmp:
-        spec_path = _materialize_codex_agent_spec(Path(_tmp), model=model)
-        yaml_text = spec_path.read_text()
-
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        data = yaml_text.encode()
-        # Non-config.yaml arcname → omnigent compat translator (the spec has
-        # no spec_version), matching the terminal_session fixture.
-        info = tarfile.TarInfo("codex-native-ui.yaml")
-        info.size = len(data)
-        tar.addfile(info, io.BytesIO(data))
-
-    labels = {
-        UI_MODE_LABEL_KEY: UI_MODE_TERMINAL_VALUE,
-        WRAPPER_LABEL_KEY: CODEX_NATIVE_WRAPPER_VALUE,
-    }
-    # Runner-owned Codex terminals hard-require a workspace: unlike the
-    # claude-native path (which falls back to Path.cwd()),
-    # _codex_session_workspace raises if neither the session's stored
-    # ``workspace`` nor OMNIGENT_RUNNER_WORKSPACE is set. Pin it on THIS
-    # session only (via metadata.workspace) rather than exporting
-    # OMNIGENT_RUNNER_WORKSPACE on the shared runner — a runner-wide value
-    # changes file-surface advertisement for every other session on the runner
-    # (it regressed the mobile file-drawer suite). The repo root is the same cwd
-    # claude falls back to, and is a valid dir on the runner's filesystem.
-    metadata = {"labels": labels, "workspace": str(_REPO_ROOT)}
-    create = httpx.post(
-        f"{base_url}/v1/sessions",
-        data={"metadata": _json.dumps(metadata)},
-        files={"bundle": ("codex-native-ui.tar.gz", buf.getvalue(), "application/gzip")},
-        timeout=30.0,
-    )
-    create.raise_for_status()
-    session_id = str(create.json()["session_id"])
+    session_id = str(created["session_id"])
     _bind_session_runner(base_url, session_id, runner_id)
     return session_id
 
@@ -3238,8 +3073,9 @@ def mocked_native_codex_session(
     try:
         proc = _spawn_server()
         runner_proc = subprocess.Popen(
-            [sys.executable, "-m", "omnigent.runner._entry"],
-            env=runner_env,
+            [runner_executable(), "-m", "omnigent.runner._entry"],
+            env=apply_runner_env(runner_env),
+            cwd=compat_runner_cwd(),
             stdout=runner_log_handle,
             stderr=subprocess.STDOUT,
         )
@@ -3344,56 +3180,14 @@ def _create_native_cursor_session(
     :param runner_id: The token-bound runner id to bind.
     :returns: The new session/conversation id.
     """
-    import json as _json
-    import tempfile
-
-    from omnigent._wrapper_labels import (
-        CURSOR_NATIVE_WRAPPER_VALUE,
-        UI_MODE_LABEL_KEY,
-        UI_MODE_TERMINAL_VALUE,
-        WRAPPER_LABEL_KEY,
+    # An empty launch_args enables approval prompts; the default trusts the workspace.
+    created = create_native_session(
+        httpx,
+        base_url,
+        harness="cursor",
+        metadata={"workspace": str(_REPO_ROOT), "terminal_launch_args": list(launch_args)},
     )
-    from omnigent.harnesses.cursor_native.main import _materialize_cursor_agent_spec
-
-    with tempfile.TemporaryDirectory() as _tmp:
-        spec_path = _materialize_cursor_agent_spec(Path(_tmp))
-        yaml_text = spec_path.read_text()
-
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        data = yaml_text.encode()
-        # Non-config.yaml arcname → omnigent compat translator (the spec has
-        # no spec_version), matching the terminal_session fixture.
-        info = tarfile.TarInfo("cursor-native-ui.yaml")
-        info.size = len(data)
-        tar.addfile(info, io.BytesIO(data))
-
-    labels = {
-        UI_MODE_LABEL_KEY: UI_MODE_TERMINAL_VALUE,
-        WRAPPER_LABEL_KEY: CURSOR_NATIVE_WRAPPER_VALUE,
-    }
-    # Pin a real workspace on THIS session (like the codex fixture): the
-    # forwarder keys cursor's chat store by ``md5(cwd)``, so the TUI needs a
-    # concrete launch cwd. The repo root is a valid dir on the runner's
-    # filesystem. ``-f`` trusts that dir + auto-approves tools so the
-    # unattended pane never hangs on an approval prompt.
-    metadata = {
-        "labels": labels,
-        "workspace": str(_REPO_ROOT),
-        # ``-f`` (the default) trusts the dir + auto-approves tools so the
-        # unattended pane never hangs. The approval-mirror test passes
-        # ``launch_args=()`` so cursor's per-tool prompts fire and surface as
-        # web elicitation cards.
-        "terminal_launch_args": list(launch_args),
-    }
-    create = httpx.post(
-        f"{base_url}/v1/sessions",
-        data={"metadata": _json.dumps(metadata)},
-        files={"bundle": ("cursor-native-ui.tar.gz", buf.getvalue(), "application/gzip")},
-        timeout=30.0,
-    )
-    create.raise_for_status()
-    session_id = str(create.json()["session_id"])
+    session_id = str(created["session_id"])
     _bind_session_runner(base_url, session_id, runner_id)
     return session_id
 
@@ -3415,44 +3209,13 @@ def _create_native_goose_session(base_url: str, runner_id: str) -> str:
     :param runner_id: The token-bound runner id to bind.
     :returns: The new session/conversation id.
     """
-    import json as _json
-    import tempfile
-
-    from omnigent._wrapper_labels import (
-        GOOSE_NATIVE_WRAPPER_VALUE,
-        UI_MODE_LABEL_KEY,
-        UI_MODE_TERMINAL_VALUE,
-        WRAPPER_LABEL_KEY,
+    created = create_native_session(
+        httpx,
+        base_url,
+        harness="goose",
+        metadata={"workspace": str(_REPO_ROOT)},
     )
-    from omnigent.harnesses.goose_native.main import _materialize_goose_agent_spec
-
-    with tempfile.TemporaryDirectory() as _tmp:
-        spec_path = _materialize_goose_agent_spec(Path(_tmp))
-        yaml_text = spec_path.read_text()
-
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        data = yaml_text.encode()
-        info = tarfile.TarInfo("goose-native-ui.yaml")
-        info.size = len(data)
-        tar.addfile(info, io.BytesIO(data))
-
-    labels = {
-        UI_MODE_LABEL_KEY: UI_MODE_TERMINAL_VALUE,
-        WRAPPER_LABEL_KEY: GOOSE_NATIVE_WRAPPER_VALUE,
-    }
-    metadata = {
-        "labels": labels,
-        "workspace": str(_REPO_ROOT),
-    }
-    create = httpx.post(
-        f"{base_url}/v1/sessions",
-        data={"metadata": _json.dumps(metadata)},
-        files={"bundle": ("goose-native-ui.tar.gz", buf.getvalue(), "application/gzip")},
-        timeout=30.0,
-    )
-    create.raise_for_status()
-    session_id = str(create.json()["session_id"])
+    session_id = str(created["session_id"])
     _bind_session_runner(base_url, session_id, runner_id)
     return session_id
 
@@ -3504,44 +3267,13 @@ def _create_native_kiro_session(base_url: str, runner_id: str) -> str:
     :param runner_id: The token-bound runner id to bind.
     :returns: The new session/conversation id.
     """
-    import json as _json
-    import tempfile
-
-    from omnigent._wrapper_labels import (
-        KIRO_NATIVE_WRAPPER_VALUE,
-        UI_MODE_LABEL_KEY,
-        UI_MODE_TERMINAL_VALUE,
-        WRAPPER_LABEL_KEY,
+    created = create_native_session(
+        httpx,
+        base_url,
+        harness="kiro",
+        metadata={"workspace": str(_REPO_ROOT)},
     )
-    from omnigent.harnesses.kiro_native.main import _materialize_kiro_agent_spec
-
-    with tempfile.TemporaryDirectory() as _tmp:
-        spec_path = _materialize_kiro_agent_spec(Path(_tmp), model=None)
-        yaml_text = spec_path.read_text()
-
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        data = yaml_text.encode()
-        info = tarfile.TarInfo("kiro-native-ui.yaml")
-        info.size = len(data)
-        tar.addfile(info, io.BytesIO(data))
-
-    labels = {
-        UI_MODE_LABEL_KEY: UI_MODE_TERMINAL_VALUE,
-        WRAPPER_LABEL_KEY: KIRO_NATIVE_WRAPPER_VALUE,
-    }
-    metadata = {
-        "labels": labels,
-        "workspace": str(_REPO_ROOT),
-    }
-    create = httpx.post(
-        f"{base_url}/v1/sessions",
-        data={"metadata": _json.dumps(metadata)},
-        files={"bundle": ("kiro-native-ui.tar.gz", buf.getvalue(), "application/gzip")},
-        timeout=30.0,
-    )
-    create.raise_for_status()
-    session_id = str(create.json()["session_id"])
+    session_id = str(created["session_id"])
     _bind_session_runner(base_url, session_id, runner_id)
     return session_id
 
@@ -3593,44 +3325,13 @@ def _create_native_hermes_session(base_url: str, runner_id: str) -> str:
     :param runner_id: The token-bound runner id to bind.
     :returns: The new session/conversation id.
     """
-    import json as _json
-    import tempfile
-
-    from omnigent._wrapper_labels import (
-        HERMES_NATIVE_WRAPPER_VALUE,
-        UI_MODE_LABEL_KEY,
-        UI_MODE_TERMINAL_VALUE,
-        WRAPPER_LABEL_KEY,
+    created = create_native_session(
+        httpx,
+        base_url,
+        harness="hermes",
+        metadata={"workspace": str(_REPO_ROOT)},
     )
-    from omnigent.harnesses.hermes_native.main import _materialize_hermes_agent_spec
-
-    with tempfile.TemporaryDirectory() as _tmp:
-        spec_path = _materialize_hermes_agent_spec(Path(_tmp))
-        yaml_text = spec_path.read_text()
-
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        data = yaml_text.encode()
-        info = tarfile.TarInfo("hermes-native-ui.yaml")
-        info.size = len(data)
-        tar.addfile(info, io.BytesIO(data))
-
-    labels = {
-        UI_MODE_LABEL_KEY: UI_MODE_TERMINAL_VALUE,
-        WRAPPER_LABEL_KEY: HERMES_NATIVE_WRAPPER_VALUE,
-    }
-    metadata = {
-        "labels": labels,
-        "workspace": str(_REPO_ROOT),
-    }
-    create = httpx.post(
-        f"{base_url}/v1/sessions",
-        data={"metadata": _json.dumps(metadata)},
-        files={"bundle": ("hermes-native-ui.tar.gz", buf.getvalue(), "application/gzip")},
-        timeout=30.0,
-    )
-    create.raise_for_status()
-    session_id = str(create.json()["session_id"])
+    session_id = str(created["session_id"])
     _bind_session_runner(base_url, session_id, runner_id)
     return session_id
 
