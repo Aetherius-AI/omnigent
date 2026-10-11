@@ -2294,8 +2294,7 @@ async def test_an_off_gateway_host_never_offers_the_static_table_to_a_turn(
                 conv.id, conv, body, conv_store, runner_client
             )
 
-    offered = [model for offer in judge.offered for models in offer.values() for model in models]
-    assert not any(model.startswith("databricks-") for model in offered), offered
+    assert judge.offered == [], judge.offered
     decisions = _routing_decisions(conv_store, conv.id)
     pinned = [d.data.model for d in decisions if str(d.data.model).startswith("databricks-")]
     assert pinned == [], [d.data for d in decisions]

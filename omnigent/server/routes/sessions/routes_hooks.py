@@ -90,9 +90,8 @@ from omnigent.server.routes._sessions.helpers import (
 from omnigent.server.routes._sessions.orchestration import (
     _hold_native_ask_gate,
     _publish_and_wait_for_harness_elicitation,
-    _spawn_gateway_backed,
     _spawn_native_blocked_notice_forward,
-    _spawn_static_table_backed,
+    _spawn_routing_backing,
 )
 from omnigent.server.schemas import (
     ElicitationRequestParams,
@@ -1646,8 +1645,9 @@ def register_hooks_routes(
         _spawn_harnesses = (
             AUTO_NATIVE_ROUTING_HARNESSES if cross_harness else (route_request.harness,)
         )
-        gateway_backed = await _spawn_gateway_backed(request, conv, _spawn_harnesses)
-        allow_static_fallback = await _spawn_static_table_backed(request, conv, _spawn_harnesses)
+        gateway_backed, allow_static_fallback = await _spawn_routing_backing(
+            request, conv, _spawn_harnesses
+        )
         # Offer the live catalog: the static table lags model generations, and
         # a pick the workspace serves must not look unservable and get
         # substituted down a tier.
@@ -1761,15 +1761,10 @@ def register_hooks_routes(
         # This pane's own family decides which router can serve its first turn.
         # A create off the Unity Gateway now succeeds (the built-in judge answers),
         # so this hook must make the same choice the composer path does.
-        turn_gateway_backed = (
-            await _spawn_gateway_backed(request, conv, (route_request.harness,))
+        turn_gateway_backed, turn_static_backed = (
+            await _spawn_routing_backing(request, conv, (route_request.harness,))
             if conv is not None
-            else True
-        )
-        turn_static_backed = (
-            await _spawn_static_table_backed(request, conv, (route_request.harness,))
-            if conv is not None
-            else True
+            else (True, True)
         )
 
         async def _route(

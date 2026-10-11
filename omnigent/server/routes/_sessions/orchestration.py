@@ -9831,14 +9831,15 @@ async def _spawn_gateway_backed(
     return _gateway_backed(await _session_routing_host(conv, host_store), harnesses)
 
 
-async def _spawn_static_table_backed(
+async def _spawn_routing_backing(
     request: Request,
     conv: Conversation,
     harnesses: Sequence[str],
-) -> bool:
-    """Spawn-time sibling of :func:`_static_table_backed`: may a spawn use the static table?"""
+) -> tuple[bool, bool]:
+    """``(gateway_backed, allow_static_fallback)`` for a spawn, from a single host read."""
     host_store = getattr(request.app.state, "host_store", None)
-    return _static_table_backed(await _session_routing_host(conv, host_store), harnesses)
+    host = await _session_routing_host(conv, host_store)
+    return _gateway_backed(host, harnesses), _static_table_backed(host, harnesses)
 
 
 def _harness_labels(harnesses: Sequence[str]) -> str:
