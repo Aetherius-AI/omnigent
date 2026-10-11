@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import time
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -109,12 +110,16 @@ def installed_codex_skills() -> Iterator[_InstalledSkills]:
     )
     codex_root = Path.home() / ".codex" / "skills"
     shared_root = Path.home() / ".agents" / "skills"
-    created = [
-        _write_skill(codex_root, skills.control, skills.control_marker),
-        _write_skill(codex_root, skills.slash, skills.slash_marker),
-        _write_skill(shared_root, skills.shared, skills.shared_marker),
-    ]
+    # Record each directory as it is written so a failure partway through
+    # setup still tears down whatever was already created.
+    created: list[Path] = []
     try:
+        for root, name, marker in (
+            (codex_root, skills.control, skills.control_marker),
+            (codex_root, skills.slash, skills.slash_marker),
+            (shared_root, skills.shared, skills.shared_marker),
+        ):
+            created.append(_write_skill(root, name, marker))
         yield skills
     finally:
         for skill_dir in created:
@@ -169,9 +174,16 @@ def _send_and_capture_marker(
         timeout=_MOCK_TURN_TIMEOUT_MS
     )
     expect(page.locator(_WORKING)).to_have_count(0, timeout=_MOCK_TURN_TIMEOUT_MS)
-    page.wait_for_timeout(1_000)
-    captured = httpx.get(f"{mock_url}/mock/requests", timeout=10).json()["requests"]
-    return any(nonce in (blob := json.dumps(req)) and marker in blob for req in captured)
+    # The turn's model request can land in the capture log slightly after the
+    # reply renders, so poll to a deadline instead of a single fixed wait.
+    deadline = time.monotonic() + 10.0
+    while True:
+        captured = httpx.get(f"{mock_url}/mock/requests", timeout=10).json()["requests"]
+        if any(nonce in (blob := json.dumps(req)) and marker in blob for req in captured):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        page.wait_for_timeout(200)
 
 
 _needs_mock_capture = pytest.mark.skipif(

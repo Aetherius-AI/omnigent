@@ -920,6 +920,10 @@ def _slash_skill_input_items(content: object, bridge_dir: Path) -> list[dict[str
     if match is None:
         return None
     name, rest = match.group(1), match.group(2)
+    # The name is a single path segment under skills/; reject dot segments and
+    # separators so attacker-controlled text can never climb out of that root.
+    if name in {".", ".."} or "\\" in name:
+        return None
     skill_md = codex_home_for_bridge_dir(bridge_dir) / "skills" / name / "SKILL.md"
     if not skill_md.is_file():
         return None

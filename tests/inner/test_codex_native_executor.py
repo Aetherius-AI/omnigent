@@ -651,6 +651,131 @@ def test_path_like_slash_text_is_not_intercepted(
     ]
 
 
+def test_dot_segment_slash_text_is_not_intercepted(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A dot-segment name such as ``/..`` never escapes the skills root.
+
+    ``skills/../SKILL.md`` resolves to a file one level up, so a bare
+    ``is_file`` check would hand Codex a skill item pointing outside the
+    per-session skills directory. The name guard must reject the dot
+    segment first and leave the text untouched.
+    """
+    _FakeCodexNativeClient.requests = []
+    _FakeCodexNativeClient.created = []
+    _FakeCodexNativeClient.next_turn = 1
+    monkeypatch.setattr(
+        "omnigent.harnesses.codex_native.app_server.CodexAppServerClient",
+        _FakeCodexNativeClient,
+    )
+    write_bridge_state(
+        tmp_path,
+        CodexNativeBridgeState(
+            session_id="conv_123",
+            socket_path=str(tmp_path / "app-server.sock"),
+            thread_id="thread_123",
+            codex_home=str(tmp_path / "codex-home"),
+            active_turn_id=None,
+            cwd=str(tmp_path),
+        ),
+    )
+    # The traversal target exists, so only the guard — not a missing file —
+    # keeps "/.." from being treated as a skill.
+    escaped = tmp_path / "codex-home" / "SKILL.md"
+    escaped.parent.mkdir(parents=True)
+    escaped.write_text("---\nname: escaped\n---\nEscaped.", encoding="utf-8")
+    (tmp_path / "codex-home" / "skills").mkdir()
+    executor = CodexNativeExecutor(bridge_dir=tmp_path)
+
+    events = _collect_turn_events(executor, "/.. do something")
+
+    assert [type(event) for event in events] == [TurnComplete]
+    assert _FakeCodexNativeClient.requests == [
+        (
+            "turn/start",
+            {
+                "threadId": "thread_123",
+                "input": [{"type": "text", "text": "/.. do something"}],
+                "environments": [{"environmentId": "local", "cwd": str(tmp_path)}],
+            },
+        ),
+    ]
+
+
+def test_multimodal_slash_command_is_not_intercepted(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A ``/skill`` turn carrying an image stays literal; the image is kept.
+
+    Interception is text-only: when the turn also has a non-text block the
+    leading ``/slash-skill`` is left to Codex verbatim as a text item and the
+    image still materializes to a ``localImage`` item. The skill is registered
+    on disk, so a text-only turn would be intercepted — proving the fallthrough
+    is caused by the multimodal content, not a missing skill.
+    """
+    _FakeCodexNativeClient.requests = []
+    _FakeCodexNativeClient.created = []
+    _FakeCodexNativeClient.next_turn = 1
+    monkeypatch.setattr(
+        "omnigent.harnesses.codex_native.app_server.CodexAppServerClient",
+        _FakeCodexNativeClient,
+    )
+    write_bridge_state(
+        tmp_path,
+        CodexNativeBridgeState(
+            session_id="conv_123",
+            socket_path=str(tmp_path / "app-server.sock"),
+            thread_id="thread_123",
+            codex_home=str(tmp_path / "codex-home"),
+            active_turn_id=None,
+            cwd=str(tmp_path),
+        ),
+    )
+    skill_md = tmp_path / "codex-home" / "skills" / "slash-skill" / "SKILL.md"
+    skill_md.parent.mkdir(parents=True)
+    skill_md.write_text("---\nname: slash-skill\n---\nBody.", encoding="utf-8")
+    executor = CodexNativeExecutor(bridge_dir=tmp_path)
+
+    async def run() -> list[Any]:
+        """Drive one turn whose text is a ``/skill`` command plus an image.
+
+        :returns: Events yielded by the turn.
+        """
+        events: list[Any] = []
+        async for event in executor.run_turn(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "/slash-skill do the thing"},
+                        {"type": "input_image", "image_url": _PNG_DATA_URI},
+                    ],
+                }
+            ],
+            [],
+            "",
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(run())
+
+    assert [type(event) for event in events] == [TurnComplete]
+    assert len(_FakeCodexNativeClient.requests) == 1
+    method, params = _FakeCodexNativeClient.requests[0]
+    assert method == "turn/start"
+    items = params["input"]
+    # No skill item: the leading command stayed literal text.
+    assert all(item["type"] != "skill" for item in items), items
+    texts = [item for item in items if item["type"] == "text"]
+    assert [item["text"] for item in texts] == ["/slash-skill do the thing"]
+    # The image still reaches the model as its own attachment item.
+    local_images = [item for item in items if item["type"] == "localImage"]
+    assert len(local_images) == 1, items
+
+
 def test_system_prompt_does_not_override_collaboration_mode(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
