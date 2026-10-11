@@ -18,8 +18,12 @@ from omnigent.harnesses.claude_native.bridge import (
     record_hook_event,
 )
 from tests.harnesses.claude_native.forwarder._support import (
+    _count_transcript_scans,
     _get_recorded_request,
+    _poll_subagents,
+    _registering_handler,
     _seed_subagent_on_disk,
+    _set_aside_warnings,
     _start_recording_server_with_responses,
     _wait_for_json_state,
 )
@@ -438,12 +442,15 @@ async def test_subagent_watcher_defers_a_spawn_owned_by_two_transcripts(
 async def test_subagent_watcher_defers_and_logs_when_no_transcript_owns_the_spawn(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A meta whose spawn record no transcript owns is deferred, not registered.
+    """A meta whose spawn record no transcript owns is deferred, then set aside.
 
     Claude can flush ``agent-<id>.meta.json`` before the spawning ``tool_use``
     record lands in a transcript. The watcher must skip such an agent (retry next
     tick) and log the miss so a spawn record that never arrives is diagnosable.
+    Once its resolve budget is spent it stops re-reading the transcripts, is set
+    aside, and warns exactly once.
     """
     bridge_dir = tmp_path / "bridge"
     transcript_path = tmp_path / "session.jsonl"
@@ -471,27 +478,38 @@ async def test_subagent_watcher_defers_and_logs_when_no_transcript_owns_the_spaw
             starts += 1
         return httpx.Response(202, json={})
 
+    scans = _count_transcript_scans(monkeypatch)
     caplog.set_level(logging.DEBUG, logger="omnigent.harnesses.claude_native.forwarder")
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(handler),
         base_url="http://ap",
     ) as client:
-        state = await forwarder._forward_available_subagents(
-            client=client,
-            parent_session_id="conv_root",
+        state = await _poll_subagents(
+            client,
             bridge_dir=bridge_dir,
             transcript_path=transcript_path,
             state=forwarder.SubagentForwardState(subagents={}),
-            agent_name="claude-native-ui",
-            start_retry_tracker=forwarder._PostRetryTracker(base_delay_s=0.0),
-            item_retry_tracker=forwarder._PostRetryTracker(base_delay_s=0.0),
-            status_retry_tracker=forwarder._PostRetryTracker(base_delay_s=0.0),
         )
+        assert starts == 0
+        assert "orphan" not in state.subagents
+        assert "no resolved parent" in caplog.text
+        assert "toolu_missing" in caplog.text
+        assert len(scans) == 1
+        assert not _set_aside_warnings(caplog)
+
+        budget = forwarder._SUBAGENT_RESOLVE_MAX_ATTEMPTS
+        for _ in range(budget):
+            state = await _poll_subagents(
+                client, bridge_dir=bridge_dir, transcript_path=transcript_path, state=state
+            )
 
     assert starts == 0
     assert "orphan" not in state.subagents
-    assert "no resolved parent" in caplog.text
-    assert "toolu_missing" in caplog.text
+    assert len(scans) == budget, (
+        "an unowned spawn must stop re-reading the transcripts at its resolve budget"
+    )
+    assert state.resolve_misses == {"orphan": budget}
+    assert len(_set_aside_warnings(caplog, "orphan", "toolu_missing")) == 1
 
 
 def _observe_subagent_scans(
@@ -807,14 +825,14 @@ async def test_fork_subagent_inheriting_its_own_spawn_record_registers(
     assert state.subagents["a-fork"].parent_subagent_id is None
 
 
-async def test_set_aside_subagent_survives_a_forwarder_restart(
+async def test_resolve_misses_survive_a_forwarder_restart(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A spawn set aside after its budget stays set aside across a forwarder
-    restart: the durable miss count reloads from disk, so the next poll runs no
-    full transcript re-read."""
+    """A partly spent resolve budget reloads from disk and gets only its remaining
+    attempts after a restart; a spent one stays set aside with no further scan or
+    WARNING."""
     bridge_dir = tmp_path / "bridge"
     transcript_path = tmp_path / "session.jsonl"
     transcript_path.write_text("", encoding="utf-8")
@@ -832,98 +850,41 @@ async def test_set_aside_subagent_survives_a_forwarder_restart(
     )
     (subagents_dir / "agent-orphan.jsonl").write_text("", encoding="utf-8")
 
-    # A previous forwarder process already spent the resolve budget and persisted
-    # the set-aside count; a restart must read it back verbatim.
+    budget = forwarder._SUBAGENT_RESOLVE_MAX_ATTEMPTS
+    spent = budget // 2
+    # A previous forwarder process persisted a partly spent budget.
     forwarder._write_subagent_forward_state(
         bridge_dir,
-        forwarder.SubagentForwardState(
-            subagents={},
-            resolve_misses={"orphan": forwarder._SUBAGENT_RESOLVE_MAX_ATTEMPTS},
-        ),
+        forwarder.SubagentForwardState(subagents={}, resolve_misses={"orphan": spent}),
     )
-    reloaded = forwarder._read_subagent_forward_state(bridge_dir)
-    assert reloaded.resolve_misses == {"orphan": forwarder._SUBAGENT_RESOLVE_MAX_ATTEMPTS}
+    state = forwarder._read_subagent_forward_state(bridge_dir)
+    assert state.resolve_misses == {"orphan": spent}
 
-    def fail_if_scanned(*args: Any, **kwargs: Any) -> dict[str, str | None]:
-        raise AssertionError("restarted forwarder re-read every transcript for a set-aside spawn")
-
-    monkeypatch.setattr(forwarder, "_subagent_parents_by_tool_use", fail_if_scanned)
+    scans = _count_transcript_scans(monkeypatch)
     caplog.set_level(logging.DEBUG, logger="omnigent.harnesses.claude_native.forwarder")
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(202, json={})
-
     async with httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), base_url="http://ap"
+        transport=httpx.MockTransport(_registering_handler), base_url="http://ap"
     ) as client:
-        state = await forwarder._forward_available_subagents(
-            client=client,
-            parent_session_id="conv_root",
-            bridge_dir=bridge_dir,
-            transcript_path=transcript_path,
-            state=reloaded,
-            agent_name="claude-native-ui",
-            start_retry_tracker=forwarder._PostRetryTracker(base_delay_s=0.0),
-            item_retry_tracker=forwarder._PostRetryTracker(base_delay_s=0.0),
-            status_retry_tracker=forwarder._PostRetryTracker(base_delay_s=0.0),
+        for _ in range(budget):
+            state = await _poll_subagents(
+                client, bridge_dir=bridge_dir, transcript_path=transcript_path, state=state
+            )
+        assert len(scans) == budget - spent, "only the remaining attempts may re-read transcripts"
+        assert state.resolve_misses == {"orphan": budget}
+        assert len(_set_aside_warnings(caplog, "orphan", "toolu_orphan")) == 1
+
+        # The next restart finds the spent budget: no scan and no repeated WARNING.
+        restarted = forwarder._read_subagent_forward_state(bridge_dir)
+        assert restarted == state
+        scans.clear()
+        caplog.clear()
+        state = await _poll_subagents(
+            client, bridge_dir=bridge_dir, transcript_path=transcript_path, state=restarted
         )
 
     assert "orphan" not in state.subagents
-    assert state.resolve_misses == {"orphan": forwarder._SUBAGENT_RESOLVE_MAX_ATTEMPTS}
-    assert not [
-        record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING
-    ], "a set-aside spawn must not re-log a WARNING on restart"
-
-
-async def _poll_subagents(
-    client: httpx.AsyncClient,
-    *,
-    bridge_dir: Path,
-    transcript_path: Path,
-    state: forwarder.SubagentForwardState,
-    start_retry_tracker: forwarder._PostRetryTracker | None = None,
-) -> forwarder.SubagentForwardState:
-    """Run one real sub-agent poll; pass ``start_retry_tracker`` to carry backoff across polls."""
-    return await forwarder._forward_available_subagents(
-        client=client,
-        parent_session_id="conv_root",
-        bridge_dir=bridge_dir,
-        transcript_path=transcript_path,
-        state=state,
-        agent_name="claude-native-ui",
-        start_retry_tracker=start_retry_tracker or forwarder._PostRetryTracker(base_delay_s=0.0),
-        item_retry_tracker=forwarder._PostRetryTracker(base_delay_s=0.0),
-        status_retry_tracker=forwarder._PostRetryTracker(base_delay_s=0.0),
-    )
-
-
-def _count_transcript_scans(monkeypatch: pytest.MonkeyPatch) -> list[int]:
-    """Record one entry per full transcript scan while still running the real scan."""
-    scans: list[int] = []
-    original = forwarder._subagent_parents_by_tool_use
-
-    def counting_scan(*args: Any, **kwargs: Any) -> dict[str, str | None]:
-        scans.append(len(scans) + 1)
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(forwarder, "_subagent_parents_by_tool_use", counting_scan)
-    return scans
-
-
-def _set_aside_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
-    return [
-        record.getMessage()
-        for record in caplog.records
-        if record.levelno >= logging.WARNING and "Setting aside" in record.getMessage()
-    ]
-
-
-def _registering_handler(request: httpx.Request) -> httpx.Response:
-    body = json.loads(request.content)
-    if body.get("type") != "external_subagent_start":
-        return httpx.Response(202, json={})
-    subagent_id = body["data"]["subagent_id"]
-    return httpx.Response(202, json={"queued": False, "child_session_id": f"conv_{subagent_id}"})
+    assert not scans
+    assert not _set_aside_warnings(caplog)
 
 
 async def test_unreadable_meta_never_spends_the_resolve_budget(
@@ -1026,6 +987,60 @@ async def test_late_spawn_record_registers_and_forgets_the_resolve_misses(
 
     assert state.subagents["late"].child_conversation_id == "conv_late"
     assert state.resolve_misses == {}
+    assert forwarder._read_subagent_forward_state(bridge_dir) == state
+
+
+async def test_checkpointing_a_child_cursor_keeps_an_orphans_resolve_misses(
+    tmp_path: Path,
+) -> None:
+    """Advancing a registered child's transcript cursor must keep an unresolved
+    orphan's resolve count in the persisted state."""
+    bridge_dir = tmp_path / "bridge"
+    transcript_path = tmp_path / "session.jsonl"
+    transcript_path.write_text("", encoding="utf-8")
+    worker_jsonl = _seed_subagent_on_disk(
+        transcript_path=transcript_path,
+        subagent_id="worker",
+        agent_type="Explore",
+        description="registered and talking",
+        tool_use_id="toolu_worker",
+        transcript_records=[
+            {
+                "isSidechain": True,
+                "type": "assistant",
+                "uuid": "worker-says",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+            }
+        ],
+    )
+    (worker_jsonl.with_name("agent-orphan.meta.json")).write_text(
+        json.dumps(
+            {
+                "agentType": "general-purpose",
+                "description": "spawn is in no transcript",
+                "toolUseId": "toolu_orphan",
+            }
+        ),
+        encoding="utf-8",
+    )
+    worker_jsonl.with_name("agent-orphan.jsonl").write_text("", encoding="utf-8")
+    registered = forwarder.SubagentForwardState(
+        subagents={
+            "worker": forwarder.SubagentEntry(
+                subagent_id="worker", child_conversation_id="conv_worker"
+            )
+        }
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_registering_handler), base_url="http://ap"
+    ) as client:
+        state = await _poll_subagents(
+            client, bridge_dir=bridge_dir, transcript_path=transcript_path, state=registered
+        )
+
+    assert state.subagents["worker"].byte_offset == worker_jsonl.stat().st_size
+    assert state.resolve_misses == {"orphan": 1}
     assert forwarder._read_subagent_forward_state(bridge_dir) == state
 
 

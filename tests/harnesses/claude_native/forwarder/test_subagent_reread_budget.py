@@ -1,5 +1,5 @@
-"""Unowned sub-agent spawns stop triggering full transcript re-scans after a
-bounded resolve budget and are set aside with a single WARNING."""
+"""A spawn dropped by a compaction rewrite stops triggering full transcript
+re-scans after a bounded resolve budget and is set aside with a single WARNING."""
 
 from __future__ import annotations
 
@@ -14,10 +14,17 @@ import pytest
 
 import omnigent.harnesses.claude_native.forwarder as forwarder
 import omnigent.harnesses.claude_native.main as claude_main
-from tests.harnesses.claude_native.forwarder._support import _seed_subagent_on_disk
+from tests.harnesses.claude_native.forwarder._support import (
+    _count_transcript_scans,
+    _poll_subagents,
+    _registering_handler,
+    _seed_subagent_on_disk,
+    _set_aside_warnings,
+)
 
-# Well past the forwarder's resolve budget, so a bounded scan leaves idle polls.
-_POLLS = 8
+_BUDGET = forwarder._SUBAGENT_RESOLVE_MAX_ATTEMPTS
+# Past the budget, so a bounded scan leaves idle polls at the end.
+_POLLS = _BUDGET + 2
 
 
 async def _poll_until_steady(
@@ -25,92 +32,28 @@ async def _poll_until_steady(
     transcript_path: Path,
     bridge_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> tuple[list[int], forwarder.SubagentForwardState]:
+) -> tuple[list[int], list[forwarder.SubagentForwardState]]:
     """Run the real sub-agent poll ``_POLLS`` times over unchanged files.
 
     Returns the 1-based indices of the polls that performed a full transcript
-    re-scan (``_subagent_parents_by_tool_use``) and the final forwarder state.
+    re-scan and the forwarder state after each poll.
     """
+    scans = _count_transcript_scans(monkeypatch)
     rescan_polls: list[int] = []
-    current_poll = 0
-    original_scan = forwarder._subagent_parents_by_tool_use
-
-    def counting_scan(*args: Any, **kwargs: Any) -> Any:
-        rescan_polls.append(current_poll)
-        return original_scan(*args, **kwargs)
-
-    monkeypatch.setattr(forwarder, "_subagent_parents_by_tool_use", counting_scan)
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(202, json={})
-
+    states: list[forwarder.SubagentForwardState] = []
     state = forwarder.SubagentForwardState(subagents={})
     async with httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), base_url="http://ap"
+        transport=httpx.MockTransport(_registering_handler), base_url="http://ap"
     ) as client:
-        for current_poll in range(1, _POLLS + 1):
-            state = await forwarder._forward_available_subagents(
-                client=client,
-                parent_session_id="conv_root",
-                bridge_dir=bridge_dir,
-                transcript_path=transcript_path,
-                state=state,
-                agent_name="claude-native-ui",
-                start_retry_tracker=forwarder._PostRetryTracker(base_delay_s=0.0),
-                item_retry_tracker=forwarder._PostRetryTracker(base_delay_s=0.0),
-                status_retry_tracker=forwarder._PostRetryTracker(base_delay_s=0.0),
+        for poll in range(1, _POLLS + 1):
+            scans_before = len(scans)
+            state = await _poll_subagents(
+                client, bridge_dir=bridge_dir, transcript_path=transcript_path, state=state
             )
-    return rescan_polls, state
-
-
-def _set_aside_warnings(caplog: pytest.LogCaptureFixture, *needles: str) -> list[str]:
-    """WARNING-level messages that name every one of ``needles``."""
-    return [
-        record.getMessage()
-        for record in caplog.records
-        if record.levelno >= logging.WARNING
-        and all(needle in record.getMessage() for needle in needles)
-    ]
-
-
-async def test_orphan_subagent_meta_is_set_aside_and_stops_full_rereads(
-    tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A ``.meta.json`` whose spawn id is in no transcript drives the full re-read
-    exactly as many times as the budget allows, then is set aside with one WARNING."""
-    transcript_path = tmp_path / "session.jsonl"
-    transcript_path.write_text("", encoding="utf-8")
-    subagents_dir = transcript_path.parent / transcript_path.stem / "subagents"
-    subagents_dir.mkdir(parents=True, exist_ok=True)
-    (subagents_dir / "agent-orphan.meta.json").write_text(
-        json.dumps(
-            {
-                "agentType": "general-purpose",
-                "description": "background spawn, no Agent call on disk",
-                "toolUseId": "toolu_orphan",
-            }
-        ),
-        encoding="utf-8",
-    )
-    (subagents_dir / "agent-orphan.jsonl").write_text("", encoding="utf-8")
-
-    caplog.set_level(logging.DEBUG, logger="omnigent.harnesses.claude_native.forwarder")
-    rescan_polls, state = await _poll_until_steady(
-        transcript_path=transcript_path, bridge_dir=tmp_path / "bridge", monkeypatch=monkeypatch
-    )
-
-    assert "orphan" not in state.subagents
-    assert len(rescan_polls) < _POLLS, (
-        f"unresolvable meta re-scanned all transcripts on every poll: {rescan_polls}"
-    )
-    assert rescan_polls == list(range(1, forwarder._SUBAGENT_RESOLVE_MAX_ATTEMPTS + 1)), (
-        f"full transcript re-scans must stop exactly at the resolve budget: {rescan_polls}"
-    )
-    assert len(_set_aside_warnings(caplog, "orphan", "toolu_orphan")) == 1, (
-        "an unresolvable spawn must be set aside with exactly one WARNING"
-    )
+            if len(scans) > scans_before:
+                rescan_polls.append(poll)
+            states.append(state)
+    return rescan_polls, states
 
 
 async def test_compaction_dropped_spawn_stops_full_rereads(
@@ -174,17 +117,18 @@ async def test_compaction_dropped_spawn_stops_full_rereads(
     )
 
     caplog.set_level(logging.DEBUG, logger="omnigent.harnesses.claude_native.forwarder")
-    rescan_polls, state = await _poll_until_steady(
+    rescan_polls, states = await _poll_until_steady(
         transcript_path=transcript_path, bridge_dir=tmp_path / "bridge", monkeypatch=monkeypatch
     )
 
-    assert "compacted" not in state.subagents
-    assert "nested" not in state.subagents
-    assert len(rescan_polls) < _POLLS, (
-        f"compaction-orphaned sub-agents re-scanned every transcript on every poll: {rescan_polls}"
-    )
-    assert rescan_polls == list(range(1, forwarder._SUBAGENT_RESOLVE_MAX_ATTEMPTS + 1)), (
+    assert "compacted" not in states[-1].subagents
+    assert "nested" not in states[-1].subagents
+    assert rescan_polls == list(range(1, _BUDGET + 1)), (
         f"full transcript re-scans must stop exactly at the resolve budget: {rescan_polls}"
     )
+    # The nested sub-agent waits for free while its parent spends the budget, then
+    # is set aside with it on the poll that exhausts the parent's budget.
+    assert states[_BUDGET - 2].resolve_misses == {"compacted": _BUDGET - 1}
+    assert states[_BUDGET - 1].resolve_misses == {"compacted": _BUDGET, "nested": _BUDGET}
     assert len(_set_aside_warnings(caplog, "compacted", "toolu_precompact")) == 1
     assert len(_set_aside_warnings(caplog, "nested", "toolu_nested")) == 1
