@@ -681,14 +681,20 @@ describe("useWorkspaceDirectory gating", () => {
 
     expect(fetchMock).not.toHaveBeenCalled();
 
-    // Once liveness resolves online, the held batch listings fire.
+    // Once liveness resolves online, both held batch listings fire.
     onlineMock.mockReturnValue(true);
     rerender(
       <Wrap>
         <DirectoriesProbe id="conv_unknown" paths={["src", "docs"]} />
       </Wrap>,
     );
-    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    const urls = fetchMock.mock.calls.map((call) => call[0]).sort();
+    expect(urls).toEqual([
+      "/v1/sessions/conv_unknown/resources/environments/default/filesystem/docs?limit=1000&order=asc",
+      "/v1/sessions/conv_unknown/resources/environments/default/filesystem/src?limit=1000&order=asc",
+    ]);
   });
 
   it("does not fetch when path is null (pre-existing gate)", async () => {
