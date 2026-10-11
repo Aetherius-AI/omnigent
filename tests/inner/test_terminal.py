@@ -1339,6 +1339,37 @@ def test_next_watch_interval_backs_off_only_when_fully_quiet(tmp_path: Path) -> 
     assert interval(hold_base_until=200.0) == 1.0
 
 
+def test_tmux_executable_for_path_caches_and_searches_path_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resolution is cached per ``PATH`` value and searches that value.
+
+    An unchanged ``PATH`` reuses the cached binary without re-walking it; a
+    changed ``PATH`` re-resolves. Each lookup searches the same ``PATH`` string
+    used as the cache key, so a cached result matches the path it was found on.
+    """
+    terminal_mod._tmux_executable_for_path.cache_clear()
+    searched: list[str | None] = []
+
+    def _fake_which(cmd: str, path: str | None = None) -> str | None:
+        searched.append(path)
+        return f"{path}/tmux"
+
+    monkeypatch.setattr(terminal_mod.shutil, "which", _fake_which)
+    try:
+        first = terminal_mod._tmux_executable_for_path("/a/bin")
+        cached = terminal_mod._tmux_executable_for_path("/a/bin")
+        changed = terminal_mod._tmux_executable_for_path("/b/bin")
+    finally:
+        terminal_mod._tmux_executable_for_path.cache_clear()
+
+    assert first == "/a/bin/tmux"
+    assert cached == "/a/bin/tmux"
+    assert changed == "/b/bin/tmux"
+    # One walk per distinct PATH, each searching exactly its own value.
+    assert searched == ["/a/bin", "/b/bin"]
+
+
 def test_capture_pane_state_or_none_folds_liveness_and_capture(tmp_path: Path) -> None:
     """One tmux invocation yields both the dead/alive flag and the capture."""
     instance = _idle_watch_instance(tmp_path)

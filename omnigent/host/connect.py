@@ -723,6 +723,12 @@ _RUNNER_ENV_ALLOWLIST: frozenset[str] = frozenset(
         # Keep host and spawned-runner routing decisions aligned when the
         # host-slice-key kill switch is explicitly disabled.
         "OMNIGENT_HOST_SLICE_KEY_ENABLED",
+        # Native-terminal idle-poll backoff kill switch: a non-secret
+        # boolean read in the runner when the watcher starts. The
+        # daemon->runner env strip would otherwise drop it, leaving
+        # operators unable to pin the pre-backoff polling rate without a
+        # code rollback.
+        "OMNIGENT_TERMINAL_IDLE_POLL_BACKOFF",
     }
     # Windows system / profile constants (SYSTEMROOT is mandatory for Winsock,
     # USERPROFILE for Path.home(), etc.); a no-op on POSIX. See _platform.
