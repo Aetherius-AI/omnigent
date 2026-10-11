@@ -4092,7 +4092,6 @@ async def test_sys_session_send_rejects_workspace_outside_worker_root(
 @pytest.mark.asyncio
 async def test_sys_session_send_rejects_workspace_in_by_id_mode(tmp_path: Path) -> None:
     """A create-time workspace cannot alter a child addressed by id."""
-    from omnigent.runner import app as runner_app
     from omnigent.runner.tool_dispatch import execute_tool
 
     requests_seen = 0
