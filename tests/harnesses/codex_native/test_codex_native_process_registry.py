@@ -271,8 +271,7 @@ async def main() -> None:
     await asyncio.sleep(300)
 
 
-asyncio.run(main())
-"""
+asyncio.run(main())"""
 
 
 def _process_has_exited(pid: int) -> bool:
@@ -317,12 +316,7 @@ def _use_real_process_identity(monkeypatch) -> None:
 def test_reconciliation_reaps_crash_leftover_model_probe_app_server(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """A fresh Host reaps the model-probe app-server a crashed Host left behind.
-
-    The launching Host is a separate process so that killing it releases the
-    probe's owner lock the way a real crash does; this process then plays the
-    fresh Host running crash-safe reconciliation.
-    """
+    """A fresh Host reaps the model-probe app-server a crashed Host left behind."""
     codex_path = shutil.which("codex")
     if codex_path is None:
         pytest.skip("codex CLI is required to spawn a real model-probe app-server")
@@ -335,6 +329,8 @@ def test_reconciliation_reaps_crash_leftover_model_probe_app_server(
     repo_root = Path(app_server.__file__).resolve().parents[3]
     launcher_env = {**os.environ, "PYTHONPATH": str(repo_root)}
 
+    # Killing the separate launcher releases the probe's owner lock like a real
+    # Host crash; this test process then plays the fresh Host.
     launcher = subprocess.Popen(
         [
             sys.executable,

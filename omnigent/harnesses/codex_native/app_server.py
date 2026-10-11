@@ -1401,19 +1401,15 @@ async def _start_codex_model_discovery_process(
     cwd: Path,
     config_overrides: Sequence[str] = (),
 ) -> _CodexModelDiscoveryProcess:
-    """
-    Start the isolated Codex process used only for model discovery.
-
-    The probe is registered in the crash-safe process registry like a session
-    app-server, so a Host that dies mid-probe leaves an entry the next
-    reconcile can reap instead of an orphan nobody knows about.
-    """
+    """Start the isolated Codex process used only for model discovery."""
     registry_tag = f"codex-model-probe-{uuid.uuid4().hex}"
     argv = _build_native_codex_app_server_argv(
         tagged_argv0=_tagged_codex_argv0(codex_path, registry_tag),
         listen_url=listen_url,
         config_overrides=config_overrides,
     )
+    # Registered like a session app-server so a Host that dies mid-probe leaves
+    # an entry the next reconcile can reap.
     owner_lock = acquire_codex_native_process_owner_lock()
     try:
         process = await asyncio.create_subprocess_exec(
