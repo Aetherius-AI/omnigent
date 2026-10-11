@@ -953,6 +953,84 @@ async def test_connected_host_dispatch_uses_resolved_local_owner(
 
 
 @pytest.mark.asyncio
+async def test_managed_sandbox_dispatch_threads_resolved_spec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The managed-sandbox seam threads the resolved spec, like the connected one.
+
+    Both launch seams route the scheduled turn, so each must hand the
+    forwarder the resolved spec to decline a gateway pick this pane cannot
+    run. This drives the managed seam to its dispatch tail and asserts the
+    spec (and bundle revision) reach it, mirroring the connected-host test.
+    """
+    import omnigent.server.routes.sessions as sessions_routes
+
+    captured: dict[str, Any] = {}
+
+    async def _run_managed_launch(**kwargs: Any) -> None:
+        return None
+
+    async def _wait_for_runner_client(*args: Any, **kwargs: Any) -> object:
+        return object()
+
+    async def _ensure_runner_session_initialized(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    async def _dispatch_session_event_to_runner(*args: Any, **kwargs: Any) -> None:
+        captured["agent_revision"] = kwargs.get("agent_revision")
+        captured["agent_spec"] = kwargs.get("agent_spec")
+
+    monkeypatch.setattr(sessions_routes, "_run_managed_launch", _run_managed_launch)
+    monkeypatch.setattr(sessions_routes, "_wait_for_runner_client", _wait_for_runner_client)
+    monkeypatch.setattr(
+        sessions_routes,
+        "_ensure_runner_session_initialized",
+        _ensure_runner_session_initialized,
+    )
+    monkeypatch.setattr(
+        sessions_routes,
+        "_dispatch_session_event_to_runner",
+        _dispatch_session_event_to_runner,
+    )
+
+    class _BoundConvStore(FakeConversationStore):
+        # The managed launch binds a runner before the seam re-reads the row;
+        # stand that in so the dispatch tail runs.
+        def get_conversation(self, conversation_id: str) -> _FakeConversation:
+            return _FakeConversation(id=conversation_id, agent_id="ag_1", runner_id="runner_1")
+
+    class _NoopManagedLaunches:
+        def begin(self, session_id: str) -> None:
+            return None
+
+        def get(self, session_id: str) -> None:
+            return None
+
+    store = FakeScheduledTaskStore(rows={"task_1": _task(execution_target="managed_sandbox")})
+    dispatch = fire_mod._make_managed_sandbox_dispatch(
+        _deps(
+            store,
+            conversation_store=_BoundConvStore(),
+            host_store=FakeHostStore({"host_1": _FakeHost("host_1", RESERVED_USER_LOCAL)}),
+            host_registry=FakeHostRegistry(online={"host_1"}),
+            agent_store=FakeAgentStore({"ag_1": _FakeAgent("ag_1", bundle_location="ag_1/rev1")}),
+            agent_cache=FakeAgentCache(harness="claude-sdk"),
+            sandbox_config=_FakeSandboxConfig(managed_launch_supported=True),
+            managed_launches=_NoopManagedLaunches(),
+        )
+    )
+
+    await dispatch(_FakeConversation(id="conv_1", agent_id="ag_1"), _task(user_id=None))
+
+    # Names the bundle it runs, so the runner sees a later reinstall.
+    assert captured["agent_revision"] == "ag_1/rev1"
+    # The scheduled turn routes like any other, so the managed seam gets the
+    # resolved spec to decline a gateway pick this pane cannot run.
+    assert captured["agent_spec"] is not None
+    assert captured["agent_spec"].executor.config["harness"] == "claude-sdk"
+
+
+@pytest.mark.asyncio
 async def test_on_fire_returns_before_launch_completes() -> None:
     """on_fire must return fast so the scheduler timer re-arms immediately."""
     store = FakeScheduledTaskStore(rows={"task_1": _task()})

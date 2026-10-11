@@ -1995,6 +1995,132 @@ async def test_the_events_route_threads_the_spec_so_an_offgateway_pick_is_declin
     )
 
 
+def _root_with_offgateway_child(tmp_path: Any) -> Any:
+    """Load a root spec whose transport differs from its sub-agent's.
+
+    The root talks over the gateway (``databricks`` auth), but the
+    declared ``offchild`` sub-agent talks direct to the vendor
+    (``api_key`` auth). A declared sub-agent session runs the child's
+    spec, so a routed gateway pick must be judged against the child, not
+    the root — the root alone would wrongly accept it.
+
+    :param tmp_path: A scratch directory to hold the bundle.
+    :returns: The parsed root :class:`~omnigent.spec.types.AgentSpec`.
+    """
+    from omnigent.spec import load as load_spec
+
+    bundle = tmp_path / "parent_agent"
+    (bundle / "agents" / "offchild").mkdir(parents=True)
+    (bundle / "config.yaml").write_text(
+        "spec_version: 1\n"
+        "name: offgateway-parent\n"
+        "prompt: terse.\n"
+        "executor:\n"
+        "  config:\n"
+        "    harness: claude-sdk\n"
+        "  model: claude-sonnet-4-20250514\n"
+        "  auth:\n"
+        "    type: databricks\n"
+        "    profile: DEFAULT\n"
+        "tools:\n"
+        "  agents:\n"
+        "    - offchild\n"
+    )
+    (bundle / "agents" / "offchild" / "config.yaml").write_text(
+        "spec_version: 1\n"
+        "name: offchild\n"
+        "prompt: terse child.\n"
+        "executor:\n"
+        "  config:\n"
+        "    harness: claude-sdk\n"
+        "  model: claude-sonnet-4-20250514\n"
+        "  auth:\n"
+        "    type: api_key\n"
+        "    api_key: mock-key\n"
+    )
+    return load_spec(bundle)
+
+
+async def test_the_forwarder_reads_a_sub_agent_sessions_child_transport_for_the_veto(
+    client: httpx.AsyncClient,
+    db_uri: str,
+    tmp_path: Any,
+) -> None:
+    """A sub-agent session judges the routed pick against the child spec.
+
+    A declared sub-agent session runs its own child spec, whose executor
+    auth can differ from the root's, and callers hand the forwarder the
+    root spec. The forwarder must resolve the child from
+    ``conv.sub_agent_name`` before deciding whether a routed gateway pick
+    is runnable. Here the root talks over the gateway but ``offchild``
+    talks direct to the vendor, so the gateway pick is unrunnable on the
+    child and must be declined — the root spec alone would have pinned it,
+    so a decline is proof the child's transport decided.
+    """
+    agent = await create_test_agent(client, name="routing-subagent-child")
+    resp = await client.post(
+        "/v1/sessions",
+        json={"agent_id": agent["id"], "cost_control_mode_override": "on"},
+    )
+    assert resp.status_code == 201, resp.text
+    conv_store = SqlAlchemyConversationStore(db_uri)
+    conv = conv_store.get_conversation(resp.json()["id"])
+    assert conv is not None
+    assert conv.model_override is None
+    # Run the turn as the declared sub-agent: the forwarder resolves the
+    # child's transport off this name while the root spec stays threaded.
+    conv.sub_agent_name = "offchild"
+
+    routing_client = FakeRoutingClient(
+        RoutingResult(model=ROUTED_MODEL, rationale="deep refactor", harness="claude_code")
+    )
+    body = SessionEventInput(
+        type="message",
+        data={"role": "user", "content": [{"type": "input_text", "text": "refactor auth"}]},
+    )
+    with patch("omnigent.runtime._globals._caps", new=FakeCaps(routing_client=routing_client)):
+        async with echo_runner_client() as runner_client:
+            await orchestration_module._forward_event_to_runner(
+                conv.id,
+                conv,
+                body,
+                conv_store,
+                runner_client,
+                agent_spec=_root_with_offgateway_child(tmp_path),
+            )
+
+    refreshed = conv_store.get_conversation(conv.id)
+    assert refreshed is not None
+    decisions = _routing_decisions(conv_store, conv.id)
+    assert len(decisions) == 1
+    assert decisions[0].data.scope == "turn"
+    # The child is off-gateway, so the gateway pick is declined even though
+    # the root talks over the gateway: proof the child's transport decided.
+    assert decisions[0].data.applied is False
+    assert refreshed.model_override is None
+    assert "gateway" in decisions[0].data.rationale.lower()
+
+
+async def test_gateway_model_prefixes_cover_every_catalog_spelling() -> None:
+    """The veto's gateway prefixes track every Unity Catalog spelling.
+
+    Model discovery lists the same gateway endpoints under more than one
+    prefix: serving-endpoints spell them ``databricks-`` while Unity
+    Catalog model services spell them ``system.ai.``. The off-gateway veto
+    keys on ``_GATEWAY_MODEL_PREFIXES``, so a spelling it omits would let a
+    gateway-only pick slip onto a direct-vendor pane. Pin the prefixes to
+    the discovery module's own source of truth.
+    """
+    from omnigent.models.databricks_model_discovery import _CATALOG_SPELLINGS
+
+    prefixes = orchestration_module._GATEWAY_MODEL_PREFIXES
+    missing = [spelling for spelling in _CATALOG_SPELLINGS if spelling not in prefixes]
+    assert not missing, (
+        f"_GATEWAY_MODEL_PREFIXES omits catalog spelling(s) {missing!r}; a "
+        "gateway-only pick in that spelling would slip past the veto."
+    )
+
+
 # ── 10. A routed child's harness is chosen once, not per message ─────
 
 

@@ -6118,8 +6118,10 @@ def _unapplied_routed_verdict(
 
 
 #: Model-id spellings only the Databricks AI-Gateway serves; a pane whose
-#: executor talks direct to the vendor cannot run them.
-_GATEWAY_MODEL_PREFIXES: tuple[str, ...] = ("databricks-", "databricks/")
+#: executor talks direct to the vendor cannot run them. Serving-endpoints list
+#: ``databricks-`` ids; Unity Catalog model services spell the same endpoints
+#: ``system.ai.`` (see :mod:`omnigent.models.databricks_model_discovery`).
+_GATEWAY_MODEL_PREFIXES: tuple[str, ...] = ("databricks-", "databricks/", "system.ai.")
 
 
 def _session_uses_direct_vendor_transport(spec: AgentSpec, harness: str | None) -> bool:
@@ -6400,9 +6402,11 @@ async def _forward_event_to_runner(
         ``None`` reads as unknown, which counts as backed.
     :param agent_revision: The agent's current ``bundle_location``; the
         runner rebuilds the session's spec when it changes.
-    :param agent_spec: The session's resolved agent spec, read only to
-        learn whether a routed gateway-hosted pick is runnable on this
-        session before pinning it. ``None`` reads as unknown and never
+    :param agent_spec: The session's resolved *root* agent spec, read only
+        to learn whether a routed gateway-hosted pick is runnable on this
+        session before pinning it. For a declared sub-agent session this
+        resolves the child spec from ``conv.sub_agent_name``, so callers
+        pass the root spec unchanged. ``None`` reads as unknown and never
         vetoes a pick.
     :returns: The store-assigned id of the persisted item.
     """
@@ -6818,14 +6822,22 @@ async def _forward_event_to_runner(
                     # model must not be pinned (the pin disables routing for
                     # every later turn) nor reported as this turn's model.
                     _turn_spelling = _routed_turn_model_spelling(session_id, conv, _routed_model)
+                    # A declared sub-agent session runs its own child spec,
+                    # whose executor auth can differ from the parent's; resolve
+                    # it here so callers can hand down the root spec unchanged.
+                    _veto_spec = agent_spec
+                    if _veto_spec is not None and conv.sub_agent_name:
+                        _veto_spec = (
+                            _find_spec_by_name(_veto_spec, conv.sub_agent_name) or _veto_spec
+                        )
                     # Static fallback can offer a gateway-hosted pick a
                     # direct-vendor pane cannot run (the executor raises at
                     # construction), so decline the pin and run unrouted.
                     _pick_off_gateway = (
                         _routed_model.startswith(_GATEWAY_MODEL_PREFIXES)
-                        and agent_spec is not None
+                        and _veto_spec is not None
                         and await asyncio.to_thread(
-                            _session_uses_direct_vendor_transport, agent_spec, _harness
+                            _session_uses_direct_vendor_transport, _veto_spec, _harness
                         )
                     )
                     if _turn_spelling is None or _pick_off_gateway:
@@ -9532,6 +9544,7 @@ async def _wake_parent_for_blocked_child(
     conversation_store: ConversationStore,
     runner_router: RunnerRouter | None,
     agent_store: AgentStore | None = None,
+    agent_cache: AgentCache | None = None,
 ) -> bool:
     """
     Deliver a parent-wake notice when a sub-agent blocks on an approval.
@@ -9556,6 +9569,9 @@ async def _wake_parent_for_blocked_child(
         consulted as a fallback).
     :param agent_store: Resolves the parent agent's current bundle, so a
         reinstall since the parent's last turn reaches this wake turn too.
+    :param agent_cache: Loads the parent's spec so the routing veto can
+        decline a gateway pick this pane cannot run. ``None`` leaves the
+        spec unknown, which never vetoes a pick (fail open).
     :returns: ``True`` when the notice was dispatched to the parent's runner;
         ``False`` when delivery could not happen (parent gone, no runner bound,
         or the forward raised a transport error).
@@ -9600,6 +9616,23 @@ async def _wake_parent_for_blocked_child(
         if agent_store is not None and parent_conv.agent_id
         else None
     )
+    # The wake posts a user message the parent routes like any turn, so load its
+    # spec to decline a gateway pick this direct-vendor pane cannot run.
+    _parent_spec: AgentSpec | None = None
+    if agent_cache is not None and parent_agent is not None and parent_agent.bundle_location:
+        try:
+            _parent_spec = (
+                await asyncio.to_thread(
+                    agent_cache.load, parent_agent.id, parent_agent.bundle_location
+                )
+            ).spec
+        except Exception:  # noqa: BLE001
+            _logger.warning(
+                "subagent block notifier: could not load spec for parent %s; "
+                "wake proceeds without the transport hint",
+                parent_id,
+                exc_info=True,
+            )
     try:
         # None args: a system notice carries no agent/files/artifacts; the runner
         # recomputes has_mcp_servers from the parent's cached spec.
@@ -9614,6 +9647,7 @@ async def _wake_parent_for_blocked_child(
             artifact_store=None,
             runner_router=runner_router,
             agent_revision=parent_agent.bundle_location if parent_agent is not None else None,
+            agent_spec=_parent_spec,
         )
     except (httpx.HTTPError, OmnigentError):
         _logger.warning(
@@ -9630,6 +9664,7 @@ def configure_subagent_block_notifier(
     conversation_store: ConversationStore,
     runner_router: RunnerRouter | None,
     agent_store: AgentStore | None = None,
+    agent_cache: AgentCache | None = None,
 ) -> Callable[[], None]:
     """
     Install the parent-wake notifier on the elicitation publish path.
@@ -9649,6 +9684,8 @@ def configure_subagent_block_notifier(
     :param runner_router: Router used by the wake to reach the parent's
         bound runner. ``None`` in in-process setups.
     :param agent_store: Lets each wake name the parent agent's current bundle.
+    :param agent_cache: Lets each wake load the parent's spec so the routing
+        veto can decline a gateway pick the parent pane cannot run.
     :returns: A callable that uninstalls the observer and cancels any
         in-flight wake futures. Call from the lifespan teardown.
     """
@@ -9675,6 +9712,7 @@ def configure_subagent_block_notifier(
             conversation_store=conversation_store,
             runner_router=runner_router,
             agent_store=agent_store,
+            agent_cache=agent_cache,
         )
 
     notifier = SubagentBlockNotifier(
@@ -11277,8 +11315,7 @@ async def _create_session_from_existing_agent(
             )
             # Dispatch (not a plain forward) so native-terminal sessions take the
             # single-writer bypass — otherwise the forwarder's echo duplicates the kickoff.
-            # The kickoff turn routes like any later turn, so hand the forwarder
-            # the resolved spec to decline a gateway pick this pane cannot run.
+            # Kickoff turns route too, so hand the forwarder the root spec.
             _kickoff_spec: AgentSpec | None = None
             if agent_cache is not None and agent.bundle_location:
                 try:
