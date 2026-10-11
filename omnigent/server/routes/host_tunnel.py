@@ -688,6 +688,7 @@ async def _receive_loop(
                         "runner_id": frame.runner_id,
                         "error": frame.error,
                         "error_code": frame.error_code,
+                        "workspace_recreated": frame.workspace_recreated,
                     }
                 )
             continue

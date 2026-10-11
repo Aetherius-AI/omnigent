@@ -874,28 +874,99 @@ async def test_handle_launch_spawns_subprocess(
         "runner subprocess must be spawned with cwd=<session workspace>"
     )
 
+    # An existing workspace was not touched, so the server has nothing to report.
+    assert result.workspace_recreated is False
+
     # Clean up the spawned sleep process (and its exit watcher).
+    _cleanup_host(host)
+
+
+async def test_handle_launch_recreates_missing_workspace(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    Verify that a launch whose workspace directory has been deleted recreates
+    it (parents included) and spawns the runner there instead of refusing.
+
+    A worktree tool or the agent itself can remove the directory between
+    turns; refusing would block the session until someone recreates it by
+    hand. The result flags the recreation so the server can tell the user.
+    """
+    host = _make_host_process()
+    host._auth_token_factory = lambda: "host-bootstrap-bearer"
+    host._auth_token_factory_resolved = True
+    workspace = tmp_path / "worktrees" / "feature-x"
+    assert not workspace.parent.exists()
+
+    frame = HostLaunchRunnerFrame(
+        request_id="req_003",
+        binding_token="test_token_abc",
+        workspace=str(workspace),
+        session_id="session_recreated_workspace",
+    )
+
+    spawned_kwargs: dict[str, object] = {}
+    original_popen = subprocess.Popen
+
+    def _fake_popen(args: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
+        """Capture the spawn kwargs and start a no-op process.
+
+        :param args: Command args (ignored — we spawn a real sleep).
+        :param kwargs: Popen kwargs including cwd.
+        :returns: A real subprocess handle.
+        """
+        spawned_kwargs.update(kwargs)
+        return original_popen(
+            ["sleep", "10"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    with (
+        caplog.at_level(logging.WARNING, logger="omnigent.host.connect"),
+        patch("omnigent.host.connect.subprocess.Popen", side_effect=_fake_popen),
+    ):
+        result = await host._handle_launch(frame)
+
+    assert isinstance(result, HostLaunchRunnerResultFrame)
+    assert result.status == "launched", (
+        f"a deleted workspace must be recreated, not refused; got {result.status!r}: "
+        f"{result.error}"
+    )
+    assert workspace.is_dir(), "the missing workspace directory should have been recreated"
+    assert spawned_kwargs.get("cwd") == str(workspace)
+    assert result.runner_id == token_bound_runner_id("test_token_abc")
+    assert result.error is None
+    assert result.error_code is None
+    assert result.workspace_recreated is True
+    assert str(workspace) in caplog.text, "the host should log which directory it recreated"
+
     _cleanup_host(host)
 
 
 @pytest.mark.parametrize("binding_token", ["token_xyz", "", "   "])
 async def test_handle_launch_fails_for_bad_workspace(
+    tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
     capsys: pytest.CaptureFixture[str],
     binding_token: str,
 ) -> None:
     """
     Verify that _handle_launch returns status='failed' when the
-    workspace path does not exist.
+    workspace path does not exist and cannot be recreated.
 
     If it returns 'launched', the path validation is missing and
     the runner would start in a nonexistent directory.
     """
     host = _make_host_process()
+    # A regular file where a parent directory should be: mkdir cannot help.
+    (tmp_path / "not-a-dir").write_text("")
+    missing_workspace = tmp_path / "not-a-dir" / "workspace"
     frame = HostLaunchRunnerFrame(
         request_id="req_002",
         binding_token=binding_token,
-        workspace="/nonexistent/path/that/does/not/exist",
+        workspace=str(missing_workspace),
         session_id="session_missing_workspace",
     )
 
@@ -924,11 +995,11 @@ async def test_handle_launch_fails_for_bad_workspace(
     assert failure.attributes["error_impact"] == "blocking"
     assert failure.attributes["error_phase"] == "harness_setup"
     assert "session_missing_workspace" in caplog.text
-    assert "/nonexistent/path/that/does/not/exist" in caplog.text
+    assert str(missing_workspace) in caplog.text
     output = capsys.readouterr().out
     assert "Runner launch failed" in output
     assert "session_missing_workspace" in output
-    assert "/nonexistent/path/that/does/not/exist" in output
+    assert str(missing_workspace) in output
 
 
 async def test_handle_launch_attributes_spawn_failure_to_host(
