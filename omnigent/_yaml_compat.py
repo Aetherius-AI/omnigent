@@ -26,6 +26,7 @@ USING_LIBYAML = SafeLoaderBase is not yaml.SafeLoader
 # Both parsers raise these same classes, so the SafeLoader reparse in
 # :func:`load` is a faithful substitution.
 _PARSE_STAGE_ERRORS = (
+    yaml.reader.ReaderError,
     yaml.scanner.ScannerError,
     yaml.parser.ParserError,
     yaml.composer.ComposerError,
@@ -67,9 +68,12 @@ def narrow_bools_to_yaml_1_2(loader: type[yaml.SafeLoader]) -> None:
 def load(text: str, loader: type[yaml.SafeLoader]) -> Any:  # type: ignore[explicit-any]
     """Parse text with loader, retaining detailed structural-error diagnostics.
 
-    Retry only scanner, parser and composer errors with stock SafeLoader. Tag
-    constructors have not run at those stages; constructor errors must retain
-    the original loader diagnosis. Text input allows the retry to reread it.
+    Retry only reader, scanner, parser and composer errors with stock
+    SafeLoader. Tag constructors have not run at those stages; constructor
+    errors must retain the original loader diagnosis. The retry only improves
+    the message: a document that libyaml alone rejects still fails, because
+    stock SafeLoader lacks the caller's resolver narrowing and so cannot stand
+    in for a successful parse.
 
     :returns: Parsed document, or None for empty input.
     :raises yaml.YAMLError: If parsing fails."""

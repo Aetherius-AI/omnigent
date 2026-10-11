@@ -169,7 +169,7 @@ def _wait_online(base_url: str, runner_id: str, server_proc: subprocess.Popen[by
             ):
                 return
         except httpx.HTTPError:
-            pass
+            pass  # still starting up; poll again until the deadline
         time.sleep(POLL_INTERVAL_S)
     raise RuntimeError(f"server + runner did not come online within {HEALTH_TIMEOUT_S}s")
 

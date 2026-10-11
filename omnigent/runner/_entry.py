@@ -1282,7 +1282,7 @@ def _agent_cache_dest(spec_cache_root: Path, agent_id: str, version: str) -> Pat
 
 # Parsed specs shared by every session this runner resolves, keyed by agent id,
 # extracted bundle directory (its name carries the version header and content
-# digest) and env-expansion mode. One entry per agent; LRU-bounded across agents.
+# digest) and env-expansion mode. One revision per agent; LRU-bounded across agents.
 _SPEC_PARSE_CACHE: dict[tuple[str, Path, bool], AgentSpec] = {}
 _SPEC_PARSE_CACHE_MAX_AGENTS = 32
 
@@ -1370,9 +1370,9 @@ async def _resolve_agent_spec_from_server(
             master = load(
                 resp.content, dest=dest, expand_env=expand_env, prune_invalid_sub_agents=True
             )
-        # A new revision supersedes the agent's other entries, so at most one
-        # entry per agent survives.
-        for stale in [k for k in _SPEC_PARSE_CACHE if k[0] == agent_id]:
+        # A new revision supersedes the agent's older revisions; both env-expansion
+        # modes of the current revision may coexist.
+        for stale in [k for k in _SPEC_PARSE_CACHE if k[0] == agent_id and k[1] != dest]:
             del _SPEC_PARSE_CACHE[stale]
         _SPEC_PARSE_CACHE[cache_key] = master
         # LRU bound across distinct agents (dict insertion order is recency).

@@ -2760,7 +2760,6 @@ async def test_resolve_agent_spec_from_server_memoizes_parse_across_sessions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Parse a shared bundle once; return deep copies so session edits stay isolated."""
-    import omnigent.runner._entry as entry_mod
     import omnigent.spec as spec_pkg
     import omnigent.spec.parser as spec_parser
 
@@ -2794,7 +2793,7 @@ async def test_resolve_agent_spec_from_server_memoizes_parse_across_sessions(
     monkeypatch.setattr(spec_parser, "parse", _counting_parse)
     monkeypatch.setattr(spec_pkg, "parse", _counting_parse)
     cache: dict[tuple[str, Path, bool], Any] = {}
-    monkeypatch.setattr(entry_mod, "_SPEC_PARSE_CACHE", cache)
+    monkeypatch.setattr("omnigent.runner._entry._SPEC_PARSE_CACHE", cache)
 
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(_handler),
@@ -2850,7 +2849,6 @@ async def test_resolve_agent_spec_from_server_evicts_prior_revision(
     A reinstall keeps the agent id and may keep the version header, so the
     content digest in the extracted directory name is what tells revisions apart.
     """
-    import omnigent.runner._entry as entry_mod
 
     def _bundle(name: str) -> bytes:
         config = f"spec_version: 1\nname: {name}\nexecutor:\n  config:\n    harness: claude-sdk\n"
@@ -2868,7 +2866,7 @@ async def test_resolve_agent_spec_from_server_evicts_prior_revision(
         return httpx.Response(200, content=content, headers={"X-Agent-Version": version})
 
     cache: dict[tuple[str, Path, bool], Any] = {}
-    monkeypatch.setattr(entry_mod, "_SPEC_PARSE_CACHE", cache)
+    monkeypatch.setattr("omnigent.runner._entry._SPEC_PARSE_CACHE", cache)
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(_handler), base_url="http://server.test"
     ) as client:
@@ -2891,7 +2889,6 @@ async def test_resolve_agent_spec_from_server_separates_env_expansion_modes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A session-scoped resolve never reuses the env-expanded parse of the same bytes."""
-    import omnigent.runner._entry as entry_mod
 
     monkeypatch.setenv("SPEC_MEMO_SECRET", "expanded-secret")
     config_bytes = (
@@ -2915,7 +2912,7 @@ async def test_resolve_agent_spec_from_server_separates_env_expansion_modes(
         )
 
     cache: dict[tuple[str, Path, bool], Any] = {}
-    monkeypatch.setattr(entry_mod, "_SPEC_PARSE_CACHE", cache)
+    monkeypatch.setattr("omnigent.runner._entry._SPEC_PARSE_CACHE", cache)
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(_handler), base_url="http://server.test"
     ) as client:
@@ -2930,7 +2927,11 @@ async def test_resolve_agent_spec_from_server_separates_env_expansion_modes(
     assert template.spec.llm is not None and tenant.spec.llm is not None
     assert template.spec.llm.connection == {"api_key": "expanded-secret"}
     assert tenant.spec.llm.connection == {"api_key": "${SPEC_MEMO_SECRET}"}
-    assert list(cache) == [("ag_env", tenant.workdir, False)]
+    # Both modes of the same revision stay cached; neither evicts the other.
+    assert list(cache) == [
+        ("ag_env", template.workdir, True),
+        ("ag_env", tenant.workdir, False),
+    ]
 
 
 @pytest.mark.asyncio
@@ -2939,7 +2940,6 @@ async def test_resolve_agent_spec_from_server_bounds_memo_across_agents(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Bound the per-agent parse memo with LRU eviction; refresh recency on a hit."""
-    import omnigent.runner._entry as entry_mod
 
     config_bytes = (
         b"spec_version: 1\nname: cached-agent\nexecutor:\n  config:\n    harness: claude-sdk\n"
@@ -2953,9 +2953,9 @@ async def test_resolve_agent_spec_from_server_bounds_memo_across_agents(
     def _handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=bundle_buf.getvalue(), headers={"X-Agent-Version": "1"})
 
-    monkeypatch.setattr(entry_mod, "_SPEC_PARSE_CACHE_MAX_AGENTS", 2)
+    monkeypatch.setattr("omnigent.runner._entry._SPEC_PARSE_CACHE_MAX_AGENTS", 2)
     cache: dict[tuple[str, Path, bool], Any] = {}
-    monkeypatch.setattr(entry_mod, "_SPEC_PARSE_CACHE", cache)
+    monkeypatch.setattr("omnigent.runner._entry._SPEC_PARSE_CACHE", cache)
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(_handler), base_url="http://server.test"
     ) as client:
@@ -2979,15 +2979,7 @@ async def test_resolve_agent_spec_from_server_bounds_memo_across_agents(
 async def test_resolve_agent_spec_does_not_reparse_cached_bundle_per_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A new session resolving an already-extracted bundle must not re-parse its YAML.
-
-    The extracted directory is reused across resolves, but ``load(dest)`` re-parses
-    every config.yaml on each call, and the session-spec cache is keyed by
-    ``session_id`` — so a parent session and each sub-agent session sharing one
-    ``(agent_id, version)`` bundle each re-parse the whole bundle. During sub-agent
-    fan-out that bursts runner CPU on redundant YAML parsing.
-    """
-    import omnigent.runner._entry as entry_mod
+    """A new session resolving an already-extracted bundle must not re-parse its YAML."""
     import omnigent.spec as spec_pkg
     import omnigent.spec.parser as spec_parser
 
@@ -3029,7 +3021,7 @@ async def test_resolve_agent_spec_does_not_reparse_cached_bundle_per_session(
     # discovery calls it through ``omnigent.spec.parser``. Patch both entry points.
     monkeypatch.setattr(spec_parser, "parse", _counting_parse)
     monkeypatch.setattr(spec_pkg, "parse", _counting_parse)
-    monkeypatch.setattr(entry_mod, "_SPEC_PARSE_CACHE", {})
+    monkeypatch.setattr("omnigent.runner._entry._SPEC_PARSE_CACHE", {})
 
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(_handler),

@@ -281,7 +281,7 @@ def diagnose_yaml_rejection(path: Path) -> str:
     if path.suffix.lower() not in {".yaml", ".yml"}:
         return f"file extension is {path.suffix!r}, expected '.yaml' or '.yml'"
     try:
-        raw = yaml.safe_load(path.read_text())
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
         # Pure-Python loader on purpose: its error echoes the offending source
         # line with a caret, which libyaml drops. Strip trailing whitespace so
@@ -383,10 +383,8 @@ def load_omnigent_yaml(
     # ``match_tools``, ``action``, ``reason``, ``set_labels``).
     # Non-mapping roots are tolerated as an empty dict — the
     # omnigent loader would already have rejected them above.
-    # Use _OmnigentYamlLoader (not a plain safe_load) so this raw
-    # read resolves booleans the same way load_agent_def's YAML
-    # parsing did — both loaders keep on/off as plain strings
-    # instead of the YAML 1.1 bool aliases.
+    # Use _OmnigentYamlLoader so this raw read resolves on/off as
+    # strings, matching load_agent_def's YAML parsing.
     raw = _yaml_load(path.read_text(encoding="utf-8"), _OmnigentYamlLoader) or {}
     if not isinstance(raw, dict):
         raw = {}

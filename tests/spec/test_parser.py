@@ -4556,14 +4556,7 @@ def test_config_loader_does_not_mutate_shared_safeloader_resolvers() -> None:
 def test_config_yaml_parsed_with_libyaml_when_available(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``parse`` must use the libyaml C loader for config.yaml when it is available.
-
-    ``_ConfigYamlLoader`` derives from the pure-Python ``yaml.SafeLoader``, which is
-    ~10-20x slower than the libyaml-backed ``CSafeLoader``, so every spec parse pays
-    that cost even when ``yaml.__with_libyaml__`` is True. The runner re-parses a
-    bundle per session, multiplying it. This captures the loader ``parse`` actually
-    hands ``yaml.load`` so the assertion survives a loader rename.
-    """
+    """Use the libyaml-backed loader for config.yaml when available."""
     if not yaml.__with_libyaml__:
         pytest.skip("libyaml C bindings not available in this interpreter")
 

@@ -16,6 +16,7 @@ import pytest
 import yaml
 
 from omnigent._yaml_compat import (
+    _PARSE_STAGE_ERRORS,
     USING_LIBYAML,
     SafeLoaderBase,
     load,
@@ -141,7 +142,7 @@ def test_load_keeps_the_source_excerpt_in_parse_errors() -> None:
             assert excinfo.value.__suppress_context__ is True
 
 
-def test_load_does_not_reparse_documents_that_succeed() -> None:
+def test_load_does_not_reparse_documents_that_succeed(monkeypatch: pytest.MonkeyPatch) -> None:
     """The retry is failure-only, so the hot path pays nothing for it."""
     calls: list[object] = []
     real_load = yaml.load
@@ -150,11 +151,8 @@ def test_load_does_not_reparse_documents_that_succeed() -> None:
         calls.append(Loader)
         return real_load(stream, Loader=Loader)  # type: ignore[arg-type]
 
-    yaml.load = counting_load  # type: ignore[assignment]
-    try:
-        assert load("a: 1\n", _ConfigYamlLoader) == {"a": 1}
-    finally:
-        yaml.load = real_load  # type: ignore[assignment]
+    monkeypatch.setattr(yaml, "load", counting_load)
+    assert load("a: 1\n", _ConfigYamlLoader) == {"a": 1}
     assert calls == [_ConfigYamlLoader]
 
 
@@ -195,7 +193,7 @@ def test_load_keeps_libyaml_error_when_the_parsers_disagree(source: str) -> None
     pure-Python parser. Reporting the latter would point the user at a
     "could not determine a constructor" problem the document does not have.
     """
-    with pytest.raises(yaml.scanner.ScannerError) as excinfo:
+    with pytest.raises(_PARSE_STAGE_ERRORS) as excinfo:
         load(source, _ConfigYamlLoader)
     exc = excinfo.value
     assert "could not determine a constructor" not in str(exc), str(exc)
@@ -280,5 +278,15 @@ def test_load_keeps_libyaml_error_when_the_retry_succeeds(
     with pytest.raises(yaml.scanner.ScannerError) as excinfo:
         load("a: 1\n", _ConfigYamlLoader)
     assert excinfo.value is fast_error
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__suppress_context__ is True
+
+
+@pytest.mark.skipif(not USING_LIBYAML, reason="without libyaml there is no retry to exercise")
+def test_load_reparses_reader_errors_for_diagnostics() -> None:
+    """Unreadable characters fail before scanning; the retry still supplies the message."""
+    with pytest.raises(yaml.reader.ReaderError) as excinfo:
+        load("a: \x00\n", _ConfigYamlLoader)
+    # Raised by the pure-Python retry (``from None``), not by libyaml's first attempt.
     assert excinfo.value.__cause__ is None
     assert excinfo.value.__suppress_context__ is True

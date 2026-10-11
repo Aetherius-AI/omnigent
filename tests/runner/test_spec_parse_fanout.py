@@ -13,11 +13,11 @@ from typing import Any
 import httpx
 import pytest
 
-import omnigent.runner._entry as entry_mod
 import omnigent.spec as spec_pkg
 import omnigent.spec.parser as parser_mod
 from omnigent.runner import create_runner_app
 from omnigent.runner._entry import _resolve_agent_spec_from_server
+from tests.runner.conftest import _FakeProcessManager, _ScriptedHarnessClient
 from tests.runner.helpers import NullServerClient
 
 N_SUB_AGENTS = 4
@@ -81,40 +81,6 @@ def _build_multi_agent_bundle() -> bytes:
     return buf.getvalue()
 
 
-class _FakeProcessManager:
-    """Minimal HarnessProcessManager stand-in for session creation."""
-
-    handles_tool_dispatch = True
-
-    def __init__(self) -> None:
-        self._sessions: set[str] = set()
-
-    async def get_client(self, conversation_id: str, harness: str, env: Any = None) -> Any:
-        self._sessions.add(conversation_id)
-        return None
-
-    def has_session(self, conversation_id: str) -> bool:
-        return conversation_id in self._sessions
-
-    def has_active_turn(self, conversation_id: str) -> bool:
-        return False
-
-    def note_activity(self, conversation_id: str) -> None:
-        pass
-
-    def mark_in_flight(self, conversation_id: str, response_id: str) -> None:
-        pass
-
-    def clear_in_flight(self, conversation_id: str) -> None:
-        pass
-
-    async def forward_cancel(self, conversation_id: str) -> bool:
-        return True
-
-    async def release(self, conversation_id: str) -> None:
-        self._sessions.discard(conversation_id)
-
-
 async def test_fanout_does_not_reparse_bundle_per_session(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -139,7 +105,7 @@ async def test_fanout_does_not_reparse_bundle_per_session(
     # every top-level bundle parse is observed regardless of entry point.
     monkeypatch.setattr(parser_mod, "parse", _counting_parse)
     monkeypatch.setattr(spec_pkg, "parse", _counting_parse)
-    monkeypatch.setattr(entry_mod, "_SPEC_PARSE_CACHE", {})
+    monkeypatch.setattr("omnigent.runner._entry._SPEC_PARSE_CACHE", {})
 
     spec_cache_root = tmp_path
     resolver_client = httpx.AsyncClient(
@@ -157,7 +123,7 @@ async def test_fanout_does_not_reparse_bundle_per_session(
         )
 
     app = create_runner_app(
-        process_manager=_FakeProcessManager(),  # type: ignore[arg-type]
+        process_manager=_FakeProcessManager(_ScriptedHarnessClient([])),  # type: ignore[arg-type]
         spec_resolver=_spec_resolver,
         server_client=NullServerClient(),  # type: ignore[arg-type]
     )
