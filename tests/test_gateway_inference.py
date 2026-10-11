@@ -567,6 +567,11 @@ def test_static_table_stays_lenient_until_a_host_proves_off_gateway() -> None:
     assert gateway_backs_static_table(
         {"claude-native": True, "codex-native": True}, ("claude-native",)
     )
+    # An explicit SDK/pi report wins over the host-wide heuristic either way.
+    assert gateway_backs_static_table(
+        {"claude-native": False, "claude-sdk": True}, ("claude-sdk",)
+    )
+    assert not gateway_backs_static_table({"claude-native": True, "pi": False}, ("pi",))
 
 
 @pytest.mark.parametrize(

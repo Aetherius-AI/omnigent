@@ -2296,8 +2296,7 @@ async def test_an_off_gateway_host_never_offers_the_static_table_to_a_turn(
 
     assert judge.offered == [], judge.offered
     decisions = _routing_decisions(conv_store, conv.id)
-    pinned = [d.data.model for d in decisions if str(d.data.model).startswith("databricks-")]
-    assert pinned == [], [d.data for d in decisions]
+    assert decisions == [], [d.data for d in decisions]
     refreshed = conv_store.get_conversation(conv.id)
     assert refreshed is not None
     assert refreshed.model_override is None, refreshed.model_override

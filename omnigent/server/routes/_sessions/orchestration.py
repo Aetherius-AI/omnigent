@@ -9815,22 +9815,6 @@ async def _session_routing_host(
         return None
 
 
-async def _spawn_gateway_backed(
-    request: Request,
-    conv: Conversation,
-    harnesses: Sequence[str],
-) -> bool:
-    """Whether the workspace router can serve a spawn over *harnesses*.
-
-    :param request: Used to reach the app's host store.
-    :param conv: The parent session row.
-    :param harnesses: Every harness family the spawn may land on.
-    :returns: ``True`` unless the host explicitly reports one as not backed.
-    """
-    host_store = getattr(request.app.state, "host_store", None)
-    return _gateway_backed(await _session_routing_host(conv, host_store), harnesses)
-
-
 async def _spawn_routing_backing(
     request: Request,
     conv: Conversation,
@@ -12736,9 +12720,9 @@ __all__ = [
     "_runner_reject_detail",
     "_schedule_deferred_elicitation_clear",
     "_spawn_archive_stop",
-    "_spawn_gateway_backed",
     "_spawn_native_approval_popup_forward",
     "_spawn_native_blocked_notice_forward",
+    "_spawn_routing_backing",
     "_stop_host_runner_intentionally",
     "_wait_for_host_bound_runner_client",
     "_wait_for_host_reconnect",
