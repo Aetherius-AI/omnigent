@@ -312,7 +312,10 @@ def register_items_routes(
         ``max_depth`` are dropped from the page but still advance the
         cursor: a page can be shorter than ``limit`` — even empty — while
         ``has_more`` is true, and ``last_id`` is always the cursor for the
-        next page.
+        next page. Placing the page's rows costs one batched primary-key
+        read per tree level above them that the page itself does not hold,
+        so a request's total work is bounded by ``limit`` times the tree
+        height, or ``max_depth`` when given.
 
         Archived descendants are listed too, flagged ``archived``, so live
         work under an archived session stays reachable; clients hide the
