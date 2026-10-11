@@ -1,26 +1,24 @@
 """UI journey: codex-native chat invokes explicit slash skills.
 
-Two user-observable outcomes of the same defect:
+Two user-observable outcomes of the same defect, each driven from the web
+Chat view of a terminal-first ``codex-native`` session against a real
+``codex`` CLI and a capturing mock LLM:
 
-1. **Explicit slash-skill invocation from chat view.** A Codex host skill
-   (``~/.codex/skills/<name>/SKILL.md``) sent as ``/<name> <args>`` from the
-   web chat view must invoke the skill, so its ``SKILL.md`` instructions
-   reach the model exactly as they do for Codex's own ``$<name>`` mention.
-   Forwarding the command to the app-server as literal text silently drops
-   the skill.
+1. A Codex host skill (``<codex home>/skills/<name>/SKILL.md``) sent as
+   ``/<name> <args>`` must invoke the skill, so its ``SKILL.md`` instructions
+   reach the model exactly as they do for Codex's own ``$<name>`` mention,
+   instead of being forwarded to the app-server as literal text.
+2. A skill installed only under ``~/.agents/skills/<name>/SKILL.md`` must be
+   discovered by codex-native sessions and be invocable with ``/<name>``.
 
-2. **Shared Agent Skills discovery.** A skill installed only under
-   ``~/.agents/skills/<name>/SKILL.md`` must be discovered by codex-native
-   sessions: seeded into the session's ``$CODEX_HOME/skills`` and invocable
-   with ``/<name>`` from chat like any host skill.
-
-Both journeys drive a real ``codex`` CLI against a capturing mock LLM and
-assert at the model boundary. Each skill body carries a unique marker that
-can only reach the model when the skill is expanded; each turn carries a
-nonce, and a marker counts only inside that turn's captured request, so an
-earlier turn's transcript cannot satisfy a later assertion. A ``$<skill>``
-control turn proves the capture path and skill registration work before the
-slash form is checked.
+Assertions are made at the model boundary: each skill body carries a unique
+marker that can only reach the model when the skill is expanded, each turn
+carries a nonce, and a marker counts only inside that turn's captured
+request. A ``$<skill>`` control turn on a *different* skill precedes every
+slash assertion, proving skill registration and the capture path first.
+Distinct skills are required because Codex resends the full conversation on
+every turn, so one skill's expanded body would otherwise satisfy the next
+turn's check.
 
 The composer's slash menu is discovered on the session host, and the
 runner-bound sessions this harness creates have none, so the menu is not part
@@ -57,6 +55,7 @@ from tests.e2e_ui.messages.test_native_codex_render_parity import (
     _open_terminal_view,
     _wait_terminal_connected,
 )
+from tests.helpers.ui_configuration import prepared_repro_environment
 
 
 @dataclass(frozen=True)
@@ -67,6 +66,8 @@ class _InstalledSkills:
     control_marker: str
     slash: str
     slash_marker: str
+    shared_control: str
+    shared_control_marker: str
     shared: str
     shared_marker: str
 
@@ -96,29 +97,39 @@ def installed_codex_skills() -> Iterator[_InstalledSkills]:
     Declare this fixture ahead of ``native_codex_mock_session`` in a test
     signature: the codex-native launch seeds its ``$CODEX_HOME/skills`` once,
     so the skills must already be on disk. Host skills are written under the
-    same config source the launch reads from — the resolver the runner itself
-    uses, which maps an inherited Omnigent-private ``CODEX_HOME`` back to the
-    user's real ``~/.codex`` — so the seeded host skills match what the CLI
-    loads in a plain, custom-``CODEX_HOME``, or nested session. Two distinct
-    host skills keep the control turn's marker out of the slash turn's check;
-    the third lives only in the shared ``~/.agents/skills`` tree.
+    config source the launch itself resolves, which maps an inherited
+    Omnigent-private ``CODEX_HOME`` back to the user's real ``~/.codex``;
+    shared skills go under ``~/.agents/skills``. Both roots must be the ones
+    the *runner* reads: a prepared ``dev.repro_env`` runner has its own
+    ``CODEX_HOME``, which ``exec`` does not export, so pytest must be started
+    with that value set. Two distinct host skills and two distinct shared
+    skills keep each control turn's marker out of the slash turn's check.
 
     :returns: The installed skill names and markers.
     """
+    if prepared_repro_environment()["OMNIGENT_REPRO_SERVER_URL"] and not os.environ.get(
+        "CODEX_HOME"
+    ):
+        pytest.fail(
+            "prepared repro environment: start pytest with CODEX_HOME set to the prepared "
+            "runner's Codex home (e.g. CODEX_HOME=.omnigent/repro-env/codex-config) so host "
+            "skills are seeded where that runner reads them"
+        )
     suffix = uuid.uuid4().hex[:8]
     skills = _InstalledSkills(
         control=f"ctrl-skill-{suffix}",
         control_marker=f"CTRLBODY{uuid.uuid4().hex[:10]}",
         slash=f"slash-skill-{suffix}",
         slash_marker=f"SLASHBODY{uuid.uuid4().hex[:10]}",
+        shared_control=f"shared-ctrl-{suffix}",
+        shared_control_marker=f"SHAREDCTRLBODY{uuid.uuid4().hex[:10]}",
         shared=f"shared-skill-{suffix}",
         shared_marker=f"SHAREDBODY{uuid.uuid4().hex[:10]}",
     )
     codex_root = _codex_home_config_source_from_env() / "skills"
     shared_root = Path.home() / ".agents" / "skills"
-    # Record every ancestor each root is missing so teardown removes exactly
-    # the directories this fixture created (deepest first), never a shared
-    # tree a concurrent session already relies on.
+    # Teardown must remove exactly the directories this fixture created, never a
+    # shared tree a concurrent session already relies on.
     roots_created: list[Path] = []
     for root in (codex_root, shared_root):
         ancestor = root
@@ -130,6 +141,7 @@ def installed_codex_skills() -> Iterator[_InstalledSkills]:
         for root, name, marker in (
             (codex_root, skills.control, skills.control_marker),
             (codex_root, skills.slash, skills.slash_marker),
+            (shared_root, skills.shared_control, skills.shared_control_marker),
             (shared_root, skills.shared, skills.shared_marker),
         ):
             created.append(_write_skill(root, name, marker))
@@ -138,8 +150,6 @@ def installed_codex_skills() -> Iterator[_InstalledSkills]:
         for skill_dir in created:
             shutil.rmtree(skill_dir, ignore_errors=True)
         for leftover in sorted(roots_created, key=lambda p: len(p.parts), reverse=True):
-            # rmdir only removes an empty dir, so a concurrent session's skills
-            # are never deleted.
             with contextlib.suppress(OSError):
                 leftover.rmdir()
 
@@ -193,9 +203,7 @@ def _send_and_capture_marker(
         timeout=_MOCK_TURN_TIMEOUT_MS
     )
     expect(page.locator(_WORKING)).to_have_count(0, timeout=_MOCK_TURN_TIMEOUT_MS)
-    # The turn's model request can land in the capture log slightly after the
-    # reply renders, so poll to a deadline instead of a single fixed wait; a
-    # transient mock-server error just retries until that deadline.
+    # The turn's request can land in the capture log slightly after the reply renders.
     deadline = time.monotonic() + 10.0
     while True:
         try:
@@ -211,8 +219,10 @@ def _send_and_capture_marker(
         page.wait_for_timeout(200)
 
 
+# A prepared dev.repro_env runner is isolated from the ambient LLM_API_KEY and
+# always routes to its capturing mock, so only the standalone lane lacks capture.
 _needs_mock_capture = pytest.mark.skipif(
-    bool(os.environ.get("LLM_API_KEY")),
+    bool(os.environ.get("LLM_API_KEY")) and not os.environ.get("OMNIGENT_REPRO_MODEL_URL"),
     reason="inspects the mock LLM's captured requests; real-gateway mode has no capture",
 )
 
@@ -242,7 +252,10 @@ def test_codex_native_chat_slash_skill_reaches_model(
         control_nonce,
         skills.control_marker,
     )
-    assert control_reached, "precondition: `$<skill>` from chat should invoke the skill"
+    assert control_reached, (
+        f"precondition: `${skills.control}` from chat should invoke the host skill "
+        "(skill registration or request capture is broken, not the slash path)"
+    )
 
     slash_nonce = uuid.uuid4().hex[:8]
     slash_reached = _send_and_capture_marker(
@@ -275,6 +288,20 @@ def test_codex_native_shared_agents_skill_invocable_from_chat(
     reset_mock_llm(mock_llm_server_url)
     set_fallback_mock_llm(mock_llm_server_url, _CODEX_MOCK_MODEL, "ready")
 
+    control_nonce = uuid.uuid4().hex[:8]
+    discovered = _send_and_capture_marker(
+        page,
+        composer,
+        mock_llm_server_url,
+        f"${skills.shared_control} verify this service {control_nonce}",
+        control_nonce,
+        skills.shared_control_marker,
+    )
+    assert discovered, (
+        f"${skills.shared_control} is installed only under ~/.agents/skills and was not "
+        "expanded: shared Agent Skills are missing from Codex skill discovery"
+    )
+
     nonce = uuid.uuid4().hex[:8]
     shared_reached = _send_and_capture_marker(
         page,
@@ -285,6 +312,6 @@ def test_codex_native_shared_agents_skill_invocable_from_chat(
         skills.shared_marker,
     )
     assert shared_reached, (
-        f"/{skills.shared} is installed only under ~/.agents/skills and was not "
-        "invoked: shared Agent Skills are missing from Codex skill discovery"
+        f"/{skills.shared} was forwarded to Codex as literal text: "
+        "the shared skill's SKILL.md body never reached the model"
     )
