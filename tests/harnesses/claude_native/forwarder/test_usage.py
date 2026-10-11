@@ -467,10 +467,9 @@ async def test_forward_session_cost_splits_display_and_policy(
                 cost_cache={},
             )
 
-        # First poll: display = S (0.01) verbatim, policy = max(0.01, 0.65).
-        # If display showed 0.65 here, the badge would diverge from /cost —
-        # the exact bug this split fixes. The display advance carries the
-        # per-model attribution weights.
+        # First poll: display = S (0.01) verbatim, policy = max(0.01, 0.65);
+        # showing 0.65 would diverge the badge from /cost. The display advance
+        # carries the per-model attribution weights.
         await run()
         # The display advance also carries the active statusLine model tag so a
         # server without ``cost_by_model`` support still attributes S correctly.
@@ -869,3 +868,72 @@ async def test_forward_session_cost_preserves_weights_after_failed_post(
     assert posted[0]["cost_by_model"] == weights
     assert posted[1]["cost_by_model"] == weights
     assert dedupe.posted_cost_by_model == weights
+
+
+@pytest.mark.asyncio
+async def test_forward_session_cost_restores_baseline_across_restart(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """
+    A restarted forwarder restores its per-model baseline from the bridge dir.
+
+    The first process persists {sonnet: 0.40, opus: 0.60}. A fresh dedupe (the
+    restart) with the parent spending another 0.20 must fan out only that growth
+    to sonnet, not re-attribute the whole cumulative estimate to both models.
+    """
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    parent = tmp_path / "sess.jsonl"
+    parent.write_text("parent", encoding="utf-8")
+
+    status_box = {"value": 1.00}
+    monkeypatch.setattr(
+        forwarder,
+        "read_claude_context_state",
+        lambda _bridge: {"total_cost_usd": status_box["value"], "model": "claude-sonnet-4-6"},
+    )
+    estimate_box: dict[str, dict[str, float]] = {
+        "value": {"claude-sonnet-4-6": 0.40, "claude-opus-4-8": 0.60}
+    }
+    monkeypatch.setattr(
+        forwarder,
+        "_session_cost_by_model_estimate",
+        lambda **_kwargs: dict(estimate_box["value"]),
+    )
+    subagent_state = forwarder.SubagentForwardState(subagents={})
+    posted: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body.get("type") == "external_session_usage":
+            posted.append(body["data"])
+        return httpx.Response(200, json={})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://ap") as client:
+
+        async def run(dedupe: forwarder._ForwardDedupeState) -> None:
+            await forwarder._forward_session_cost(
+                client=client,
+                session_id="conv_parent",
+                bridge_dir=bridge_dir,
+                parent_transcript_path=parent,
+                subagent_state=subagent_state,
+                dedupe=dedupe,
+                cost_cache={},
+            )
+
+        # First process establishes and persists the per-model baseline.
+        await run(forwarder._ForwardDedupeState())
+        assert posted[-1]["cost_by_model"] == {
+            "claude-sonnet-4-6": pytest.approx(0.40),
+            "claude-opus-4-8": pytest.approx(0.60),
+        }
+
+        # Restart: a fresh dedupe loses the in-memory baseline. The parent spent
+        # 0.20 during the gap, so only that growth may fan out — to sonnet alone.
+        status_box["value"] = 1.20
+        estimate_box["value"] = {"claude-sonnet-4-6": 0.60, "claude-opus-4-8": 0.60}
+        await run(forwarder._ForwardDedupeState())
+        assert posted[-1]["cumulative_cost_usd"] == pytest.approx(1.20)
+        assert posted[-1]["cost_by_model"] == {"claude-sonnet-4-6": pytest.approx(0.20)}

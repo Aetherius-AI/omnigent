@@ -1933,25 +1933,27 @@ def _persist_native_cumulative_usage(
         if "total_cost_usd" in current
         else 0.0
     )
-    # A known zero cost must remain distinct from an unpriced model.
     if "total_cost_usd" in current:
-        if cost_by_model_weights and cost_growth > 0.0:
-            # Split real growth across the per-model weights (a claude-native turn's
-            # Task sub-agents), normalized by the max weight so near-overflow finite
-            # weights still split proportionally and sum to the clamped flat delta.
-            max_weight = max(cost_by_model_weights.values())
-            scaled = {m: w / max_weight for m, w in cost_by_model_weights.items()}
-            weight_total = sum(scaled.values())
-            for weight_model, weight in scaled.items():
-                share = cost_growth * (weight / weight_total)
-                weight_bucket = _model_usage_bucket(current, weight_model)
-                weight_bucket["total_cost_usd"] = (
-                    float(weight_bucket.get("total_cost_usd", 0.0)) + share
-                )
+        if cost_by_model_weights:
+            # Weighted reports stay on the weighted path. A clamped/re-sent report
+            # has no growth and attributes nothing, so it never falls back to a
+            # tagged-alias bucket — which would be a phantom zero row.
+            if cost_growth > 0.0:
+                # Split growth across the weights (a turn's Task sub-agents),
+                # normalized by the max weight so near-overflow finite weights still
+                # split proportionally and sum to the clamped flat delta.
+                max_weight = max(cost_by_model_weights.values())
+                scaled = {m: w / max_weight for m, w in cost_by_model_weights.items()}
+                weight_total = sum(scaled.values())
+                for weight_model, weight in scaled.items():
+                    share = cost_growth * (weight / weight_total)
+                    weight_bucket = _model_usage_bucket(current, weight_model)
+                    weight_bucket["total_cost_usd"] = (
+                        float(weight_bucket.get("total_cost_usd", 0.0)) + share
+                    )
         elif isinstance(model_name, str) and model_name:
-            # No growth to split (plain turn, or a re-sent/clamped report): record
-            # it — zero included — on the active model, never fanned out to the
-            # weights, so a clamped weighted report leaves no phantom zero rows.
+            # Plain turn (no weights): record the delta — zero included — on the
+            # active model so a single-model session still gets its per-model row.
             bucket = _model_usage_bucket(current, model_name)
             bucket["total_cost_usd"] = float(bucket.get("total_cost_usd", 0.0)) + cost_growth
 

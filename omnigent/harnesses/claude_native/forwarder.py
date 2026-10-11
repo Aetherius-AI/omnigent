@@ -77,6 +77,7 @@ _HOOK_STATE_FILE = "hook_forwarder.json"
 _SUBAGENT_STATE_FILE = "subagent_forwarder.json"
 _DELTA_STATE_FILE = "message_deltas_forwarder.json"
 _COMPACTION_STATE_FILE = "compaction_forwarder.json"
+_COST_BASELINE_STATE_FILE = "cost_attribution_forwarder.json"
 _HOOKS_FILE = "hooks.jsonl"
 _INVOCATION_SETTINGS_FILE = "claude-settings.json"
 
@@ -842,6 +843,9 @@ class _ForwardDedupeState:
     # display advance sends only the growth since then as ``cost_by_model``
     # weights. ``None`` until the first display post with a priceable transcript.
     posted_cost_by_model: dict[str, float] | None = None
+    # Set once ``posted_cost_by_model`` has been seeded from the durable bridge-dir
+    # copy on (re)start, so the restore is attempted at most once per process.
+    cost_baseline_seeded: bool = False
     # Last permission mode POSTed as ``external_permission_mode_change`` —
     # mirrors the launch mode and any in-pane shift+tab switch, neither of
     # which the web UI can observe on its own.
@@ -2822,7 +2826,8 @@ def _transcript_cost_size_cached(
         computed :class:`_TranscriptCostCacheEntry`. Mutated in place.
     :returns: Per-model USD cost (e.g. ``{"claude-opus-4-8": 0.0135}``;
         the flat cumulative cost is the sum of the values), or ``None``
-        when nothing is priceable (missing file included).
+        when nothing is priceable (missing file included). The mapping
+        aliases the cache entry; callers must treat it as read-only.
     """
     try:
         size = transcript_path.stat().st_size
@@ -2940,6 +2945,8 @@ async def _forward_session_cost(
 
     Best-effort, like the other forwarder posts: a failed POST is retried
     on the next poll (the ``dedupe`` baselines advance only on success).
+    The per-model baseline is also mirrored to ``bridge_dir`` so a forwarder
+    restart resumes attribution instead of re-fanning out the whole estimate.
 
     :param client: Omnigent HTTP client.
     :param session_id: Parent (claude-native) conversation id the cost is
@@ -2959,6 +2966,17 @@ async def _forward_session_cost(
     """
     if time.monotonic() < dedupe.cost_retry_not_before:
         return
+    if not dedupe.cost_baseline_seeded:
+        # A restarted forwarder lost its in-memory per-model baseline; restore the
+        # durable copy (keyed by transcript, so a /clear or /fork ignores it) to
+        # keep post-restart growth from fanning out the full cumulative estimate.
+        dedupe.cost_baseline_seeded = True
+        if dedupe.posted_cost_by_model is None:
+            restored = await asyncio.to_thread(
+                _read_cost_forward_baseline, bridge_dir, parent_transcript_path
+            )
+            if restored is not None:
+                dedupe.posted_cost_by_model = restored
     status_state = await asyncio.to_thread(read_claude_context_state, bridge_dir)
     status_cost = _cumulative_cost_from_status_state(status_state)
     active_subagents = [
@@ -3059,6 +3077,9 @@ async def _forward_session_cost(
             for model_id, model_cost in cost_by_model.items():
                 merged[model_id] = max(merged.get(model_id, 0.0), model_cost)
             dedupe.posted_cost_by_model = merged
+            await asyncio.to_thread(
+                _write_cost_forward_baseline, bridge_dir, parent_transcript_path, merged
+            )
     if "policy_cost_usd" in payload:
         dedupe.posted_policy_cost = policy_cost
 
@@ -7227,6 +7248,67 @@ async def _write_delta_forward_state_async(
     :returns: None.
     """
     await asyncio.to_thread(_write_delta_forward_state, bridge_dir, state)
+
+
+def _read_cost_forward_baseline(
+    bridge_dir: Path, transcript_path: Path
+) -> dict[str, float] | None:
+    """
+    Read the durable per-model cost-attribution baseline for a transcript.
+
+    The forwarder's in-memory ``posted_cost_by_model`` is lost when the
+    process restarts; a fresh process would then treat the whole cumulative
+    transcript estimate as new growth and misattribute the post-restart
+    delta across the sub-agent models. This restores the last acknowledged
+    split. Keyed by transcript path so a ``/clear`` or ``/fork`` rotation
+    (which resolves to a new transcript) ignores the stale baseline, matching
+    how the transcript cursor itself resets on rotation.
+
+    :param bridge_dir: Native Claude bridge directory.
+    :param transcript_path: Parent transcript the baseline must belong to.
+    :returns: The per-model baseline, or ``None`` when it is absent,
+        unreadable, or recorded against a different transcript.
+    """
+    try:
+        raw = json.loads((bridge_dir / _COST_BASELINE_STATE_FILE).read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(raw, dict) or raw.get("transcript_path") != str(transcript_path):
+        return None
+    baseline = raw.get("posted_cost_by_model")
+    if not isinstance(baseline, dict):
+        return None
+    restored: dict[str, float] = {}
+    for model_id, cost in baseline.items():
+        if not isinstance(model_id, str):
+            return None
+        if isinstance(cost, bool) or not isinstance(cost, (int, float)):
+            return None
+        restored[model_id] = float(cost)
+    return restored
+
+
+def _write_cost_forward_baseline(
+    bridge_dir: Path, transcript_path: Path, baseline: Mapping[str, float]
+) -> None:
+    """
+    Persist the per-model cost-attribution baseline so it survives a restart.
+
+    :param bridge_dir: Native Claude bridge directory.
+    :param transcript_path: Parent transcript the baseline belongs to.
+    :param baseline: Last acknowledged per-model split
+        (``dedupe.posted_cost_by_model``).
+    :returns: None.
+    """
+    bridge_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _write_json_atomic(
+        bridge_dir / _COST_BASELINE_STATE_FILE,
+        {
+            "transcript_path": str(transcript_path),
+            "posted_cost_by_model": dict(baseline),
+            "updated_at": time.time(),
+        },
+    )
 
 
 def _transcript_end_offset(transcript_path: Path) -> int:

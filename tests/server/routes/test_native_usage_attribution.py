@@ -459,9 +459,8 @@ def test_clamped_weighted_report_leaves_no_phantom_zero_rows(db_uri: str) -> Non
         {"cumulative_cost_usd": 1.00, "model": "claude-sonnet-4-6"},
         store,
     )
-    # A re-sent/clamped weighted report: the flat total does not advance (a
-    # forwarder restart re-posts a baseline below the persisted peak), so there is
-    # no growth to split. Weights must not fan out zero-cost rows to models that
+    # A re-sent/clamped weighted report: the flat total does not advance, so there
+    # is no growth to split. Weights must not fan out zero-cost rows to models that
     # never spent in this session.
     _persist_native_cumulative_usage(
         conv.id,
@@ -479,6 +478,30 @@ def test_clamped_weighted_report_leaves_no_phantom_zero_rows(db_uri: str) -> Non
     # The sub-agent model got zero growth, so it must not appear at all.
     assert "claude-opus-4-8" not in by_model
     assert by_model["claude-sonnet-4-6"]["total_cost_usd"] == pytest.approx(1.00)
+
+
+def test_reposted_weighted_report_adds_no_tagged_alias_row(db_uri: str) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(title="weights-repost", agent_id=_AGENT_ID)
+
+    # Positive-growth weighted report whose tagged model is a configured alias that
+    # differs from the transcript model id in the weights, so only the concrete
+    # model gets a bucket and the alias never spends on its own.
+    report = {
+        "cumulative_cost_usd": 1.00,
+        "model": "claude-opus-alias",
+        "cost_by_model": {"claude-opus-4-8": 1.00},
+    }
+    _persist_native_cumulative_usage(conv.id, dict(report), store)
+    # Reposting the identical report (a restart or an ambiguous success) is clamped
+    # to zero growth. It must stay on the weighted path and add no alias row.
+    _persist_native_cumulative_usage(conv.id, dict(report), store)
+
+    usage = _usage(store, conv.id)
+    by_model = usage["by_model"]
+    assert usage["total_cost_usd"] == pytest.approx(1.00)
+    assert list(by_model) == ["claude-opus-4-8"]
+    assert by_model["claude-opus-4-8"]["total_cost_usd"] == pytest.approx(1.00)
 
 
 def test_cost_by_model_weights_survive_overflowing_aggregate(db_uri: str) -> None:
