@@ -112,7 +112,11 @@ export interface OmnigentHostConfig {
    * mount. Omitted by older hosts, which retain the sandboxed srcdoc preview.
    */
   htmlPreviewFrame?: ComponentType<HtmlPreviewFrameProps>;
-  /** Stable server/workspace identity used to scope browser-local extension storage. */
+  /**
+   * Stable server/workspace identity. Scopes browser-local state to one backend:
+   * extension storage, and the cached user identity and admin flag, which are
+   * dropped when it changes (several backends can share one origin).
+   */
   serverIdentity?: string;
   /**
    * Maps an web API path (always starting with `/v1`, `/health`, or

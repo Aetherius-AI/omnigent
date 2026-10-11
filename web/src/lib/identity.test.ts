@@ -839,4 +839,61 @@ describe("host Server switch", () => {
     settleServerA!(mockJsonResponse({ user_id: "alice", is_admin: true }));
     expect(await again).toBe("alice");
   });
+
+  it("ignores a superseded probe's answer after the host left and returned to its Server", async () => {
+    const { setOmnigentHostConfig } = await import("./host");
+    const { resolveIdentity, getCurrentIsAdmin, getCurrentUserId } = await import("./identity");
+    const answers: Array<(r: Response) => void> = [];
+    const serverA = vi.fn(
+      () =>
+        new Promise<Response>((r) => {
+          answers.push(r);
+        }),
+    );
+
+    setOmnigentHostConfig({ serverIdentity: "server-a", fetcher: serverA });
+    const first = resolveIdentity();
+
+    setOmnigentHostConfig({ serverIdentity: "server-b", fetcher: serverFetcher("bob") });
+    await resolveIdentity();
+    setOmnigentHostConfig({ serverIdentity: "server-a", fetcher: serverA });
+    const second = resolveIdentity();
+    expect(answers).toHaveLength(2);
+
+    // The newer probe answers first; the superseded one lands afterwards.
+    answers[1](mockJsonResponse({ user_id: "alice", is_admin: false }));
+    expect(await second).toBe("alice");
+    answers[0](mockJsonResponse({ user_id: "alice", is_admin: true }));
+    expect(await first).toBeNull();
+
+    expect(getCurrentIsAdmin()).toBe(false);
+    expect(getCurrentUserId()).toBe("alice");
+    expect(await resolveIdentity()).toBe("alice");
+    expect(serverA).toHaveBeenCalledTimes(2);
+  });
+
+  it("aborts a request still waiting for its session host when the host switches Servers", async () => {
+    const { setOmnigentHostConfig } = await import("./host");
+    const { authenticatedFetch, resolveIdentity, setSessionHostResolver } =
+      await import("./identity");
+    const serverA = serverFetcher("alice");
+    const serverB = serverFetcher("bob");
+    let hostResolved!: () => void;
+    setSessionHostResolver(
+      () =>
+        new Promise<void>((resolve) => {
+          hostResolved = resolve;
+        }),
+    );
+
+    setOmnigentHostConfig({ serverIdentity: "server-a", fetcher: serverA });
+    await resolveIdentity();
+    const pending = authenticatedFetch("/v1/sessions/session-a/items");
+
+    setOmnigentHostConfig({ serverIdentity: "server-b", fetcher: serverB });
+    hostResolved();
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(serverB.mock.calls.map((c) => c[0])).not.toContain("/v1/sessions/session-a/items");
+  });
 });

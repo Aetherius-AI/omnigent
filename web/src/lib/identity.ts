@@ -311,9 +311,9 @@ let loginRedirectPending = false;
 let identityServer: string | null | undefined;
 
 /**
- * The Server named by the host config. Standalone and unnamed embedded hosts
- * have one Server per page, so `null` never changes. Read off the config this
- * module already depends on rather than widening its `./host` contract.
+ * The Server the host config names (`null` standalone or unnamed: one Server
+ * per page). Only a change here is a switch, so same-Server remounts keep the
+ * cache. Read from the config so partial `./host` mocks need no extra export.
  */
 function configuredServer(): string | null {
   return getOmnigentHostConfig().serverIdentity?.trim() || null;
@@ -401,8 +401,11 @@ export async function resolveIdentity(): Promise<string | null> {
   // The Server this probe is asking. Compared against the live host config
   // when it answers, so a reply that lands after the host switched Servers is
   // discarded instead of being cached for the Server that never sent it.
+  // An answer counts only while this probe still owns the identity slot: a
+  // switch away drops it, and a switch back starts a newer probe that an older
+  // one must not overwrite.
   const probeServer = configuredServer();
-  const isStale = () => configuredServer() !== probeServer;
+  const isStale = () => configuredServer() !== probeServer || identityPromise !== probe;
   // A stale answer also frees the slot it holds; otherwise switching back to
   // this Server before any reader ran would keep returning the settled null.
   const discard = (): null => {
@@ -516,6 +519,17 @@ export async function authenticatedFetch(
   init?: RequestInit,
 ): Promise<Response> {
   syncIdentityServer();
+  // A switch while this request waits means it was meant for the previous
+  // Server; dispatching it through the new fetcher would forward that user.
+  const requestServer = configuredServer();
+  const ensureSameServer = () => {
+    if (configuredServer() !== requestServer) {
+      throw new DOMException(
+        "The host switched Servers while the request was pending",
+        "AbortError",
+      );
+    }
+  };
   const headers = new Headers(init?.headers);
   if (currentUserId && currentUserId !== RESERVED_USER_LOCAL && !headers.has("X-Forwarded-Email")) {
     headers.set("X-Forwarded-Email", currentUserId);
@@ -531,7 +545,10 @@ export async function authenticatedFetch(
   // bootstrap is needed — we skip the await so the fetch still dispatches in the
   // same tick, exactly as before the gate.
   const hostResolve = beginSessionHostResolve(url);
-  if (hostResolve !== null) await hostResolve;
+  if (hostResolve !== null) {
+    await hostResolve;
+    ensureSameServer();
+  }
   // Whether WE (not the caller) stamped the slice key on this request; only then
   // is a keyless re-address meaningful on a wrong-replica (wrong_replica) response.
   let stampedSliceKey = false;
@@ -592,6 +609,7 @@ export async function authenticatedFetch(
     // (callers/tests hold it by reference).
     const retryHeaders = new Headers(headers);
     retryHeaders.delete(SLICE_KEY_HEADER);
+    ensureSameServer();
     res = await hostFetch(url, {
       ...init,
       headers: retryHeaders,
@@ -615,6 +633,7 @@ export async function authenticatedFetch(
       init?.signal?.throwIfAborted();
       await resolveSessionHost(sessionId, { force: true });
       init?.signal?.throwIfAborted();
+      ensureSameServer();
       const hostId = getSessionHost(sessionId);
       if (hostId !== null) {
         clearHostKeyless(hostId);
