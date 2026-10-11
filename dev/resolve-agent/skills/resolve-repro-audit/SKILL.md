@@ -76,13 +76,13 @@ before Step 1.
      the sandbox lane caps a command at 300 s) with margin for setup and
      teardown, sleeps its full budget on a correct fix and times out the
      lane. Rewrite it to return on evidence the turn leaves behind — a new
-     transcript item or rendered reply past a pre-send snapshot, or a
-     `failed` status that was not already present before the send, which
-     some failures persist without appending an item — with deadlines below
-     that cap. A wait that accepts a cached `failed` from an earlier turn can
-     end before the requested turn runs and misreport the transition. Confirm
-     the fail reason is unchanged on the base, and disclose the change in
-     `test_audit`.
+     assistant or error item (or rendered reply) past a pre-send snapshot
+     together with a terminal status, or a `failed` status that was not
+     already present before the send, which some failures persist without
+     appending an item — with deadlines below that cap. A wait that accepts a
+     cached `failed` from an earlier turn can end before the requested turn
+     runs and misreport the transition. Confirm the fail reason is unchanged
+     on the base, and disclose the change in `test_audit`.
    - If the test passes but the journey still misbehaves, the test is too loose:
      strengthen it and re-establish the failure.
    - A passing test alone does not establish that main has fixed the bug.
