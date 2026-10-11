@@ -24,6 +24,8 @@ See ``designs/REPL_TMUX_PANE_SPLIT.md`` for the full design.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -31,8 +33,11 @@ import shlex
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+
+from omnigent.inner.tmux_hooks import CLIENTS_CHANGED_CHANNEL
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -656,3 +661,92 @@ def read_pane_option(pane_id: str, name: str) -> str | None:
         return None
     out = result.stdout.strip()
     return out or None
+
+
+# ── Viewer-aware rendering ────────────────────────────────────
+
+
+async def _tmux_output(*args: str) -> str | None:
+    """Run ``tmux *args`` against this pane's server; ``None`` on any failure."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "tmux",
+            *args,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except OSError:
+        return None
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return None
+    return stdout.decode(errors="replace")
+
+
+async def _server_signals_client_changes() -> bool:
+    """Whether the hosting tmux server wakes :data:`CLIENTS_CHANGED_CHANNEL`.
+
+    Only a server the runner launched with ``tmux_start_on_attach`` carries
+    the ``client-detached`` hook; a user's own tmux does not, and the REPL
+    must not park a ``wait-for`` client there.
+    """
+    hooks = await _tmux_output("show-hooks", "-g")
+    if hooks is None:
+        return False
+    return any(
+        line.startswith("client-detached[") and CLIENTS_CHANGED_CHANNEL in line
+        for line in hooks.splitlines()
+    )
+
+
+async def _attached_client_count(pane_id: str) -> int | None:
+    """``#{session_attached}`` for *pane_id*'s session, or ``None`` if unreadable."""
+    out = await _tmux_output("display-message", "-p", "-t", pane_id, "#{session_attached}")
+    if out is None:
+        return None
+    try:
+        return int(out.strip())
+    except ValueError:
+        return None
+
+
+async def watch_tmux_clients(on_change: Callable[[int], None]) -> None:
+    """Report this pane's attached-client count after every viewer change.
+
+    Blocks in ``tmux wait-for`` between changes, so an idle watcher costs
+    nothing. A signal raised before a wait started is delivered once, so a
+    wake-up may report an unchanged count. Returns without calling
+    *on_change* outside a runner-hosted tmux pane, and whenever tmux stops
+    answering.
+
+    :param on_change: Receives ``#{session_attached}`` for the pane's session.
+    """
+    pane_id = _tmux_pane_id()
+    if not _is_in_tmux() or pane_id is None or not await _server_signals_client_changes():
+        return
+    while True:
+        try:
+            waiter = await asyncio.create_subprocess_exec(
+                "tmux",
+                "wait-for",
+                CLIENTS_CHANGED_CHANNEL,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+        except OSError:
+            return
+        try:
+            returncode = await waiter.wait()
+        except asyncio.CancelledError:
+            with contextlib.suppress(ProcessLookupError):
+                waiter.terminate()
+            await waiter.wait()
+            raise
+        if returncode != 0:
+            return
+        count = await _attached_client_count(pane_id)
+        if count is None:
+            return
+        on_change(count)

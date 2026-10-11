@@ -12,10 +12,11 @@ import logging
 import re
 import sys
 from collections.abc import Iterable
+from types import SimpleNamespace
 
 import pytest
 from omnigent_client import child_summary_busy
-from omnigent_ui_sdk.terminal._formatter import StreamingText
+from omnigent_ui_sdk.terminal._formatter import StreamingText, StreamLive, StreamReplace
 from omnigent_ui_sdk.terminal._host import TerminalHost
 from prompt_toolkit.output import DummyOutput
 from rich.text import Text
@@ -1755,3 +1756,95 @@ def test_subagent_finished_node_kept_visible_in_selector() -> None:
     node = host._subagents["conv_c1"]
     assert host._subagent_visible(node, host._monotonic()) is True
     assert host._subagent_status_label(node) == "Done"
+
+
+# ── pause / resume rendering ────────────────────────────────────
+
+
+def _capture_stdout(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record every ``sys.stdout.write`` payload and silence ``flush``."""
+    writes: list[str] = []
+    monkeypatch.setattr(sys.stdout, "write", lambda data: (writes.append(data), len(data))[1])
+    monkeypatch.setattr(sys.stdout, "flush", lambda: None)
+    return writes
+
+
+def test_paused_host_queues_output_and_replays_it_on_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """While paused nothing reaches the terminal; resume paints the queue in order."""
+    host = TerminalHost(model_name="test")
+    writes = _capture_stdout(monkeypatch)
+
+    host.pause_rendering()
+    host.output(Text("alpha"))
+    host.output(StreamingText(text="bravo\n"))
+    assert host.rendering_paused
+    assert writes == []
+
+    host.resume_rendering()
+    painted = "".join(writes)
+    assert painted.index("alpha") < painted.index("bravo")
+    assert not host.rendering_paused
+    # A second resume has nothing left to replay.
+    writes.clear()
+    host.resume_rendering()
+    assert writes == []
+
+
+def test_paused_host_drops_repaint_requests_until_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Timer flips must not invalidate the prompt while paused; resume repaints once."""
+    host = TerminalHost(model_name="test")
+    invalidations: list[None] = []
+    monkeypatch.setattr(
+        host._prompt, "app", SimpleNamespace(invalidate=lambda: invalidations.append(None))
+    )
+
+    host.pause_rendering()
+    host.start_timer()
+    host.stop_timer()
+    assert invalidations == []
+
+    host.resume_rendering()
+    assert len(invalidations) == 1
+
+
+def test_paused_live_region_renders_collapse_to_the_latest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Consecutive ``StreamLive`` items queue as one, so a long detach replays cheaply."""
+    host = TerminalHost(model_name="test")
+    writes = _capture_stdout(monkeypatch)
+
+    host.pause_rendering()
+    host.output(StreamLive(Text("draft one")))
+    host.output(StreamLive(Text("draft two")))
+    host.output(StreamReplace(Text("final")))
+    assert len(host._paused_output) == 2
+
+    host.resume_rendering()
+    painted = "".join(writes)
+    assert "draft one" not in painted
+    assert painted.index("draft two") < painted.index("final")
+
+
+def test_paused_output_keeps_the_newest_items_and_reports_the_rest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Past the queue limit the oldest items go, and resume says how many."""
+    monkeypatch.setattr("omnigent_ui_sdk.terminal._host._PAUSED_OUTPUT_LIMIT", 2)
+    host = TerminalHost(model_name="test")
+    writes = _capture_stdout(monkeypatch)
+
+    host.pause_rendering()
+    for word in ("alpha", "bravo", "charlie", "delta"):
+        host.output(Text(word))
+
+    host.resume_rendering()
+    painted = "".join(writes)
+    assert "alpha" not in painted
+    assert "bravo" not in painted
+    assert "2 earlier output items were skipped" in painted
+    assert painted.index("skipped") < painted.index("charlie") < painted.index("delta")

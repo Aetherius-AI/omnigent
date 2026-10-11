@@ -21,6 +21,7 @@ import os
 import pathlib
 import shlex
 import sys
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -206,6 +207,10 @@ _SPINNER_FRAMES: tuple[str, ...] = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "�
 # to feel animated (10 fps) and slow enough that the invalidate
 # calls don't dominate the event loop.
 _SPINNER_TICK_SECONDS: float = 0.1
+
+# Output items kept while rendering is paused. Older items are dropped and
+# reported once on resume; the pane's scrollback could not show them anyway.
+_PAUSED_OUTPUT_LIMIT: int = 20_000
 
 # Debounce window for the "N agents running" badge / spinner only. A
 # sub-agent that just reached a terminal task status keeps counting as
@@ -923,6 +928,13 @@ class TerminalHost:
         self.theme = get_theme(theme) if isinstance(theme, str) else theme
         self._console = Console(highlight=False, theme=self.theme.rich_theme)
         self._stream_start: float | None = None
+        # Set while nobody views the pane: output queues for replay and repaint
+        # requests are dropped (see ``pause_rendering``).
+        self._render_paused = False
+        self._render_resumed = asyncio.Event()
+        self._render_resumed.set()
+        self._paused_output: deque[FormattedItem] = deque(maxlen=_PAUSED_OUTPUT_LIMIT)
+        self._paused_output_dropped = 0
         # Live sub-agent tree shown on the main interface (state badge +
         # ``↓`` menu). Keyed by child session id; the tree is reconstructed
         # from each node's ``parent_id``. ``_subagent_root`` is the session
@@ -1704,8 +1716,10 @@ class TerminalHost:
               hint linger for up to that window past expiry.
             - **Idle**: 500 ms — nothing to animate, just keep
               the toolbar responsive to late ``is_busy`` flips.
+            - **Paused**: no ticks until :meth:`resume_rendering`.
             """
             while True:
+                await self._render_resumed.wait()
                 if self._stream_start is not None or self.is_busy or self.has_active_subagents():
                     if self._prompt.app:
                         self._prompt.app.invalidate()
@@ -2046,6 +2060,7 @@ class TerminalHost:
             try:
                 while True:
                     await asyncio.sleep(0.5)
+                    await self._render_resumed.wait()
                     await _rebuild_content(reset_scroll=False)
             except asyncio.CancelledError:
                 return
@@ -2813,8 +2828,14 @@ class TerminalHost:
           nearly identical to the streamed raw text.
         - Rich renderables: rendered to ANSI via a temp console, printed.
         - ``None``: ignored.
+
+        While rendering is paused the item is queued and replayed by
+        :meth:`resume_rendering` instead.
         """
         if item is None:
+            return
+        if self._render_paused:
+            self._queue_paused_output(item)
             return
         if isinstance(item, StreamLive):
             self._replace_live_region(item.renderable, commit=False)
@@ -2981,16 +3002,16 @@ class TerminalHost:
         """
         Atomically erase the streamed-text region and render in its place.
 
-        Backward-compatible wrapper around :meth:`_replace_live_region`
-        with ``commit=True``. Kept for external callers (cancel paths,
-        etc.) that hold a replacement renderable and need the
-        clear+render+state-reset sequence in one call.
+        Equivalent to ``output(StreamReplace(renderable))``. Kept for
+        external callers (cancel paths, etc.) that hold a replacement
+        renderable and need the clear+render+state-reset sequence in one
+        call.
 
         :param renderable: The Rich renderable to display in place of
             the cleared lines, e.g.
             ``Padding(Markdown(text), (0, 1, 0, 3))``.
         """
-        self._replace_live_region(renderable, commit=True)
+        self.output(StreamReplace(renderable))
 
     def _replace_live_region(
         self,
@@ -3089,11 +3110,66 @@ class TerminalHost:
 
         :returns: ``None``. The method is best-effort because tests
             and pre-run host instances may not have an active
-            prompt-toolkit application yet.
+            prompt-toolkit application yet. Dropped while rendering is
+            paused; :meth:`resume_rendering` repaints once instead.
         """
+        if self._render_paused:
+            return
         app = self._prompt.app
         if app is not None:
             app.invalidate()
+
+    @property
+    def rendering_paused(self) -> bool:
+        """Whether output is being queued instead of painted."""
+        return self._render_paused
+
+    def pause_rendering(self) -> None:
+        """Stop painting until :meth:`resume_rendering`.
+
+        For a pane nobody is viewing (the embedded REPL after its last tmux
+        client detaches): output queues for replay, repaint requests are
+        dropped, and the spinner ticker and overlay refresh sleep. The
+        session connection stays up, so nothing needs rebuilding on resume.
+        """
+        if self._render_paused:
+            return
+        self._render_paused = True
+        self._render_resumed.clear()
+
+    def resume_rendering(self) -> None:
+        """Replay output queued while paused and repaint the prompt."""
+        if not self._render_paused:
+            return
+        self._render_paused = False
+        dropped, self._paused_output_dropped = self._paused_output_dropped, 0
+        queued = list(self._paused_output)
+        self._paused_output.clear()
+        if dropped:
+            self.output(
+                Text(
+                    f"  … {dropped} earlier output items were skipped while no terminal "
+                    "client was attached",
+                    style=self.theme.muted,
+                )
+            )
+        for item in queued:
+            self.output(item)
+        self._render_resumed.set()
+        self._invalidate_prompt()
+
+    def _queue_paused_output(self, item: FormattedItem) -> None:
+        """Queue *item* for replay; consecutive live-region renders keep only the latest."""
+        if (
+            isinstance(item, StreamLive)
+            and self._paused_output
+            and isinstance(self._paused_output[-1], StreamLive)
+        ):
+            self._paused_output[-1] = item
+            return
+        if len(self._paused_output) == self._paused_output.maxlen:
+            self._paused_output_dropped += 1
+        self._paused_output.append(item)
 
     def start_timer(self) -> None:
         """Start the elapsed timer shown in the toolbar.
