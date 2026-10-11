@@ -513,7 +513,9 @@ def ensure_stdio_survives_unencodable_output() -> None:
             continue
         encoding = getattr(stream, "encoding", "") or ""
         with contextlib.suppress(LookupError):
-            if codecs.lookup(encoding).name == "utf-8":
+            # utf-8-sig is UTF-8 (only its canonical name differs); it encodes
+            # the glyphs, so skip it and keep any BOM behaviour.
+            if codecs.lookup(encoding).name in ("utf-8", "utf-8-sig"):
                 continue
         # errors="replace" makes unencodable output degrade to "?" instead of
         # raising. Detached or captured streams can't be reconfigured, which is

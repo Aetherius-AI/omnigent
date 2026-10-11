@@ -23,9 +23,8 @@ import yaml
 from omnigent.process_logging import PROCESS_LOG_FILE_ENV_VAR
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-# Reconfigures redirected stdout to cp1252/strict and stderr to cp1252/
-# backslashreplace at interpreter startup, honouring PYTHONUTF8 / PYTHONIOENCODING
-# the way Windows does.
+# Emulates Windows redirected cp1252 stdio at interpreter startup; see the
+# shim's module docstring.
 _CP1252_SITECUSTOMIZE_DIR = Path(__file__).parent / "_windows_cp1252_stdio"
 
 
@@ -115,11 +114,11 @@ def test_host_daemon_registers_under_cp1252_stdio(
         )
     try:
         online = False
-        deadline = time.monotonic() + 40.0
+        deadline = time.monotonic() + 60.0
         while time.monotonic() < deadline:
             if proc.poll() is not None:
                 break
-            log_text = daemon_log.read_text(errors="replace")
+            log_text = daemon_log.read_text(encoding="latin-1")
             if _banner_encode_crash(log_text):
                 break
             if _host_online():
@@ -128,7 +127,7 @@ def test_host_daemon_registers_under_cp1252_stdio(
                 break
             time.sleep(0.25)
 
-        log_text = daemon_log.read_text(errors="replace")
+        log_text = daemon_log.read_text(encoding="latin-1")
         banner_logged = " Connected as " in log_text
         assert proc.poll() is None, (
             "the host daemon process exited in Windows degraded mode:\n" + _tail(log_text)

@@ -9,6 +9,7 @@ import re
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -793,14 +794,14 @@ def test_redact_log_text_handles_large_url_without_userinfo_in_linear_time() -> 
 class _FakeStream:
     """A stdio stub recording ``reconfigure`` calls for the stdio-hardening tests."""
 
-    def __init__(self, encoding: str, *, raises: bool = False) -> None:
+    def __init__(self, encoding: str, *, error: type[Exception] | None = None) -> None:
         self.encoding = encoding
-        self.raises = raises
+        self.error = error
         self.reconfigured: dict[str, object] | None = None
 
     def reconfigure(self, **kwargs: object) -> None:
-        if self.raises:
-            raise ValueError("stream detached")
+        if self.error is not None:
+            raise self.error("stream detached")
         self.reconfigured = kwargs
         self.encoding = str(kwargs.get("encoding", self.encoding))
 
@@ -842,25 +843,41 @@ def test_stdio_hardening_relaxes_errors_on_posix_legacy_stream(
     assert out.encoding == "cp1252"
 
 
-def test_stdio_hardening_skips_already_utf8(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A UTF-8 stream is not reconfigured again (any platform)."""
+@pytest.mark.parametrize("encoding", ["utf-8", "UTF8", "utf-8-sig"])
+def test_stdio_hardening_skips_already_utf8(
+    monkeypatch: pytest.MonkeyPatch, encoding: str
+) -> None:
+    """A UTF-8 stream (incl. an alias or the BOM variant) is not reconfigured."""
     for platform in ("win32", "linux"):
         monkeypatch.setattr(sys, "platform", platform)
-        out = _FakeStream("utf-8")
+        out = _FakeStream(encoding)
         monkeypatch.setattr(sys, "stdout", out)
-        monkeypatch.setattr(sys, "stderr", _FakeStream("utf-8"))
+        monkeypatch.setattr(sys, "stderr", _FakeStream(encoding))
 
         ensure_stdio_survives_unencodable_output()
 
         assert out.reconfigured is None
 
 
+@pytest.mark.parametrize("error", [ValueError, OSError])
 def test_stdio_hardening_tolerates_reconfigure_failure(
     monkeypatch: pytest.MonkeyPatch,
+    error: type[Exception],
 ) -> None:
     """A stream whose ``reconfigure`` raises does not abort startup."""
     monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(sys, "stdout", _FakeStream("cp1252", raises=True))
-    monkeypatch.setattr(sys, "stderr", _FakeStream("cp1252", raises=True))
+    monkeypatch.setattr(sys, "stdout", _FakeStream("cp1252", error=error))
+    monkeypatch.setattr(sys, "stderr", _FakeStream("cp1252", error=error))
+
+    ensure_stdio_survives_unencodable_output()  # must not raise
+
+
+def test_stdio_hardening_skips_streams_without_reconfigure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stream missing ``reconfigure`` (a plain file object) is left alone."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "stdout", SimpleNamespace(encoding="cp1252"))
+    monkeypatch.setattr(sys, "stderr", SimpleNamespace(encoding="cp1252"))
 
     ensure_stdio_survives_unencodable_output()  # must not raise
