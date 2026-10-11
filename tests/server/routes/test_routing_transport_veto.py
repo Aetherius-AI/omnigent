@@ -5,8 +5,8 @@ prefix set directly, without the database-backed event route. The route's
 persistence and decision-card output stay covered by the forwarder integration
 suite (``tests/server/integration/test_routing_integration.py``); here the
 transport decision itself is exercised against the shared launch-path
-resolution so the subscription-precedence and provider-backed-key branches are
-protected without repeating database setup.
+resolution so the subscription-precedence, provider-backed-key, and
+default-key-provider branches are protected without repeating database setup.
 """
 
 from __future__ import annotations
@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from omnigent.onboarding.configure_models import default_base_url_for_family
+from omnigent.runtime.workflow import _load_global_auth
 from omnigent.server.routes._sessions import orchestration
 from omnigent.spec.types import AgentSpec, ApiKeyAuth, ExecutorSpec, ProviderAuth
 
@@ -102,9 +104,9 @@ def test_resolved_subscription_is_direct_despite_legacy_gateway_api_key(
     from omnigent.models.model_catalog import SUBSCRIPTION_KIND, resolve_model_provider
 
     assert resolve_model_provider(spec, "claude-sdk").kind == SUBSCRIPTION_KIND
-    # The legacy gateway api-key is present — the old second-resolution helper
-    # would have read it — but a subscription pane is direct regardless.
-    assert orchestration._api_key_auth_has_gateway_base_url(spec) is True
+    # The legacy gateway api-key is configured but launch never selects it, so
+    # it must not exempt the subscription pane from the veto.
+    assert getattr(_load_global_auth(), "base_url", None) == "https://gw.example.invalid/v1"
     assert orchestration._session_uses_direct_vendor_transport(spec, "claude-sdk") is True
 
 
@@ -136,8 +138,47 @@ def test_provider_backed_gateway_key_is_not_vetoed(
     provider = resolve_model_provider(spec, "claude-sdk")
     assert provider.kind == KEY_KIND
     assert provider.base_url == "https://gw.example.invalid/v1"
-    assert orchestration._api_key_auth_has_gateway_base_url(spec) is False
+    assert provider.launch_base_url is None
     assert orchestration._session_uses_direct_vendor_transport(spec, "claude-sdk") is False
+
+
+def test_explicit_default_key_provider_is_direct_despite_legacy_gateway_api_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An explicit default key provider on the vendor endpoint is direct.
+
+    Launch selects the configured default provider before the legacy global
+    ``auth:`` block, so that block's gateway ``base_url`` plays no part in
+    this pane's transport. The veto must judge the selected provider's own
+    endpoint and decline the gateway pick.
+    """
+    vendor_default = default_base_url_for_family("anthropic")
+    monkeypatch.setenv("DIRECT_KEY", "sk-ant-test")
+    _isolate_config(
+        monkeypatch,
+        tmp_path,
+        "providers:\n"
+        "  anthropic-direct:\n"
+        "    kind: key\n"
+        "    default: true\n"
+        "    anthropic:\n"
+        f"      base_url: {vendor_default}\n"
+        "      api_key: $DIRECT_KEY\n"
+        "auth:\n"
+        "  type: api_key\n"
+        "  api_key: mock-key\n"
+        "  base_url: https://gw.example.invalid/v1\n",
+    )
+    spec = _claude_sdk_spec()
+
+    from omnigent.models.model_catalog import KEY_KIND, resolve_model_provider
+
+    provider = resolve_model_provider(spec, "claude-sdk")
+    assert provider.kind == KEY_KIND
+    assert provider.detail == "provider 'anthropic-direct'"
+    assert provider.base_url == vendor_default
+    assert getattr(_load_global_auth(), "base_url", None) == "https://gw.example.invalid/v1"
+    assert orchestration._session_uses_direct_vendor_transport(spec, "claude-sdk") is True
 
 
 @pytest.mark.parametrize(

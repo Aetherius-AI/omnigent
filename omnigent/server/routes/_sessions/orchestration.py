@@ -6124,34 +6124,19 @@ def _unapplied_routed_verdict(
 _GATEWAY_MODEL_PREFIXES: tuple[str, ...] = ("databricks-", "databricks/", "system.ai.")
 
 
-def _api_key_auth_has_gateway_base_url(spec: AgentSpec) -> bool:
-    """Whether the session's effective ``api_key`` auth names a gateway endpoint.
-
-    The claude-sdk launch builder enables the harness gateway for an
-    ``ApiKeyAuth`` whose ``base_url`` is set, so such a pane reaches
-    gateway-hosted models. The effective auth is the spec's own
-    ``executor.auth`` or, when it declares none, the global ``auth:`` block.
-    """
-    from omnigent.runtime.workflow import _load_global_auth
-    from omnigent.spec.types import ApiKeyAuth
-
-    auth = spec.executor.auth
-    if auth is None:
-        auth = _load_global_auth()
-    return isinstance(auth, ApiKeyAuth) and bool(auth.base_url)
-
-
 def _session_uses_direct_vendor_transport(spec: AgentSpec, harness: str | None) -> bool:
     """Whether this session reaches its model direct from the vendor.
 
-    A direct pane — a subscription login, or an ``api_key`` with no gateway
-    ``base_url`` — has no gateway transport, so a routed gateway-hosted
-    (``databricks-*``) pick raises at construction and, once pinned, disables
-    routing for every later turn. The decision follows the single launch-path
-    resolution (:func:`~omnigent.models.model_catalog.resolve_model_provider`),
-    never a second credential read: a subscription is always direct, and a
-    resolved ``key`` provider is direct only when neither its own endpoint nor
-    the selected api-key auth names a gateway. Any other kind (databricks /
+    A direct pane — a subscription login, or an ``api_key`` whose launch
+    endpoint is the vendor default — has no gateway transport, so a routed
+    gateway-hosted (``databricks-*``) pick raises at construction and, once
+    pinned, disables routing for every later turn. The decision follows the
+    single launch-path resolution
+    (:func:`~omnigent.models.model_catalog.resolve_model_provider`) with no
+    second credential read: a subscription is always direct, and a ``key``
+    provider is direct only when the endpoint launch uses — its
+    ``launch_base_url`` when the legacy api-key path sets one, else its
+    ``base_url`` — is the family's vendor default. Any other kind (databricks /
     gateway / local / none) is treated as not direct, so launch-time resolution
     stays the authority (fail open).
 
@@ -6169,19 +6154,16 @@ def _session_uses_direct_vendor_transport(spec: AgentSpec, harness: str | None) 
     provider = resolve_model_provider(spec, harness)
     if provider.kind == SUBSCRIPTION_KIND:
         return True
-    if provider.kind != KEY_KIND:
+    if provider.kind != KEY_KIND or not provider.family:
         return False
-    # A provider-backed key carries its own endpoint; a non-vendor one reaches
-    # gateway-hosted models. The claude-sdk legacy api-key path reports the
-    # vendor default here regardless of the key's own base_url, so that case
-    # falls through to the auth inspection below.
-    if provider.base_url and provider.family:
-        try:
-            if provider.base_url != default_base_url_for_family(provider.family):
-                return False
-        except KeyError:
-            return False
-    return not _api_key_auth_has_gateway_base_url(spec)
+    endpoint = provider.launch_base_url or provider.base_url
+    if not endpoint:
+        return False
+    try:
+        vendor_default = default_base_url_for_family(provider.family)
+    except KeyError:
+        return False
+    return endpoint.rstrip("/").lower() == vendor_default.rstrip("/").lower()
 
 
 #: Placeholder model on a decision card for a routing call that never answered.
