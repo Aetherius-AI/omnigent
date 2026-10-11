@@ -2398,7 +2398,7 @@ def main() -> None:
     # Do not recommend the off-switch when it is already running. Commands
     # unrelated to runner startup are excluded to avoid a misleading hint;
     # group options may precede the command (`omnigent --profiling login`).
-    command = next((arg for arg in argv if not arg.startswith("-")), "")
+    command = next((arg for arg in argv if arg in _CLICK_SUBCOMMANDS), "")
     suggest_stale_host_recovery = command not in {
         "integration",
         "login",

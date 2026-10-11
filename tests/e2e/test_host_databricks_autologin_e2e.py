@@ -30,8 +30,8 @@ import pytest
 
 pexpect = pytest.importorskip("pexpect")
 
-_WORKSPACE_ID = "1965859176160743"
-_USER = "zeyi.f@databricks.com"
+_WORKSPACE_ID = "1234567890123456"
+_USER = "test-user@example.com"
 
 # Seconds for the spawned CLI to finish the whole auto-login flow (server
 # probes, stub browser login, SDK token resolution, verify round-trip).
@@ -137,10 +137,10 @@ def edge_cert(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return cert_dir
 
 
-def _serve_edge(cert_dir: Path, mode: str) -> tuple[http.server.HTTPServer, str]:
+def _serve_edge(cert_dir: Path, mode: str) -> tuple[http.server.ThreadingHTTPServer, str]:
     """Start the fake edge on an ephemeral HTTPS port; return (server, base URL)."""
     handler = type("Handler", (_FakeDatabricksEdge,), {"mode": mode})
-    httpd = http.server.HTTPServer(("127.0.0.1", 0), handler)
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.load_cert_chain(cert_dir / "cert.pem", cert_dir / "key.pem")
@@ -220,8 +220,7 @@ def host_env(edge_cert: Path, tmp_path: Path) -> dict[str, str]:
 
     repo_root = Path(__file__).resolve().parents[2]
     env = os.environ.copy()
-    # The reported machine had never logged in: drop any ambient Databricks
-    # or Omnigent credentials so they can't change which auth path runs.
+    # Ambient Databricks/Omnigent credentials must not change which auth path runs.
     for ambient in (
         "OMNIGENT_REMOTE_AUTH_TOKEN",
         "DATABRICKS_HOST",

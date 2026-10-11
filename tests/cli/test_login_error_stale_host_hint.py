@@ -9,6 +9,7 @@ import pytest
 
 from omnigent import cli as cli_module
 from omnigent.cli_common import AuthFailure
+from omnigent.cli_diagnostics import suppresses_recovery_hint
 
 
 def _run_main_with_failure(
@@ -22,6 +23,7 @@ def _run_main_with_failure(
         raise exc
 
     monkeypatch.setattr("omnigent.cli_diagnostics.setup_cli_logging", lambda argv: None)
+    monkeypatch.setattr(cli_module, "_maybe_fast_backfill_install_ledger", lambda argv: None)
     monkeypatch.setattr(cli_module, "cli", raising_cli)
     monkeypatch.setattr(sys, "argv", argv or ["omnigent", "host", "--server", "https://x"])
     with pytest.raises(SystemExit) as exc_info:
@@ -40,6 +42,7 @@ def test_auth_failure_omits_stale_host_hint(
         "token (HTTP 403). Check that your user has access to this app."
     )
     assert isinstance(exc, click.ClickException)
+    assert suppresses_recovery_hint(exc)
     code = _run_main_with_failure(monkeypatch, exc)
 
     err = capsys.readouterr().err
