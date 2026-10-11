@@ -807,19 +807,21 @@ def _cli_probe_cwd() -> str | None:
     checkout or a removed git worktree). A probe subprocess inherits that
     deleted cwd, where ``claude`` exits non-zero, so a present CLI reads as
     unavailable. Return ``None`` while the cwd is intact (inherit it, no
-    change); fall back to home, else the filesystem root, once it is gone.
+    change); once it is gone, fall back to home, else the filesystem root.
     """
     try:
         os.getcwd()
         return None
     except OSError:
-        for candidate in (Path.home(), Path(os.path.abspath(os.sep))):
-            try:
-                if candidate.is_dir():
-                    return str(candidate)
-            except OSError:
-                continue
-        return None
+        pass
+    try:
+        # Path.home() raises RuntimeError, not OSError, when HOME is unset.
+        home = Path.home()
+        if home.is_dir():
+            return str(home)
+    except (OSError, RuntimeError):
+        pass
+    return os.path.abspath(os.sep)
 
 
 def _binary_signature(binary: str) -> tuple[str, int, int] | None:
@@ -1204,10 +1206,11 @@ def harness_cli_logged_in(key: str, timeout: float = _DEFAULT_CLI_PROBE_TIMEOUT_
     with _PROBE_CACHE_LOCK:
         if time.monotonic() < _LOGIN_PROBE_CACHE.get(cache_key, 0.0):
             return True
-    argv_binary = binary if key == GEMINI_FAMILY else spec.binary
     try:
         result = subprocess.run(
-            [argv_binary, *spec.status_args],
+            # Exec the discovered absolute path so a relative PATH entry can't
+            # re-resolve the bare name against the probe's fallback cwd.
+            [binary, *spec.status_args],
             check=False,
             timeout=timeout,
             # Concurrent probes must not change or restore a shared terminal's input mode.

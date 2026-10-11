@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shutil
+import subprocess
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -94,12 +96,50 @@ def test_login_probe_survives_deleted_daemon_cwd(
         assert hi.harness_cli_logged_in(ANTHROPIC_FAMILY) is True
 
 
-def test_cli_probe_cwd_only_overrides_when_the_cwd_is_gone(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+@pytest.mark.skipif(os.name == "nt", reason="POSIX deleted-cwd semantics")
+def test_cli_probe_cwd_only_overrides_when_the_cwd_is_gone(tmp_path: Path) -> None:
     """A valid cwd is inherited (``None``); a removed one falls back to a dir."""
     assert hi._cli_probe_cwd() is None
     with _deleted_cwd(tmp_path):
         fallback = hi._cli_probe_cwd()
     assert fallback is not None
     assert Path(fallback).is_dir()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX deleted-cwd semantics")
+def test_cli_probe_cwd_falls_back_to_root_without_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unresolvable home (``Path.home`` raising) must not escape the probe."""
+
+    def _no_home() -> Path:
+        raise RuntimeError("home directory not resolvable")
+
+    monkeypatch.setattr(Path, "home", staticmethod(_no_home))
+    with _deleted_cwd(tmp_path):
+        fallback = hi._cli_probe_cwd()
+    assert fallback == os.path.abspath(os.sep)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX deleted-cwd semantics")
+def test_login_probe_execs_discovered_absolute_binary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The status probe must exec the resolved absolute path, so a relative
+    PATH entry cannot re-resolve ``claude`` against the fallback cwd."""
+    _install_fake_claude(tmp_path, monkeypatch)
+    discovered = shutil.which("claude")
+    monkeypatch.setenv("PATH", f".{os.pathsep}{os.environ['PATH']}")
+    executed: list[str] = []
+
+    def _run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess:
+        executed.append(argv[0])
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout='{"loggedIn": true}', stderr=""
+        )
+
+    monkeypatch.setattr(hi.subprocess, "run", _run)
+    with _deleted_cwd(tmp_path):
+        assert hi.harness_cli_logged_in(ANTHROPIC_FAMILY) is True
+    assert executed == [discovered]
+    assert os.path.isabs(executed[0])
