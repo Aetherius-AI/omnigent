@@ -170,14 +170,6 @@ describe("sessionUpdatesSocket visibility-aware reconnect", () => {
     document.dispatchEvent(new Event("visibilitychange"));
   }
 
-  /** Refuse `count` dials in a row, letting each visible retry fire. */
-  function refuseDials(count: number): void {
-    for (let attempt = 0; attempt < count; attempt += 1) {
-      latestWs().close();
-      vi.advanceTimersByTime(RECONNECT_CEILING_MS);
-    }
-  }
-
   beforeEach(() => {
     vi.useFakeTimers();
     FakeWebSocket.instances = [];
@@ -196,12 +188,15 @@ describe("sessionUpdatesSocket visibility-aware reconnect", () => {
 
   it("fires only the retry already pending when the page hides mid-outage", () => {
     sessionUpdatesSocket.start();
-    refuseDials(6);
     const dialsBefore = FakeWebSocket.instances.length;
 
-    // The retry scheduled while visible still fires once after hiding...
+    // Arrange one foreground retry scheduled from the visible ramp, then hide.
+    // The hidden cadence is attempt-independent, so a single pending retry is
+    // enough to show which dial honours it.
     latestWs().close();
     fireVisibilityChange(true);
+
+    // The retry scheduled while visible still fires once after hiding...
     vi.advanceTimersByTime(RECONNECT_CEILING_MS);
     expect(FakeWebSocket.instances.length).toBe(dialsBefore + 1);
 

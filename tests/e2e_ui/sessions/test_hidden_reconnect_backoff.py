@@ -18,12 +18,14 @@ from playwright.sync_api import Browser, BrowserContext, Page, Playwright, expec
 
 from tests.e2e_ui.mobile.test_android_shell import _ANDROID_SHELL_INIT_SCRIPT
 
-# While visible the socket keeps redialing (250 ms base, doubling, 5 s cap), so
-# a 15 s window sees at least two fresh dials even once the backoff saturates.
+# These windows mirror web/src/lib/reconnectBackoff.ts; re-check them if its
+# constants change. Visible, the socket ramps 250 ms -> 5 s (RECONNECT_BASE_MS ->
+# RECONNECT_MAX_MS), so a 15 s window sees at least two fresh dials.
 _RAMP_MS = 15_000
 _MIN_RAMP_DIALS = 2
-# The visible cadence fits 4-5 dials in this window; a hidden-aware loop fires
-# at most the one retry already pending when the page hid.
+# Hidden, retries wait a 45 s floor (HIDDEN_RECONNECT_MS - HIDDEN_RECONNECT_JITTER_MS);
+# keeping this window below that floor means a hidden-aware loop fires at most the
+# one retry already pending when the page hid.
 _HIDDEN_WINDOW_MS = 20_000
 _MAX_HIDDEN_DIALS = 1
 
