@@ -1,14 +1,10 @@
-"""Browser e2e: archiving one session must leave the unread dots on other rows off.
+"""Browser e2e: archiving a session must not flash the unread dot on other rows.
 
-The dot lights when a row's ``updated_at`` exceeds the viewer's last-seen
-baseline, seeded from the first ``GET /v1/sessions`` page. Archiving changes the
-session-updates watch-set and the server answers with a ``snapshot`` restating
-the remaining rows; where streamed timestamps lead the list values (the managed
-deployment serves the list from MySQL and the stream from WHS) already-read rows
-would light until the list refetch wrote the list timestamps back. The OSS server
-returns one timestamp on both paths, so the test re-creates the split in the
-browser: a WebSocket route adds a few seconds to every streamed ``updated_at``
-while ``GET /v1/sessions`` is untouched.
+The sidebar lights the dot when a row's ``updated_at`` exceeds the viewer's
+last-seen baseline from ``GET /v1/sessions``, and an archive makes the server
+restate the remaining rows in a ``snapshot`` frame. A WebSocket route makes every
+streamed ``updated_at`` lead the list (as the managed deployment's two read paths
+do) while ``GET /v1/sessions`` is untouched.
 """
 
 from __future__ import annotations
@@ -107,27 +103,13 @@ def _frame(payload: Any) -> dict[str, Any] | None:
     return frame if isinstance(frame, dict) else None
 
 
-def _count_snapshots(page: Page) -> list[dict[str, Any]]:
-    """Collect the ``snapshot`` frames the server sends on the updates stream."""
-    snapshots: list[dict[str, Any]] = []
+def _lead_stream_timestamps(
+    ws: WebSocketRoute, lead_s: int, snapshots: list[dict[str, Any]]
+) -> None:
+    """Forward the stream, adding ``lead_s`` to every streamed ``updated_at``.
 
-    def on_websocket(ws: Any) -> None:
-        if not ws.url.split("?", 1)[0].rstrip("/").endswith("/v1/sessions/updates"):
-            return
-
-        def on_frame(payload: Any) -> None:
-            frame = _frame(payload)
-            if frame is not None and frame.get("type") == "snapshot":
-                snapshots.append(frame)
-
-        ws.on("framereceived", on_frame)
-
-    page.on("websocket", on_websocket)
-    return snapshots
-
-
-def _lead_stream_timestamps(ws: WebSocketRoute, lead_s: int) -> None:
-    """Forward the stream, adding ``lead_s`` to every streamed ``updated_at``."""
+    ``snapshot`` frames are also collected so the journey can wait for them.
+    """
     server = ws.connect_to_server()
     ws.on_message(server.send)
 
@@ -139,6 +121,8 @@ def _lead_stream_timestamps(ws: WebSocketRoute, lead_s: int) -> None:
         for item in frame.get("items", []):
             if isinstance(item.get("updated_at"), int):
                 item["updated_at"] += lead_s
+        if frame["type"] == "snapshot":
+            snapshots.append(frame)
         ws.send(json.dumps(frame))
 
     server.on_message(from_server)
@@ -174,12 +158,13 @@ def _other_rows_lit(log: list[dict[str, Any]], t_action_ms: float, exclude: str)
     return lit
 
 
-def _drive_archive_journey(page: Page, base_url: str, ids: list[str]) -> dict[str, dict[str, Any]]:
+def _drive_archive_journey(
+    page: Page, base_url: str, ids: list[str], snapshots: list[dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
     """Open the sidebar with every row read, then archive two non-active rows.
 
     Returns, per archived session, the other rows that lit the dot and when.
     """
-    snapshots = _count_snapshots(page)
     page.goto(f"{base_url}/c/{ids[0]}")
     for sid in ids:
         expect(_row(page, sid)).to_be_visible()
@@ -207,12 +192,13 @@ def test_archiving_leaves_other_rows_dots_off_when_stream_timestamps_lead_the_li
 ) -> None:
     base_url, ids = seeded_sessions
     page: Page = request.getfixturevalue("page")
+    snapshots: list[dict[str, Any]] = []
     page.route_web_socket(
         "**/v1/sessions/updates*",
-        lambda ws: _lead_stream_timestamps(ws, STREAM_LEAD_S),
+        lambda ws: _lead_stream_timestamps(ws, STREAM_LEAD_S, snapshots),
     )
 
-    lit = _drive_archive_journey(page, base_url, ids)
+    lit = _drive_archive_journey(page, base_url, ids, snapshots)
 
     assert all(rows == {} for rows in lit.values()), (
         f"unread dot lit on other rows after archiving: {json.dumps(lit, indent=1)}"
