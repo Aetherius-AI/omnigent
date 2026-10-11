@@ -410,7 +410,7 @@ describe("ProjectSettingsDialog", () => {
       harness: "cursor-native",
     });
 
-  it("offers a Cursor model default from the host's catalog and round-trips it", async () => {
+  it("offers the host's Cursor catalog as the model default and saves a pick from it", async () => {
     availableAgentsMock.mockReturnValue({ data: [pickerAgent(), cursorAgent()] });
     hostModelOptionsMock.mockReturnValue({
       data: [
@@ -424,14 +424,18 @@ describe("ProjectSettingsDialog", () => {
       config: { agent_id: "ag_cursor", model: "grok-4.7" },
     });
     renderDialog();
+    // The stored id is labelled from the host catalog, not kept as a raw fallback.
     await waitFor(() =>
       expect(screen.getByTestId("project-settings-model")).toHaveTextContent("Grok 4.7"),
     );
     expect(hostModelOptionsMock).toHaveBeenCalledWith("h1", "cursor-native", true);
 
+    // A model only the catalog knows is offered and can become the default.
+    fireEvent.click(screen.getByTestId("project-settings-model"));
+    fireEvent.click(screen.getByRole("option", { name: "Auto" }));
     fireEvent.click(screen.getByTestId("project-settings-save"));
     await waitFor(() =>
-      expect(updateMock).toHaveBeenCalledWith("p_1", { agent_id: "ag_cursor", model: "grok-4.7" }),
+      expect(updateMock).toHaveBeenCalledWith("p_1", { agent_id: "ag_cursor", model: "auto" }),
     );
   });
 

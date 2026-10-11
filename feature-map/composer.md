@@ -126,9 +126,10 @@ Tests under `tests/browser_ui/` stub every backend call and need no instance:
   `tests/e2e_ui/start_session/test_start_session.py::test_start_session_select_cursor_model_before_first_message`
   (the pick rides the create as `model_override`; a failed host lookup shows its reason and sends
   no override — the Cursor cases in `web/src/shell/NewChatDialog.test.tsx`),
-  `web/src/shell/ProjectSettingsDialog.test.tsx` (Cursor cases: Project Settings → Model default
-  offers the same host-resolved catalog for a model-picker harness, and stays disabled, storing no
-  default, when the host has no catalog),
+  `web/src/shell/ProjectSettingsDialog.test.tsx` (Cursor cases: a project's sidebar menu →
+  Project settings → Default agent → Model offers the same host-resolved catalog for a
+  model-picker harness; with no catalog the field stays visible but disabled with an explanatory
+  hint, and Save stores no default),
   `tests/e2e_ui/start_session/test_composer_transition.py::test_selected_model_survives_delayed_create`
 - **`effort-picker`, new-session composer:**
   `tests/e2e_ui/start_session/test_codex_effort_prelaunch.py::test_new_codex_session_gear_offers_reasoning_effort`
