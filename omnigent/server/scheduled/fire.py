@@ -857,7 +857,10 @@ async def _agent_binding(
     if deps.agent_cache is not None and agent.bundle_location:
         try:
             loaded = await asyncio.to_thread(
-                deps.agent_cache.load, agent.id, agent.bundle_location
+                deps.agent_cache.load,
+                agent.id,
+                agent.bundle_location,
+                expand_env=agent.operator_authored,
             )
             spec = loaded.spec
         except Exception:  # noqa: BLE001

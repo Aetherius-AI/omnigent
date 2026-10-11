@@ -325,18 +325,24 @@ async def test_wake_threads_the_parent_spec_for_the_routing_veto(
         kind="sub_agent", title="codex:demo", parent_conversation_id=parent.id
     )
     parent_agent = type(
-        "Agent", (), {"id": parent_agent_id, "bundle_location": f"{parent_agent_id}/v2"}
+        "Agent",
+        (),
+        {
+            "id": parent_agent_id,
+            "bundle_location": f"{parent_agent_id}/v2",
+            "operator_authored": True,
+        },
     )()
     agents = {parent_agent_id: parent_agent}
     agent_store = type("Agents", (), {"get": staticmethod(agents.get)})()
 
     # Identity sentinel: the wake must hand this exact object to dispatch.
     sentinel_spec = object()
-    load_calls: list[tuple[str, str]] = []
+    load_calls: list[tuple[str, str, bool | None]] = []
 
     class _Cache:
-        def load(self, agent_id: str, bundle_location: str, **_: Any) -> Any:
-            load_calls.append((agent_id, bundle_location))
+        def load(self, agent_id: str, bundle_location: str, **kw: Any) -> Any:
+            load_calls.append((agent_id, bundle_location, kw.get("expand_env")))
             return type("Loaded", (), {"spec": sentinel_spec})()
 
     delivered: list[_DispatchCall] = []
@@ -387,9 +393,10 @@ async def test_wake_threads_the_parent_spec_for_the_routing_veto(
         uninstall()
 
     assert len(delivered) == 1
-    # The cache was consulted with the parent's CURRENT bundle, and that
-    # exact spec rode to the dispatch so the veto can judge the pick.
-    assert load_calls == [(parent_agent_id, f"{parent_agent_id}/v2")]
+    # The cache was consulted with the parent's CURRENT bundle and the
+    # provenance-derived expansion flag, and that exact spec rode to the
+    # dispatch so the veto can judge the pick.
+    assert load_calls == [(parent_agent_id, f"{parent_agent_id}/v2", True)]
     assert delivered[0].agent_spec is sentinel_spec
 
 
@@ -411,7 +418,13 @@ async def test_wake_fails_open_when_the_parent_spec_cannot_load(
         kind="sub_agent", title="codex:demo", parent_conversation_id=parent.id
     )
     parent_agent = type(
-        "Agent", (), {"id": parent_agent_id, "bundle_location": f"{parent_agent_id}/v2"}
+        "Agent",
+        (),
+        {
+            "id": parent_agent_id,
+            "bundle_location": f"{parent_agent_id}/v2",
+            "operator_authored": True,
+        },
     )()
     agents = {parent_agent_id: parent_agent}
     agent_store = type("Agents", (), {"get": staticmethod(agents.get)})()

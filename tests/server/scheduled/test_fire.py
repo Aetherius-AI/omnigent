@@ -99,8 +99,12 @@ class FakeAgentCache:
     ) -> None:
         self._harness = harness
         self._reasoning_effort = reasoning_effort
+        # (agent_id, bundle_location, expand_env) for each load, so tests can
+        # assert the immutable provenance is threaded into a cold load.
+        self.load_calls: list[tuple[str, str, Any]] = []
 
-    def load(self, agent_id: str, bundle_location: str, **_: Any) -> _FakeLoadedAgent:
+    def load(self, agent_id: str, bundle_location: str, **kwargs: Any) -> _FakeLoadedAgent:
+        self.load_calls.append((agent_id, bundle_location, kwargs.get("expand_env")))
         return _FakeLoadedAgent(self._harness, self._reasoning_effort)
 
 
@@ -1006,6 +1010,9 @@ async def test_managed_sandbox_dispatch_threads_resolved_spec(
         def get(self, session_id: str) -> None:
             return None
 
+    agent_cache = FakeAgentCache(harness="claude-sdk")
+    operator_agent = _FakeAgent("ag_1", bundle_location="ag_1/rev1")
+    assert operator_agent.operator_authored is True
     store = FakeScheduledTaskStore(rows={"task_1": _task(execution_target="managed_sandbox")})
     dispatch = fire_mod._make_managed_sandbox_dispatch(
         _deps(
@@ -1013,8 +1020,8 @@ async def test_managed_sandbox_dispatch_threads_resolved_spec(
             conversation_store=_BoundConvStore(),
             host_store=FakeHostStore({"host_1": _FakeHost("host_1", RESERVED_USER_LOCAL)}),
             host_registry=FakeHostRegistry(online={"host_1"}),
-            agent_store=FakeAgentStore({"ag_1": _FakeAgent("ag_1", bundle_location="ag_1/rev1")}),
-            agent_cache=FakeAgentCache(harness="claude-sdk"),
+            agent_store=FakeAgentStore({"ag_1": operator_agent}),
+            agent_cache=agent_cache,
             sandbox_config=_FakeSandboxConfig(managed_launch_supported=True),
             managed_launches=_NoopManagedLaunches(),
         )
@@ -1028,6 +1035,38 @@ async def test_managed_sandbox_dispatch_threads_resolved_spec(
     # resolved spec to decline a gateway pick this pane cannot run.
     assert captured["agent_spec"] is not None
     assert captured["agent_spec"].executor.config["harness"] == "claude-sdk"
+    # The spec is loaded with the agent's immutable provenance, so a cold
+    # Tier-1 cache load is not poisoned with unexpanded ``${VAR}`` values.
+    assert agent_cache.load_calls == [("ag_1", "ag_1/rev1", True)]
+
+
+@pytest.mark.asyncio
+async def test_session_authored_agent_loads_its_spec_unexpanded() -> None:
+    """A session-authored agent threads ``expand_env=False`` into the load.
+
+    Provenance is immutable per agent, so the scheduled spec load must forward
+    the agent's own ``operator_authored`` value rather than a fixed default;
+    otherwise a cold Tier-1 cache first-loads a user agent with the wrong
+    expansion and serves it to later callers.
+    """
+    session_agent = _FakeAgent(
+        "ag_1", bundle_location="ag_1/rev1", session_id="sess_1", created_by="user_1"
+    )
+    assert session_agent.operator_authored is False
+    agent_cache = FakeAgentCache(harness="claude-sdk")
+    deps = _deps(
+        FakeScheduledTaskStore(rows={"task_1": _task()}),
+        agent_store=FakeAgentStore({"ag_1": session_agent}),
+        agent_cache=agent_cache,
+    )
+
+    revision, spec = await fire_mod._agent_binding(
+        deps, _FakeConversation(id="conv_1", agent_id="ag_1")
+    )
+
+    assert revision == "ag_1/rev1"
+    assert spec is not None
+    assert agent_cache.load_calls == [("ag_1", "ag_1/rev1", False)]
 
 
 @pytest.mark.asyncio

@@ -1808,10 +1808,19 @@ def _claude_sdk_spec(tmp_path: Any, auth_block: str) -> Any:
         # Direct-to-vendor api_key pane: the gateway-hosted pick is unrunnable,
         # so it must not be pinned and the turn runs unrouted.
         ("offgateway-api-key", "  auth:\n    type: api_key\n    api_key: mock-key\n", False),
+        # Gateway-backed api_key pane: the key names a custom gateway base_url,
+        # so the launch path enables the gateway and the same pick runs — it is
+        # pinned like the databricks pane.
+        (
+            "gateway-api-key-base-url",
+            "  auth:\n    type: api_key\n    api_key: mock-key\n"
+            "    base_url: https://gw.example.invalid/v1\n",
+            True,
+        ),
         # Gateway-backed databricks pane: the same pick runs, so it is pinned.
         ("gateway-databricks", "  auth:\n    type: databricks\n    profile: DEFAULT\n", True),
     ],
-    ids=["offgateway-api-key", "gateway-databricks"],
+    ids=["offgateway-api-key", "gateway-api-key-base-url", "gateway-databricks"],
 )
 async def test_a_routed_gateway_pick_is_pinned_only_when_the_pane_can_run_it(
     client: httpx.AsyncClient,

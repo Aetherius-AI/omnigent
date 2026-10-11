@@ -6124,27 +6124,56 @@ def _unapplied_routed_verdict(
 _GATEWAY_MODEL_PREFIXES: tuple[str, ...] = ("databricks-", "databricks/", "system.ai.")
 
 
+def _api_key_auth_has_gateway_base_url(spec: AgentSpec) -> bool:
+    """
+    Whether the session's effective ``api_key`` auth names a gateway endpoint.
+
+    The launch builders enable the harness gateway for an ``ApiKeyAuth``
+    whose ``base_url`` is set (see
+    :func:`omnigent.runtime.workflow._build_claude_sdk_spawn_env`), so such a
+    pane reaches gateway-hosted models instead of the vendor default. The
+    effective auth is the spec's own ``executor.auth`` or, when it declares
+    none, the global ``auth:`` block — the same precedence the builders use.
+
+    :param spec: The session's resolved agent spec.
+    :returns: ``True`` when the effective api-key auth carries a ``base_url``.
+    """
+    from omnigent.runtime.workflow import _load_global_auth
+    from omnigent.spec.types import ApiKeyAuth
+
+    auth = spec.executor.auth
+    if auth is None:
+        auth = _load_global_auth()
+    return isinstance(auth, ApiKeyAuth) and bool(auth.base_url)
+
+
 def _session_uses_direct_vendor_transport(spec: AgentSpec, harness: str | None) -> bool:
     """
     Whether this session reaches its model direct from the vendor.
 
-    A direct ``api_key`` or bare subscription login has no gateway
-    transport. A direct ``claude-sdk`` pane rejects a gateway-hosted
-    (``databricks-*``) model at construction — see
+    A bare subscription login or an ``api_key`` with no ``base_url`` talks
+    direct to the vendor and has no gateway transport. A direct
+    ``claude-sdk`` pane rejects a gateway-hosted (``databricks-*``) model at
+    construction — see
     :class:`omnigent.inner.claude_sdk_executor.ClaudeSDKExecutor`; other
     transports may surface the mismatch later instead. Pinning such a pick
     as the session ``model_override`` would both fail this turn and disable
-    routing for every later one. Resolution reuses the catalog lookup the
-    spawn builders call
-    (:func:`omnigent.models.model_catalog.resolve_model_provider`); a
-    provider that does not resolve to direct key or subscription auth is
-    treated as *not* direct, so launch-time resolution stays the authority
-    (fail open).
+    routing for every later one.
+
+    An ``api_key`` that carries a ``base_url`` is the exception: the launch
+    builders point the harness gateway at that endpoint, so the pane reaches
+    gateway-hosted models and the pick is runnable. The catalog lookup
+    (:func:`omnigent.models.model_catalog.resolve_model_provider`) folds a
+    ``base_url`` into the resolved provider for some harnesses but not for
+    ``claude-sdk``, so the effective api-key auth is inspected directly to
+    mirror the launch decision. A provider that does not resolve to direct
+    key or subscription auth is treated as *not* direct, so launch-time
+    resolution stays the authority (fail open).
 
     :param spec: The session's resolved agent spec.
     :param harness: The session's harness id, e.g. ``"claude-sdk"``.
-    :returns: ``True`` when the resolved provider uses direct key or
-        subscription auth to the vendor.
+    :returns: ``True`` when the session reaches its model direct from the
+        vendor with no gateway transport.
     """
     from omnigent.models.model_catalog import (
         KEY_KIND,
@@ -6152,7 +6181,9 @@ def _session_uses_direct_vendor_transport(spec: AgentSpec, harness: str | None) 
         resolve_model_provider,
     )
 
-    return resolve_model_provider(spec, harness).kind in {KEY_KIND, SUBSCRIPTION_KIND}
+    if resolve_model_provider(spec, harness).kind not in {KEY_KIND, SUBSCRIPTION_KIND}:
+        return False
+    return not _api_key_auth_has_gateway_base_url(spec)
 
 
 #: Placeholder model on a decision card for a routing call that never answered.
@@ -9623,7 +9654,10 @@ async def _wake_parent_for_blocked_child(
         try:
             _parent_spec = (
                 await asyncio.to_thread(
-                    agent_cache.load, parent_agent.id, parent_agent.bundle_location
+                    agent_cache.load,
+                    parent_agent.id,
+                    parent_agent.bundle_location,
+                    expand_env=parent_agent.operator_authored,
                 )
             ).spec
         except Exception:  # noqa: BLE001
@@ -11324,6 +11358,7 @@ async def _create_session_from_existing_agent(
                             agent_cache.load,
                             agent.id,
                             agent.bundle_location,
+                            expand_env=agent.operator_authored,
                         )
                     ).spec
                 except Exception:  # noqa: BLE001
