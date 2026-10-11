@@ -2983,6 +2983,26 @@ async def test_resolve_agent_spec_from_server_reextracts_a_pruned_bundle_dir(
 
 
 @pytest.mark.asyncio
+async def test_resolve_agent_spec_from_server_discards_a_failed_extraction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bundle that fails to extract leaves no half-extracted directory behind."""
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"not a tarball", headers={"X-Agent-Version": "1"})
+
+    monkeypatch.setattr("omnigent.runner._entry._SPEC_PARSE_CACHE", {})
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_handler), base_url="http://server.test"
+    ) as client:
+        with pytest.raises(Exception, match=r"(?i)tar|extract|bundle"):
+            await _resolve_agent_spec_from_server(
+                client, tmp_path, "ag_broken", session_id="conv_a"
+            )
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
 async def test_resolve_agent_spec_from_server_bounds_memo_across_agents(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

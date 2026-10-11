@@ -11,12 +11,12 @@ from __future__ import annotations
 import subprocess
 import sys
 import textwrap
+from pathlib import Path
 
 import pytest
 import yaml
 
 from omnigent._yaml_compat import (
-    _PARSE_STAGE_ERRORS,
     USING_LIBYAML,
     SafeLoaderBase,
     load,
@@ -178,6 +178,13 @@ def test_load_does_not_substitute_constructor_errors() -> None:
 # tag while scanning, pure-Python scans it clean and then fails in the
 # constructor. The retry must not swap one diagnosis for the other.
 _STAGE_DIVERGENT = ("!] ", "!]", "!!] x", "a: !] b\n")
+# Failures raised before any constructor runs, so eligible for the diagnostic retry.
+_STRUCTURAL_ERRORS = (
+    yaml.reader.ReaderError,
+    yaml.scanner.ScannerError,
+    yaml.parser.ParserError,
+    yaml.composer.ComposerError,
+)
 
 
 @pytest.mark.skipif(
@@ -193,7 +200,7 @@ def test_load_keeps_libyaml_error_when_the_parsers_disagree(source: str) -> None
     pure-Python parser. Reporting the latter would point the user at a
     "could not determine a constructor" problem the document does not have.
     """
-    with pytest.raises(_PARSE_STAGE_ERRORS) as excinfo:
+    with pytest.raises(_STRUCTURAL_ERRORS) as excinfo:
         load(source, _ConfigYamlLoader)
     exc = excinfo.value
     assert "could not determine a constructor" not in str(exc), str(exc)
@@ -306,3 +313,26 @@ def test_load_names_the_source_in_parse_errors() -> None:
         assert 'in "agents/alpha.yaml", line 2' in message, message
         # Naming the source must not cost the excerpt and caret.
         assert "description: has: unquoted colon" in message and "^" in message, message
+
+
+@pytest.mark.parametrize("entry", ["parse", "load_agent_def"])
+def test_call_sites_keep_filename_line_and_caret(tmp_path: Path, entry: str) -> None:
+    """The spec parser and the inner loader name the file and echo the broken line."""
+    from omnigent.inner.loader import load_agent_def
+    from omnigent.spec.parser import parse
+
+    if entry == "parse":
+        path = tmp_path / "config.yaml"
+        path.write_text("spec_version: 1\n" + _BROKEN, encoding="utf-8")
+        line = 3
+        with pytest.raises(yaml.MarkedYAMLError) as excinfo:
+            parse(tmp_path)
+    else:
+        path = tmp_path / "agent.yaml"
+        path.write_text(_BROKEN, encoding="utf-8")
+        line = 2
+        with pytest.raises(yaml.MarkedYAMLError) as excinfo:
+            load_agent_def(path)
+    message = str(excinfo.value)
+    assert f'in "{path}", line {line}' in message, message
+    assert "description: has: unquoted colon" in message and "^" in message, message

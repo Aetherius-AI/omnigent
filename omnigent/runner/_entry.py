@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import signal
 import sys
 import threading
@@ -1370,9 +1371,14 @@ async def _resolve_agent_spec_from_server(
         else:
             # Extraction already parses and validates the bundle; reuse that spec.
             dest.mkdir(parents=True)
-            master = load(
-                resp.content, dest=dest, expand_env=expand_env, prune_invalid_sub_agents=True
-            )
+            try:
+                master = load(
+                    resp.content, dest=dest, expand_env=expand_env, prune_invalid_sub_agents=True
+                )
+            except BaseException:
+                # A half-extracted directory must not pass as a cached bundle next time.
+                shutil.rmtree(dest, ignore_errors=True)
+                raise
         # A new revision supersedes the agent's older revisions; both env-expansion
         # modes of the current revision may coexist.
         for stale in [k for k in _SPEC_PARSE_CACHE if k[0] == agent_id and k[1] != dest]:

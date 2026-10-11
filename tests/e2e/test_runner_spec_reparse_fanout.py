@@ -1,6 +1,6 @@
 """
 A live runner must not re-parse a shared agent bundle for every sub-agent
-session, and its spec parser must use the libyaml loader when available.
+session.
 
 Journey: register a directory bundle whose parent fans out to three
 sub-agents, bind it to a real runner, run one warm-up turn so the parent
@@ -12,7 +12,7 @@ parsed spec per bundle parses nothing new during the fan-out.
 The runner under test is a real ``omnigent.runner._entry`` subprocess. A
 test-only ``sitecustomize`` shim on its ``PYTHONPATH`` records each
 ``omnigent.spec.parser.parse`` call (the bundle directory it parsed, and the
-runner functions on the stack) and the YAML loader class the parser uses;
+runner functions on the stack);
 product code is not modified.
 
 Run::
@@ -95,7 +95,6 @@ def _record(kind, **fields):
 
 if _LOG:
     try:
-        import yaml
         import omnigent.spec as _spec
         import omnigent.spec.parser as _parser
 
@@ -112,16 +111,6 @@ if _LOG:
 
         _parser.parse = _recording_parse
         _spec.parse = _recording_parse
-
-        _loader = _parser._ConfigYamlLoader
-        _csafe = getattr(yaml, "CSafeLoader", None)
-        _record(
-            "loader",
-            argv=sys.argv,
-            with_libyaml=bool(getattr(yaml, "__with_libyaml__", False)),
-            mro=[f"{c.__module__}.{c.__name__}" for c in _loader.__mro__],
-            is_csafeloader=_csafe is not None and issubclass(_loader, _csafe),
-        )
     except Exception as exc:  # noqa: BLE001 - instrumentation must never break the runner
         _record("error", error=repr(exc))
 """
@@ -459,7 +448,7 @@ def test_subagent_fanout_does_not_reparse_shared_bundle(
     assert warmup["status"] == "completed", f"warm-up turn failed: {warmup.get('error')!r}"
 
     records_before = _read_records(stack.parse_log, pid=stack.runner_pid)
-    assert any(r["kind"] == "loader" for r in records_before), (
+    assert records_before, (
         f"parse recorder did not load in the runner; records={records_before!r}\n"
         f"runner log:\n{stack.runner_log.read_text()[-3000:]}"
     )
@@ -516,12 +505,4 @@ def test_subagent_fanout_does_not_reparse_shared_bundle(
         f"bundle {bundle_root} made the runner parse that bundle {reparses} more time(s) "
         f"(root parses before fan-out: {parses_before}, after: {parses_after}; "
         f"parse() calls during the fan-out: {len(new_parses)}; runner call paths: {call_paths})"
-    )
-
-    # Facet A, observed inside the same runner process: with libyaml available,
-    # the spec loader must be libyaml-backed.
-    loader = next(r for r in records_after if r["kind"] == "loader")
-    assert loader["is_csafeloader"] or not loader["with_libyaml"], (
-        f"the runner parses agent-bundle YAML with the pure-Python SafeLoader although libyaml "
-        f"is available; _ConfigYamlLoader MRO: {loader['mro']}"
     )

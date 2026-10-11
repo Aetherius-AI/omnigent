@@ -62,9 +62,6 @@ def narrow_bools_to_yaml_1_2(loader: type[yaml.SafeLoader]) -> None:
     )
 
 
-# YAML documents are open-ended trees whose shape is only known after the
-# caller's isinstance checks, so the return type is the same ``Any`` that
-# ``yaml.safe_load`` itself returns.
 def _named_mark(mark: yaml.Mark | None, name: str) -> yaml.Mark | None:
     # libyaml's marks are read-only extension objects; rebuild them as the
     # pure-Python Mark, keeping the position and any excerpt buffer.
@@ -94,6 +91,9 @@ def _name_source(error: yaml.YAMLError, name: str | None) -> None:
         error.context_mark = _named_mark(error.context_mark, name)
 
 
+# YAML documents are open-ended trees whose shape is only known after the
+# caller's isinstance checks, so the return type is the same ``Any`` that
+# ``yaml.safe_load`` itself returns.
 def load(text: str, loader: type[yaml.SafeLoader], *, name: str | None = None) -> Any:  # type: ignore[explicit-any]
     """Parse text with loader, retaining detailed structural-error diagnostics.
 

@@ -2601,9 +2601,7 @@ def _parse_skill(skill_md: Path) -> SkillSpec:
         )
     frontmatter_str, content = match.groups()
     try:
-        # Pure-Python loader on purpose: frontmatter is a few hundred bytes,
-        # so libyaml buys nothing measurable, and its errors drop the source
-        # line and caret that make a malformed SKILL.md easy to fix.
+        # Keep SafeLoader here so malformed frontmatter retains source excerpts and carets.
         frontmatter = yaml.safe_load(frontmatter_str)
     except yaml.YAMLError as exc:
         # Retry prose containing colons; diagnostics must not include file contents.
