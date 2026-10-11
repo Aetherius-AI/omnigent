@@ -1,21 +1,12 @@
-"""Browser e2e: the session-search palette treats ``%`` and ``_`` literally.
+"""Browser e2e: the sidebar Search palette matches ``%`` and ``_`` literally.
 
-The sidebar's Search button opens the command palette, which forwards the
-query to ``GET /v1/sessions?search_query=…``. That filter is documented as a
-case-insensitive *substring* match on the title or chat content, so a ``%``
-or ``_`` typed by the user must only list sessions that actually contain the
-character, and the dimmed preview under a content match must show the text
-that contains the query.
-
-Four hello_world sessions are seeded once per module through the real
-composer (so the chat text is persisted the way a user's would be) and then
-titled through the sessions API:
-
-- ``Plain prose <marker>`` — one message ``innocent prose <marker>`` (the
-  decoy: contains neither ``%`` nor ``_``);
-- ``Progress report <marker>`` — ``innocent first <marker>`` followed by
-  ``literal 50% later <marker>``;
-- ``fileXname <marker>`` and ``file_name <marker>`` — title-only look-alikes.
+The palette forwards the query to ``GET /v1/sessions?search_query=…``, a
+case-insensitive substring filter, so ``%`` must only list sessions containing
+``%`` and the dimmed preview must show the text that contains the query. Four
+hello_world sessions are seeded once per module through the real composer and
+titled through the sessions API: ``Plain prose`` (``innocent prose``, the decoy),
+``Progress report`` (``innocent first`` then ``literal 50% later``) and the
+title-only look-alikes ``fileXname`` and ``file_name``.
 """
 
 from __future__ import annotations

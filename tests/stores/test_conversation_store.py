@@ -2173,16 +2173,8 @@ def test_list_conversations_search_treats_like_metacharacters_literally(
     decoy_text: str,
 ) -> None:
     """
-    ``search_query`` is a literal substring filter: ``%``, ``_`` and ``\\`` in
-    the query never act as LIKE wildcards or escapes, whether the hit is in the
-    title or in the chat content, and a content hit carries a snippet that
-    contains the query itself.
-
-    :param conversation_store: The conversation store fixture.
-    :param where: Whether the texts are stored as titles or as chat content.
-    :param query: The user's search string.
-    :param matching_text: Text containing ``query`` literally.
-    :param decoy_text: Text that only matches ``query`` under wildcard semantics.
+    ``%``, ``_`` and ``\\`` in ``search_query`` match themselves in titles and chat
+    content, never as LIKE wildcards or escapes; a content hit's snippet contains the query.
     """
     matching = conversation_store.create_conversation()
     decoy = conversation_store.create_conversation()
@@ -2209,12 +2201,7 @@ def test_list_conversations_search_treats_like_metacharacters_literally(
 def test_list_conversations_search_snippet_comes_from_the_literal_match(
     conversation_store: SqlAlchemyConversationStore,
 ) -> None:
-    """
-    When an earlier turn would only match as a wildcard, the snippet still
-    comes from the turn that contains the query literally.
-
-    :param conversation_store: The conversation store fixture.
-    """
+    """The snippet comes from the turn containing the query literally, not an earlier wildcard hit."""
     conv = conversation_store.create_conversation()
     _append_user_text(conversation_store, conv.id, "innocent first", "resp_first")
     _append_user_text(conversation_store, conv.id, "literal 50% later", "resp_later")
