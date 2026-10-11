@@ -2201,7 +2201,7 @@ def test_list_conversations_search_treats_like_metacharacters_literally(
 def test_list_conversations_search_snippet_comes_from_the_literal_match(
     conversation_store: SqlAlchemyConversationStore,
 ) -> None:
-    """The snippet comes from the turn containing the query literally, not an earlier wildcard hit."""
+    """The snippet comes from the literal match, not from an earlier wildcard-only turn."""
     conv = conversation_store.create_conversation()
     _append_user_text(conversation_store, conv.id, "innocent first", "resp_first")
     _append_user_text(conversation_store, conv.id, "literal 50% later", "resp_later")
