@@ -1,7 +1,9 @@
-"""A Task sub-agent using another model appears in the session cost breakdown.
+"""A Claude Code sub-agent that runs on another model gets its own row in the cost breakdown.
 
-A real Claude CLI on sonnet runs a scripted Task/Agent call on opus (both served by the
-mock); the SPA usage panel must list opus instead of folding it into sonnet."""
+A real Claude CLI on sonnet runs a scripted Agent/Task spawn pinned to opus; the mock
+serves both models and echoes the requested model id. The session's Token usage
+breakdown must list the opus model instead of folding its spend into sonnet.
+"""
 
 from __future__ import annotations
 
@@ -11,10 +13,11 @@ import os
 import re
 import time
 import uuid
+from pathlib import Path
 
 import httpx
 import pytest
-from playwright.sync_api import Page, expect
+from playwright.sync_api import Locator, Page, expect
 
 from tests.e2e_ui.conftest import (
     configure_mock_llm,
@@ -27,27 +30,24 @@ from tests.e2e_ui.messages.test_message_render_parity import (
     _ensure_chat_view,
     _send,
 )
+from tests.helpers.ui_configuration import _CLAUDE_MOCK_MODEL
 
 _log = logging.getLogger(__name__)
 
-# Must match the model in the mock anthropic provider config written by the
-# native_claude_mock_session fixture (conftest._CLAUDE_MOCK_MODEL).
-_CLAUDE_MOCK_MODEL = "claude-sonnet-4-20250514"
-
 # claude-native auto-launch + first-run pre-accept + WS attach.
 _TERMINAL_READY_TIMEOUT_MS = 120_000
-# Mock LLM responds instantly; budget covers CLI boot + the Task round-trip.
+# Mock LLM responds instantly; budget covers CLI boot + the spawn round-trip.
 _MOCK_TURN_TIMEOUT_MS = 90_000
-# The forwarder polls the statusLine snapshot and posts cost best-effort, so
-# the priced cost can land a few polls after the turn settles in the UI.
+# The forwarder posts Claude Code's cumulative statusLine cost a few polls after
+# the turn settles in the UI.
 _COST_SETTLE_TIMEOUT_S = 90.0
-# Bounded grace for a FIXED build to publish the sub-agent model's bucket
-# before the failing assertion runs (buggy builds never publish it).
+# Grace for a build that publishes the sub-agent model's bucket asynchronously.
 _BREAKDOWN_SETTLE_TIMEOUT_S = 30.0
+# Optional directory for screenshots and API snapshots kept as evidence.
+_EVIDENCE_DIR_ENV = "OMNIGENT_E2E_EVIDENCE_DIR"
 
 
 def _session_snapshot(base_url: str, session_id: str) -> dict:
-    """Fetch the ``SessionResponse`` snapshot the web UI's cost panel is seeded from."""
     resp = httpx.get(
         f"{base_url}/v1/sessions/{session_id}",
         params={"include_items": "false"},
@@ -60,9 +60,7 @@ def _session_snapshot(base_url: str, session_id: str) -> dict:
 def _wait_for_priced_cost(
     base_url: str, session_id: str, *, above: float, timeout_s: float
 ) -> dict:
-    """Poll until the asynchronously forwarded total_cost_usd exceeds above.
-
-    A settled chat turn does not guarantee the cost snapshot has arrived."""
+    """Poll until the asynchronously forwarded total_cost_usd exceeds *above*."""
     deadline = time.monotonic() + timeout_s
     last: dict = {}
     while time.monotonic() < deadline:
@@ -74,40 +72,38 @@ def _wait_for_priced_cost(
     pytest.fail(
         "Claude Code's cumulative statusLine cost never advanced past "
         f"{above} within {timeout_s:.0f}s — the cost-forwarding lane did not "
-        "settle (harness/timing issue, NOT the attribution bug this test "
-        f"guards). Last snapshot cost fields: total_cost_usd="
-        f"{last.get('total_cost_usd')} usage_by_model="
-        f"{json.dumps(last.get('usage_by_model'))}"
+        "settle (harness/timing issue, not the attribution bug this test guards). "
+        f"Last snapshot: total_cost_usd={last.get('total_cost_usd')} "
+        f"usage_by_model={json.dumps(last.get('usage_by_model'))}"
     )
 
 
-def _spawn_tool_name(mock_llm_server_url: str) -> str:
-    """Return the spawn tool name this CLI advertises (``Task`` became ``Agent`` in 2.1.63).
-
-    The scripted ``tool_use`` must quote the name the CLI sent in its ``tools`` list."""
+def _captured_requests(mock_llm_server_url: str) -> list[dict]:
     resp = httpx.get(f"{mock_llm_server_url}/mock/requests", timeout=10.0)
     resp.raise_for_status()
-    for req in reversed(resp.json()["requests"]):
-        tools = req.get("tools") if isinstance(req, dict) else None
+    return [req for req in resp.json()["requests"] if isinstance(req, dict)]
+
+
+def _spawn_tool_name(mock_llm_server_url: str) -> str:
+    """Return the spawn tool the CLI advertises (``Task`` became ``Agent`` in 2.1.63)."""
+    for req in reversed(_captured_requests(mock_llm_server_url)):
+        tools = req.get("tools")
         if isinstance(tools, list):
             names = {t.get("name") for t in tools if isinstance(t, dict)}
             for candidate in ("Task", "Agent"):
                 if candidate in names:
                     return candidate
-    return "Task"
+    return "Agent"
 
 
 def _models_asked_with_user_marker(mock_llm_server_url: str, marker: str) -> list[str]:
-    """Return captured request models whose user message carries the marker.
+    """Models of captured requests whose *user* message carries *marker*.
 
-    Ignore assistant tool-use blocks, which repeat the child prompt in the
-    parent history and would otherwise count the parent as a child request."""
-    resp = httpx.get(f"{mock_llm_server_url}/mock/requests", timeout=10.0)
-    resp.raise_for_status()
+    Assistant tool_use blocks repeat the child prompt in the parent history and
+    would otherwise count the parent as a child request.
+    """
     models: list[str] = []
-    for req in resp.json()["requests"]:
-        if not isinstance(req, dict):
-            continue
+    for req in _captured_requests(mock_llm_server_url):
         messages = req.get("messages") or []
         if isinstance(messages, dict):
             messages = [messages]
@@ -122,169 +118,178 @@ def _models_asked_with_user_marker(mock_llm_server_url: str, marker: str) -> lis
     return models
 
 
-@pytest.mark.nightly
-@pytest.mark.timeout(420)
-def test_task_subagent_on_other_model_appears_in_cost_breakdown(
-    page: Page,
-    native_claude_mock_session: tuple[str, str],
-    mock_llm_server_url: str,
-) -> None:
-    """A real Claude Task call selecting opus must add an opus row in the cost panel.
-
-    Both parent and child model responses come from the mock provider."""
-    if os.environ.get("LLM_API_KEY"):
-        pytest.skip("deterministic scripted fan-out needs the mock LLM (unset LLM_API_KEY)")
-
-    base_url, session_id = native_claude_mock_session
-    nonce = uuid.uuid4().hex[:8]
-    baseline_token = f"base-reply-{nonce}"
-    # Longer than the parent queue's match token (see below) so the mock's
-    # longest-match content routing always hands the sub-agent's own request
-    # to the sub-agent queue.
-    subtask_marker = f"subtask-prompt-{nonce}-unique-cross-model-routing-token"
-    subagent_reply = f"subagent-done-{nonce}"
-    final_token = f"fanout-final-{nonce}"
-
-    page.goto(f"{base_url}/c/{session_id}")
-    # Claude Code must be up (terminal-first session) before composer turns run.
-    expect(page.get_by_test_id("view-mode-toggle")).to_be_visible(
-        timeout=_TERMINAL_READY_TIMEOUT_MS
-    )
-    _ensure_chat_view(page)
-
-    reset_mock_llm(mock_llm_server_url)
-    # Fallbacks serve Claude's private background requests AND the baseline
-    # turn, so queues below stay reserved for the scripted fan-out.
-    set_fallback_mock_llm(mock_llm_server_url, "default", baseline_token)
-    set_fallback_mock_llm(mock_llm_server_url, _CLAUDE_MOCK_MODEL, baseline_token)
-
-    # --- Turn 1: baseline on the launch model, so the fan-out turn's cost
-    # delta lands on an already-settled baseline. ---
-    _send(page, f"baseline turn {nonce}")
-    expect(page.locator(_ASSISTANT, has_text=baseline_token).first).to_be_visible(
-        timeout=_MOCK_TURN_TIMEOUT_MS
-    )
-    expect(page.locator(_WORKING)).to_have_count(0, timeout=_MOCK_TURN_TIMEOUT_MS)
-    baseline = _wait_for_priced_cost(
-        base_url, session_id, above=0.0, timeout_s=_COST_SETTLE_TIMEOUT_S
-    )
-    baseline_cost = float(baseline["total_cost_usd"])
-    _log.info(
-        "baseline cost settled: %s by_model=%s", baseline_cost, baseline.get("usage_by_model")
-    )
-
-    spawn_tool = _spawn_tool_name(mock_llm_server_url)
-    _log.info("CLI advertises spawn tool: %s", spawn_tool)
-
-    # --- Turn 2: scripted fan-out. A real spawn tool_use pinned to the OTHER model
-    # family; the sub-agent's own request is routed by its unique prompt marker. ---
-    fanout_text = f"fan out one sub-agent {nonce}"
-    # Route on the Agent-tool system reminder: only the parent's real turns carry it,
-    # while Claude's background requests (title generation etc.) replay the user text
-    # and would otherwise steal the scripted tool_use.
-    configure_mock_llm(
-        mock_llm_server_url,
-        [
-            {
-                "tool_calls": [
-                    {
-                        "name": spawn_tool,
-                        "arguments": json.dumps(
-                            {
-                                "description": "Cost attribution probe",
-                                "prompt": f"{subtask_marker} reply with one word: done",
-                                "subagent_type": "general-purpose",
-                                "model": "opus",
-                            }
-                        ),
-                    }
-                ],
-            },
-            # Post-Task continuations (extra copies absorb a stray
-            # background request that also embeds the conversation text).
-            {"text": final_token},
-            {"text": final_token},
-            {"text": final_token},
-            {"text": final_token},
-            {"text": final_token},
-        ],
-        key="fanout-parent",
-        match="Available agent types for the Agent tool",
-    )
-    configure_mock_llm(
-        mock_llm_server_url,
-        [{"text": subagent_reply}, {"text": subagent_reply}, {"text": subagent_reply}],
-        key="opus-subagent",
-        match=subtask_marker,
-    )
-
-    _send(page, fanout_text)
-    expect(page.locator(_ASSISTANT, has_text=final_token).first).to_be_visible(
-        timeout=_MOCK_TURN_TIMEOUT_MS
-    )
-    expect(page.locator(_WORKING)).to_have_count(0, timeout=_MOCK_TURN_TIMEOUT_MS)
-
-    # The sub-agent genuinely ran on a different (opus) model — the journey's
-    # precondition, distinct from the attribution assertion below.
-    subagent_models = _models_asked_with_user_marker(mock_llm_server_url, subtask_marker)
-    assert subagent_models, (
-        "the scripted Task sub-agent never called the LLM — the fan-out did "
-        "not run, so the journey could not be driven (harness issue, not the bug)"
-    )
-    opus_models = {m for m in subagent_models if "opus" in m}
-    assert opus_models, (
-        f"the Task sub-agent ran on {subagent_models} instead of an opus "
-        "model — the fan-out was not cross-model, so the journey could not "
-        "be driven (harness issue, not the bug)"
-    )
-    _log.info("sub-agent ran on: %s", sorted(opus_models))
-
-    # Wait for the fan-out turn's cost (sub-agent spend included, once Claude
-    # settles S at the turn boundary) to reach the server.
-    settled = _wait_for_priced_cost(
-        base_url, session_id, above=baseline_cost, timeout_s=_COST_SETTLE_TIMEOUT_S
-    )
-    _log.info(
-        "fan-out cost settled: %s by_model=%s",
-        settled.get("total_cost_usd"),
-        settled.get("usage_by_model"),
-    )
-
-    # Bounded grace so a FIXED build (which attributes the sub-agent's spend
-    # to its own model, directly or via the child-session rollup) publishes
-    # the opus bucket before the assertion; a buggy build never will.
-    deadline = time.monotonic() + _BREAKDOWN_SETTLE_TIMEOUT_S
-    while time.monotonic() < deadline:
-        by_model = _session_snapshot(base_url, session_id).get("usage_by_model") or {}
-        if any("opus" in model for model in by_model):
-            break
-        time.sleep(2.0)
-
-    # --- The user-facing surface: the agent-info popover's per-model
-    # Token-usage breakdown. Reload so the popover seeds from the snapshot. ---
-    page.reload()
+def _open_usage_breakdown(page: Page) -> Locator:
+    """Open the agent-info popover's Token usage section via the keyboard (no hover timer)."""
     trigger = page.get_by_test_id("agent-info-trigger")
     expect(trigger).to_be_visible(timeout=60_000)
-    trigger.click()
+    trigger.focus()
+    trigger.press("Enter")
     expect(page.get_by_test_id("agent-info-panel")).to_be_visible(timeout=15_000)
     breakdown = page.get_by_test_id("agent-info-usage-by-model")
     expect(breakdown).to_be_visible(timeout=15_000)
     breakdown.locator("summary").click()
+    return breakdown
 
-    model_rows = page.locator('[data-testid^="agent-info-model-"]')
-    # Sanity: the breakdown renders at least the orchestrator's own bucket.
-    expect(model_rows.first).to_be_visible(timeout=15_000)
 
-    # THE BUG: the sub-agent ran on opus, but its spend was attributed to the
-    # orchestrator's model, so the breakdown has no opus row at all.
-    api_by_model = _session_snapshot(base_url, session_id).get("usage_by_model") or {}
-    expect(
-        model_rows.filter(has_text=re.compile("opus")),
-        (
-            "the Task sub-agent ran on an opus model "
-            f"({sorted(opus_models)}), but the session cost panel's "
-            "per-model breakdown has no opus entry — its spend was folded "
-            "into the orchestrator's model bucket "
-            f"(API usage_by_model: {json.dumps(api_by_model)})"
-        ),
-    ).to_have_count(1, timeout=5_000)
+def _save_evidence(name: str, payload: dict | list, page: Page | None = None) -> None:
+    evidence_dir = os.environ.get(_EVIDENCE_DIR_ENV)
+    if not evidence_dir:
+        return
+    target = Path(evidence_dir)
+    target.mkdir(parents=True, exist_ok=True)
+    (target / f"{name}.json").write_text(json.dumps(payload, indent=1))
+    if page is not None:
+        page.screenshot(path=str(target / f"{name}.png"))
+
+
+@pytest.mark.nightly
+@pytest.mark.timeout(420)
+def test_subagent_on_other_model_has_its_own_cost_row(
+    request: pytest.FixtureRequest,
+    native_claude_mock_session: tuple[str, str],
+    mock_llm_server_url: str,
+) -> None:
+    """A real Claude spawn pinned to opus must add an opus row to the Token usage breakdown."""
+    base_url, session_id = native_claude_mock_session
+    nonce = uuid.uuid4().hex[:8]
+    baseline_token = f"base-reply-{nonce}"
+    fanout_text = f"fan out one sub-agent {nonce}"
+    # Longer than the parent's match token so longest-match routing always hands
+    # the sub-agent's own request to the sub-agent queue.
+    subtask_marker = f"subtask-prompt-{nonce}-unique-cross-model-routing-token"
+    subagent_reply = f"subagent-done-{nonce}"
+    final_token = f"fanout-final-{nonce}"
+
+    reset_mock_llm(mock_llm_server_url)
+    # Fallbacks serve Claude's background requests and the baseline turn, so the
+    # queues configured below stay reserved for the scripted fan-out.
+    set_fallback_mock_llm(mock_llm_server_url, "default", baseline_token)
+    set_fallback_mock_llm(mock_llm_server_url, _CLAUDE_MOCK_MODEL, baseline_token)
+
+    # The recorded page is created after the session exists so the clip starts
+    # on the user journey rather than on fixture setup.
+    page: Page = request.getfixturevalue("page")
+    try:
+        page.goto(f"{base_url}/c/{session_id}")
+        expect(page.get_by_test_id("view-mode-toggle")).to_be_visible(
+            timeout=_TERMINAL_READY_TIMEOUT_MS
+        )
+        _ensure_chat_view(page)
+
+        # Turn 1: baseline on the launch model so the fan-out turn's cost delta
+        # lands on a settled baseline.
+        _send(page, f"baseline turn {nonce}")
+        expect(page.locator(_ASSISTANT, has_text=baseline_token).first).to_be_visible(
+            timeout=_MOCK_TURN_TIMEOUT_MS
+        )
+        expect(page.locator(_WORKING)).to_have_count(0, timeout=_MOCK_TURN_TIMEOUT_MS)
+        baseline = _wait_for_priced_cost(
+            base_url, session_id, above=0.0, timeout_s=_COST_SETTLE_TIMEOUT_S
+        )
+        baseline_cost = float(baseline["total_cost_usd"])
+        _log.info(
+            "baseline cost settled: %s by_model=%s", baseline_cost, baseline.get("usage_by_model")
+        )
+        _save_evidence("baseline-snapshot", baseline)
+
+        spawn_tool = _spawn_tool_name(mock_llm_server_url)
+        _log.info("CLI advertises spawn tool: %s", spawn_tool)
+
+        # Turn 2: the orchestrator's reply is a real spawn tool_use pinned to the
+        # opus family; only requests advertising the spawn tool (the parent's own
+        # turns, not Claude's background requests) can consume this queue.
+        configure_mock_llm(
+            mock_llm_server_url,
+            [
+                {
+                    "tool_calls": [
+                        {
+                            "name": spawn_tool,
+                            "arguments": json.dumps(
+                                {
+                                    "description": "Cost attribution probe",
+                                    "prompt": f"{subtask_marker} reply with one word: done",
+                                    "subagent_type": "general-purpose",
+                                    "model": "opus",
+                                }
+                            ),
+                        }
+                    ],
+                },
+                *([{"text": final_token}] * 5),
+            ],
+            match=fanout_text,
+            required_tools=[spawn_tool],
+        )
+        configure_mock_llm(
+            mock_llm_server_url,
+            [{"text": subagent_reply}] * 3,
+            match=subtask_marker,
+        )
+
+        _send(page, fanout_text)
+        expect(page.locator(_ASSISTANT, has_text=final_token).first).to_be_visible(
+            timeout=_MOCK_TURN_TIMEOUT_MS
+        )
+        expect(page.locator(_WORKING)).to_have_count(0, timeout=_MOCK_TURN_TIMEOUT_MS)
+
+        # Journey precondition, distinct from the attribution assertion: the
+        # sub-agent genuinely ran on an opus model.
+        subagent_models = _models_asked_with_user_marker(mock_llm_server_url, subtask_marker)
+        _save_evidence("mock-requests", _captured_requests(mock_llm_server_url))
+        assert subagent_models, (
+            "the scripted sub-agent never called the LLM — the fan-out did not run, "
+            "so the journey could not be driven (harness issue, not the bug)"
+        )
+        opus_models = {m for m in subagent_models if "opus" in m}
+        assert opus_models, (
+            f"the sub-agent ran on {subagent_models} instead of an opus model — the "
+            "fan-out was not cross-model, so the journey could not be driven "
+            "(harness issue, not the bug)"
+        )
+        _log.info("sub-agent ran on: %s", sorted(opus_models))
+
+        settled = _wait_for_priced_cost(
+            base_url, session_id, above=baseline_cost, timeout_s=_COST_SETTLE_TIMEOUT_S
+        )
+        _log.info(
+            "fan-out cost settled: %s by_model=%s",
+            settled.get("total_cost_usd"),
+            settled.get("usage_by_model"),
+        )
+        deadline = time.monotonic() + _BREAKDOWN_SETTLE_TIMEOUT_S
+        while time.monotonic() < deadline:
+            by_model = _session_snapshot(base_url, session_id).get("usage_by_model") or {}
+            if any("opus" in model for model in by_model):
+                break
+            time.sleep(2.0)
+
+        # The user-facing surface: reload so the popover seeds from the snapshot,
+        # then open the per-model Token usage breakdown.
+        page.reload()
+        _open_usage_breakdown(page)
+        model_rows = page.locator('[data-testid^="agent-info-model-"]')
+        expect(model_rows.first).to_be_visible(timeout=15_000)
+        page.wait_for_timeout(2_000)
+
+        final = _session_snapshot(base_url, session_id)
+        api_by_model = final.get("usage_by_model") or {}
+        _save_evidence("final-snapshot", final, page)
+        expect(
+            model_rows.filter(has_text=re.compile("opus")),
+            (
+                f"the sub-agent ran on an opus model ({sorted(opus_models)}), but the "
+                "session cost panel's per-model breakdown has no opus row — its spend "
+                "was folded into the orchestrator's model bucket "
+                f"(API usage_by_model: {json.dumps(api_by_model)})"
+            ),
+        ).to_have_count(1, timeout=5_000)
+        per_model_cost = sum(
+            float(bucket.get("total_cost_usd") or 0.0) for bucket in api_by_model.values()
+        )
+        assert per_model_cost == pytest.approx(float(final["total_cost_usd"]), abs=1e-6), (
+            f"per-model costs {per_model_cost} do not sum to the session cost "
+            f"{final['total_cost_usd']} (usage_by_model: {json.dumps(api_by_model)})"
+        )
+    finally:
+        page.context.close()

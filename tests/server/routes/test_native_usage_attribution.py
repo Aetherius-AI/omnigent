@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import pytest
 
+from omnigent.llms.context_window import ModelPricing
 from omnigent.server.routes._sessions.orchestration import (
     _persist_native_cumulative_usage,
 )
@@ -218,6 +219,140 @@ def test_token_priced_bucket_matches_flat_cost(
     assert usage["by_model"]["gpt-5.6"]["total_cost_usd"] == pytest.approx(2.50)
 
 
+def test_token_report_without_cache_field_keeps_persisted_cache_split(
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(title="codex-cache-miss", agent_id=_AGENT_ID)
+
+    monkeypatch.setattr(
+        "omnigent.llms.context_window.fetch_model_pricing",
+        lambda model: ModelPricing(
+            input_per_token=2.5e-6,
+            output_per_token=10e-6,
+            cache_read_per_token=0.25e-6,
+            cache_write_per_token=None,
+        ),
+    )
+
+    # Cache-heavy turn: 100K cumulative input, 90K of them cache reads.
+    _persist_native_cumulative_usage(
+        conv.id,
+        {
+            "cumulative_input_tokens": 100_000,
+            "cumulative_cache_read_input_tokens": 90_000,
+            "cumulative_output_tokens": 200,
+            "model": "gpt-5.6",
+        },
+        store,
+    )
+    # Cache-miss turn: the cumulative cached count is unchanged, and the
+    # report omits it. The persisted split must carry forward rather than
+    # re-billing the 90K cache reads at the full input rate.
+    _persist_native_cumulative_usage(
+        conv.id,
+        {"cumulative_input_tokens": 200_000, "cumulative_output_tokens": 400, "model": "gpt-5.6"},
+        store,
+    )
+
+    usage = _usage(store, conv.id)
+    expected_cost = (110_000 * 2.5 + 90_000 * 0.25 + 400 * 10) / 1_000_000
+    assert usage["cache_read_input_tokens"] == 90_000
+    assert usage["input_tokens"] == 110_000
+    assert usage["total_tokens"] == 200_400
+    assert usage["total_cost_usd"] == pytest.approx(expected_cost)
+    bucket = usage["by_model"]["gpt-5.6"]
+    assert bucket["input_tokens"] == 110_000
+    assert bucket["cache_read_input_tokens"] == 90_000
+    assert bucket["total_cost_usd"] == pytest.approx(expected_cost)
+
+
+def test_explicit_zero_cache_count_replaces_persisted_split(
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(title="codex-cache-zero", agent_id=_AGENT_ID)
+
+    # Only token splits are asserted here; keep the token-pricing branch off
+    # the live catalog so the test is deterministic and offline.
+    monkeypatch.setattr(
+        "omnigent.llms.context_window.fetch_model_pricing",
+        lambda model: None,
+    )
+
+    _persist_native_cumulative_usage(
+        conv.id,
+        {
+            "cumulative_input_tokens": 100_000,
+            "cumulative_cache_read_input_tokens": 90_000,
+            "cumulative_output_tokens": 200,
+            "model": "gpt-5.6",
+        },
+        store,
+    )
+    # An explicit zero is a report, not an omission: it is honored as-is.
+    _persist_native_cumulative_usage(
+        conv.id,
+        {
+            "cumulative_input_tokens": 120_000,
+            "cumulative_cache_read_input_tokens": 0,
+            "cumulative_output_tokens": 300,
+            "model": "gpt-5.6",
+        },
+        store,
+    )
+
+    usage = _usage(store, conv.id)
+    assert usage["cache_read_input_tokens"] == 0
+    assert usage["input_tokens"] == 120_000
+
+
+def test_carried_cache_count_is_clamped_to_a_lowered_input_total(
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(title="codex-cache-lowered", agent_id=_AGENT_ID)
+
+    # Only token splits are asserted here; keep the token-pricing branch off
+    # the live catalog so the test is deterministic and offline.
+    monkeypatch.setattr(
+        "omnigent.llms.context_window.fetch_model_pricing",
+        lambda model: None,
+    )
+
+    _persist_native_cumulative_usage(
+        conv.id,
+        {
+            "cumulative_input_tokens": 100_000,
+            "cumulative_cache_read_input_tokens": 90_000,
+            "cumulative_output_tokens": 200,
+            "model": "gpt-5.6",
+        },
+        store,
+    )
+    # A lowered cumulative total without a cache count keeps the carried split
+    # within the reported input, and later reports carry that clamped count.
+    _persist_native_cumulative_usage(
+        conv.id,
+        {"cumulative_input_tokens": 50_000, "cumulative_output_tokens": 250, "model": "gpt-5.6"},
+        store,
+    )
+    assert _usage(store, conv.id)["cache_read_input_tokens"] == 50_000
+    assert _usage(store, conv.id)["input_tokens"] == 0
+
+    _persist_native_cumulative_usage(
+        conv.id,
+        {"cumulative_input_tokens": 200_000, "cumulative_output_tokens": 400, "model": "gpt-5.6"},
+        store,
+    )
+    usage = _usage(store, conv.id)
+    assert usage["cache_read_input_tokens"] == 50_000
+    assert usage["input_tokens"] == 150_000
+
+
 def test_cost_by_model_weights_split_the_growth(db_uri: str) -> None:
     store = SqlAlchemyConversationStore(db_uri)
     conv = store.create_conversation(title="fan-out", agent_id=_AGENT_ID)
@@ -288,6 +423,30 @@ def test_cost_by_model_rejects_malformed_weights(db_uri: str) -> None:
     ):
         with pytest.raises(OmnigentError):
             _persist_native_cumulative_usage(conv.id, {"cumulative_cost_usd": 1.0, **bad}, store)
+
+
+def test_cost_only_weighted_report_leaves_no_empty_bucket_for_the_tagged_model(
+    db_uri: str,
+) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(title="weights-no-phantom", agent_id=_AGENT_ID)
+
+    # The tagged model is the session's configured id while the transcripts price
+    # the API's concrete ids; with no tokens in the report it must not get a row.
+    _persist_native_cumulative_usage(
+        conv.id,
+        {
+            "cumulative_cost_usd": 1.00,
+            "model": "databricks-claude-sonnet-4-6",
+            "cost_by_model": {"claude-sonnet-4-6": 0.40, "claude-opus-4-8": 0.60},
+        },
+        store,
+    )
+
+    by_model = _usage(store, conv.id)["by_model"]
+    assert set(by_model) == {"claude-sonnet-4-6", "claude-opus-4-8"}
+    assert by_model["claude-sonnet-4-6"]["total_cost_usd"] == pytest.approx(0.40)
+    assert by_model["claude-opus-4-8"]["total_cost_usd"] == pytest.approx(0.60)
 
 
 def _conversation_point_reads(statements: list[str]) -> list[str]:
