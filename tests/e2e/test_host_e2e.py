@@ -1349,12 +1349,10 @@ def test_host_relaunch_recreates_deleted_workspace(
 ) -> None:
     """A message sent after the workspace directory vanished still gets a reply.
 
-    The reported journey: a worktree tool (or the agent itself) deletes the
-    session's workspace while the runner is down, and the next message used to
-    be refused with ``workspace_missing`` until someone recreated the directory
-    by hand. Against a REAL host + server, the relaunch must recreate the
-    directory, start the runner in it, answer the turn, and leave one
-    info-level ``workspace_recreated`` notice in the transcript.
+    A worktree tool or the agent deletes the session's workspace while the
+    runner is down. Against a REAL host and server, the next message recreates
+    the leaf directory, starts the runner there, answers the turn, and leaves
+    exactly one info-level ``workspace_recreated`` notice in the transcript.
     """
     marker_pre = "WORKSPACE_PRE_DELETE"
     marker_post = "WORKSPACE_POST_RECREATE"
