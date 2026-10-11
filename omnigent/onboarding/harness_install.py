@@ -806,8 +806,8 @@ def _cli_probe_cwd() -> str | None:
     A long-lived daemon can outlive the directory it was started from (a temp
     checkout or a removed git worktree). A probe subprocess inherits that
     deleted cwd, where ``claude`` exits non-zero, so a present CLI reads as
-    unavailable. Return ``None`` while the cwd is intact (inherit it, no
-    change); once it is gone, fall back to home, else the filesystem root.
+    unavailable. Return ``None`` while the cwd is intact; once it is gone, fall
+    back to the home directory, else the filesystem root.
     """
     try:
         os.getcwd()

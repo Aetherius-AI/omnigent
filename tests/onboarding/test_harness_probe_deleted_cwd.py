@@ -23,11 +23,9 @@ import omnigent._platform as _platform
 from omnigent.onboarding import harness_install as hi
 from omnigent.onboarding.provider_config import ANTHROPIC_FAMILY
 
-# Fake ``claude`` body: aborts from a deleted cwd like the real binary, else
-# reports a supported version and a logged-in status. Run via a short
-# ``/bin/sh`` launcher (see ``_install_fake_claude``) so the launcher's shebang
-# stays well under the kernel limit and tolerates an interpreter path with
-# spaces.
+# Fake ``claude`` body run via a short ``/bin/sh`` launcher (see
+# ``_install_fake_claude``): aborts from a deleted cwd like the real binary,
+# else reports a supported version and a logged-in status.
 _FAKE_CLAUDE_IMPL = """\
 import json
 import os
@@ -88,7 +86,9 @@ def test_missing_harness_cli_survives_deleted_daemon_cwd(
     _install_fake_claude(tmp_path, monkeypatch)
     with _deleted_cwd(tmp_path):
         assert hi.missing_harness_cli("claude-native") is None
-    # And the version is read correctly, not swallowed as a probe failure.
+    # Re-probe from scratch so the version read exercises detection under the
+    # deleted cwd, not the value the preflight already cached.
+    hi._VERSION_PROBE_CACHE.clear()
     with _deleted_cwd(tmp_path):
         assert hi.harness_cli_version(ANTHROPIC_FAMILY)[0] == "2.1.268"
 
@@ -104,13 +104,17 @@ def test_login_probe_survives_deleted_daemon_cwd(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX deleted-cwd semantics")
-def test_cli_probe_cwd_only_overrides_when_the_cwd_is_gone(tmp_path: Path) -> None:
+def test_cli_probe_cwd_only_overrides_when_the_cwd_is_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A valid cwd is inherited (``None``); a removed one falls back to home."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
     assert hi._cli_probe_cwd() is None
-    expected_home = str(Path.home())
     with _deleted_cwd(tmp_path):
         fallback = hi._cli_probe_cwd()
-    assert fallback == expected_home
+    assert fallback == str(home)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX deleted-cwd semantics")
