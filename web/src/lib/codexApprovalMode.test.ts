@@ -9,13 +9,14 @@ import {
 } from "@/lib/codexApprovalMode";
 
 describe("codexApprovalMode", () => {
-  it("offers the runtime /permissions superset, in Codex's popup order", () => {
-    // Newer builds add "Read Only" after "Full Access"; 0.146 lacks it.
+  it("offers the common live /permissions rows, in Codex's popup order", () => {
+    // Some Codex builds add "Read Only"; the core popup-row list keeps the
+    // always-present three, while the broader running-session picker adds
+    // "Read Only" and bypass below.
     expect(CODEX_NATIVE_RUNTIME_APPROVAL_PRESETS.map((m) => m.value)).toEqual([
       "ask-for-approval",
       "approve-for-me",
       "full-access",
-      "read-only",
     ]);
   });
 
@@ -37,6 +38,9 @@ describe("codexApprovalMode", () => {
       expect(codexApprovalModeLabel("ask-for-approval")).toBe("Ask for approval");
       expect(codexApprovalModeLabel("approve-for-me")).toBe("Approve for me");
       expect(codexApprovalModeLabel("full-access")).toBe("Full Access");
+    });
+
+    it("still labels a read-only session the picker can't switch into", () => {
       expect(codexApprovalModeLabel("read-only")).toBe("Read Only");
     });
 

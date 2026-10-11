@@ -2,10 +2,12 @@
 // presets in `nativeHarnessModes` (which map to `terminal_launch_args`), the
 // live switch drives Codex's own `/permissions` popup by keystroke injection,
 // so its options and labels mirror that popup. The popup is version-dependent:
-// newer builds add a "Read Only" stance that 0.146 lacks, so the list is the
-// superset. The full-bypass stance has no popup row of its own — the runner
-// delivers it through the Full Access row (same runtime settings) and the
-// server arms the bypass label so relaunches keep the real launch flag.
+// newer builds add a "Read Only" stance that 0.146 lacks, so the core popup
+// preset list keeps the common three rows while the broader running-session
+// picker also exposes Read Only. The full-bypass stance has no popup row of
+// its own — the runner delivers it through Full Access (same runtime
+// settings), and the server arms a bypass label so relaunches keep the real
+// launch flag.
 
 import {
   CODEX_NATIVE_BYPASS_APPROVAL_OPTION,
@@ -23,8 +25,9 @@ export interface CodexRuntimeApprovalPreset {
 export const CODEX_NATIVE_APPROVAL_MODE_LABEL_KEY = "omnigent.codex_native.approval_mode";
 
 /**
- * The runtime approval stances Codex's `/permissions` popup offers, in its
- * order (see the version caveat above).
+ * The common runtime approval stances Codex's `/permissions` popup offers, in
+ * its popup order. The running-session picker adds the version-dependent
+ * read-only stance separately below.
  */
 export const CODEX_NATIVE_RUNTIME_APPROVAL_PRESETS: CodexRuntimeApprovalPreset[] = [
   {
@@ -42,19 +45,21 @@ export const CODEX_NATIVE_RUNTIME_APPROVAL_PRESETS: CodexRuntimeApprovalPreset[]
     label: "Full Access",
     description: "Edit any file and access the internet without approval",
   },
-  {
-    value: "read-only",
-    label: "Read Only",
-    description: "Read files only; approval required to edit files or access the internet",
-  },
 ];
 
+const CODEX_NATIVE_READ_ONLY_OPTION: CodexRuntimeApprovalPreset = {
+  value: "read-only",
+  label: "Read Only",
+  description: "Read files only; approval required to edit files or access the internet",
+};
+
 /**
- * Everything the running-session picker offers: the `/permissions` presets
- * plus the full-bypass stance, matching the create-time picker.
+ * Everything the running-session picker offers: the common popup presets, the
+ * version-dependent read-only stance, and the full-bypass stance.
  */
 export const CODEX_NATIVE_RUNTIME_PERMISSION_OPTIONS: CodexRuntimeApprovalPreset[] = [
   ...CODEX_NATIVE_RUNTIME_APPROVAL_PRESETS,
+  CODEX_NATIVE_READ_ONLY_OPTION,
   {
     value: CODEX_NATIVE_BYPASS_APPROVAL_VALUE,
     label: CODEX_NATIVE_BYPASS_APPROVAL_OPTION.label,
