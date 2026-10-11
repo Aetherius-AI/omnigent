@@ -565,7 +565,8 @@ reruns your test on a candidate fix has the same cap, and some e2e workflows
 use 180 s. A wait must return as soon as its outcome is observable — a new
 transcript item, a rendered reply or error pill, a terminal status past a
 pre-send snapshot (see the Appendix) — never only when its deadline expires,
-and the per-step deadlines must sum to well under the cap. The unfixed build
+and the per-step deadlines must sum to well under the effective cap for the
+lane the test runs in, leaving margin for setup and teardown. The unfixed build
 often fails fast, so a quick failing run proves nothing about the passing
 path: time each wait helper on a turn that completes normally (the journey's
 healthy first turn will do) and treat one that returns only at its deadline
@@ -808,9 +809,13 @@ Check these before debugging a Playwright driver against the SPA:
   its deadline and a correct fix times out. Snapshot the transcript
   (`GET /v1/sessions/{id}/items`) or the on-screen reply/error count before
   sending, then return once a new assistant or error item exists past that
-  snapshot and the status is terminal — see `_wait_for_idle` in
-  `tests/e2e_ui/chat/test_acp_catalog_model_selection.py` and
-  `_poll_turn_outcome` in `test_absolute_watchdog_spares_active_turn.py`.
+  snapshot and the status is terminal, with a deadline below the enclosing
+  test's budget. `poll_session_until_terminal` in `tests/e2e/conftest.py` is
+  the complete pattern (it accepts `idle` after a running edge *or* real turn
+  output); in `tests/e2e_ui/chat/`, `_poll_turn_outcome` in
+  `test_absolute_watchdog_spares_active_turn.py` shows the transcript check and
+  `_wait_for_idle` in `test_acp_catalog_model_selection.py` the status check,
+  which its caller reaches only after the reply is visible.
 - **`main-terminal-view` mounts hidden** (`data-visible="false"`) while chat is
   shown, so a bare visibility wait on it hangs. Switch views via the header
   `view-mode-toggle` (buttons labelled "Chat view" / "Terminal view").
