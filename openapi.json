@@ -1514,7 +1514,7 @@
         "type": "object"
       },
       "DescendantSessionList": {
-        "description": "Paginated sub-agent subtree; `data` is a newest-first page of descendant summaries.",
+        "description": "Paginated sub-agent subtree: `data` is one id-ordered store page, so\nclients order siblings by `created_at` themselves.",
         "properties": {
           "data": {
             "items": {

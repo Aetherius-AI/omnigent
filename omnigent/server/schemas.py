@@ -2873,7 +2873,10 @@ class ChildSessionList(BaseModel):
 
 
 class DescendantSessionList(BaseModel):
-    """Paginated sub-agent subtree; ``data`` is a newest-first page of descendant summaries."""
+    """
+    Paginated sub-agent subtree: ``data`` is one id-ordered store page, so
+    clients order siblings by ``created_at`` themselves.
+    """
 
     object: Literal["list"] = "list"
     data: list[DescendantSessionSummary] = Field(default_factory=list)

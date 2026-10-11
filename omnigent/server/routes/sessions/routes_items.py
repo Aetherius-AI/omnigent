@@ -85,8 +85,9 @@ def _descendant_rows(
             chain: list[str] = []
             cursor: str | None = conv.id
             while cursor is not None and cursor not in depth_of:
-                if cursor in chain:
-                    # A corrupt parent cycle: treat the row as outside the tree.
+                # A corrupt parent cycle, or a chain already longer than the
+                # requested depth, puts the row outside the listed tree.
+                if cursor in chain or (max_depth is not None and len(chain) > max_depth):
                     cursor = None
                     break
                 chain.append(cursor)

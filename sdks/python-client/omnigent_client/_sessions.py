@@ -1052,7 +1052,8 @@ class SessionsNamespace:
                 break
             after = last_id
         # Pages arrive in primary-key order; callers expect levels in order and
-        # siblings newest-first, as child_sessions lists them.
+        # siblings newest-first, same-second siblings by descending id.
+        nodes.sort(key=lambda row: row["id"], reverse=True)
         nodes.sort(
             key=lambda row: (
                 row["depth"] if isinstance(row.get("depth"), int) else 0,

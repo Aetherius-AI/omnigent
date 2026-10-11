@@ -1310,7 +1310,8 @@ async def test_child_sessions_tree_follows_the_page_cursor() -> None:
     finally:
         await client.aclose()
 
-    assert [n["id"] for n in nodes] == [f"c{i}" for i in range(5)]
+    # Rows without timestamps tie, so siblings fall back to descending id.
+    assert [n["id"] for n in nodes] == [f"c{i}" for i in range(4, -1, -1)]
     assert [r.url.params.get("after") for r in requests] == [None, "c1", "c3"]
 
 
@@ -1344,6 +1345,29 @@ async def test_child_sessions_tree_walks_past_an_empty_page_that_continues() -> 
     # Siblings come back newest-first, whatever order the pages used.
     assert [n["id"] for n in nodes] == ["b", "a"]
     assert [r.url.params.get("after") for r in requests] == [None, "filtered"]
+
+
+@pytest.mark.asyncio
+async def test_child_sessions_tree_orders_same_second_siblings_by_descending_id() -> None:
+    """Timestamps have whole-second precision, so a same-second fan-out falls
+    back to descending id for a stable sibling order."""
+    rows = [
+        _child("b", parent_session_id="root", depth=1, created_at=7),
+        _child("c", parent_session_id="root", depth=1, created_at=7),
+        _child("a", parent_session_id="root", depth=1, created_at=7),
+        _child("z", parent_session_id="root", depth=1, created_at=6),
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": rows, "last_id": "z", "has_more": False})
+
+    ns, client = _make_namespace(handler)
+    try:
+        nodes = await ns.child_sessions_tree("root")
+    finally:
+        await client.aclose()
+
+    assert [n["id"] for n in nodes] == ["c", "b", "a", "z"]
 
 
 @pytest.mark.asyncio
@@ -1390,8 +1414,8 @@ async def test_child_sessions_tree_hides_settled_archived_rows_unless_asked() ->
 
     # Archiving does not end a session's work: a busy archived leaf stays, so
     # the rollup still reports the subtree busy.
-    assert [n["id"] for n in pruned] == ["mid", "working", "leaf"]
-    assert [n["id"] for n in everything] == ["mid", "settled", "working", "leaf"]
+    assert [n["id"] for n in pruned] == ["working", "mid", "leaf"]
+    assert [n["id"] for n in everything] == ["working", "settled", "mid", "leaf"]
     assert busy is True
     assert all("include_archived" not in r.url.params for r in requests)
 
@@ -1575,7 +1599,7 @@ async def test_child_sessions_tree_keeps_a_row_repeated_across_pages_once() -> N
     finally:
         await client.aclose()
 
-    assert [n["id"] for n in nodes] == ["a", "b"]
+    assert [n["id"] for n in nodes] == ["b", "a"]
 
 
 @pytest.mark.asyncio

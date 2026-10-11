@@ -2880,6 +2880,12 @@ def test_list_conversations_sort_by_id_pages_a_tree_in_key_order(
     )
     assert [conv.id for conv in ascending.data] == sorted(conv.id for conv in children)
 
+    # ``before`` pages back toward the start of the same order.
+    previous = conversation_store.list_conversations(
+        limit=10, before=seen[2], kind="sub_agent", root_conversation_id=root.id, sort_by="id"
+    )
+    assert [conv.id for conv in previous.data] == seen[:2]
+
     with pytest.raises(StaleCursorError):
         conversation_store.list_conversations(
             limit=2, after="0" * 32, kind="sub_agent", root_conversation_id=root.id, sort_by="id"
