@@ -2168,11 +2168,14 @@ def _canonical_subagent_workspace(
             raise ValueError(
                 f"sub-agent {sub_agent_name!r} os_env.cwd is not a directory: {configured_root!r}"
             )
-        # Reject out-of-root requests lexically, before probing the requested
-        # path, so error messages cannot reveal the existence or type of paths
-        # outside the boundary. The strict re-check below still catches a
-        # symlink escape from a lexically in-root path.
-        if not Path(os.path.normpath(workspace)).is_relative_to(canonical_root):
+        # Accept paths under the canonical root or the configured (possibly
+        # symlinked) root spelling; reject others lexically before probing so
+        # errors cannot reveal out-of-boundary paths (strict re-check follows).
+        normalized = Path(os.path.normpath(workspace))
+        if not (
+            normalized.is_relative_to(canonical_root)
+            or normalized.is_relative_to(Path(os.path.normpath(str(root))))
+        ):
             raise ValueError(f"workspace is outside sub-agent {sub_agent_name!r} root")
 
     try:

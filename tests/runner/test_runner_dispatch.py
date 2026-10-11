@@ -4132,6 +4132,41 @@ def test_subagent_workspace_symlink_escape_rejected(
         )
 
 
+def test_subagent_workspace_symlinked_root_accepts_both_spellings(
+    tmp_path: Path,
+) -> None:
+    """A valid workspace under a symlinked configured root is accepted.
+
+    When the configured ``os_env.cwd`` resolves through a symlink, a workspace
+    expressed under either the symlinked spelling or the canonical spelling is
+    inside the boundary and must be accepted, each canonicalizing to the same
+    real directory. Only an actual escape (checked after strict resolution) is
+    rejected.
+    """
+    from omnigent.runner.tool_dispatch import _canonical_subagent_workspace
+
+    real_root = tmp_path / "real"
+    real_root.mkdir()
+    (real_root / "task-a").mkdir()
+    alias_root = tmp_path / "alias"
+    alias_root.symlink_to(real_root)
+    spec = _spec_with_subagent_harness("claude-native", alias_root)
+
+    canonical = str((real_root / "task-a").resolve())
+    assert (
+        _canonical_subagent_workspace(
+            str(alias_root / "task-a"), sub_agent_name="worker", agent_spec=spec
+        )
+        == canonical
+    )
+    assert (
+        _canonical_subagent_workspace(
+            str(real_root / "task-a"), sub_agent_name="worker", agent_spec=spec
+        )
+        == canonical
+    )
+
+
 @pytest.mark.asyncio
 async def test_sys_session_send_rejects_workspace_outside_worker_root(
     monkeypatch: pytest.MonkeyPatch,

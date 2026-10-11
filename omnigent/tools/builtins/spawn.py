@@ -404,12 +404,13 @@ def _build_sys_session_send_schema(
                                         "minLength": 1,
                                         "description": (
                                             "Optional absolute workspace for the "
-                                            "sub-agent. The path must exist, be a "
-                                            "directory, and resolve inside the "
-                                            "sub-agent's configured os_env.cwd; "
-                                            "sub-agents without an os_env.cwd "
-                                            "reject it. Applies only when this "
-                                            "send CREATES the sub-agent session."
+                                            "sub-agent. The path must exist and be "
+                                            "a directory; when the sub-agent's "
+                                            "configured os_env.cwd is absolute the "
+                                            "workspace must also resolve inside it. "
+                                            "Sub-agents without an os_env.cwd reject "
+                                            "it. Applies only when this send CREATES "
+                                            "the sub-agent session."
                                         ),
                                     },
                                     "file_ids": {
