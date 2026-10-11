@@ -449,6 +449,62 @@ def test_cost_only_weighted_report_leaves_no_empty_bucket_for_the_tagged_model(
     assert by_model["claude-opus-4-8"]["total_cost_usd"] == pytest.approx(0.60)
 
 
+def test_clamped_weighted_report_leaves_no_phantom_zero_rows(db_uri: str) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(title="weights-no-growth", agent_id=_AGENT_ID)
+
+    # Priced total on the orchestrator's model.
+    _persist_native_cumulative_usage(
+        conv.id,
+        {"cumulative_cost_usd": 1.00, "model": "claude-sonnet-4-6"},
+        store,
+    )
+    # A re-sent/clamped weighted report: the flat total does not advance (a
+    # forwarder restart re-posts a baseline below the persisted peak), so there is
+    # no growth to split. Weights must not fan out zero-cost rows to models that
+    # never spent in this session.
+    _persist_native_cumulative_usage(
+        conv.id,
+        {
+            "cumulative_cost_usd": 0.50,
+            "model": "claude-sonnet-4-6",
+            "cost_by_model": {"claude-sonnet-4-6": 0.20, "claude-opus-4-8": 0.80},
+        },
+        store,
+    )
+
+    usage = _usage(store, conv.id)
+    by_model = usage["by_model"]
+    assert usage["total_cost_usd"] == pytest.approx(1.00)
+    # The sub-agent model got zero growth, so it must not appear at all.
+    assert "claude-opus-4-8" not in by_model
+    assert by_model["claude-sonnet-4-6"]["total_cost_usd"] == pytest.approx(1.00)
+
+
+def test_cost_by_model_weights_survive_overflowing_aggregate(db_uri: str) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(title="weights-overflow", agent_id=_AGENT_ID)
+
+    # Each weight is finite and accepted, but their naive sum overflows to +inf,
+    # which would normalize every share to zero and strand the whole advance.
+    # Normalizing by the max weight first keeps the split stable.
+    _persist_native_cumulative_usage(
+        conv.id,
+        {
+            "cumulative_cost_usd": 1.00,
+            "cost_by_model": {"claude-sonnet-4-6": 1e308, "claude-opus-4-8": 1e308},
+        },
+        store,
+    )
+
+    usage = _usage(store, conv.id)
+    by_model = usage["by_model"]
+    assert usage["total_cost_usd"] == pytest.approx(1.00)
+    assert by_model["claude-sonnet-4-6"]["total_cost_usd"] == pytest.approx(0.50)
+    assert by_model["claude-opus-4-8"]["total_cost_usd"] == pytest.approx(0.50)
+    assert sum(m["total_cost_usd"] for m in by_model.values()) == pytest.approx(1.00)
+
+
 def _conversation_point_reads(statements: list[str]) -> list[str]:
     """Filter captured SQL to point reads of a single conversation row."""
     matches: list[str] = []

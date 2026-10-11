@@ -3002,10 +3002,17 @@ async def _forward_session_cost(
         payload["policy_cost_usd"] = policy_cost
     if not payload:
         return
-    # S has no token counts and is tagged with the ACTIVE model only, so a display
-    # advance carries its own attribution: per-model transcript-estimate growth as
-    # ``cost_by_model`` weights when the transcripts price, else the statusLine model.
+    # S has no token counts, so a display advance carries its own attribution: the
+    # active statusLine model tag always, plus per-model transcript-estimate growth
+    # as ``cost_by_model`` weights when the transcripts price.
     if "cumulative_cost_usd" in payload:
+        # Tag the advance with the active model even alongside weights: a server that
+        # predates ``cost_by_model`` ignores the weights and would otherwise attribute
+        # S to the configured model rather than the statusLine's active one.
+        if isinstance(status_state, dict):
+            model = status_state.get("model")
+            if isinstance(model, str) and model:
+                payload["model"] = model
         cost_growth_by_model: dict[str, float] = {}
         if cost_by_model:
             # Only priceable transcripts contribute weights, so an advance can skew
@@ -3017,10 +3024,6 @@ async def _forward_session_cost(
                     cost_growth_by_model[model_id] = growth
         if cost_growth_by_model:
             payload["cost_by_model"] = cost_growth_by_model
-        elif isinstance(status_state, dict):
-            model = status_state.get("model")
-            if isinstance(model, str) and model:
-                payload["model"] = model
     try:
         await _post_external_session_usage(
             client,

@@ -258,11 +258,16 @@ def test_subagent_on_other_model_has_its_own_cost_row(
             settled.get("usage_by_model"),
         )
         deadline = time.monotonic() + _BREAKDOWN_SETTLE_TIMEOUT_S
+        by_model: dict[str, object] = {}
         while time.monotonic() < deadline:
             by_model = _session_snapshot(base_url, session_id).get("usage_by_model") or {}
             if any("opus" in model for model in by_model):
                 break
-            time.sleep(2.0)
+            time.sleep(0.5)
+        assert any("opus" in model for model in by_model), (
+            "the API never attributed the sub-agent's opus spend within "
+            f"{_BREAKDOWN_SETTLE_TIMEOUT_S}s (usage_by_model: {json.dumps(by_model)})"
+        )
 
         # The user-facing surface: reload so the popover seeds from the snapshot,
         # then open the per-model Token usage breakdown.
@@ -270,20 +275,23 @@ def test_subagent_on_other_model_has_its_own_cost_row(
         _open_usage_breakdown(page)
         model_rows = page.locator('[data-testid^="agent-info-model-"]')
         expect(model_rows.first).to_be_visible(timeout=15_000)
-        page.wait_for_timeout(2_000)
 
         final = _session_snapshot(base_url, session_id)
         api_by_model = final.get("usage_by_model") or {}
         _save_evidence("final-snapshot", final, page)
+        # At least one opus row: the bug folded the sub-agent's spend into the
+        # orchestrator bucket, so the fix must surface a distinct opus row (the
+        # harness may report more than one opus variant, so don't pin the count).
+        opus_rows = model_rows.filter(has_text=re.compile("opus"))
         expect(
-            model_rows.filter(has_text=re.compile("opus")),
+            opus_rows.first,
             (
                 f"the sub-agent ran on an opus model ({sorted(opus_models)}), but the "
                 "session cost panel's per-model breakdown has no opus row — its spend "
                 "was folded into the orchestrator's model bucket "
                 f"(API usage_by_model: {json.dumps(api_by_model)})"
             ),
-        ).to_have_count(1, timeout=5_000)
+        ).to_be_visible(timeout=5_000)
         per_model_cost = sum(
             float(bucket.get("total_cost_usd") or 0.0) for bucket in api_by_model.values()
         )

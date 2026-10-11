@@ -430,7 +430,7 @@ async def test_forward_session_cost_splits_display_and_policy(
     monkeypatch.setattr(
         forwarder,
         "read_claude_context_state",
-        lambda _bridge: {"total_cost_usd": status_box["value"]},
+        lambda _bridge: {"total_cost_usd": status_box["value"], "model": "claude-sonnet-4-6"},
     )
     estimate_box = {"value": 0.65}
     monkeypatch.setattr(
@@ -472,11 +472,14 @@ async def test_forward_session_cost_splits_display_and_policy(
         # the exact bug this split fixes. The display advance carries the
         # per-model attribution weights.
         await run()
+        # The display advance also carries the active statusLine model tag so a
+        # server without ``cost_by_model`` support still attributes S correctly.
         assert posted == [
             {
                 "cumulative_cost_usd": pytest.approx(0.01),
                 "policy_cost_usd": pytest.approx(0.65),
                 "cost_by_model": {"claude-opus-4-8": pytest.approx(0.65)},
+                "model": "claude-sonnet-4-6",
             }
         ]
         assert dedupe.posted_cost == pytest.approx(0.01)
@@ -514,6 +517,7 @@ async def test_forward_session_cost_splits_display_and_policy(
             "cumulative_cost_usd": pytest.approx(0.95),
             "policy_cost_usd": pytest.approx(0.95),
             "cost_by_model": {"claude-opus-4-8": pytest.approx(0.30)},
+            "model": "claude-sonnet-4-6",
         }
         assert dedupe.posted_cost == pytest.approx(0.95)
         assert dedupe.posted_policy_cost == pytest.approx(0.95)
@@ -640,13 +644,15 @@ async def test_forward_session_cost_weights_exclude_spend_attributed_before_fan_
                 cost_cache={},
             )
 
-        # Plain turn: the whole advance belongs to sonnet.
+        # Plain turn: the whole advance belongs to sonnet. The post also carries the
+        # active model tag for servers that ignore ``cost_by_model`` weights.
         await run()
         assert posted == [
             {
                 "cumulative_cost_usd": pytest.approx(0.20),
                 "policy_cost_usd": pytest.approx(0.20),
                 "cost_by_model": {"claude-sonnet-4-6": pytest.approx(0.20)},
+                "model": "claude-sonnet-4-6",
             }
         ]
 
@@ -669,6 +675,7 @@ async def test_forward_session_cost_weights_exclude_spend_attributed_before_fan_
                 "claude-sonnet-4-6": pytest.approx(0.10),
                 "claude-opus-4-8": pytest.approx(0.60),
             },
+            "model": "claude-sonnet-4-6",
         }
 
 
@@ -792,3 +799,73 @@ async def test_forward_session_cost_tags_display_advance_with_model(
         # Mid-turn: S frozen and the estimate still empty → nothing to post.
         await run()
         assert len(posted) == 1
+
+
+@pytest.mark.asyncio
+async def test_forward_session_cost_preserves_weights_after_failed_post(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A failed weighted POST leaves the per-model baseline unadvanced.
+
+    The baseline advances only after a POST succeeds, so the next poll re-sends
+    the same growth weights instead of dropping the sub-agent's attribution.
+    """
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    parent = tmp_path / "sess.jsonl"
+    parent.write_text("parent", encoding="utf-8")
+    monkeypatch.setattr(
+        forwarder,
+        "read_claude_context_state",
+        lambda _bridge: {"total_cost_usd": 0.80, "model": "claude-sonnet-4-6"},
+    )
+    monkeypatch.setattr(
+        forwarder,
+        "_session_cost_by_model_estimate",
+        lambda **_kwargs: {"claude-sonnet-4-6": 0.20, "claude-opus-4-8": 0.60},
+    )
+    now = {"value": 100.0}
+    monkeypatch.setattr(forwarder.time, "monotonic", lambda: now["value"])
+    subagent_state = forwarder.SubagentForwardState(
+        subagents={
+            "aaa": forwarder.SubagentEntry(subagent_id="aaa", child_conversation_id="conv_child")
+        }
+    )
+    dedupe = forwarder._ForwardDedupeState()
+    posted: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body.get("type") == "external_session_usage":
+            posted.append(body["data"])
+        if len(posted) == 1:
+            return httpx.Response(503, request=request)
+        return httpx.Response(200, json={}, request=request)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://ap") as client:
+        kwargs = {
+            "client": client,
+            "session_id": "conv_parent",
+            "bridge_dir": bridge_dir,
+            "parent_transcript_path": parent,
+            "subagent_state": subagent_state,
+            "dedupe": dedupe,
+            "cost_cache": {},
+        }
+        # The first post fails, so the per-model baseline must not advance.
+        await forwarder._forward_session_cost(**kwargs)
+        assert not dedupe.posted_cost_by_model
+
+        # Past the backoff window the retry re-sends the same pending weights.
+        now["value"] = 200.0
+        await forwarder._forward_session_cost(**kwargs)
+
+    weights = {
+        "claude-sonnet-4-6": pytest.approx(0.20),
+        "claude-opus-4-8": pytest.approx(0.60),
+    }
+    assert len(posted) == 2
+    assert posted[0]["cost_by_model"] == weights
+    assert posted[1]["cost_by_model"] == weights
+    assert dedupe.posted_cost_by_model == weights
