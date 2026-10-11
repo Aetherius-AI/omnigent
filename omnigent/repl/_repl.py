@@ -4680,10 +4680,16 @@ async def run_repl(
             from omnigent.repl._tmux_pane import watch_tmux_clients
 
             def _on_clients_changed(attached: int) -> None:
-                if attached == 0:
-                    host.pause_rendering()
-                else:
-                    host.resume_rendering()
+                # A failed replay re-pauses the host with its backlog intact; keep
+                # the watcher alive so the next attach retries, rather than ending
+                # viewer monitoring for the rest of the session.
+                try:
+                    if attached == 0:
+                        host.pause_rendering()
+                    else:
+                        host.resume_rendering()
+                except Exception:  # noqa: BLE001 — a failed repaint must not stop monitoring
+                    _log.exception("tmux viewer render toggle failed")
 
             try:
                 await watch_tmux_clients(_on_clients_changed)
@@ -4691,7 +4697,10 @@ async def run_repl(
                 _log.exception("tmux viewer watch stopped")
             finally:
                 # Without signals we cannot tell when a viewer returns, so paint.
-                host.resume_rendering()
+                try:
+                    host.resume_rendering()
+                except Exception:  # noqa: BLE001 — best-effort final paint during teardown
+                    _log.exception("final viewer-resume paint failed")
 
         viewer_watch_task = asyncio.create_task(_follow_tmux_viewers())
         try:

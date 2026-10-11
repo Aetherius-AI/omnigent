@@ -288,6 +288,10 @@ def test_detached_repl_stops_rendering_after_last_client_leaves(
         key=nonce,
         match=nonce,
     )
+    # A settled snapshot of the paused pane taken right before the turn: a
+    # correctly paused REPL repaints nothing for the turn, so this stays
+    # byte-identical even where the toolbar's context-usage ring would redraw.
+    pane_detached = pane.capture()
     # The prompt names only the nonce, never the reply token, so the token can
     # reach the transcript or the pane only as the assistant's painted response
     # -- not by echoing the user's own text.
@@ -315,6 +319,7 @@ def test_detached_repl_stops_rendering_after_last_client_leaves(
         cpu_delta: float | None = sum(proc.cpu_times()[:2])
     except psutil.NoSuchProcess:
         cpu_delta = None
+    pane_after = pane.capture()
     attached = pane.attached_clients()
     assert attached == 0, f"a client re-attached ({attached}); the detached condition was lost"
     assert not rendered, (
@@ -323,7 +328,14 @@ def test_detached_repl_stops_rendering_after_last_client_leaves(
         f"client-detached hook={_hook_command(pane.hooks(), 'client-detached')!r}, "
         f"cpu_seconds={cpu_delta}); it keeps full-rendering every session event for "
         "the rest of the session after the last web client leaves.\n"
-        f"pane_before:\n{pane_before}\npane_after:\n{pane.capture()}"
+        f"pane_before:\n{pane_before}\npane_after:\n{pane_after}"
+    )
+    # Nothing on the paused pane may change for the turn -- not even the toolbar
+    # context-usage ring, which a bypassed invalidate would redraw while detached.
+    assert pane_after == pane_detached, (
+        "the detached REPL repainted the pane for a background session event with "
+        f"zero clients attached (repl pid={proc.pid}); a paused pane must not change "
+        f"until a viewer returns.\npane_detached:\n{pane_detached}\npane_after:\n{pane_after}"
     )
 
     # The user reopens the terminal: the turn queued while detached is painted.

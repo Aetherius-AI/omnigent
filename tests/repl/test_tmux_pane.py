@@ -1289,7 +1289,9 @@ async def test_watch_tmux_clients_recovers_when_viewers_reconnect_during_rearm(
 
     def on_change(count: int) -> None:
         counts.append(count)
-        if count != 0 or reconnects:
+        if count != 0 or reconnects or not any(counts):
+            # ``not any(counts)`` skips the watcher's startup sample of an empty
+            # pane; reconnect only on the first detach that follows a viewer.
             return
         # Reconnect two viewers before the watcher re-arms: both land inside the
         # rearm gap, the window where paired attach signals would collapse.
@@ -1319,6 +1321,44 @@ async def test_watch_tmux_clients_recovers_when_viewers_reconnect_during_rearm(
             if client.poll() is None:
                 client.kill()
                 client.wait(timeout=10)
+
+
+@requires_tmux
+@pytest.mark.asyncio
+async def test_watch_tmux_clients_reports_zero_when_a_viewer_leaves_before_startup(
+    scratch_tmux: _ScratchTmux,
+) -> None:
+    """
+    A viewer that attaches and fully detaches before the watcher starts delivers
+    both channel signals with nobody waiting, so they cancel. The watcher must
+    still sample the empty pane and report zero -- otherwise its first
+    ``wait-for`` blocks forever and the pane keeps rendering with no viewer.
+    """
+    for hook in client_hook_commands():
+        scratch_tmux.run(*hook)
+
+    # Attach and detach before any watcher waits: the paired signals land with
+    # nobody waiting and collapse, so a wait-for started now would block.
+    early = scratch_tmux.attach_client()
+    await _eventually(lambda: scratch_tmux.session_attached() == 1, what="the pre-start viewer")
+    early.terminate()
+    early.wait(timeout=10)
+    await _eventually(
+        lambda: scratch_tmux.session_attached() == 0, what="the pre-start viewer to leave"
+    )
+
+    counts: list[int] = []
+    watcher = asyncio.create_task(watch_tmux_clients(counts.append))
+    try:
+        await _eventually(lambda: counts[-1:] == [0], what="the watcher to sample the empty pane")
+        assert not watcher.done()
+    finally:
+        watcher.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watcher
+        if early.poll() is None:
+            early.kill()
+            early.wait(timeout=10)
 
 
 @requires_tmux

@@ -22,13 +22,12 @@ def client_hook_commands() -> list[list[str]]:
     becomes ``1`` and ``client-detached`` when it reaches ``0``. A viewer joining
     or leaving while others remain is silent.
 
-    Signalling only those two transitions is what keeps the watcher reliable. It
-    re-arms a fresh one-shot ``wait-for`` after each wake, and tmux cancels two
-    signals delivered to a channel while nobody is waiting (a later ``wait-for``
-    then blocks instead of returning). Were every attach to signal, two viewers
-    reconnecting in the gap before the watcher re-arms would cancel each other
-    and strand the pane paused with clients attached. One signal per real
-    transition means at most one lands per gap, so ``wait-for`` remembers it.
+    tmux cancels two signals delivered to a channel while nobody is waiting, so a
+    later ``wait-for`` blocks instead of returning. Signalling only the zero/one
+    boundary keeps paired reconnects inside the watcher's rearm gap from
+    colliding; because the watcher also samples the current client count before
+    each wait, a collapse that still happens (an attach then detach before it
+    starts) only costs a redundant wake, never a stranded pause.
 
     ``client-attached`` still signals :data:`START_ON_ATTACH_CHANNEL` on every
     attach to release the pane's one-shot start gate.

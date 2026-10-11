@@ -1406,8 +1406,7 @@ class TerminalHost:
         """
         self._tokens_used = tokens_used
         self._context_window = context_window
-        with contextlib.suppress(RuntimeError):
-            get_app().invalidate()
+        self._invalidate_app()
 
     def set_theme(self, theme: TerminalTheme | str) -> None:
         """Switch prompt/status-bar colors for future TUI renders."""
@@ -1421,8 +1420,7 @@ class TerminalHost:
         app = getattr(self._prompt, "app", None)
         if app is not None:
             app.style = self._style
-        with contextlib.suppress(RuntimeError):
-            get_app().invalidate()
+        self._invalidate_app()
 
     def set_model_name(self, model_name: str) -> None:
         """
@@ -1442,8 +1440,7 @@ class TerminalHost:
         if self._window_title is not None:
             self._window_title = model_name
             self._try_set_window_title()
-        with contextlib.suppress(RuntimeError):
-            get_app().invalidate()
+        self._invalidate_app()
 
     def add_overlay(self, overlay: Overlay) -> None:
         """
@@ -3128,6 +3125,20 @@ class TerminalHost:
         if app is not None:
             app.invalidate()
 
+    def _invalidate_app(self) -> None:
+        """Repaint the running application for a metadata change, unless paused.
+
+        Toolbar/title updates reach the live application through ``get_app()``
+        rather than the ``PromptSession`` slot :meth:`_invalidate_prompt` uses.
+        Dropped while paused so a detached pane is not repainted for a background
+        session event; :meth:`resume_rendering` repaints once with the latest
+        state on return.
+        """
+        if self._render_paused:
+            return
+        with contextlib.suppress(RuntimeError):
+            get_app().invalidate()
+
     @property
     def rendering_paused(self) -> bool:
         """Whether output is being queued instead of painted."""
@@ -3145,39 +3156,51 @@ class TerminalHost:
         self._render_resumed.clear()
 
     def resume_rendering(self) -> None:
-        """Replay output queued while paused and repaint the prompt."""
+        """Replay output queued while paused and repaint the prompt.
+
+        A mid-replay write failure (a pane that vanished) re-pauses the host and
+        keeps the items it never reached, so the next resume on reattach finishes
+        them rather than painting ahead of a stranded backlog. The failing item
+        is dropped because it may have been written in part; a failed
+        skipped-output notice keeps its count so a later resume re-emits it.
+        """
         if not self._render_paused:
             return
-        self._render_paused = False
-        dropped, self._paused_output_dropped = self._paused_output_dropped, 0
+        dropped = self._paused_output_dropped
         queued = list(self._paused_output)
-        self._paused_output.clear()
-        try:
-            if dropped:
-                # A StreamReplace also erases the pre-pause live region, whose
-                # replacement is among the dropped items.
-                self.output(
-                    StreamReplace(
-                        Text(
-                            f"  … {dropped} earlier output "
-                            f"{'item was' if dropped == 1 else 'items were'} skipped "
-                            "while no terminal client was attached",
-                            style=self.theme.muted,
-                        )
+        replay: list[FormattedItem] = []
+        if dropped:
+            # A StreamReplace also erases the pre-pause live region, whose
+            # replacement is among the dropped items.
+            replay.append(
+                StreamReplace(
+                    Text(
+                        f"  … {dropped} earlier output "
+                        f"{'item was' if dropped == 1 else 'items were'} skipped "
+                        "while no terminal client was attached",
+                        style=self.theme.muted,
                     )
                 )
-            for index, item in enumerate(queued):
-                try:
-                    self.output(item)
-                except Exception:
-                    # The pane went away mid-replay. Re-queue the items we never
-                    # reached so a later resume finishes instead of dropping them.
-                    for leftover in reversed(queued[index + 1 :]):
-                        self._paused_output.appendleft(leftover)
-                    raise
-        finally:
-            self._render_resumed.set()
-            self._invalidate_prompt()
+            )
+        replay.extend(queued)
+
+        self._render_paused = False
+        self._paused_output_dropped = 0
+        self._paused_output.clear()
+        for index, item in enumerate(replay):
+            try:
+                self.output(item)
+            except Exception:
+                self._render_paused = True
+                if dropped and index == 0:
+                    # The skipped-output notice never printed; keep its count so
+                    # a later resume re-emits it with the whole retained backlog.
+                    self._paused_output_dropped = dropped
+                for leftover in reversed(replay[index + 1 :]):
+                    self._paused_output.appendleft(leftover)
+                raise
+        self._render_resumed.set()
+        self._invalidate_prompt()
 
     def _queue_paused_output(self, item: FormattedItem) -> None:
         """Queue *item* for replay, dropping what a later item supersedes.

@@ -713,18 +713,28 @@ async def _attached_client_count(pane_id: str) -> int | None:
 
 
 async def watch_tmux_clients(on_change: Callable[[int], None]) -> None:
-    """Report this pane's attached-client count after every viewer change.
+    """Report this pane's attached-client count now and after every change.
 
-    Blocks in ``tmux wait-for`` between changes; a wake-up may repeat an
-    unchanged count. Returns without calling *on_change* outside a
-    runner-hosted tmux pane, and whenever tmux stops answering.
+    Samples ``#{session_attached}`` before each wait so the caller learns the
+    current state even when a startup attach/detach pair cancelled both channel
+    signals, then blocks in ``tmux wait-for`` and re-reports only when the count
+    changes. Returns without calling *on_change* outside a runner-hosted tmux
+    pane, and whenever tmux stops answering.
 
-    :param on_change: Receives ``#{session_attached}`` for the pane's session.
+    :param on_change: Receives ``#{session_attached}`` for the pane's session,
+        once at startup and again whenever it changes.
     """
     pane_id = _tmux_pane_id()
     if not _is_in_tmux() or pane_id is None or not await _server_signals_client_changes():
         return
+    last_reported: int | None = None
     while True:
+        count = await _attached_client_count(pane_id)
+        if count is None:
+            return
+        if count != last_reported:
+            on_change(count)
+            last_reported = count
         try:
             waiter = await asyncio.create_subprocess_exec(
                 "tmux",
@@ -745,7 +755,3 @@ async def watch_tmux_clients(on_change: Callable[[int], None]) -> None:
             raise
         if returncode != 0:
             return
-        count = await _attached_client_count(pane_id)
-        if count is None:
-            return
-        on_change(count)

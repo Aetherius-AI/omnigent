@@ -1795,20 +1795,37 @@ def test_paused_host_queues_output_and_replays_it_on_resume(
 def test_paused_host_drops_repaint_requests_until_resume(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Timer flips must not invalidate the prompt while paused; resume repaints once."""
+    """Timer flips and metadata updates must not repaint while paused.
+
+    ``update_context_usage``/``set_theme``/``set_model_name`` repaint through
+    ``get_app()`` rather than the prompt slot, so a completed turn's toolbar
+    update would otherwise bypass the pause and re-render the detached pane.
+    """
     host = TerminalHost(model_name="test")
     invalidations: list[None] = []
     monkeypatch.setattr(
         host._prompt, "app", SimpleNamespace(invalidate=lambda: invalidations.append(None))
     )
+    app_invalidations: list[None] = []
+    monkeypatch.setattr(
+        "omnigent_ui_sdk.terminal._host.get_app",
+        lambda: SimpleNamespace(invalidate=lambda: app_invalidations.append(None)),
+    )
 
     host.pause_rendering()
     host.start_timer()
     host.stop_timer()
+    host.update_context_usage(3100, 200000)
+    host.set_theme(host.theme)
+    host.set_model_name("renamed agent")
     assert invalidations == []
+    assert app_invalidations == []
 
     host.resume_rendering()
     assert len(invalidations) == 1
+    # The latest metadata is retained for the single repaint resume triggers.
+    assert host._model == "renamed agent"
+    assert host._tokens_used == 3100
 
 
 def test_paused_live_region_renders_collapse_to_the_latest(
@@ -1869,36 +1886,25 @@ def test_paused_non_stream_item_keeps_the_streaming_before_it(
     assert painted.index("alpha") < painted.index("panel") < painted.index("paragraph")
 
 
-def test_resume_rendering_releases_waiters_when_the_replay_fails(
+def test_resume_rendering_repauses_and_recovers_when_a_replay_write_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A failing replay must not leave the ticker and overlay loops asleep."""
-    host = TerminalHost(model_name="test")
-    host.pause_rendering()
-    host.output(Text("alpha"))
+    """A mid-replay write failure re-pauses with the unreached tail retained.
 
-    def _broken_write(_data: str) -> int:
-        raise RuntimeError("stdout is gone")
-
-    monkeypatch.setattr(sys.stdout, "write", _broken_write)
-    with pytest.raises(RuntimeError):
-        host.resume_rendering()
-    assert not host.rendering_paused
-    assert host._render_resumed.is_set()
-
-
-def test_resume_rendering_preserves_unreplayed_output_when_a_write_fails(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A mid-replay write failure keeps the items it never reached for a later resume."""
+    The failing item is dropped because it may have been half-written; the host
+    re-pauses so the next resume on reattach actually replays the rest instead of
+    stranding it, and the viewer loops stay parked until that clean replay.
+    """
     host = TerminalHost(model_name="test")
     host.pause_rendering()
     host.output(Text("alpha"))
     host.output(Text("bravo"))
     host.output(Text("charlie"))
 
+    fail = {"active": True}
+
     def _write(data: str) -> int:
-        if "bravo" in data:
+        if fail["active"] and "bravo" in data:
             raise BrokenPipeError("pane gone mid-replay")
         return len(data)
 
@@ -1907,12 +1913,59 @@ def test_resume_rendering_preserves_unreplayed_output_when_a_write_fails(
 
     with pytest.raises(BrokenPipeError):
         host.resume_rendering()
+    assert host.rendering_paused
+    assert not host._render_resumed.is_set()
+    assert [item.plain for item in host._paused_output] == ["charlie"]
 
-    # alpha painted and bravo failed; only the untouched tail is re-queued, so a
-    # later resume finishes the replay instead of silently dropping it.
+    # The pane recovers: a fresh resume drains the retained tail and wakes loops.
+    fail["active"] = False
+    writes = _capture_stdout(monkeypatch)
+    host.resume_rendering()
+    assert "charlie" in "".join(writes)
     assert not host.rendering_paused
     assert host._render_resumed.is_set()
-    assert [item.plain for item in host._paused_output] == ["charlie"]
+    assert list(host._paused_output) == []
+
+
+def test_resume_rendering_recovers_when_the_skipped_notice_write_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure printing the skipped-output notice keeps the whole backlog.
+
+    The notice prints before the retained items, so if it fails the backlog and
+    the skipped count are both preserved for a later resume to replay.
+    """
+    monkeypatch.setattr("omnigent_ui_sdk.terminal._host._PAUSED_OUTPUT_LIMIT", 1)
+    host = TerminalHost(model_name="test")
+    host.pause_rendering()
+    host.output(Text("alpha"))  # dropped by the one-item cap
+    host.output(Text("bravo"))  # the retained backlog
+    assert host._paused_output_dropped == 1
+
+    fail = {"active": True}
+
+    def _write(data: str) -> int:
+        if fail["active"] and "skipped" in data:
+            raise BrokenPipeError("pane gone before the notice")
+        return len(data)
+
+    monkeypatch.setattr(sys.stdout, "write", _write)
+    monkeypatch.setattr(sys.stdout, "flush", lambda: None)
+
+    with pytest.raises(BrokenPipeError):
+        host.resume_rendering()
+    assert host.rendering_paused
+    assert host._paused_output_dropped == 1
+    assert [item.plain for item in host._paused_output] == ["bravo"]
+
+    fail["active"] = False
+    writes = _capture_stdout(monkeypatch)
+    host.resume_rendering()
+    painted = "".join(writes)
+    assert "1 earlier output item was skipped" in painted
+    assert "bravo" in painted
+    assert not host.rendering_paused
+    assert list(host._paused_output) == []
 
 
 def test_clear_streamed_text_defers_while_paused(
