@@ -403,10 +403,16 @@ export async function resolveIdentity(): Promise<string | null> {
   // discarded instead of being cached for the Server that never sent it.
   const probeServer = configuredServer();
   const isStale = () => configuredServer() !== probeServer;
-  identityPromise = (async () => {
+  // A stale answer also frees the slot it holds; otherwise switching back to
+  // this Server before any reader ran would keep returning the settled null.
+  const discard = (): null => {
+    if (identityPromise === probe) identityPromise = null;
+    return null;
+  };
+  const probe: Promise<string | null> = (async () => {
     try {
       const res = await hostFetch("/v1/me");
-      if (isStale()) return null;
+      if (isStale()) return discard();
       if (res.status === 401) {
         // OIDC / accounts mode: server requires authentication.
         // Redirect to the login URL provided in the response body —
@@ -417,7 +423,7 @@ export async function resolveIdentity(): Promise<string | null> {
             user_id: null;
             login_url?: string;
           };
-          if (isStale()) return null;
+          if (isStale()) return discard();
           if (data.login_url) {
             serverLoginUrl = data.login_url;
             if (!isOnLoginPath()) {
@@ -434,18 +440,19 @@ export async function resolveIdentity(): Promise<string | null> {
           user_id: string | null;
           is_admin?: boolean;
         };
-        if (isStale()) return null;
+        if (isStale()) return discard();
         currentUserId = data.user_id;
         currentIsAdmin = data.is_admin ?? false;
       }
     } catch {
       // Server unreachable — leave as null.
     }
-    if (isStale()) return null;
+    if (isStale()) return discard();
     identityResolved = true;
     return currentUserId;
   })();
-  return identityPromise;
+  identityPromise = probe;
+  return probe;
 }
 
 /** Return the cached user ID (null before resolveIdentity completes). */

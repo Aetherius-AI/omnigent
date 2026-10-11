@@ -73,3 +73,33 @@ it("settles to the resolved admin flag instead of a pre-resolution seed", async 
 
   await waitFor(() => expect(result.current).toBe(true));
 });
+
+it("does not file the new Server's flag under the previous Server's key", async () => {
+  const { setOmnigentHostConfig } = await import("@/lib/host");
+  const { useIsAdmin } = await import("./useIsAdmin");
+  let answerA!: (response: Response) => void;
+  const serverA = vi.fn((path: string, _init?: RequestInit) =>
+    path === "/v1/me"
+      ? new Promise<Response>((resolve) => {
+          answerA = resolve;
+        })
+      : Promise.resolve(jsonResponse({})),
+  );
+  const client = new QueryClient();
+  const keyA = ["identity-is-admin", "server-a"];
+
+  setOmnigentHostConfig({ serverIdentity: "server-a", fetcher: serverA });
+  const onA = renderHook(() => useIsAdmin(), { wrapper: wrapperFor(client) });
+  await waitFor(() => expect(serverA).toHaveBeenCalled());
+  onA.unmount();
+
+  // The host repoints the embed at Server B while Server A's probe is in flight.
+  setOmnigentHostConfig({ serverIdentity: "server-b", fetcher: serverFetcher("bob", false) });
+  await act(async () => {
+    answerA(jsonResponse({ user_id: "alice", is_admin: true }));
+  });
+
+  await waitFor(() => expect(client.getQueryState(keyA)?.fetchStatus).toBe("idle"));
+  expect(client.getQueryState(keyA)?.dataUpdateCount).toBe(0);
+  expect(client.getQueryState(keyA)?.status).toBe("error");
+});

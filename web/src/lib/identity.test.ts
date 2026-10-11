@@ -795,4 +795,48 @@ describe("host Server switch", () => {
     expect(getCurrentUserId()).not.toBe("alice");
     expect(await resolveIdentity()).toBe("bob");
   });
+
+  it("keeps the cached identity when the host reinstalls a config for the same Server", async () => {
+    const { setOmnigentHostConfig } = await import("./host");
+    const { resolveIdentity, getCurrentIsAdmin } = await import("./identity");
+    const serverA = serverFetcher("alice", true);
+    const serverAAgain = serverFetcher("alice", true);
+
+    setOmnigentHostConfig({ serverIdentity: "server-a", fetcher: serverA });
+    expect(await resolveIdentity()).toBe("alice");
+
+    // A remount reinstalls an equivalent config; the Server did not change.
+    setOmnigentHostConfig({ serverIdentity: "server-a", fetcher: serverAAgain });
+
+    expect(await resolveIdentity()).toBe("alice");
+    expect(getCurrentIsAdmin()).toBe(true);
+    expect(serverA).toHaveBeenCalledTimes(1);
+    expect(serverAAgain).not.toHaveBeenCalled();
+  });
+
+  it("re-probes a Server whose first answer was discarded while the host was elsewhere", async () => {
+    const { setOmnigentHostConfig } = await import("./host");
+    const { resolveIdentity } = await import("./identity");
+    let settleServerA: ((r: Response) => void) | null = null;
+    const serverA = vi.fn(
+      () =>
+        new Promise<Response>((r) => {
+          settleServerA = r;
+        }),
+    );
+
+    setOmnigentHostConfig({ serverIdentity: "server-a", fetcher: serverA });
+    const pendingA = resolveIdentity();
+
+    // Away and back without any identity reader running in between.
+    setOmnigentHostConfig({ serverIdentity: "server-b", fetcher: serverFetcher("bob") });
+    settleServerA!(mockJsonResponse({ user_id: "alice", is_admin: true }));
+    expect(await pendingA).toBeNull();
+    setOmnigentHostConfig({ serverIdentity: "server-a", fetcher: serverA });
+
+    const again = resolveIdentity();
+    expect(serverA).toHaveBeenCalledTimes(2);
+    settleServerA!(mockJsonResponse({ user_id: "alice", is_admin: true }));
+    expect(await again).toBe("alice");
+  });
 });

@@ -17,14 +17,22 @@ const QUERY_KEY = ["identity-is-admin"];
  */
 export function useIsAdmin(): boolean {
   // Identity is per-Server, and an embedded host can repoint the app at
-  // another Server in place, so the cached flag is keyed by its Server.
+  // another Server in place (remounting it, which re-reads this), so the
+  // cached flag is keyed by its Server.
   const serverIdentity = getOmnigentServerIdentity();
   const { data } = useQuery<boolean>({
     queryKey: [...QUERY_KEY, serverIdentity],
     queryFn: async () => {
       await resolveIdentity();
+      // A switch mid-probe would file the new Server's flag under this key.
+      if (getOmnigentServerIdentity() !== serverIdentity) {
+        throw new Error("host switched Servers during the identity probe");
+      }
       return getCurrentIsAdmin();
     },
+    // The probe never rejects on its own, so that switch is the only failure
+    // and the remounted app re-reads under the new key.
+    retry: false,
     // The seed below may predate the /v1/me answer, and the refetch is a free
     // read of the cached identity, so a mount never trusts it as fresh.
     staleTime: 0,
