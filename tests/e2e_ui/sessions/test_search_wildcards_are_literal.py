@@ -1,170 +1,181 @@
-"""Browser e2e: the sidebar Search palette treats ``%`` and ``_`` in the query as
-literal text and previews the item that literally contains the query."""
+"""Browser e2e: the session-search palette treats ``%`` and ``_`` literally.
+
+The sidebar's Search button opens the command palette, which forwards the
+query to ``GET /v1/sessions?search_query=…``. That filter is documented as a
+case-insensitive *substring* match on the title or chat content, so a ``%``
+or ``_`` typed by the user must only list sessions that actually contain the
+character, and the dimmed preview under a content match must show the text
+that contains the query.
+
+Four hello_world sessions are seeded once per module through the real
+composer (so the chat text is persisted the way a user's would be) and then
+titled through the sessions API:
+
+- ``Plain prose <marker>`` — one message ``innocent prose <marker>`` (the
+  decoy: contains neither ``%`` nor ``_``);
+- ``Progress report <marker>`` — ``innocent first <marker>`` followed by
+  ``literal 50% later <marker>``;
+- ``fileXname <marker>`` and ``file_name <marker>`` — title-only look-alikes.
+"""
 
 from __future__ import annotations
 
-import time
+import subprocess
+import urllib.parse
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
-from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
-from playwright.sync_api import Locator, Page, Response, expect
+from playwright.sync_api import Browser, Locator, Page, expect
 
-from tests.e2e_ui.conftest import _create_runner_bound_session, _server_state, configure_mock_llm
+from tests.e2e_ui.conftest import (
+    _create_runner_bound_session,
+    _ensure_runner_online,
+    _server_state,
+    set_fallback_mock_llm,
+)
 
-_ASSISTANT = '[data-testid="message-bubble"][data-role="assistant"]'
+_REPLY = "Noted."
+_HELLO_WORLD_MODEL = "gpt-4o-mini"
+# Browser-local preference the SPA sends as a request header; keeps background
+# title inference from renaming the seeded sessions mid-journey.
+_TITLES_OFF_STORAGE_KEY = "omnigent:background-session-titles"
+_TITLES_OFF_INIT_SCRIPT = f'window.localStorage.setItem("{_TITLES_OFF_STORAGE_KEY}", "off");'
+_TITLES_OFF_HEADERS = {"x-omnigent-background-session-titles": "off"}
 
 
 @dataclass(frozen=True)
-class _SearchSessions:
+class SeededSearchSessions:
     base_url: str
     marker: str
-    decoy_title: str
-    progress_title: str
-    lookalike_title: str
-    underscore_title: str
+    ids: dict[str, str]
+
+    def title(self, name: str) -> str:
+        return f"{name} {self.marker}"
 
 
-def _send(page: Page, composer: Locator, text: str, *, replies: int) -> None:
+def _send_and_wait(page: Page, text: str, expected_replies: int) -> None:
+    composer = page.get_by_label("Message the agent", exact=True)
+    expect(composer).to_be_visible(timeout=30_000)
     composer.fill(text)
-    page.get_by_role("button", name="Send", exact=True).click()
-    expect(page.locator(_ASSISTANT)).to_have_count(replies, timeout=30_000)
+    composer.press("Enter")
+    expect(page.get_by_text(_REPLY, exact=True)).to_have_count(expected_replies, timeout=60_000)
 
 
-def _wait_until_searchable(base_url: str, session_id: str, query: str) -> None:
-    deadline = time.monotonic() + 30.0
-    while time.monotonic() < deadline:
-        resp = httpx.get(
-            f"{base_url}/v1/sessions",
-            params={"search_query": query, "limit": 50},
-            timeout=10.0,
-        )
-        resp.raise_for_status()
-        if any(conv["id"] == session_id for conv in resp.json()["data"]):
-            return
-        time.sleep(0.5)
-    raise AssertionError(f"{query!r} never became searchable in session {session_id}")
-
-
-@pytest.fixture
-def search_sessions(
-    page: Page,
-    seeded_session_pair: tuple[str, str, str],
+@pytest.fixture(scope="module")
+def seeded_search_sessions(
+    live_server: str,
     mock_llm_server_url: str,
-) -> Iterator[_SearchSessions]:
-    """Four sessions a literal search can tell apart: a decoy with no ``%``, a chat with
-    ``50%`` behind an earlier plain message, and two titles differing only at the ``_``."""
-    base_url, decoy_id, progress_id = seeded_session_pair
-    marker = uuid.uuid4().hex[:8]
+    browser: Browser,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[SeededSearchSessions]:
+    respawned_runner = _ensure_runner_online(live_server, tmp_path_factory)
     runner_id = str(_server_state["runner_id"])
-    lookalike_id = _create_runner_bound_session(base_url, runner_id)
-    underscore_id = _create_runner_bound_session(base_url, runner_id)
+    set_fallback_mock_llm(mock_llm_server_url, _HELLO_WORLD_MODEL, _REPLY)
+
+    marker = uuid.uuid4().hex[:8]
+    names = ("Plain prose", "Progress report", "fileXname", "file_name")
+    ids = {name: _create_runner_bound_session(live_server, runner_id) for name in names}
+    seeded = SeededSearchSessions(base_url=live_server, marker=marker, ids=ids)
+
+    context = browser.new_context()
+    context.add_init_script(_TITLES_OFF_INIT_SCRIPT)
+    page = context.new_page()
     try:
-        configure_mock_llm(
-            mock_llm_server_url,
-            [{"text": "Noted."}] * 3,
-            key=f"search-wildcards-{marker}",
-            match=marker,
-        )
-        # Automatic titling would rename the sessions under test mid-journey.
-        page.add_init_script(
-            "window.localStorage.setItem('omnigent:background-session-titles', 'off')"
-        )
-
-        page.goto(f"{base_url}/c/{decoy_id}")
-        composer = page.get_by_label("Message the agent")
-        expect(composer).to_be_visible(timeout=30_000)
-        _send(page, composer, f"innocent prose {marker}", replies=1)
-        _wait_until_searchable(base_url, decoy_id, f"prose {marker}")
-
-        page.goto(f"{base_url}/c/{progress_id}")
-        composer = page.get_by_label("Message the agent")
-        expect(composer).to_be_visible(timeout=30_000)
-        _send(page, composer, f"innocent first {marker}", replies=1)
-        _send(page, composer, f"literal 50% later {marker}", replies=2)
-        _wait_until_searchable(base_url, progress_id, f"later {marker}")
-
-        sessions = _SearchSessions(
-            base_url=base_url,
-            marker=marker,
-            decoy_title=f"Plain prose {marker}",
-            progress_title=f"Progress report {marker}",
-            lookalike_title=f"fileXname {marker}",
-            underscore_title=f"file_name {marker}",
-        )
-        for session_id, title in (
-            (decoy_id, sessions.decoy_title),
-            (progress_id, sessions.progress_title),
-            (lookalike_id, sessions.lookalike_title),
-            (underscore_id, sessions.underscore_title),
-        ):
-            httpx.patch(
-                f"{base_url}/v1/sessions/{session_id}", json={"title": title}, timeout=10.0
-            ).raise_for_status()
-        yield sessions
+        page.goto(f"{live_server}/c/{ids['Plain prose']}")
+        _send_and_wait(page, f"innocent prose {marker}", 1)
+        page.goto(f"{live_server}/c/{ids['Progress report']}")
+        _send_and_wait(page, f"innocent first {marker}", 1)
+        _send_and_wait(page, f"literal 50% later {marker}", 2)
     finally:
-        for session_id in (lookalike_id, underscore_id):
-            httpx.delete(f"{base_url}/v1/sessions/{session_id}", timeout=10.0)
+        context.close()
+
+    for name, session_id in ids.items():
+        httpx.patch(
+            f"{live_server}/v1/sessions/{session_id}",
+            json={"title": seeded.title(name)},
+            headers=_TITLES_OFF_HEADERS,
+            timeout=10.0,
+        ).raise_for_status()
+
+    try:
+        yield seeded
+    finally:
+        for session_id in ids.values():
+            httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
+        if respawned_runner is not None:
+            respawned_runner.terminate()
+            try:
+                respawned_runner.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                respawned_runner.kill()
+                respawned_runner.wait(timeout=5)
 
 
-def _open_palette(page: Page) -> tuple[Locator, Locator]:
-    page.get_by_test_id("sidebar-search-button").click()
-    dialog = page.get_by_role("dialog", name="Command palette", exact=True)
+def _open_search_palette(
+    page: Page, seeded: SeededSearchSessions, open_session: str
+) -> tuple[Locator, Locator]:
+    page.add_init_script(_TITLES_OFF_INIT_SCRIPT)
+    page.goto(f"{seeded.base_url}/c/{seeded.ids[open_session]}")
+    search_button = page.get_by_test_id("sidebar-search-button")
+    expect(search_button).to_be_visible(timeout=30_000)
+    search_button.click()
     palette_input = page.get_by_test_id("command-palette-input")
     expect(palette_input).to_be_visible()
-    return dialog, palette_input
+    return page.get_by_role("dialog"), palette_input
 
 
-def _search(page: Page, palette_input: Locator, query: str) -> None:
-    def _is_this_search(response: Response) -> bool:
-        url = urlparse(response.url)
-        return url.path.endswith("/v1/sessions") and parse_qs(url.query).get("search_query") == [
-            query
-        ]
-
-    # The palette drops its rows while a search is in flight, so a zero-count
-    # assertion is only meaningful once this query's response has landed.
-    with page.expect_response(_is_this_search):
-        palette_input.fill(query)
-
-
-def _session_rows(dialog: Locator, title: str) -> Locator:
+def _session_row(dialog: Locator, title: str) -> Locator:
     return dialog.get_by_role("option").filter(has_text=title)
 
 
-# A bare ``_`` is not asserted here: every runner-bound session carries a
-# resource-event item whose indexed text (``terminal_tui_main``) contains a
-# literal underscore, so listing them is correct. The lookalike test covers ``_``.
-def test_bare_percent_does_not_list_unrelated_session(
-    page: Page, search_sessions: _SearchSessions
+def _search(page: Page, palette_input: Locator, query: str) -> None:
+    # The palette empties while the debounced query is in flight, so a negative
+    # assertion is only meaningful once this query's results have arrived.
+    param = urllib.parse.urlencode({"search_query": query})
+    with page.expect_response(
+        lambda response: "/v1/sessions?" in response.url and param in response.url,
+        timeout=15_000,
+    ):
+        palette_input.fill(query)
+
+
+# A bare ``_`` is not asserted in the palette: every runner-bound session indexes
+# a resource event named ``terminal_tui_main``, so listing them all is correct.
+def test_bare_percent_only_lists_sessions_containing_it(
+    page: Page,
+    seeded_search_sessions: SeededSearchSessions,
 ) -> None:
-    sessions = search_sessions
-    dialog, palette_input = _open_palette(page)
+    seeded = seeded_search_sessions
+    dialog, palette_input = _open_search_palette(page, seeded, "Plain prose")
 
     _search(page, palette_input, "%")
-    expect(_session_rows(dialog, sessions.progress_title)).to_be_visible()
-    expect(_session_rows(dialog, sessions.decoy_title)).to_have_count(0)
+    expect(_session_row(dialog, seeded.title("Progress report"))).to_be_visible()
+    expect(_session_row(dialog, seeded.title("Plain prose"))).to_have_count(0)
 
 
-def test_underscore_matches_single_character_lookalike(
-    page: Page, search_sessions: _SearchSessions
+def test_underscore_in_query_does_not_match_lookalike_title(
+    page: Page,
+    seeded_search_sessions: SeededSearchSessions,
 ) -> None:
-    sessions = search_sessions
-    dialog, palette_input = _open_palette(page)
+    seeded = seeded_search_sessions
+    dialog, palette_input = _open_search_palette(page, seeded, "fileXname")
 
-    _search(page, palette_input, f"file_name {sessions.marker}")
-    expect(_session_rows(dialog, sessions.underscore_title)).to_be_visible()
-    expect(_session_rows(dialog, sessions.lookalike_title)).to_have_count(0)
+    _search(page, palette_input, seeded.title("file_name"))
+    expect(_session_row(dialog, seeded.title("file_name"))).to_be_visible()
+    expect(_session_row(dialog, seeded.title("fileXname"))).to_have_count(0)
 
 
-def test_percent_match_shows_content_preview(page: Page, search_sessions: _SearchSessions) -> None:
-    sessions = search_sessions
-    dialog, palette_input = _open_palette(page)
+def test_percent_match_shows_the_literal_content_preview(
+    page: Page,
+    seeded_search_sessions: SeededSearchSessions,
+) -> None:
+    seeded = seeded_search_sessions
+    dialog, palette_input = _open_search_palette(page, seeded, "Progress report")
 
     _search(page, palette_input, "%")
-    row = _session_rows(dialog, sessions.progress_title)
+    row = _session_row(dialog, seeded.title("Progress report"))
     expect(row).to_be_visible()
-    expect(row).to_contain_text("50% later")
+    expect(row).to_contain_text(f"literal 50% later {seeded.marker}")

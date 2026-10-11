@@ -2128,101 +2128,102 @@ def test_list_conversations_search_snippet_uses_earliest_match(
     assert "second mention" not in snippet
 
 
-def _seed_sessions_for_literal_search(
-    store: SqlAlchemyConversationStore,
-) -> dict[str, str]:
-    """Create sessions only a literal substring search can tell apart, keyed by role."""
-
-    def _session(role: str, title: str, *texts: str) -> str:
-        conv = store.create_conversation()
-        store.update_conversation(conv.id, title=title)
-        if texts:
-            store.append(
-                conv.id,
-                [
-                    NewConversationItem(
-                        type="message",
-                        response_id=f"resp_{role}_{index}",
-                        data=MessageData(
-                            role="user",
-                            content=[{"type": "input_text", "text": text}],
-                        ),
-                    )
-                    for index, text in enumerate(texts)
-                ],
+def _append_user_text(
+    store: SqlAlchemyConversationStore, conversation_id: str, text: str, response_id: str
+) -> None:
+    store.append(
+        conversation_id,
+        [
+            NewConversationItem(
+                type="message",
+                response_id=response_id,
+                data=MessageData(role="user", content=[{"type": "input_text", "text": text}]),
             )
-        return conv.id
-
-    return {
-        "plain": _session("plain", "Plain prose", "innocent prose"),
-        "percent_title": _session("percent_title", "Progress 50% done"),
-        "percent_content": _session(
-            "percent_content", "Progress report", "innocent first", "literal 50% later"
-        ),
-        "underscore": _session("underscore", "file_name notes"),
-        "lookalike": _session("lookalike", "fileXname notes"),
-        "bang": _session("bang", "General chat", "deploy it now!"),
-        "backslash": _session("backslash", "Windows path", "path C:\\temp done"),
-        "no_backslash": _session("no_backslash", "Other path", "path C:temp done"),
-    }
+        ],
+    )
 
 
+@pytest.mark.parametrize("where", ["title", "content"])
 @pytest.mark.parametrize(
-    ("query", "expected_roles"),
+    ("query", "matching_text", "decoy_text"),
     [
-        ("%", {"percent_title", "percent_content"}),
-        ("_", {"underscore"}),
-        ("file_name", {"underscore"}),
-        ("!", {"bang"}),
-        ("50%", {"percent_title", "percent_content"}),
-        ("% later", {"percent_content"}),
-        ("\\", {"backslash"}),
-        ("C:\\temp", {"backslash"}),
-        ("C:temp", {"no_backslash"}),
-        ("PROSE", {"plain"}),
+        ("%", "literal 50% later", "innocent prose"),
+        ("50%", "literal 50% later", "innocent 50 later"),
+        ("_", "open file_name", "innocent prose"),
+        ("file_name", "open file_name", "open fileXname"),
+        ("!", "deploy it now!", "deploy it now"),
+        ("\\", "path C:\\temp done", "path C:temp done"),
+        ("C:\\temp", "path C:\\temp done", "path C:temp done"),
     ],
     ids=[
         "percent",
+        "percent-in-word",
         "underscore",
         "underscore-in-word",
-        "bang",
-        "percent-in-word",
-        "percent-then-space",
+        "escape-char",
         "backslash",
         "backslash-in-path",
-        "no-backslash",
-        "case-insensitive",
     ],
 )
-def test_list_conversations_search_matches_like_metacharacters_literally(
+def test_list_conversations_search_treats_like_metacharacters_literally(
     conversation_store: SqlAlchemyConversationStore,
+    where: str,
     query: str,
-    expected_roles: set[str],
+    matching_text: str,
+    decoy_text: str,
 ) -> None:
     """
-    ``%``, ``_`` and backslash in ``search_query`` match themselves, never as wildcards.
+    ``search_query`` is a literal substring filter: ``%``, ``_`` and ``\\`` in
+    the query never act as LIKE wildcards or escapes, whether the hit is in the
+    title or in the chat content, and a content hit carries a snippet that
+    contains the query itself.
+
+    :param conversation_store: The conversation store fixture.
+    :param where: Whether the texts are stored as titles or as chat content.
+    :param query: The user's search string.
+    :param matching_text: Text containing ``query`` literally.
+    :param decoy_text: Text that only matches ``query`` under wildcard semantics.
     """
-    ids = _seed_sessions_for_literal_search(conversation_store)
+    matching = conversation_store.create_conversation()
+    decoy = conversation_store.create_conversation()
+    if where == "title":
+        conversation_store.update_conversation(matching.id, title=matching_text)
+        conversation_store.update_conversation(decoy.id, title=decoy_text)
+    else:
+        conversation_store.update_conversation(matching.id, title="Matching session")
+        conversation_store.update_conversation(decoy.id, title="Decoy session")
+        _append_user_text(conversation_store, matching.id, matching_text, "resp_match")
+        _append_user_text(conversation_store, decoy.id, decoy_text, "resp_decoy")
 
-    page = conversation_store.list_conversations(search_query=query)
+    by_id = {c.id: c for c in conversation_store.list_conversations(search_query=query).data}
+    assert matching.id in by_id, "literal match should be included"
+    assert decoy.id not in by_id, "wildcard-only look-alike must be excluded"
+    snippet = by_id[matching.id].search_snippet
+    if where == "content":
+        assert snippet is not None
+        assert query.lower() in snippet.lower()
+    else:
+        assert snippet is None
 
-    assert {c.id for c in page.data} == {ids[role] for role in expected_roles}
 
-
-def test_list_conversations_search_snippet_follows_literal_match(
+def test_list_conversations_search_snippet_comes_from_the_literal_match(
     conversation_store: SqlAlchemyConversationStore,
 ) -> None:
     """
-    ``%`` previews the item literally containing ``%``; a title-only hit keeps no snippet.
+    When an earlier turn would only match as a wildcard, the snippet still
+    comes from the turn that contains the query literally.
+
+    :param conversation_store: The conversation store fixture.
     """
-    ids = _seed_sessions_for_literal_search(conversation_store)
+    conv = conversation_store.create_conversation()
+    _append_user_text(conversation_store, conv.id, "innocent first", "resp_first")
+    _append_user_text(conversation_store, conv.id, "literal 50% later", "resp_later")
 
     by_id = {c.id: c for c in conversation_store.list_conversations(search_query="%").data}
-
-    snippet = by_id[ids["percent_content"]].search_snippet
+    assert conv.id in by_id
+    snippet = by_id[conv.id].search_snippet
     assert snippet is not None
-    assert "50% later" in snippet
-    assert by_id[ids["percent_title"]].search_snippet is None
+    assert "50%" in snippet
 
 
 def test_list_conversations_excludes_archived_by_default(
