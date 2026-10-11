@@ -6858,6 +6858,8 @@ async def _forward_event_to_runner(
                     # it here so callers can hand down the root spec unchanged.
                     _veto_spec = agent_spec
                     if _veto_spec is not None and conv.sub_agent_name:
+                        # A stale/renamed name resolves to nothing; the runner
+                        # then clones the root spec, so judge the root too.
                         _veto_spec = (
                             _find_spec_by_name(_veto_spec, conv.sub_agent_name) or _veto_spec
                         )

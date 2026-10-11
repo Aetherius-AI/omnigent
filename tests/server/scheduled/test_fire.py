@@ -1070,6 +1070,33 @@ async def test_session_authored_agent_loads_its_spec_unexpanded() -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_binding_fails_open_when_the_spec_load_raises() -> None:
+    """A spec-load failure still names the bundle and dispatches with no spec.
+
+    Routing must never block a scheduled turn, so a cache that raises leaves
+    the resolved revision intact and the spec ``None`` — the forwarder then
+    runs the turn without the transport hint rather than failing.
+    """
+
+    class _RaisingCache:
+        def load(self, *_: Any, **__: Any) -> Any:
+            raise RuntimeError("bundle unavailable")
+
+    deps = _deps(
+        FakeScheduledTaskStore(rows={"task_1": _task()}),
+        agent_store=FakeAgentStore({"ag_1": _FakeAgent("ag_1", bundle_location="ag_1/rev1")}),
+        agent_cache=_RaisingCache(),
+    )
+
+    revision, spec = await fire_mod._agent_binding(
+        deps, _FakeConversation(id="conv_1", agent_id="ag_1")
+    )
+
+    assert revision == "ag_1/rev1"
+    assert spec is None
+
+
+@pytest.mark.asyncio
 async def test_on_fire_returns_before_launch_completes() -> None:
     """on_fire must return fast so the scheduler timer re-arms immediately."""
     store = FakeScheduledTaskStore(rows={"task_1": _task()})

@@ -2110,6 +2110,117 @@ async def test_the_forwarder_reads_a_sub_agent_sessions_child_transport_for_the_
     assert "gateway" in decisions[0].data.rationale.lower()
 
 
+@pytest.mark.parametrize(
+    "routed_model",
+    ["databricks-claude-opus-4-8", "databricks/claude-opus-4-8", "system.ai.claude-opus-4-8"],
+    ids=["dash", "slash", "system-ai"],
+)
+async def test_every_gateway_spelling_is_declined_on_a_direct_vendor_pane(
+    client: httpx.AsyncClient,
+    db_uri: str,
+    tmp_path: Any,
+    routed_model: str,
+) -> None:
+    """Each catalog spelling of a gateway model is vetoed on a direct pane.
+
+    Model discovery lists the same gateway endpoints under more than one
+    spelling (``databricks-``, ``databricks/``, ``system.ai.``). The pin
+    regression must hold for every one, so route each spelling onto a
+    direct-vendor api-key pane and assert the pick runs unrouted with the
+    row left clear rather than pinned.
+    """
+    agent = await create_test_agent(client, name="routing-spelling")
+    resp = await client.post(
+        "/v1/sessions",
+        json={"agent_id": agent["id"], "cost_control_mode_override": "on"},
+    )
+    assert resp.status_code == 201, resp.text
+    conv_store = SqlAlchemyConversationStore(db_uri)
+    conv = conv_store.get_conversation(resp.json()["id"])
+    assert conv is not None
+
+    routing_client = FakeRoutingClient(
+        RoutingResult(model=routed_model, rationale="deep refactor", harness="claude_code")
+    )
+    body = SessionEventInput(
+        type="message",
+        data={"role": "user", "content": [{"type": "input_text", "text": "refactor auth"}]},
+    )
+    direct_api_key = "  auth:\n    type: api_key\n    api_key: mock-key\n"
+    with patch("omnigent.runtime._globals._caps", new=FakeCaps(routing_client=routing_client)):
+        async with echo_runner_client() as runner_client:
+            await orchestration_module._forward_event_to_runner(
+                conv.id,
+                conv,
+                body,
+                conv_store,
+                runner_client,
+                agent_spec=_claude_sdk_spec(tmp_path, direct_api_key),
+            )
+
+    refreshed = conv_store.get_conversation(conv.id)
+    assert refreshed is not None
+    decisions = _routing_decisions(conv_store, conv.id)
+    assert len(decisions) == 1
+    assert decisions[0].data.applied is False
+    assert refreshed.model_override is None
+    assert "gateway" in decisions[0].data.rationale.lower()
+
+
+async def test_an_unresolvable_sub_agent_name_judges_the_root_transport(
+    client: httpx.AsyncClient,
+    db_uri: str,
+    tmp_path: Any,
+) -> None:
+    """A stale sub-agent name falls back to the root spec for the veto.
+
+    When ``conv.sub_agent_name`` resolves to no declared sub-agent, the
+    runner boots the child as a clone of the root spec (see
+    ``_find_spec_by_name`` callers in runtime/workflow.py). The veto must
+    therefore judge the root transport, not read the unresolved name as
+    unknown: here the root talks direct to the vendor, so the gateway pick
+    is declined. Dropping the root fallback would wrongly pin it.
+    """
+    agent = await create_test_agent(client, name="routing-stale-child")
+    resp = await client.post(
+        "/v1/sessions",
+        json={"agent_id": agent["id"], "cost_control_mode_override": "on"},
+    )
+    assert resp.status_code == 201, resp.text
+    conv_store = SqlAlchemyConversationStore(db_uri)
+    conv = conv_store.get_conversation(resp.json()["id"])
+    assert conv is not None
+    # No sub-agent of this name is declared, so the runner would clone the root.
+    conv.sub_agent_name = "does-not-exist"
+
+    routing_client = FakeRoutingClient(
+        RoutingResult(model=ROUTED_MODEL, rationale="deep refactor", harness="claude_code")
+    )
+    body = SessionEventInput(
+        type="message",
+        data={"role": "user", "content": [{"type": "input_text", "text": "refactor auth"}]},
+    )
+    direct_api_key = "  auth:\n    type: api_key\n    api_key: mock-key\n"
+    with patch("omnigent.runtime._globals._caps", new=FakeCaps(routing_client=routing_client)):
+        async with echo_runner_client() as runner_client:
+            await orchestration_module._forward_event_to_runner(
+                conv.id,
+                conv,
+                body,
+                conv_store,
+                runner_client,
+                agent_spec=_claude_sdk_spec(tmp_path, direct_api_key),
+            )
+
+    refreshed = conv_store.get_conversation(conv.id)
+    assert refreshed is not None
+    decisions = _routing_decisions(conv_store, conv.id)
+    assert len(decisions) == 1
+    assert decisions[0].data.applied is False
+    assert refreshed.model_override is None
+    assert "gateway" in decisions[0].data.rationale.lower()
+
+
 async def test_gateway_model_prefixes_cover_every_catalog_spelling() -> None:
     """The veto's gateway prefixes track every Unity Catalog spelling.
 
