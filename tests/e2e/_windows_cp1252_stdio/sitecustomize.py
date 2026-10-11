@@ -10,7 +10,10 @@ from __future__ import annotations
 import os
 import sys
 
-_UTF8_REQUESTED = os.environ.get("PYTHONUTF8") == "1" or "utf8" in sys._xoptions
+_UTF8_REQUESTED = os.environ.get("PYTHONUTF8") == "1" or sys._xoptions.get("utf8") not in (
+    None,
+    "0",
+)
 
 if not _UTF8_REQUESTED and not os.environ.get("PYTHONIOENCODING"):
     for _name, _errors in (("stdout", "strict"), ("stderr", "backslashreplace")):

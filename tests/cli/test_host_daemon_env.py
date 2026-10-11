@@ -425,3 +425,16 @@ def test_runner_env_preserves_claude_telemetry_opt_in() -> None:
     # Then
     assert env.get("OTEL_METRICS_EXPORTER") == "otlp"
     assert env.get("CLAUDE_CODE_ENABLE_TELEMETRY") == "1"
+
+
+def test_host_daemon_env_preserves_pythonutf8(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The user's explicit UTF-8 mode must reach local and remote host daemons."""
+    monkeypatch.setenv("PYTHONUTF8", "1")
+    remote_env = _build_host_daemon_env(server_url="https://server.example")
+    local_env = _build_host_daemon_env(server_url=None)
+    assert remote_env.get("PYTHONUTF8") == "1", (
+        "PYTHONUTF8 stripped from the remote host-daemon env"
+    )
+    assert local_env.get("PYTHONUTF8") == "1", "PYTHONUTF8 stripped from the local host-daemon env"

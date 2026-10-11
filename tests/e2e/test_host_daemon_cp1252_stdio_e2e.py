@@ -106,7 +106,7 @@ def test_host_daemon_registers_under_cp1252_stdio(
             for host in resp.json().get("hosts", [])
         )
 
-    with open(daemon_log, "w") as log_fh:
+    with open(daemon_log, "a") as log_fh:
         proc = subprocess.Popen(
             [sys.executable, "-P", "-m", "omnigent.host._daemon_entry", "--server", live_server],
             env=env,
@@ -117,14 +117,16 @@ def test_host_daemon_registers_under_cp1252_stdio(
         online = False
         deadline = time.monotonic() + 40.0
         while time.monotonic() < deadline:
-            if _banner_encode_crash(daemon_log.read_text(errors="replace")):
+            log_text = daemon_log.read_text(errors="replace")
+            if _banner_encode_crash(log_text):
                 break
-            if _host_online():
-                online = True
+            online = online or _host_online()
+            if online and " Connected as " in log_text:
                 break
             time.sleep(0.25)
 
         log_text = daemon_log.read_text(errors="replace")
+        banner_logged = " Connected as " in log_text
         assert not _banner_encode_crash(log_text), (
             "the host daemon crashed encoding its '✓ Connected' banner on a "
             "cp1252 (legacy Windows codepage) stdout, so the tunnel "
@@ -133,6 +135,10 @@ def test_host_daemon_registers_under_cp1252_stdio(
         assert online, (
             "the host daemon never registered / did not stay online in "
             "Windows degraded mode:\n" + _tail(log_text)
+        )
+        assert banner_logged, (
+            "the host registered but never logged its ' Connected as ' banner, "
+            "so the cp1252 write that used to crash was not exercised:\n" + _tail(log_text)
         )
     finally:
         proc.send_signal(signal.SIGTERM)
