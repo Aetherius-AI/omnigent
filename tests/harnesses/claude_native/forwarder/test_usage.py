@@ -505,10 +505,9 @@ async def test_forward_session_cost_splits_display_and_policy(
         # Display baseline untouched — S never advanced.
         assert dedupe.posted_cost == pytest.approx(0.01)
 
-        # Turn settles: S jumps to the sub-agent-inclusive total. Display
-        # advances; policy advances to the same settled value. Both post.
-        # The attribution weights carry only the growth since the last
-        # display post (0.95 - 0.65), so an advance is never re-attributed.
+        # Turn settles: S jumps to the sub-agent-inclusive total; both fields post.
+        # Weights carry only the growth since the last display post (0.95 - 0.65),
+        # so an advance is never re-attributed.
         status_box["value"] = 0.95
         estimate_box["value"] = 0.95
         await run()
@@ -937,3 +936,42 @@ async def test_forward_session_cost_restores_baseline_across_restart(
         await run(forwarder._ForwardDedupeState())
         assert posted[-1]["cumulative_cost_usd"] == pytest.approx(1.20)
         assert posted[-1]["cost_by_model"] == {"claude-sonnet-4-6": pytest.approx(0.20)}
+
+
+def test_read_cost_forward_baseline_skips_malformed_entries(tmp_path: Path) -> None:
+    """One malformed row is skipped rather than discarding the whole baseline."""
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    transcript = tmp_path / "sess.jsonl"
+    (bridge_dir / forwarder._COST_BASELINE_STATE_FILE).write_text(
+        json.dumps(
+            {
+                "transcript_path": str(transcript),
+                "posted_cost_by_model": {
+                    "claude-sonnet-4-6": 0.40,
+                    "claude-opus-4-8": True,
+                    "claude-haiku-4": "nan",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    restored = forwarder._read_cost_forward_baseline(bridge_dir, transcript)
+    assert restored == {"claude-sonnet-4-6": pytest.approx(0.40)}
+
+
+def test_read_cost_forward_baseline_ignores_other_transcript(tmp_path: Path) -> None:
+    """A baseline recorded for a rotated-away transcript is ignored, not reused."""
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    (bridge_dir / forwarder._COST_BASELINE_STATE_FILE).write_text(
+        json.dumps(
+            {
+                "transcript_path": str(tmp_path / "old.jsonl"),
+                "posted_cost_by_model": {"claude-sonnet-4-6": 0.40},
+            }
+        ),
+        encoding="utf-8",
+    )
+    restored = forwarder._read_cost_forward_baseline(bridge_dir, tmp_path / "new.jsonl")
+    assert restored is None

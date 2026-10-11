@@ -3012,7 +3012,7 @@ async def _forward_session_cost(
     # steady-state churn. The two fields advance independently (policy_cost
     # moves mid-turn while display_cost/S is frozen).
     payload: dict[str, float | str | dict[str, float]] = {}
-    if display_cost is not None and display_advanced:
+    if display_advanced:
         payload["cumulative_cost_usd"] = display_cost
     if policy_cost is not None and (
         dedupe.posted_policy_cost is None or policy_cost > dedupe.posted_policy_cost
@@ -3020,13 +3020,8 @@ async def _forward_session_cost(
         payload["policy_cost_usd"] = policy_cost
     if not payload:
         return
-    # S has no token counts, so a display advance carries its own attribution: the
-    # active statusLine model tag always, plus per-model transcript-estimate growth
-    # as ``cost_by_model`` weights when the transcripts price.
+    # Attach transcript-growth weights and retain the active-model fallback for older servers.
     if "cumulative_cost_usd" in payload:
-        # Tag the advance with the active model even alongside weights: a server that
-        # predates ``cost_by_model`` ignores the weights and would otherwise attribute
-        # S to the configured model rather than the statusLine's active one.
         if isinstance(status_state, dict):
             model = status_state.get("model")
             if isinstance(model, str) and model:
@@ -7280,12 +7275,15 @@ def _read_cost_forward_baseline(
         return None
     restored: dict[str, float] = {}
     for model_id, cost in baseline.items():
+        # Skip a malformed entry rather than discard the whole baseline, so one
+        # bad row only re-fans its own model instead of every model (matching the
+        # other durable-state readers).
         if not isinstance(model_id, str):
-            return None
+            continue
         if isinstance(cost, bool) or not isinstance(cost, (int, float)):
-            return None
+            continue
         restored[model_id] = float(cost)
-    return restored
+    return restored or None
 
 
 def _write_cost_forward_baseline(

@@ -2285,12 +2285,12 @@ def _coerce_cost_by_model(data: dict[str, Any]) -> dict[str, float] | None:
     value = data.get("cost_by_model")
     if value is None:
         return None
+    error = (
+        "external_session_usage data.cost_by_model must be a dict of non-empty "
+        "model ids to finite non-negative numbers (booleans rejected)"
+    )
     if not isinstance(value, dict):
-        raise OmnigentError(
-            "external_session_usage data.cost_by_model must be a dict of non-empty "
-            "model ids to finite non-negative numbers (booleans rejected)",
-            code=ErrorCode.INVALID_INPUT,
-        )
+        raise OmnigentError(error, code=ErrorCode.INVALID_INPUT)
     weights: dict[str, float] = {}
     for model, weight in value.items():
         if (
@@ -2298,16 +2298,18 @@ def _coerce_cost_by_model(data: dict[str, Any]) -> dict[str, float] | None:
             or not model
             or isinstance(weight, bool)
             or not isinstance(weight, (int, float))
-            or not math.isfinite(weight)
-            or weight < 0
         ):
-            raise OmnigentError(
-                "external_session_usage data.cost_by_model must be a dict of non-empty "
-                "model ids to finite non-negative numbers (booleans rejected)",
-                code=ErrorCode.INVALID_INPUT,
-            )
+            raise OmnigentError(error, code=ErrorCode.INVALID_INPUT)
+        try:
+            # float() rejects an out-of-range integer weight (e.g. 10**400) that
+            # would otherwise overflow math.isfinite and surface as HTTP 500.
+            weight = float(weight)
+        except (OverflowError, ValueError):
+            raise OmnigentError(error, code=ErrorCode.INVALID_INPUT) from None
+        if not math.isfinite(weight) or weight < 0:
+            raise OmnigentError(error, code=ErrorCode.INVALID_INPUT)
         if weight > 0:
-            weights[model] = float(weight)
+            weights[model] = weight
     return weights or None
 
 
