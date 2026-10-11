@@ -190,6 +190,12 @@ def test_antigravity_gemini_display_name_usage_is_priced(
         bug = _read_session_usage(client, bug_id)
         buckets: dict[str, Any] = bug["usage_by_model"] or {}
 
+        # The usage must land in the exact catalog-id bucket, not a family-prefix
+        # fallback that happens to price positively under a differently priced sibling.
+        assert set(buckets) == {_CATALOG_MODEL_ID}, (
+            f"usage bucketed under {sorted(buckets)!r}, not the normalized catalog id "
+            f"{_CATALOG_MODEL_ID!r}"
+        )
         assert _recorded_tokens(buckets) > 0, "token usage was not recorded for the Gemini turn"
         assert bug["total_cost_usd"] == pytest.approx(control["total_cost_usd"]), (
             f"antigravity-native Gemini usage recorded under {_DISPLAY_MODEL_NAME!r} reports "
