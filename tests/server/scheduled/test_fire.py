@@ -913,6 +913,7 @@ async def test_connected_host_dispatch_uses_resolved_local_owner(
 
     async def _dispatch_session_event_to_runner(*args: Any, **kwargs: Any) -> None:
         captured["agent_revision"] = kwargs.get("agent_revision")
+        captured["agent_spec"] = kwargs.get("agent_spec")
 
     monkeypatch.setattr(host_launch, "resolve_host_launch", _resolve_host_launch)
     monkeypatch.setattr(sessions_routes, "_launch_runner_on_host", _launch_runner_on_host)
@@ -936,6 +937,7 @@ async def test_connected_host_dispatch_uses_resolved_local_owner(
             host_store=FakeHostStore({"host_1": _FakeHost("host_1", RESERVED_USER_LOCAL)}),
             host_registry=FakeHostRegistry(online={"host_1"}),
             agent_store=FakeAgentStore({"ag_1": _FakeAgent("ag_1", bundle_location="ag_1/rev1")}),
+            agent_cache=FakeAgentCache(harness="claude-sdk"),
         )
     )
 
@@ -944,6 +946,10 @@ async def test_connected_host_dispatch_uses_resolved_local_owner(
     assert captured["user_id"] == RESERVED_USER_LOCAL
     # The kickoff names the bundle it runs, so the runner sees a later reinstall.
     assert captured["agent_revision"] == "ag_1/rev1"
+    # The scheduled turn routes like any other, so the forwarder gets the
+    # resolved spec to decline a gateway pick this pane cannot run.
+    assert captured["agent_spec"] is not None
+    assert captured["agent_spec"].executor.config["harness"] == "claude-sdk"
 
 
 @pytest.mark.asyncio

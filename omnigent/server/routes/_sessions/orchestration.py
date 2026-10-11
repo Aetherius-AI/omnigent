@@ -6814,10 +6814,9 @@ async def _forward_event_to_runner(
                     # model must not be pinned (the pin disables routing for
                     # every later turn) nor reported as this turn's model.
                     _turn_spelling = _routed_turn_model_spelling(session_id, conv, _routed_model)
-                    # A gateway-hosted pick (static-fallback can offer one
-                    # even when the pane talks direct to the vendor) would
-                    # make the executor raise at construction, so decline the
-                    # pin and run the turn unrouted with the reason on the card.
+                    # Static fallback can offer a gateway-hosted pick a
+                    # direct-vendor pane cannot run (the executor raises at
+                    # construction), so decline the pin and run unrouted.
                     _pick_off_gateway = (
                         _routed_model.startswith(_GATEWAY_MODEL_PREFIXES)
                         and agent_spec is not None
@@ -11274,6 +11273,24 @@ async def _create_session_from_existing_agent(
             )
             # Dispatch (not a plain forward) so native-terminal sessions take the
             # single-writer bypass — otherwise the forwarder's echo duplicates the kickoff.
+            # The kickoff turn routes like any later turn, so hand the forwarder
+            # the resolved spec to decline a gateway pick this pane cannot run.
+            _kickoff_spec: AgentSpec | None = None
+            if agent_cache is not None and agent.bundle_location:
+                try:
+                    _kickoff_spec = (
+                        await asyncio.to_thread(
+                            agent_cache.load,
+                            agent.id,
+                            agent.bundle_location,
+                        )
+                    ).spec
+                except Exception:  # noqa: BLE001
+                    _logger.warning(
+                        "Failed to load agent spec for routing hint for session=%s",
+                        conv.id,
+                        exc_info=True,
+                    )
             for item in body.initial_items:
                 pending_background_title = prepare_background_session_title(
                     coordinator=background_title_coordinator,
@@ -11295,6 +11312,7 @@ async def _create_session_from_existing_agent(
                     host_store=getattr(request.app.state, "host_store", None),
                     background_titles_enabled=background_session_titles_enabled(request.headers),
                     agent_revision=agent.bundle_location,
+                    agent_spec=_kickoff_spec,
                 )
                 if pending_background_title is not None:
                     pending_background_title.schedule(expected_seed_title=conv.title)
