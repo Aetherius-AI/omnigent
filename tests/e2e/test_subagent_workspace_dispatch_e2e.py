@@ -106,9 +106,9 @@ def _build_agent_yaml(
             },
         },
         "prompt": prompt,
-        # ``caller_process`` + explicit cwd: the configured filesystem root
-        # the report says a per-dispatch workspace must resolve inside.
-        # ``sandbox: none`` keeps the worker's pwd probe deterministic on CI.
+        # ``caller_process`` + explicit cwd pins the configured filesystem
+        # root a per-dispatch workspace must resolve inside. ``sandbox: none``
+        # keeps the worker's pwd probe deterministic on CI.
         "os_env": {"type": "caller_process", "cwd": cwd, "sandbox": {"type": "none"}},
     }
     if extra:
@@ -221,9 +221,8 @@ def _configure_parent_and_child_mocks(
                                         "State your working directory: run pwd "
                                         "and report the result."
                                     ),
-                                    # The report's step 3: assign the nested
-                                    # per-task directory as the child session's
-                                    # create-time workspace.
+                                    # Assign the nested per-task directory as
+                                    # the child session's create-time workspace.
                                     "workspace": task_workspace,
                                 },
                             }
@@ -385,8 +384,8 @@ def test_dispatch_workspace_is_persisted_and_used_by_child(
     task_dir.mkdir(parents=True)
     canonical_task_dir = str(task_dir.resolve())
 
-    reset_mock_llm(mock_llm_server_url)
     assert mock_llm_server_url is not None
+    reset_mock_llm(mock_llm_server_url)
     agent_name = _register_workspace_bundle(
         http_client,
         name=f"subagent-workspace-{uid}",
@@ -421,10 +420,9 @@ def test_dispatch_workspace_is_persisted_and_used_by_child(
     )
     child_items = _wait_for_child_done(http_client, child_session_id=child_session_id)
 
-    # The dispatch must not have errored: on the buggy build the workspace
-    # key is dropped SILENTLY (no rejection reaches the orchestrator), and
-    # on a fixed build this valid nested workspace is accepted. An error
-    # here means dispatch plumbing regressed in a different way.
+    # A valid nested workspace must be accepted without error. An error here
+    # means dispatch plumbing regressed in a different way than the silent
+    # drop this test guards against.
     parent_snap = http_client.get(f"/v1/sessions/{session_id}")
     parent_snap.raise_for_status()
     dispatch_outputs = _tool_outputs(parent_snap.json().get("items", []), "sys_session_send")
@@ -434,9 +432,9 @@ def test_dispatch_workspace_is_persisted_and_used_by_child(
         f"silently dropping) the workspace: {dispatch_outputs!r}"
     )
 
-    # THE BUG: the child session must persist the canonical per-task
-    # workspace assigned at dispatch. On the buggy build this is None —
-    # the assigned workspace was silently dropped.
+    # The child session must persist the canonical per-task workspace
+    # assigned at dispatch; without that plumbing the assigned workspace
+    # is dropped and this persists None.
     child_snap = http_client.get(f"/v1/sessions/{child_session_id}")
     child_snap.raise_for_status()
     persisted_workspace = child_snap.json().get("workspace")

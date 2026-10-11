@@ -142,10 +142,9 @@ async def test_eager_runner_notify_carries_child_workspace(
     notify_body = session_inits[-1]["body"]
     assert notify_body.get("session_id") == child["id"]
 
-    # The actual regression: the eager notify must carry the standard
-    # session-init snapshot (workspace included) so a runner that
-    # initializes from it caches the child's workspace. Today the body
-    # is the bare legacy triple and the snapshot is absent entirely.
+    # The runner caches the child's workspace from session_init.snapshot; a
+    # legacy id-only triple would drop it and spawn the harness in the
+    # runner's default cwd.
     envelope = notify_body.get("session_init")
     assert isinstance(envelope, dict), (
         f"eager runner notify for child {child['id']} sent the LEGACY "

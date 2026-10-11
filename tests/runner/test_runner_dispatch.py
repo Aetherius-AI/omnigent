@@ -4018,22 +4018,76 @@ async def test_sys_session_send_workspace_lands_in_child_create_body(
     }
 
 
-def test_subagent_workspace_resolves_relative_os_env_cwd(
+def test_subagent_workspace_relative_os_env_cwd_imposes_no_boundary(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A common ``cwd: .`` boundary resolves from the runner's cwd."""
+    """A relative ``cwd: .`` places no boundary on the assigned workspace.
+
+    The runtime binds the child to its persisted session workspace, which can
+    sit outside the runner's process directory (for example an imported
+    session bound to the only online runner). A workspace there must be
+    accepted, mirroring the server's relative-cwd policy.
+    """
     from omnigent.runner.tool_dispatch import _canonical_subagent_workspace
 
-    workspace = tmp_path / "task"
-    workspace.mkdir()
-    monkeypatch.chdir(tmp_path)
+    process_dir = tmp_path / "proc"
+    process_dir.mkdir()
+    monkeypatch.chdir(process_dir)
+    workspace = tmp_path / "elsewhere" / "task"
+    workspace.mkdir(parents=True)
 
     assert _canonical_subagent_workspace(
         str(workspace),
         sub_agent_name="worker",
         agent_spec=_spec_with_subagent_harness("claude-native", Path(".")),
     ) == str(workspace.resolve())
+
+
+def test_subagent_workspace_requires_configured_os_env_cwd(
+    tmp_path: Path,
+) -> None:
+    """A sub-agent without an ``os_env.cwd`` cannot accept a workspace."""
+    from omnigent.runner.tool_dispatch import _canonical_subagent_workspace
+
+    workspace = tmp_path / "task"
+    workspace.mkdir()
+    with pytest.raises(ValueError, match=r"no configured os_env\.cwd boundary"):
+        _canonical_subagent_workspace(
+            str(workspace),
+            sub_agent_name="worker",
+            agent_spec=_spec_with_subagent_harness("claude-native"),
+        )
+
+
+def test_subagent_workspace_rejects_nonexistent_directory(
+    tmp_path: Path,
+) -> None:
+    """A workspace that does not exist is rejected before child creation."""
+    from omnigent.runner.tool_dispatch import _canonical_subagent_workspace
+
+    with pytest.raises(ValueError, match="does not exist or cannot be resolved"):
+        _canonical_subagent_workspace(
+            str(tmp_path / "missing"),
+            sub_agent_name="worker",
+            agent_spec=_spec_with_subagent_harness("claude-native", Path(".")),
+        )
+
+
+def test_subagent_workspace_rejects_file_target(
+    tmp_path: Path,
+) -> None:
+    """A regular file supplied as a workspace is rejected."""
+    from omnigent.runner.tool_dispatch import _canonical_subagent_workspace
+
+    target = tmp_path / "a-file"
+    target.write_text("not a dir")
+    with pytest.raises(ValueError, match="is not a directory"):
+        _canonical_subagent_workspace(
+            str(target),
+            sub_agent_name="worker",
+            agent_spec=_spec_with_subagent_harness("claude-native", Path(".")),
+        )
 
 
 @pytest.mark.asyncio

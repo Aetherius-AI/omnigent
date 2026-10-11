@@ -2156,25 +2156,28 @@ def _canonical_subagent_workspace(
     if not canonical.is_dir():
         raise ValueError(f"workspace is not a directory: {workspace!r}")
 
-    # Resolve a relative os_env.cwd against the runner process cwd. This is a
-    # fail-fast dispatch boundary, not the authoritative root: a host-launched
-    # runner may start the child under OMNIGENT_RUNNER_WORKSPACE instead.
+    # Only an absolute configured root pins a containment boundary. A relative
+    # os_env.cwd (".", "./", a relative subdir) imposes no boundary, matching
+    # the server's relative-cwd policy: the dispatch layer lacks the session's
+    # persisted-workspace context, so resolving a relative root against the
+    # runner process cwd would wrongly reject workspaces the runtime accepts.
     root = Path(configured_root).expanduser()
-    try:
-        canonical_root = root.resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
-        raise ValueError(
-            f"sub-agent {sub_agent_name!r} os_env.cwd does not exist: {configured_root!r}"
-        ) from exc
-    if not canonical_root.is_dir():
-        raise ValueError(
-            f"sub-agent {sub_agent_name!r} os_env.cwd is not a directory: {configured_root!r}"
-        )
-    if not canonical.is_relative_to(canonical_root):
-        raise ValueError(
-            f"workspace {str(canonical)!r} is outside sub-agent {sub_agent_name!r} "
-            f"root {str(canonical_root)!r}"
-        )
+    if root.is_absolute():
+        try:
+            canonical_root = root.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(
+                f"sub-agent {sub_agent_name!r} os_env.cwd does not exist: {configured_root!r}"
+            ) from exc
+        if not canonical_root.is_dir():
+            raise ValueError(
+                f"sub-agent {sub_agent_name!r} os_env.cwd is not a directory: {configured_root!r}"
+            )
+        if not canonical.is_relative_to(canonical_root):
+            raise ValueError(
+                f"workspace {str(canonical)!r} is outside sub-agent {sub_agent_name!r} "
+                f"root {str(canonical_root)!r}"
+            )
     return str(canonical)
 
 
