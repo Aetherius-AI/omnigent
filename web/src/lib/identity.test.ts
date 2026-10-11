@@ -428,6 +428,7 @@ describe("authenticatedFetch", () => {
         setSessionParent("child", "parent");
         vi.doMock("./host", () => ({
           getOmnigentHostConfig: vi.fn(() => ({ fetcher: () => fetch })),
+          getOmnigentServerIdentity: vi.fn(() => "server"),
           hostFetch: fetchMock,
           isDatabricksWorkspace: vi.fn(() => true),
           isHostRoutingEnabled: vi.fn(() => true),
