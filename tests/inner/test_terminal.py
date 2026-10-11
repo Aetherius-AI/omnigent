@@ -2181,11 +2181,8 @@ async def test_launch_start_on_attach_installs_viewer_hooks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    A start-on-attach terminal's hook table also reports later viewer changes.
-
-    The embedded REPL pauses painting while ``#{session_attached}`` is zero, so
-    it needs the ``client-detached`` signal to learn that its last viewer left
-    and the ``client-attached`` one to learn that a viewer is back.
+    A start-on-attach terminal's hook table also reports later viewer changes,
+    which the embedded REPL needs to pause painting while nobody is attached.
 
     :param tmp_path: Temporary directory for the fake tmux socket.
     :param monkeypatch: Pytest monkeypatch fixture.

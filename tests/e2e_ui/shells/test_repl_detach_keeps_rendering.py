@@ -1,18 +1,14 @@
 """The embedded ``omnigent attach`` REPL must stop painting once its last client leaves.
 
-The runner defers the REPL behind ``tmux wait-for omnigent-start-on-attach``
-until the first terminal-attach client arrives. The same hook table signals
-``omnigent-clients-changed`` on every later attach and on the last detach, and
-the REPL pauses rendering while ``#{session_attached}`` is zero: a turn that
-arrives then must not repaint the unviewed pane, and it must appear once a
-client attaches again. Without that pause the orphaned REPL re-renders its full
-prompt_toolkit screen for every session event for the rest of the session.
+The runner's start-on-attach hook table signals ``omnigent-clients-changed`` on
+every attach and on the last detach, and the REPL pauses rendering while
+``#{session_attached}`` is zero: a turn arriving then must not repaint the
+unviewed pane, and it must appear once a client attaches again.
 
 These checks observe the pane's tmux session and the REPL process directly, so
-they need the e2e server, runner and REPL to share this test's PID namespace and
-TMPDIR (run them without ``dev.repro_env exec``). The attach itself is driven
-with the same ``tmux -C attach`` the server's ``bridge_tmux_control_to_websocket``
-runs for a web terminal client.
+the e2e server, runner and REPL must share this test's PID namespace and TMPDIR
+(run without ``dev.repro_env exec``). The attach uses the same ``tmux -C attach``
+the server's ``bridge_tmux_control_to_websocket`` runs for a web terminal client.
 """
 
 from __future__ import annotations
@@ -156,10 +152,8 @@ def wait_for_repl_terminal(
 def control_attach(pane: ReplPane) -> Iterator[subprocess.Popen[bytes]]:
     """Attach to the REPL pane in tmux control mode, as the web terminal bridge does.
 
-    ``omnigent/terminals/control_bridge.py`` runs ``tmux -C attach`` for every
-    web terminal client; doing the same here fires the ``client-attached`` hook
-    that releases the start-on-attach gate. Terminating the process is the
-    "last client leaves" event the web client triggers when its tab closes.
+    Attaching fires the ``client-attached`` hook that releases the start gate;
+    terminating the client is the "last client leaves" event a closing tab causes.
     """
     assert _TMUX is not None
     proc = subprocess.Popen(
@@ -197,12 +191,7 @@ def _wait_until(predicate: Callable[[], bool], *, timeout_s: float, what: str) -
 
 
 def _accept_first_run_theme_picker(pane: ReplPane) -> bool:
-    """Accept the one-time first-run theme picker if the fresh REPL shows one.
-
-    A configured host's REPL has a persisted theme and skips straight to the
-    live view; the throwaway e2e home has none, so the picker gates startup.
-    Accepting it with Enter reaches the live-render loop the report describes.
-    """
+    """Accept the first-run theme picker a fresh (theme-less) e2e home shows."""
     if "Choose your theme" not in pane.capture():
         return False
     pane.send_enter()

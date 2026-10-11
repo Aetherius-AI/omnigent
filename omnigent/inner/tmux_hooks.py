@@ -1,12 +1,9 @@
 """tmux hooks that let a start-on-attach pane follow its viewers.
 
-A terminal launched with ``tmux_start_on_attach`` runs ``tmux wait-for
-<START_ON_ATTACH_CHANNEL>; exec <command>`` so nothing starts until a client
-looks at it. The same hook table wakes :data:`CLIENTS_CHANGED_CHANNEL` after
-every attach and after the last detach, so the pane application can stop
-painting a screen nobody is viewing. Shared by the runner-side launch
-(:mod:`omnigent.inner.terminal`) and the REPL that consumes the signals
-(:mod:`omnigent.repl._tmux_pane`).
+The pane command waits on :data:`START_ON_ATTACH_CHANNEL` before starting, and
+the hook table wakes :data:`CLIENTS_CHANGED_CHANNEL` after every attach and the
+last detach so the pane application can stop painting an unviewed screen. Shared
+by :mod:`omnigent.inner.terminal` (launch) and :mod:`omnigent.repl._tmux_pane`.
 """
 
 from __future__ import annotations
@@ -18,12 +15,9 @@ CLIENTS_CHANGED_CHANNEL = "omnigent-clients-changed"
 def client_hook_commands() -> list[list[str]]:
     """Return the ``set-hook`` commands for a start-on-attach tmux server.
 
-    ``client-attached`` releases the start gate and reports the new viewer.
-    ``client-detached`` reports only once ``#{session_attached}`` has dropped
-    to zero, so a viewer leaving while others remain is silent. ``wait-for -S``
-    remembers a signal nobody awaited yet, which lets the pane application
-    start its watcher after the first attach without missing a detach that
-    raced it.
+    ``client-detached`` signals only once ``#{session_attached}`` is zero, so a
+    viewer leaving while others remain is silent. ``wait-for -S`` remembers a
+    signal nobody awaited yet, so a watcher started late misses nothing.
 
     :returns: Argument lists for one tmux command sequence.
     """

@@ -687,9 +687,8 @@ async def _tmux_output(*args: str) -> str | None:
 async def _server_signals_client_changes() -> bool:
     """Whether the hosting tmux server wakes :data:`CLIENTS_CHANGED_CHANNEL`.
 
-    Only a server the runner launched with ``tmux_start_on_attach`` carries
-    the ``client-detached`` hook; a user's own tmux does not, and the REPL
-    must not park a ``wait-for`` client there.
+    Only a runner-launched start-on-attach server carries the hook; the REPL
+    must not park a ``wait-for`` client in a user's own tmux.
     """
     hooks = await _tmux_output("show-hooks", "-g")
     if hooks is None:
@@ -714,11 +713,9 @@ async def _attached_client_count(pane_id: str) -> int | None:
 async def watch_tmux_clients(on_change: Callable[[int], None]) -> None:
     """Report this pane's attached-client count after every viewer change.
 
-    Blocks in ``tmux wait-for`` between changes, so an idle watcher costs
-    nothing. A signal raised before a wait started is delivered once, so a
-    wake-up may report an unchanged count. Returns without calling
-    *on_change* outside a runner-hosted tmux pane, and whenever tmux stops
-    answering.
+    Blocks in ``tmux wait-for`` between changes; a wake-up may repeat an
+    unchanged count. Returns without calling *on_change* outside a
+    runner-hosted tmux pane, and whenever tmux stops answering.
 
     :param on_change: Receives ``#{session_attached}`` for the pane's session.
     """

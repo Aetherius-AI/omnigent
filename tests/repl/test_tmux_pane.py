@@ -1216,11 +1216,8 @@ async def test_watch_tmux_clients_reports_attach_and_last_detach(
     scratch_tmux: _ScratchTmux,
 ) -> None:
     """
-    The runner's hook table wakes the watcher on attach and on the last detach.
-
-    Uses the exact ``set-hook`` commands the start-on-attach launch installs,
-    so a drift between the runner's hooks and the REPL's channel shows up
-    here rather than only in a live session.
+    The runner's exact hook commands wake the watcher on attach and on the last
+    detach, so a drift between the hooks and the REPL's channel shows up here.
     """
     for hook in client_hook_commands():
         scratch_tmux.run(*hook)

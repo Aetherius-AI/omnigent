@@ -3127,10 +3127,8 @@ class TerminalHost:
     def pause_rendering(self) -> None:
         """Stop painting until :meth:`resume_rendering`.
 
-        For a pane nobody is viewing (the embedded REPL after its last tmux
-        client detaches): output queues for replay, repaint requests are
-        dropped, and the spinner ticker and overlay refresh sleep. The
-        session connection stays up, so nothing needs rebuilding on resume.
+        For a pane nobody is viewing: output queues for replay, repaint
+        requests are dropped, and the spinner ticker and overlay refresh sleep.
         """
         if self._render_paused:
             return
