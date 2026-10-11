@@ -1,6 +1,7 @@
 // Build + preview config for the e2e embed host page (`e2e-embed-host/`): the preview
 // proxies two Servers behind one origin, authenticated as the host's signed-in user.
-// The harness (tests/e2e_ui/embed/_embed_host_harness.py) sets every OMNIGENT_E2E_* var.
+// The harness (tests/e2e_ui/embed/_embed_host_harness.py) sets the OMNIGENT_E2E_* vars;
+// a build without them lands in `dist-e2e-embed-host` with the harness's default users.
 import fs from "node:fs";
 import path from "node:path";
 import tailwindcss from "@tailwindcss/vite";
@@ -13,10 +14,13 @@ function required(name: string): string {
   return value;
 }
 
-const OUT_DIR = path.resolve(required("OMNIGENT_E2E_HOST_DIST"));
+const OUT_DIR = path.resolve(
+  __dirname,
+  process.env.OMNIGENT_E2E_HOST_DIST || "dist-e2e-embed-host",
+);
 const USERS = {
-  a: required("OMNIGENT_E2E_SERVER_A_USER"),
-  b: required("OMNIGENT_E2E_SERVER_B_USER"),
+  a: process.env.OMNIGENT_E2E_SERVER_A_USER || "alice@example.test",
+  b: process.env.OMNIGENT_E2E_SERVER_B_USER || "bob@example.test",
 };
 
 function serverProxy(prefix: string, target: string, user: string): Record<string, ProxyOptions> {

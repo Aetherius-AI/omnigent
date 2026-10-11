@@ -53,8 +53,10 @@ interface AnsweredRequest {
 
 const params = new URLSearchParams(window.location.search);
 const initialServer: ServerKey = params.get("server") === "b" ? "b" : "a";
-// `holdMeA=1` holds Server A's `/v1/me` answer until the test releases it.
+// `holdMeA=1` holds Server A's `/v1/me` answer until the test releases it;
+// `meDelayA=<ms>` delays it by a fixed time instead.
 const holdMeA = params.get("holdMeA") === "1";
+const meDelayA = Number(params.get("meDelayA") ?? "0");
 let releaseMeA: () => void = () => {};
 const meGateA = new Promise<void>((resolve) => {
   releaseMeA = resolve;
@@ -87,8 +89,13 @@ function hostConfigFor(server: HostServer): OmnigentHostConfig {
       const headers = new Headers(init?.headers);
       transportLog.sent[server.key].push({ path, embedUser: headers.get("X-Forwarded-Email") });
       const response = await window.fetch(server.prefix + path, { ...init, headers });
-      if (server.key === "a" && holdMeA && path.startsWith("/v1/me")) {
-        await meGateA;
+      if (server.key === "a" && path.startsWith("/v1/me")) {
+        if (holdMeA) await meGateA;
+        if (meDelayA > 0) {
+          await new Promise<void>((resolve) => {
+            setTimeout(resolve, meDelayA);
+          });
+        }
       }
       transportLog.answered[server.key].push({ path });
       return response;
