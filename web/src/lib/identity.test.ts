@@ -111,16 +111,16 @@ describe("resolveIdentity", () => {
   it("swallows a host adapter that throws synchronously and resolves to null", async () => {
     const { setOmnigentHostConfig } = await import("./host");
     const { resolveIdentity, getCurrentUserId } = await import("./identity");
-    setOmnigentHostConfig({
-      serverIdentity: "server-a",
-      fetcher: () => {
-        throw new Error("adapter exploded");
-      },
+    const exploding = vi.fn((): Promise<Response> => {
+      throw new Error("adapter exploded");
     });
+    setOmnigentHostConfig({ serverIdentity: "server-a", fetcher: exploding });
 
     expect(await resolveIdentity()).toBeNull();
     expect(getCurrentUserId()).toBeNull();
+    // Cached like any other failed probe: no re-probe on the next call.
     expect(await resolveIdentity()).toBeNull();
+    expect(exploding).toHaveBeenCalledTimes(1);
   });
 
   it("treats non-2xx as null without throwing", async () => {
@@ -921,6 +921,77 @@ describe("host Server switch", () => {
     expect(serverA.mock.calls.filter((c) => c[0] === "/v1/sessions/session-a/items")).toHaveLength(
       1,
     );
+    expect(serverB).not.toHaveBeenCalled();
+  });
+
+  it("aborts a replica retry whose answer lands after the host switched Servers", async () => {
+    const { setOmnigentHostConfig } = await import("./host");
+    const { isHostKeyless, setSessionHost } = await import("./sessionHost");
+    const { authenticatedFetch, resolveIdentity } = await import("./identity");
+    const wrongReplica = {
+      ok: false,
+      status: 400,
+      clone: () => ({ json: async () => ({ error: { code: "wrong_replica" } }) }),
+    } as unknown as Response;
+    let answerRetry!: (r: Response) => void;
+    let attempts = 0;
+    const serverA = vi.fn((path: string) => {
+      if (path === "/v1/me") return Promise.resolve(mockJsonResponse({ user_id: "alice" }));
+      attempts += 1;
+      return attempts === 1
+        ? Promise.resolve(wrongReplica)
+        : new Promise<Response>((r) => {
+            answerRetry = r;
+          });
+    });
+    const serverB = serverFetcher("bob");
+
+    setOmnigentHostConfig({ serverIdentity: "server-a", fetcher: serverA });
+    await resolveIdentity();
+    setSessionHost("session-a", "host-a");
+    const pending = authenticatedFetch("/v1/sessions/session-a/items");
+    await vi.waitFor(() => expect(attempts).toBe(2));
+
+    setOmnigentHostConfig({ serverIdentity: "server-b", fetcher: serverB });
+    answerRetry(mockJsonResponse({ items: [] }));
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(isHostKeyless("host-a")).toBe(false);
+    expect(serverB).not.toHaveBeenCalled();
+  });
+
+  it("aborts a hostless wrong-replica recovery when the host switched during the body read", async () => {
+    const { setOmnigentHostConfig } = await import("./host");
+    const { authenticatedFetch, resolveIdentity, setSessionHostResolver } =
+      await import("./identity");
+    let readBody!: () => void;
+    const wrongReplica = {
+      ok: false,
+      status: 400,
+      clone: () => ({
+        json: () =>
+          new Promise<unknown>((resolve) => {
+            readBody = () => resolve({ error: { code: "wrong_replica" } });
+          }),
+      }),
+    } as unknown as Response;
+    const serverA = vi.fn(async (path: string) =>
+      path === "/v1/me" ? mockJsonResponse({ user_id: "alice" }) : wrongReplica,
+    );
+    const serverB = serverFetcher("bob");
+    const resolver = vi.fn(async () => {});
+    setSessionHostResolver(resolver);
+
+    setOmnigentHostConfig({ serverIdentity: "server-a", fetcher: serverA });
+    await resolveIdentity();
+    const pending = authenticatedFetch("/v1/sessions/session-x/items");
+    await vi.waitFor(() => expect(readBody).toBeDefined());
+
+    setOmnigentHostConfig({ serverIdentity: "server-b", fetcher: serverB });
+    readBody();
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(resolver).not.toHaveBeenCalledWith("session-x", { force: true });
     expect(serverB).not.toHaveBeenCalled();
   });
 

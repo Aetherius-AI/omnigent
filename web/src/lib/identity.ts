@@ -337,6 +337,7 @@ function syncIdentityServer(): void {
   identityResolved = false;
   identityPromise = null;
   serverLoginUrl = null;
+  // loginRedirectPending stays: it guards this document's single navigation.
 }
 
 /**
@@ -399,11 +400,12 @@ export async function resolveIdentity(): Promise<string | null> {
   if (identityResolved) return currentUserId;
   if (identityPromise) return identityPromise;
   // Accept replies only while this Server is active and this probe owns the
-  // slot; otherwise release the slot for another probe. Declared before the
-  // adapter runs so a synchronous throw inside it still sees `probe`.
+  // slot; otherwise release the slot for another probe. Until the slot is
+  // assigned (a synchronous adapter throw lands here) no other probe can own it.
   let probe: Promise<string | null> | undefined;
   const probeServer = getConfiguredServer();
-  const isStale = () => getConfiguredServer() !== probeServer || identityPromise !== probe;
+  const isStale = () =>
+    getConfiguredServer() !== probeServer || (probe !== undefined && identityPromise !== probe);
   const discard = (): null => {
     if (identityPromise === probe) identityPromise = null;
     return null;
@@ -614,6 +616,7 @@ export async function authenticatedFetch(
       headers: retryHeaders,
       cache: "no-store",
     });
+    ensureSameServer();
     // Only a successful keyless retry proves this host uses the default replica.
     // Failed retries must preserve the host key for subsequent requests.
     if (derivedHostId && res.ok) {
@@ -627,6 +630,7 @@ export async function authenticatedFetch(
   ) {
     // The first managed message can outlive provisioning and acquire a host.
     // Refresh its original hostless lookup, then retry once on that host.
+    ensureSameServer();
     const sessionId = sessionIdForHostResolve(url);
     if (sessionId !== null) {
       init?.signal?.throwIfAborted();
@@ -643,6 +647,7 @@ export async function authenticatedFetch(
           headers: retryHeaders,
           cache: "no-store",
         });
+        ensureSameServer();
       }
     }
   } else if (
@@ -656,6 +661,7 @@ export async function authenticatedFetch(
     // wrong_replica — so keying was not the problem (e.g. the host re-registered
     // keyed after a CLI upgrade). Clear the demotion so the next request
     // re-evaluates by trying keyed again.
+    ensureSameServer();
     clearHostKeyless(derivedHostId);
   }
 
