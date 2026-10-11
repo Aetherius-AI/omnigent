@@ -482,7 +482,9 @@ def _discover_rotated_store(store_path: Path, launch_epoch_ms: int) -> Path | No
         _chat_created_ms(store_path.parent) + 1,
     )
     best, _created = _scan_hash_dir(store_path.parent.parent, floor_ms, None, -1)
-    return best
+    # A transient meta.json read could otherwise re-admit the bound chat and
+    # re-mirror it from rowid 0; never rotate onto the chat we already mirror.
+    return None if best == store_path else best
 
 
 def _scan_hash_dir(
@@ -1086,8 +1088,11 @@ async def forward_cursor_store_to_session(
                             ),
                         )
                         persisted = _ForwardState()  # consumed
+                        # Write-once PATCH binds the cold-resume target only on
+                        # first bind; a later chat change re-points through the
+                        # rotation event (the PATCH would be rejected and strand).
                         chat_id_val = store_path.parent.name
-                        if chat_id_val != patched_chat_id:
+                        if patched_chat_id is None:
                             await _patch_external_session_id(
                                 client, session_id=session_id, chat_id=chat_id_val
                             )
@@ -1118,11 +1123,11 @@ async def forward_cursor_store_to_session(
                                 ),
                             )
                             persisted = _ForwardState()  # consumed
-                            # Persist the cursor chat id as external_session_id so
-                            # a later cold resume can pass ``--resume <chatId>``
-                            # to the cursor-agent TUI.
+                            # Bind external_session_id for a later ``--resume``.
+                            # Only the first bind uses the write-once PATCH; a
+                            # later chat change re-points via the rotation event.
                             chat_id_val = store_path.parent.name
-                            if chat_id_val != patched_chat_id:
+                            if patched_chat_id is None:
                                 await _patch_external_session_id(
                                     client, session_id=session_id, chat_id=chat_id_val
                                 )

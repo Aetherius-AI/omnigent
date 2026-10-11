@@ -1814,16 +1814,9 @@ def register_events_routes(
             _publish_session_superseded(session_id, target_conversation_id.strip())
             return {"queued": False}
         if body.type == _EXTERNAL_SESSION_ROTATED_TYPE:
-            # A wrapper bridge detected that the vendor TUI started a NEW
-            # native chat inside the same terminal (cursor-agent's in-pane
-            # /clear), so the cold-resume target must follow the pane's
-            # current chat. This is the one sanctioned overwrite of
-            # ``external_session_id``; the PATCH endpoint keeps its
-            # write-once, loud-failure contract for every other caller.
-            # Restrict it to the wrapper bridge running under the session's
-            # runner (the same runner-tunnel authority that gates
-            # ``created_by``); a generic ``LEVEL_EDIT`` collaborator must not
-            # be able to redirect the owner's cold-resume ``--resume`` target.
+            # The one sanctioned overwrite of ``external_session_id`` (the PATCH
+            # endpoint stays write-once): only the session's runner bridge may
+            # redirect the cold-resume target after a TUI chat rotation.
             if not _has_runner_created_by_authority(request, conv):
                 raise OmnigentError(
                     "external_session_rotated is reserved for the session's runner bridge",

@@ -376,6 +376,25 @@ class TestDiscoverRotatedStore:
         self._seed_chat(tmp_path, ws, _CHAT_ID_2, 5_000)
         assert fwd._discover_rotated_store(bound, launch_epoch_ms=1_000_000) is None
 
+    def test_transient_meta_read_never_self_rotates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # If the bound chat's meta.json reads as missing (0) while computing the
+        # floor but is readable during the scan, the floor would otherwise
+        # re-admit the bound store itself — rotating onto it would re-mirror the
+        # whole chat from rowid 0. The guard must return None, not the bound store.
+        ws = "/home/u/proj"
+        bound = self._seed_chat(tmp_path, ws, _CHAT_ID, 5_000)
+        real = fwd._chat_created_ms
+        calls = {"n": 0}
+
+        def flaky(chat_dir: Path) -> int:
+            calls["n"] += 1
+            return 0 if calls["n"] == 1 else real(chat_dir)
+
+        monkeypatch.setattr(fwd, "_chat_created_ms", flaky)
+        assert fwd._discover_rotated_store(bound, launch_epoch_ms=4_000) is None
+
 
 class TestStateRoundTrip:
     def test_write_then_read(self, tmp_path: Path) -> None:
@@ -1681,6 +1700,100 @@ class TestForwardLoopClearRotation:
         assert texts == ["first", "after clear", "post-clear reply"]
         # The cold-resume target was re-pointed at the new chat.
         assert patches == [_CHAT_ID, _CHAT_ID_2]
+
+    @pytest.mark.asyncio
+    async def test_rediscovery_after_sibling_yield_repoints_via_rotation_event(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # After binding chat A (write-once PATCH), an earlier concurrent session
+        # claims it and this session yields. When /clear starts chat B, the mirror
+        # re-discovers B through the empty-store branch; the cold-resume target
+        # must re-point through the rotation EVENT, never a second write-once
+        # PATCH (which the server rejects, stranding the resume).
+        caplog.set_level(logging.WARNING)
+        chats_root = tmp_path / "chats"
+        first = self._seed_chat(
+            chats_root,
+            self._WS,
+            _CHAT_ID,
+            5_000,
+            [("a1", _user("<user_query>\nfirst\n</user_query>"))],
+        )
+        poster = _FakePoster(lambda _: None)
+        patch_calls: list[str] = []
+        rotated_calls: list[str] = []
+
+        async def _record_patch(client: object, *, session_id: str, chat_id: str) -> None:
+            patch_calls.append(chat_id)
+
+        async def _record_rotated(client: object, *, session_id: str, chat_id: str) -> bool:
+            rotated_calls.append(chat_id)
+            return True
+
+        monkeypatch.setattr(fwd, "_cursor_chats_root", lambda: chats_root)
+        monkeypatch.setattr(fwd, "_post_conversation_item", poster)
+        monkeypatch.setattr(fwd, "_patch_external_session_id", _record_patch)
+        monkeypatch.setattr(fwd, "_post_external_session_rotated", _record_rotated)
+        bridge_dir = tmp_path / "cursor-native" / "sess"
+        bridge_dir.mkdir(parents=True)
+        task = asyncio.create_task(
+            fwd.forward_cursor_store_to_session(
+                base_url="http://test",
+                headers={},
+                session_id="conv_1",
+                bridge_dir=bridge_dir,
+                agent_name="cursor-native-ui",
+                workspace=self._WS,
+                launch_epoch_ms=1_000,
+                poll_interval_s=0.001,
+            )
+        )
+        try:
+            await self._wait_for(
+                lambda: (
+                    patch_calls == [_CHAT_ID]
+                    and fwd._read_state(bridge_dir).store_path == str(first)
+                ),
+                message="forwarder never bound and PATCHed the first chat",
+            )
+            # An EARLIER concurrent session claims chat A, so this session yields.
+            sibling = bridge_dir.parent / "earlier"
+            sibling.mkdir()
+            fwd._write_state(
+                sibling,
+                fwd._ForwardState(store_path=str(first), last_rowid=0, launch_epoch_ms=500),
+            )
+            await self._wait_for(
+                lambda: "already mirrored by another session" in caplog.text,
+                message="forwarder never yielded chat A to the earlier session",
+            )
+            # The TUI /clear starts chat B (newer, unclaimed): re-discovered via
+            # the empty-store branch while this session is unbound.
+            second = self._seed_chat(
+                chats_root,
+                self._WS,
+                _CHAT_ID_2,
+                6_000,
+                [("b1", _user("<user_query>\nafter clear\n</user_query>"))],
+            )
+            await self._wait_for(
+                lambda: fwd._read_state(bridge_dir).store_path == str(second),
+                message="mirror never re-bound onto the post-/clear chat",
+            )
+            await self._wait_for(
+                lambda: rotated_calls == [_CHAT_ID_2],
+                message="re-point did not ride the rotation event",
+            )
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        # First bind used the write-once PATCH once; the later chat change rode
+        # the rotation event, so the cold-resume target is not stranded.
+        assert patch_calls == [_CHAT_ID]
+        assert rotated_calls == [_CHAT_ID_2]
 
     @pytest.mark.asyncio
     async def test_rotation_yields_to_a_live_sibling_claim(
