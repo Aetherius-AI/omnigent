@@ -118,8 +118,8 @@ def test_switching_servers_rebinds_identity_and_admin_chrome(
     connect_server_b(page)
     wait_for_answer(page, "b", "/v1/sessions")
 
-    expect_no_admin_chrome(page)
     expect_identity_on_server_b(page)
+    expect_no_admin_chrome(page)
 
 
 def test_late_answer_from_the_previous_server_is_ignored(
@@ -136,5 +136,5 @@ def test_late_answer_from_the_previous_server_is_ignored(
     wait_for_answer(page, "a", "/v1/me")
 
     page.get_by_test_id("settings-button").click()
-    expect_no_admin_chrome(page)
     expect_identity_on_server_b(page)
+    expect_no_admin_chrome(page)

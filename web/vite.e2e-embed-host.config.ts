@@ -1,15 +1,24 @@
 // Build + preview config for the e2e embed host page (`e2e-embed-host/`): the
 // preview proxies two Servers behind one origin, authenticated as the host's user.
-// The harness points `OMNIGENT_E2E_HOST_DIST` at a per-run output directory.
+// The harness (tests/e2e_ui/embed/_embed_host_harness.py) supplies every
+// OMNIGENT_E2E_* variable below, including a per-run output directory.
 import fs from "node:fs";
 import path from "node:path";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig, type Plugin, type ProxyOptions } from "vite";
 
-const OUT_DIR = process.env.OMNIGENT_E2E_HOST_DIST
-  ? path.resolve(process.env.OMNIGENT_E2E_HOST_DIST)
-  : path.resolve(__dirname, "dist-e2e-embed-host");
+function required(name: string): string {
+  const value = process.env[name];
+  if (!value) throw new Error(`${name} must be set; the e2e harness sets it`);
+  return value;
+}
+
+const OUT_DIR = path.resolve(required("OMNIGENT_E2E_HOST_DIST"));
+const USERS = {
+  a: required("OMNIGENT_E2E_SERVER_A_USER"),
+  b: required("OMNIGENT_E2E_SERVER_B_USER"),
+};
 
 function serverProxy(prefix: string, target: string, user: string): Record<string, ProxyOptions> {
   return {
@@ -17,7 +26,7 @@ function serverProxy(prefix: string, target: string, user: string): Record<strin
       target,
       changeOrigin: true,
       ws: true,
-      rewrite: (requestPath) => requestPath.slice(prefix.length),
+      rewrite: (requestPath) => requestPath.slice(prefix.length) || "/",
       configure: (proxy) => {
         proxy.on("proxyReq", (proxyReq) => proxyReq.setHeader("X-Forwarded-Email", user));
         proxy.on("proxyReqWs", (proxyReq) => proxyReq.setHeader("X-Forwarded-Email", user));
@@ -31,18 +40,13 @@ function serverProxy(prefix: string, target: string, user: string): Record<strin
   };
 }
 
-const proxy = {
-  ...serverProxy(
-    "/server-a",
-    process.env.OMNIGENT_E2E_SERVER_A_URL ?? "http://127.0.0.1:6767",
-    process.env.OMNIGENT_E2E_SERVER_A_USER ?? "alice@example.test",
-  ),
-  ...serverProxy(
-    "/server-b",
-    process.env.OMNIGENT_E2E_SERVER_B_URL ?? "http://127.0.0.1:6768",
-    process.env.OMNIGENT_E2E_SERVER_B_USER ?? "bob@example.test",
-  ),
-};
+// Only the preview serves the Servers; the build runs before they exist.
+function proxies(): Record<string, ProxyOptions> {
+  return {
+    ...serverProxy("/server-a", required("OMNIGENT_E2E_SERVER_A_URL"), USERS.a),
+    ...serverProxy("/server-b", required("OMNIGENT_E2E_SERVER_B_URL"), USERS.b),
+  };
+}
 
 // The Vite root stays at `web/` so Tailwind scans `src/`; the host page is in a
 // subdirectory, so its index.html is hoisted for the preview SPA fallback.
@@ -58,12 +62,15 @@ function hoistHostIndex(): Plugin {
   };
 }
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
   plugins: [react(), tailwindcss(), hoistHostIndex()],
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
     },
+  },
+  define: {
+    OMNIGENT_E2E_USERS: JSON.stringify(USERS),
   },
   build: {
     outDir: OUT_DIR,
@@ -74,6 +81,6 @@ export default defineConfig({
     minify: false,
     reportCompressedSize: false,
   },
-  server: { proxy },
-  preview: { proxy },
-});
+  server: { proxy: command === "serve" ? proxies() : {} },
+  preview: { proxy: command === "serve" ? proxies() : {} },
+}));

@@ -11,6 +11,9 @@ import { getCurrentIsAdmin, resolveIdentity } from "../src/lib/identity";
 
 type ServerKey = "a" | "b";
 
+// Injected by vite.e2e-embed-host.config.ts from the harness's environment.
+declare const OMNIGENT_E2E_USERS: Record<ServerKey, string>;
+
 interface HostServer {
   key: ServerKey;
   label: string;
@@ -26,14 +29,14 @@ const SERVERS: Record<ServerKey, HostServer> = {
     key: "a",
     label: "Server A",
     serverIdentity: "server-a",
-    user: "alice@example.test",
+    user: OMNIGENT_E2E_USERS.a,
     prefix: "/server-a",
   },
   b: {
     key: "b",
     label: "Server B",
     serverIdentity: "server-b",
-    user: "bob@example.test",
+    user: OMNIGENT_E2E_USERS.b,
     prefix: "/server-b",
   },
 };

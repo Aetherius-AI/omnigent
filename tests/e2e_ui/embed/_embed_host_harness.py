@@ -56,7 +56,12 @@ def build_host_page(dist: Path) -> None:
         cwd=_WEB_DIR,
         check=True,
         stdin=subprocess.DEVNULL,
-        env={**os.environ, "OMNIGENT_E2E_HOST_DIST": str(dist)},
+        env={
+            **os.environ,
+            "OMNIGENT_E2E_HOST_DIST": str(dist),
+            "OMNIGENT_E2E_SERVER_A_USER": SERVER_A_USER,
+            "OMNIGENT_E2E_SERVER_B_USER": SERVER_B_USER,
+        },
     )
 
 
