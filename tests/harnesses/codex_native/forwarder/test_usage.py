@@ -99,6 +99,16 @@ async def _handle_child_event(
     )
 
 
+_GENEROUS_BUDGET_SECONDS = 60.0
+
+
+@pytest.fixture(autouse=True)
+def _generous_budgets(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep wall-clock budgets from expiring on a loaded runner; bound tests shrink them."""
+    monkeypatch.setattr(fwd, "_CHILD_MODEL_RECOVERY_TIMEOUT_SECONDS", _GENEROUS_BUDGET_SECONDS)
+    monkeypatch.setattr(fwd, "_CHILD_USAGE_SHUTDOWN_TIMEOUT_SECONDS", _GENEROUS_BUDGET_SECONDS)
+
+
 @pytest.mark.asyncio
 async def test_usage_coalescer_seeded_model_rides_along_so_child_usage_prices() -> None:
     """A coalescer seeded with a model attaches it to its token post."""
@@ -282,6 +292,7 @@ async def test_child_usage_frame_bounds_hung_live_recovery(
     assert state.child_usage_coalescers_by_thread["thread_child"].has_pending_usage
     assert state.needs_child_thread_backfill("thread_child")
 
+    monkeypatch.setattr(fwd, "_CHILD_MODEL_RECOVERY_TIMEOUT_SECONDS", _GENEROUS_BUDGET_SECONDS)
     codex_client.request = AsyncMock(return_value=_resume_response("thread_child", "child-model"))
     await state.close_child_usage_coalescers(client)
 
