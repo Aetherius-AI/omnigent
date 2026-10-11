@@ -139,6 +139,11 @@ def offline_runner_session(
                     f"server exited early (code {server.returncode}); "
                     f"log:\n{(work / 'server.log').read_text()[-3000:]}"
                 )
+            if runner.poll() is not None:
+                raise RuntimeError(
+                    f"runner exited early (code {runner.returncode}); "
+                    f"log:\n{(work / 'runner.log').read_text()[-3000:]}"
+                )
             try:
                 resp = client.get(f"{base_url}/v1/runners/{runner_id}/status")
                 if resp.status_code == 200 and resp.json().get("online") is True:
