@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import subprocess
 import time
 import uuid
 from collections.abc import Callable, Iterator
@@ -24,7 +25,7 @@ from tests.e2e_ui.conftest import _create_runner_bound_session, _ensure_runner_o
 
 UNSEEN_DOT = '[data-testid="session-state-badge"][data-state="unseen"]'
 STREAM_LEAD_S = 2
-# Well past the 250 ms watch debounce, the snapshot it triggers, and the list
+# Well past the sidebar's watch debounce, the snapshot it triggers, and the list
 # refetch that follows.
 WATCH_S = 6.0
 
@@ -63,15 +64,16 @@ def seeded_sessions(
 ) -> Iterator[tuple[str, list[str]]]:
     """Four idle, titled, runner-bound sessions; yields ``(base_url, ids)``."""
     respawned = _ensure_runner_online(live_server, tmp_path_factory)
-    ids = [_create_runner_bound_session(live_server, runner_id) for _ in range(4)]
-    tag = uuid.uuid4().hex[:6]
-    for index, sid in enumerate(ids):
-        httpx.patch(
-            f"{live_server}/v1/sessions/{sid}",
-            json={"title": f"e2e-dot-{tag}-{index}"},
-            timeout=10.0,
-        ).raise_for_status()
+    ids: list[str] = []
     try:
+        tag = uuid.uuid4().hex[:6]
+        for index in range(4):
+            ids.append(_create_runner_bound_session(live_server, runner_id))
+            httpx.patch(
+                f"{live_server}/v1/sessions/{ids[-1]}",
+                json={"title": f"e2e-dot-{tag}-{index}"},
+                timeout=10.0,
+            ).raise_for_status()
         yield live_server, ids
     finally:
         for sid in ids:
@@ -79,7 +81,11 @@ def seeded_sessions(
                 httpx.delete(f"{live_server}/v1/sessions/{sid}", timeout=10.0)
         if respawned is not None:
             respawned.terminate()
-            respawned.wait(timeout=10)
+            try:
+                respawned.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                respawned.kill()
+                respawned.wait(timeout=10)
 
 
 def _row(page: Page, session_id: str) -> Locator:
@@ -93,9 +99,8 @@ def _archive_from_row(page: Page, session_id: str) -> None:
     page.get_by_test_id("archive-conversation").click()
 
 
-def _frame(payload: Any) -> dict[str, Any] | None:
-    raw = payload["payload"] if isinstance(payload, dict) else payload
-    text = raw.decode() if isinstance(raw, bytes) else raw
+def _frame(payload: str | bytes) -> dict[str, Any] | None:
+    text = payload.decode() if isinstance(payload, bytes) else payload
     try:
         frame = json.loads(text)
     except json.JSONDecodeError:
@@ -104,11 +109,12 @@ def _frame(payload: Any) -> dict[str, Any] | None:
 
 
 def _lead_stream_timestamps(
-    ws: WebSocketRoute, lead_s: int, snapshots: list[dict[str, Any]]
+    ws: WebSocketRoute, lead_s: int, snapshots: list[dict[str, Any]], led: list[str]
 ) -> None:
     """Forward the stream, adding ``lead_s`` to every streamed ``updated_at``.
 
-    ``snapshot`` frames are also collected so the journey can wait for them.
+    Collects the ``snapshot`` frames and the ids whose timestamp was shifted, so
+    the test can wait for snapshots and prove the split was exercised.
     """
     server = ws.connect_to_server()
     ws.on_message(server.send)
@@ -121,6 +127,7 @@ def _lead_stream_timestamps(
         for item in frame.get("items", []):
             if isinstance(item.get("updated_at"), int):
                 item["updated_at"] += lead_s
+                led.append(item["id"])
         if frame["type"] == "snapshot":
             snapshots.append(frame)
         ws.send(json.dumps(frame))
@@ -193,13 +200,15 @@ def test_archiving_leaves_other_rows_dots_off_when_stream_timestamps_lead_the_li
     base_url, ids = seeded_sessions
     page: Page = request.getfixturevalue("page")
     snapshots: list[dict[str, Any]] = []
+    led: list[str] = []
     page.route_web_socket(
         "**/v1/sessions/updates*",
-        lambda ws: _lead_stream_timestamps(ws, STREAM_LEAD_S, snapshots),
+        lambda ws: _lead_stream_timestamps(ws, STREAM_LEAD_S, snapshots, led),
     )
 
     lit = _drive_archive_journey(page, base_url, ids, snapshots)
 
+    assert led, "no streamed updated_at was shifted, so the stream/list split was not exercised"
     assert all(rows == {} for rows in lit.values()), (
         f"unread dot lit on other rows after archiving: {json.dumps(lit, indent=1)}"
     )

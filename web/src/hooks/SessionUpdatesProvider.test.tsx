@@ -17,7 +17,7 @@ import {
   type Conversation,
   type ConversationsPage,
 } from "@/hooks/useConversations";
-import type { ConversationsInfiniteData } from "@/lib/sessionListCache";
+import { type ConversationsInfiniteData, clearRecentlyCreated } from "@/lib/sessionListCache";
 
 // Mock the socket transport so setWatched is observable and start/stop are
 // inert. subscribe/subscribeStatus return no-op unsubscribers.
@@ -348,34 +348,31 @@ describe("SessionUpdatesProvider snapshot timestamps", () => {
   it("keeps project folder and pinned rows' updated_at on a snapshot", () => {
     const client = new QueryClient();
     seedProjectFolder(client, "Sprint 42", ["conv_filed"]);
+    // A list-shaped title: the wire's null becomes undefined on apply, which
+    // would otherwise read as a change against this fixture's `title: null`.
+    const pinnedRow = { ...conv("old-pin"), title: "Pinned", labels: { "omnigent.pinned": "123" } };
     client.setQueryData(["pinned-conversations"], {
-      conversations: [{ ...conv("old-pin"), labels: { "omnigent.pinned": "123" } }],
+      conversations: [pinnedRow],
       filterHonored: true,
     });
     renderProvider(client, ["/"]);
     const invalidate = vi.spyOn(client, "invalidateQueries");
+    const pinnedBefore = client.getQueryData(["pinned-conversations"]);
 
     // A pinned row outside the list window has no list refetch to converge
-    // through, so an unchanged timestamp must not refetch the pinned query...
-    act(() =>
-      frameHandler()({
-        type: "snapshot",
-        items: [{ ...conv("old-pin"), pending_elicitations_count: 1 }],
-      }),
-    );
-    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["pinned-conversations"] });
-
-    // ...while a restated timestamp it kept does.
+    // through: a restated timestamp it kept asks for the pinned query instead,
+    // and the row itself is left untouched.
     act(() =>
       frameHandler()({
         type: "snapshot",
         items: [
           { ...conv("conv_filed"), updated_at: 7, pending_elicitations_count: 1 },
-          { ...conv("old-pin"), updated_at: 7, pending_elicitations_count: 2 },
+          { ...pinnedRow, updated_at: 7 },
         ],
       }),
     );
-
+    expect(client.getQueryData(["pinned-conversations"])).toBe(pinnedBefore);
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["pinned-conversations"] });
     const folder = client.getQueryData<ConversationsInfiniteData>([
       "project-sessions",
       "Sprint 42",
@@ -384,12 +381,63 @@ describe("SessionUpdatesProvider snapshot timestamps", () => {
       updated_at: 0,
       pending_elicitations_count: 1,
     });
+
+    // An unchanged timestamp overlays the other fields without a refetch.
+    invalidate.mockClear();
+    act(() =>
+      frameHandler()({
+        type: "snapshot",
+        items: [{ ...pinnedRow, pending_elicitations_count: 2 }],
+      }),
+    );
     const pinned = client.getQueryData<{ conversations: Conversation[] }>(["pinned-conversations"]);
     expect(pinned!.conversations[0]).toMatchObject({
       updated_at: 0,
       pending_elicitations_count: 2,
     });
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["pinned-conversations"] });
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["pinned-conversations"] });
+  });
+
+  it("does not refetch the pinned query for the active row's restated updated_at", () => {
+    const client = new QueryClient();
+    const pinnedRow = { ...conv("old-pin"), title: "Pinned", labels: { "omnigent.pinned": "123" } };
+    client.setQueryData(["pinned-conversations"], {
+      conversations: [pinnedRow],
+      filterHonored: true,
+    });
+    renderProvider(client, ["/c/old-pin"]);
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+
+    act(() => frameHandler()({ type: "snapshot", items: [{ ...pinnedRow, updated_at: 7 }] }));
+
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["pinned-conversations"] });
+  });
+
+  it("inserts a pinned row the list window lacks with the pinned copy's updated_at", () => {
+    // The sidebar shows the list copy of a duplicated row first, so a snapshot
+    // that surfaces an off-window pinned session must not insert it with the
+    // stream's leading timestamp.
+    const client = new QueryClient();
+    seedConversations(client, ["conv_a"]);
+    const pinnedRow = { ...conv("old-pin"), title: "Pinned", labels: { "omnigent.pinned": "123" } };
+    client.setQueryData(["pinned-conversations"], {
+      conversations: [pinnedRow],
+      filterHonored: true,
+    });
+    renderProvider(client, ["/"]);
+
+    act(() =>
+      frameHandler()({
+        type: "snapshot",
+        items: [conv("conv_a"), { ...pinnedRow, updated_at: 7 }],
+      }),
+    );
+
+    const rows = client.getQueryData<ConversationsInfiniteData>(["conversations", "", false])!
+      .pages[0].data;
+    expect(rows.map((row) => row.id)).toEqual(["old-pin", "conv_a"]);
+    expect(rows[0].updated_at).toBe(0);
+    clearRecentlyCreated();
   });
 });
 

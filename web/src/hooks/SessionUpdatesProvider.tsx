@@ -31,6 +31,7 @@ import {
   type ConversationsInfiniteData,
   type MergeItemsOptions,
   type SessionListWireItem,
+  changedWireFields,
   collectConversationIds,
   filtersFromConversationQueryKey,
   insertNewRowsIntoPages,
@@ -84,6 +85,13 @@ function applyItemsToCache(
       nullsToUndefined(isSessionArchiving(item.id) ? { ...item, archived: true } : item),
     );
   }
+  // A snapshot may also insert a watched row the list window lacks. A pinned
+  // copy already holds that row's timestamp, so the insertion must not lead it.
+  const pinnedUpdatedAt = new Map<string, number>();
+  if (options.keepUpdatedAt) {
+    const pinned = queryClient.getQueryData<PinnedConversationsResult>(PINNED_CONVERSATIONS_KEY);
+    for (const row of pinned?.conversations ?? []) pinnedUpdatedAt.set(row.id, row.updated_at);
+  }
   const foundAnywhere = new Set<string>();
   let needsRefetch = false;
   const entries = queryClient.getQueriesData<ConversationsInfiniteData>({
@@ -104,7 +112,12 @@ function applyItemsToCache(
     // search index). An unfiled row is fully placed → mark it found so it skips
     // that refetch; a filed row can't be placed in its folder locally → leave it
     // missing so the folder still reconciles via the scheduled refetch.
-    const missingHere = new Map([...itemsById].filter(([id]) => !found.has(id)));
+    const missingHere = new Map<string, SessionListWireItem>();
+    for (const [id, item] of itemsById) {
+      if (found.has(id)) continue;
+      const kept = pinnedUpdatedAt.get(id);
+      missingHere.set(id, kept === undefined ? item : { ...item, updated_at: kept });
+    }
     const { data: next, inserted } = insertNewRowsIntoPages(
       merged,
       missingHere,
@@ -149,14 +162,14 @@ function applyItemsToCache(
         const item = itemsById.get(row.id);
         if (!item) return row;
         foundAnywhere.add(row.id);
-        changed = true;
-        if (
-          options.keepUpdatedAt &&
-          item.updated_at !== undefined &&
-          item.updated_at !== row.updated_at
-        ) {
+        const changedFields = changedWireFields(row, item);
+        // The pinned copy of a row outside the list window converges only through
+        // the pinned query; like the list path, the active row needs none.
+        if (options.keepUpdatedAt && changedFields.delete("updated_at") && row.id !== activeId) {
           pinnedNeedsRefetch = true;
         }
+        if (changedFields.size === 0) return row;
+        changed = true;
         // Pin membership and pin timestamps reconcile through the pinned query.
         return {
           ...row,
@@ -169,7 +182,8 @@ function applyItemsToCache(
         };
       })
       .filter((row) => !row.archived);
-    return changed ? { ...previous, conversations } : previous;
+    if (!changed && conversations.length === previous.conversations.length) return previous;
+    return { ...previous, conversations };
   });
   return {
     missingIds: [...itemsById.keys()].filter((id) => !foundAnywhere.has(id)),
@@ -442,8 +456,6 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
             getCurrentUserId(),
             { keepUpdatedAt: frame.type === "snapshot" },
           );
-          // A pinned row outside the loaded list window converges only through
-          // its own query, so a restated timestamp it kept asks for that refetch.
           if (pinnedNeedsRefetch) {
             void queryClient.invalidateQueries({ queryKey: PINNED_CONVERSATIONS_KEY });
           }

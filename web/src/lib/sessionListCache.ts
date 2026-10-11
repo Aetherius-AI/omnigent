@@ -114,7 +114,7 @@ export function nullsToUndefined(wire: SessionListWireItem): SessionListWireItem
  * @param wire - The incoming wire item overlaying it.
  * @returns Field names that would change if `wire` were applied.
  */
-function changedWireFields(conv: Conversation, wire: SessionListWireItem): Set<string> {
+export function changedWireFields(conv: Conversation, wire: SessionListWireItem): Set<string> {
   const changed = new Set<string>();
   // Index the typed Conversation by arbitrary wire keys to compare field
   // by field. The double cast is required because Conversation has no index
