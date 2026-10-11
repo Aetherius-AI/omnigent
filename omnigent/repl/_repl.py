@@ -4680,9 +4680,9 @@ async def run_repl(
             from omnigent.repl._tmux_pane import watch_tmux_clients
 
             def _on_clients_changed(attached: int) -> None:
-                # A failed replay re-pauses the host with its backlog intact; keep
-                # the watcher alive so the next attach retries, rather than ending
-                # viewer monitoring for the rest of the session.
+                # A failed replay re-pauses the host with its backlog intact; the
+                # watcher stays alive, but only a last-detach/first-attach boundary
+                # wakes it, so recovery waits for all viewers to leave and return.
                 try:
                     if attached == 0:
                         host.pause_rendering()

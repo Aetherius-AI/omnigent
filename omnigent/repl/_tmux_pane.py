@@ -678,7 +678,13 @@ async def _tmux_output(*args: str) -> str | None:
         )
     except OSError:
         return None
-    stdout, _ = await proc.communicate()
+    try:
+        stdout, _ = await proc.communicate()
+    except asyncio.CancelledError:
+        with contextlib.suppress(ProcessLookupError):
+            proc.terminate()
+        await proc.wait()
+        raise
     if proc.returncode != 0:
         return None
     return stdout.decode(errors="replace")

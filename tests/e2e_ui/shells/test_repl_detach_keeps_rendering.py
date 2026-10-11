@@ -316,9 +316,9 @@ def test_detached_repl_stops_rendering_after_last_client_leaves(
         time.sleep(0.3)
 
     try:
-        cpu_delta: float | None = sum(proc.cpu_times()[:2])
+        cpu_total: float | None = sum(proc.cpu_times()[:2])
     except psutil.NoSuchProcess:
-        cpu_delta = None
+        cpu_total = None
     pane_after = pane.capture()
     attached = pane.attached_clients()
     assert attached == 0, f"a client re-attached ({attached}); the detached condition was lost"
@@ -326,7 +326,7 @@ def test_detached_repl_stops_rendering_after_last_client_leaves(
         "the detached REPL repainted the posted turn into the pane with zero clients "
         f"attached (session_attached={attached}, repl pid={proc.pid} still running, "
         f"client-detached hook={_hook_command(pane.hooks(), 'client-detached')!r}, "
-        f"cpu_seconds={cpu_delta}); it keeps full-rendering every session event for "
+        f"cpu_seconds={cpu_total}); it keeps full-rendering every session event for "
         "the rest of the session after the last web client leaves.\n"
         f"pane_before:\n{pane_before}\npane_after:\n{pane_after}"
     )

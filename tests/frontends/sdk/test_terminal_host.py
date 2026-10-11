@@ -1828,6 +1828,22 @@ def test_paused_host_drops_repaint_requests_until_resume(
     assert host._tokens_used == 3100
 
 
+def test_overlay_signature_cleared_while_paused_so_resume_repaints() -> None:
+    """A rebuild finishing while paused clears the stored overlay signature.
+
+    Otherwise the first overlay rebuild after resume would match the recorded
+    signature and skip, leaving the stale pre-pause frame on the reattached pane.
+    """
+    host = TerminalHost(model_name="test")
+    signature = ("target", "content")
+
+    assert host._overlay_signature_to_store(signature) == signature
+    host.pause_rendering()
+    assert host._overlay_signature_to_store(signature) is None
+    host.resume_rendering()
+    assert host._overlay_signature_to_store(signature) == signature
+
+
 def test_paused_live_region_renders_collapse_to_the_latest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1971,7 +1987,12 @@ def test_resume_rendering_recovers_when_the_skipped_notice_write_fails(
 def test_clear_streamed_text_defers_while_paused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Clearing while paused writes nothing and keeps the counts resume will erase."""
+    """Clearing while paused writes nothing; resume erases the preserved lines.
+
+    The erase must run against the live terminal at resume even when the replay
+    queue is empty, so a cleared region (e.g. a cancel path's stale draft) does
+    not survive on the reattached pane.
+    """
     host = TerminalHost(model_name="test")
     writes = _capture_stdout(monkeypatch)
     host._streamed_line_count = 3
@@ -1983,6 +2004,76 @@ def test_clear_streamed_text_defers_while_paused(
     assert writes == []
     assert host._streamed_line_count == 3
     assert host._text_buffer == ""
+    assert host._pending_streamed_clear
+
+    host.resume_rendering()
+    assert "".join(writes) == "\033[A\033[2K" * 3
+    assert host._streamed_line_count == 0
+    assert not host._pending_streamed_clear
+    assert not host.rendering_paused
+
+
+def test_deferred_clear_erases_before_a_plain_replay_item(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deferred clear erases the stale region even when the replay starts plain.
+
+    A plain renderable resets the line counts without erasing, so without the
+    deferred erase at resume the pre-pause lines would survive on the pane.
+    """
+    host = TerminalHost(model_name="test")
+    writes = _capture_stdout(monkeypatch)
+    host._streamed_line_count = 2
+
+    host.pause_rendering()
+    host.clear_streamed_text()
+    host.output(Text("fresh"))
+    writes.clear()
+
+    host.resume_rendering()
+    painted = "".join(writes)
+    assert painted.startswith("\033[A\033[2K" * 2)
+    assert "fresh" in painted
+    assert host._streamed_line_count == 0
+    assert not host._pending_streamed_clear
+
+
+def test_deferred_clear_re_pauses_when_the_erase_write_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed deferred erase keeps the clear pending and the backlog intact."""
+    host = TerminalHost(model_name="test")
+    host._streamed_line_count = 1
+
+    host.pause_rendering()
+    host.clear_streamed_text()
+    host.output(Text("fresh"))
+
+    fail = {"active": True}
+
+    def _write(data: str) -> int:
+        if fail["active"] and "\033[2K" in data:
+            raise BrokenPipeError("pane gone before the deferred clear")
+        return len(data)
+
+    monkeypatch.setattr(sys.stdout, "write", _write)
+    monkeypatch.setattr(sys.stdout, "flush", lambda: None)
+
+    with pytest.raises(BrokenPipeError):
+        host.resume_rendering()
+    assert host.rendering_paused
+    assert host._pending_streamed_clear
+    assert [item.plain for item in host._paused_output] == ["fresh"]
+
+    fail["active"] = False
+    writes = _capture_stdout(monkeypatch)
+    host.resume_rendering()
+    painted = "".join(writes)
+    assert painted.startswith("\033[A\033[2K")
+    assert "fresh" in painted
+    assert not host.rendering_paused
+    assert not host._pending_streamed_clear
+    assert list(host._paused_output) == []
 
 
 def test_dropped_notice_replaces_the_pre_pause_live_region(

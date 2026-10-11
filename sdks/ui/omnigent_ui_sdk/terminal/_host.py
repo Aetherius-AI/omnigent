@@ -935,6 +935,8 @@ class TerminalHost:
         self._render_resumed.set()
         self._paused_output: deque[FormattedItem] = deque(maxlen=_PAUSED_OUTPUT_LIMIT)
         self._paused_output_dropped = 0
+        # A clear_streamed_text() requested while paused, deferred to resume.
+        self._pending_streamed_clear = False
         # Live sub-agent tree shown on the main interface (state badge +
         # ``↓`` menu). Keyed by child session id; the tree is reconstructed
         # from each node's ``parent_id``. ``_subagent_root`` is the session
@@ -1869,6 +1871,18 @@ class TerminalHost:
             self._tasks.remove(task)
         self._invalidate_prompt()
 
+    def _overlay_signature_to_store(
+        self, signature: tuple[str | None, str]
+    ) -> tuple[str | None, str] | None:
+        """Signature to remember after an overlay content rebuild.
+
+        While rendering is paused the overlay is unviewed and is not repainted,
+        so remembering the signature would let the first rebuild after resume
+        match it and skip, leaving the stale pre-pause frame on screen. Return
+        ``None`` while paused so that rebuild repaints instead.
+        """
+        return None if self._render_paused else signature
+
     async def _show_overlay(self, overlay: Overlay) -> None:
         """
         Run the overlay's fullscreen view until the user closes it.
@@ -2034,7 +2048,7 @@ class TerminalHost:
                 scroll_offset[0] = 0
                 cursor_anchor[0] = "top"
             current_target_key[0] = target_key
-            last_signature[0] = signature
+            last_signature[0] = self._overlay_signature_to_store(signature)
             app = app_holder[0]
             # A rebuild already in flight when the last viewer left must not
             # repaint the unviewed pane; resume_rendering repaints on return.
@@ -2962,6 +2976,18 @@ class TerminalHost:
         ceiling = max(1, _term_height() - _BOTTOM_RESERVED_ROWS)
         return self._streamed_line_count < ceiling
 
+    def _erase_streamed_region(self) -> None:
+        """Erase the on-screen streamed + live lines and reset their counts.
+
+        Writes one cursor-up + clear-line sequence per tracked line; a no-op
+        when nothing is tracked.
+        """
+        total = self._streamed_line_count + self._live_line_count
+        for _ in range(total):
+            print("\033[A\033[2K", end="", flush=True)
+        self._streamed_line_count = 0
+        self._live_line_count = 0
+
     def clear_streamed_text(self) -> None:
         """Clear the previously streamed text lines using ANSI escapes.
 
@@ -2987,20 +3013,17 @@ class TerminalHost:
         kept for callers that need to clear without an immediate
         replacement (e.g. cancel paths).
 
-        While rendering is paused the pre-pause lines are left on the
-        unviewed screen and their counts preserved, so the next replay
-        (:meth:`resume_rendering`) still erases exactly those lines. The
-        held-back buffer is dropped either way, matching the raw-tail
+        While rendering is paused the pre-pause lines stay on the unviewed
+        screen and their counts are preserved; the erase is deferred and runs
+        at the start of :meth:`resume_rendering`, against the live terminal and
+        before any queued output, so it survives an empty or non-stream replay.
+        The held-back buffer is dropped either way, matching the raw-tail
         guarantee above.
         """
-        if not self._render_paused:
-            total = self._streamed_line_count + self._live_line_count
-            if total > 0:
-                # Move cursor up and clear each line.
-                for _ in range(total):
-                    print("\033[A\033[2K", end="", flush=True)
-                self._streamed_line_count = 0
-                self._live_line_count = 0
+        if self._render_paused:
+            self._pending_streamed_clear = True
+        else:
+            self._erase_streamed_region()
         self._text_buffer = ""
         self._last_was_streaming = False
 
@@ -3158,15 +3181,19 @@ class TerminalHost:
     def resume_rendering(self) -> None:
         """Replay output queued while paused and repaint the prompt.
 
-        A mid-replay write failure (a pane that vanished) re-pauses the host and
-        keeps the items it never reached, so the next resume on reattach finishes
-        them rather than painting ahead of a stranded backlog. The failing item
-        is dropped because it may have been written in part; a failed
-        skipped-output notice keeps its count so a later resume re-emits it.
+        A clear requested while paused is deferred to here and erases the
+        preserved pre-pause region before replaying, so stale lines do not
+        survive an empty or non-stream replay. A mid-replay write failure (a
+        pane that vanished) re-pauses the host and keeps the items it never
+        reached, so the next resume on reattach finishes them rather than
+        painting ahead of a stranded backlog. The failing item is dropped
+        because it may have been written in part; a failed skipped-output notice
+        keeps its count so a later resume re-emits it.
         """
         if not self._render_paused:
             return
         dropped = self._paused_output_dropped
+        pending_clear = self._pending_streamed_clear
         queued = list(self._paused_output)
         replay: list[FormattedItem] = []
         if dropped:
@@ -3186,7 +3213,20 @@ class TerminalHost:
 
         self._render_paused = False
         self._paused_output_dropped = 0
+        self._pending_streamed_clear = False
         self._paused_output.clear()
+        if pending_clear:
+            try:
+                self._erase_streamed_region()
+            except Exception:
+                # The deferred erase never ran; keep it pending and preserve the
+                # whole backlog (the notice re-derives from the dropped count).
+                self._render_paused = True
+                self._pending_streamed_clear = True
+                self._paused_output_dropped = dropped
+                for leftover in reversed(queued):
+                    self._paused_output.appendleft(leftover)
+                raise
         for index, item in enumerate(replay):
             try:
                 self.output(item)
