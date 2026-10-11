@@ -11,14 +11,18 @@ import sys
 
 
 def test_native_bridges_import_without_os_getuid() -> None:
-    """Native bridges must import when os.getuid is unavailable."""
+    """Every native bridge must import when os.getuid is unavailable."""
+    # Discover the bridges dynamically so a new harness is covered automatically.
     child = (
         "import os\n"
         "if hasattr(os, 'getuid'): delattr(os, 'getuid')\n"
-        "import omnigent.harnesses.kiro_native.bridge\n"
-        "import omnigent.harnesses.hermes_native.bridge\n"
-        "import omnigent.harnesses.kimi_native.bridge\n"
-        "import omnigent.harnesses.qwen_native.bridge\n"
+        "import importlib, pkgutil\n"
+        "import omnigent.harnesses as h\n"
+        "mods = [m.name for m in pkgutil.iter_modules(h.__path__, 'omnigent.harnesses.')\n"
+        "        if m.name.endswith('_native')]\n"
+        "assert mods, 'no native harness bridges discovered'\n"
+        "for m in mods:\n"
+        "    importlib.import_module(m + '.bridge')\n"
         "print('BRIDGES_IMPORT_OK')\n"
     )
     proc = subprocess.run(

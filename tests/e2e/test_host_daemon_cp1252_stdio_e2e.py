@@ -117,22 +117,28 @@ def test_host_daemon_registers_under_cp1252_stdio(
         online = False
         deadline = time.monotonic() + 40.0
         while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                break
             log_text = daemon_log.read_text(errors="replace")
             if _banner_encode_crash(log_text):
                 break
-            online = online or _host_online()
+            if _host_online():
+                online = True
             if online and " Connected as " in log_text:
                 break
             time.sleep(0.25)
 
         log_text = daemon_log.read_text(errors="replace")
         banner_logged = " Connected as " in log_text
+        assert proc.poll() is None, (
+            "the host daemon process exited in Windows degraded mode:\n" + _tail(log_text)
+        )
         assert not _banner_encode_crash(log_text), (
             "the host daemon crashed encoding its '✓ Connected' banner on a "
             "cp1252 (legacy Windows codepage) stdout, so the tunnel "
             "reconnect-loops on the crash:\n" + _tail(log_text)
         )
-        assert online, (
+        assert online and _host_online(), (
             "the host daemon never registered / did not stay online in "
             "Windows degraded mode:\n" + _tail(log_text)
         )

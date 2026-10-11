@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import codecs
 import contextlib
 import logging
 import os
@@ -510,12 +511,13 @@ def ensure_stdio_survives_unencodable_output() -> None:
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is None:
             continue
-        encoding = (getattr(stream, "encoding", "") or "").lower().replace("_", "-")
-        if encoding in {"utf-8", "utf8"}:
-            continue
-        # errors="replace" is process-wide: unencodable output degrades to "?"
-        # rather than raising. Detached or captured streams can't be
-        # reconfigured, which is fine -- their writes keep their old behavior.
+        encoding = getattr(stream, "encoding", "") or ""
+        with contextlib.suppress(LookupError):
+            if codecs.lookup(encoding).name == "utf-8":
+                continue
+        # errors="replace" makes unencodable output degrade to "?" instead of
+        # raising. Detached or captured streams can't be reconfigured, which is
+        # fine -- their writes keep their old behavior.
         with contextlib.suppress(ValueError, OSError):
             if sys.platform == "win32":
                 reconfigure(encoding="utf-8", errors="replace")

@@ -18,5 +18,6 @@ _UTF8_REQUESTED = os.environ.get("PYTHONUTF8") == "1" or sys._xoptions.get("utf8
 if not _UTF8_REQUESTED and not os.environ.get("PYTHONIOENCODING"):
     for _name, _errors in (("stdout", "strict"), ("stderr", "backslashreplace")):
         _stream = getattr(sys, _name, None)
-        if _stream is not None and not _stream.isatty():
-            _stream.reconfigure(encoding="cp1252", errors=_errors)
+        _reconfigure = getattr(_stream, "reconfigure", None)
+        if _stream is not None and _reconfigure is not None and not _stream.isatty():
+            _reconfigure(encoding="cp1252", errors=_errors)
