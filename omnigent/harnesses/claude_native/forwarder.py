@@ -2813,11 +2813,9 @@ async def _forward_available_subagents(
             await _write_subagent_forward_state_async(bridge_dir, updated)
             made_progress = True
         if not made_progress:
-            # Nothing registered this pass. A deferred child follows a set-aside
-            # parent, waits while its parent is registered or still on disk and
-            # unsettled, and spends its own budget only once the parent's meta is gone.
-            # Re-sweep until nothing more is set aside, so a whole chain is set aside
-            # in one pass whatever order its meta files sort in.
+            # Nothing registered this pass. A deferred child follows a set-aside parent
+            # (re-swept until the cascade stops, whatever order the metas sort in), waits
+            # while its parent is registered or still on disk, else spends its own budget.
             waiting = deferred
             while waiting:
                 still_waiting: list[tuple[Path, dict[str, str], str | None]] = []
