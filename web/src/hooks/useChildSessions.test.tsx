@@ -429,11 +429,14 @@ describe("useSubagentTree", () => {
     ] as ChildSessionInfo[]);
     renderRail(queryClient);
     const stale = () => treePage([descendantRow("conv_a", "conv_root", 1)]);
+    // Each pass must see its own request before the next invalidation lands.
+    /* oxlint-disable no-await-in-loop */
     for (let pass = 0; pass < 3; pass++) {
       await waitFor(() => expect(pending).toHaveLength(pass + 1));
       await act(() => invalidateChildSessions(queryClient, "conv_a"));
       pending[pass](stale());
     }
+    /* oxlint-enable no-await-in-loop */
 
     // A fourth request follows the exhausted loop and carries the change.
     await waitFor(() => expect(pending).toHaveLength(4));
