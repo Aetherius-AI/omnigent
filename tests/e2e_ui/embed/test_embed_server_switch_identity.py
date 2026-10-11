@@ -94,15 +94,16 @@ def expect_no_admin_chrome(page: Page) -> None:
 
 
 def expect_identity_on_server_b(page: Page) -> None:
+    # The embed's own probe must reach Server B before this test probes identity,
+    # which would otherwise issue that request itself.
+    wait_for_request(page, "b", "/v1/me")
+    stamped_alice = [r["path"] for r in sent_to(page, "b") if r["embedUser"] == SERVER_A_USER]
+    assert stamped_alice == [], stamped_alice
     assert embed_identity(page) == {
         "user": SERVER_B_USER,
         "isAdmin": False,
         "serverIdentity": "server-b",
     }
-    requests_to_b = sent_to(page, "b")
-    assert any(r["path"].startswith("/v1/me") for r in requests_to_b), requests_to_b
-    stamped_alice = [r["path"] for r in requests_to_b if r["embedUser"] == SERVER_A_USER]
-    assert stamped_alice == [], stamped_alice
 
 
 def test_switching_servers_rebinds_identity_and_admin_chrome(
