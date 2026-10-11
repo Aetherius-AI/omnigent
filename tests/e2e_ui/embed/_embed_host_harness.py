@@ -18,6 +18,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+import filelock
 import httpx
 
 from tests._helpers.live_server import find_free_port, local_server_env, terminate_process
@@ -51,14 +52,16 @@ def build_host_page(*, force: bool = True) -> None:
 
     Without *force*, an existing build is reused (``--ui-skip-build``).
     """
-    if (_HOST_DIST / "index.html").exists() and not force:
-        return
-    subprocess.run(
-        [str(_VITE), "build", "--config", _HOST_VITE_CONFIG],
-        cwd=_WEB_DIR,
-        check=True,
-        stdin=subprocess.DEVNULL,
-    )
+    # Serialize with other workers and the SPA build, which share the output tree.
+    with filelock.FileLock(str(_WEB_DIR / ".build.lock"), timeout=600):
+        if (_HOST_DIST / "index.html").exists() and not force:
+            return
+        subprocess.run(
+            [str(_VITE), "build", "--config", _HOST_VITE_CONFIG],
+            cwd=_WEB_DIR,
+            check=True,
+            stdin=subprocess.DEVNULL,
+        )
 
 
 def _wait_until_ready(
@@ -139,7 +142,7 @@ def _omnigent_server(tmp_path: Path, name: str, user: str, admins: list[str]) ->
                 proc, log_path, f"{base_url}/v1/me", headers={"X-Forwarded-Email": user}
             ).json()
             expected = {"user_id": user, "is_admin": user in admins}
-            if me != expected:
+            if not expected.items() <= me.items():
                 raise RuntimeError(f"{name} /v1/me for {user} returned {me}, expected {expected}")
             yield base_url
         finally:
@@ -154,6 +157,8 @@ def _preview_server(tmp_path: Path, server_a_url: str, server_b_url: str) -> Ite
         **os.environ,
         "OMNIGENT_E2E_SERVER_A_URL": server_a_url,
         "OMNIGENT_E2E_SERVER_B_URL": server_b_url,
+        "OMNIGENT_E2E_SERVER_A_USER": SERVER_A_USER,
+        "OMNIGENT_E2E_SERVER_B_USER": SERVER_B_USER,
         "NO_PROXY": "127.0.0.1,localhost",
         "no_proxy": "127.0.0.1,localhost",
     }

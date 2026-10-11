@@ -32,12 +32,12 @@ const proxy = {
   ...serverProxy(
     "/server-a",
     process.env.OMNIGENT_E2E_SERVER_A_URL ?? "http://127.0.0.1:6767",
-    "alice@example.test",
+    process.env.OMNIGENT_E2E_SERVER_A_USER ?? "alice@example.test",
   ),
   ...serverProxy(
     "/server-b",
     process.env.OMNIGENT_E2E_SERVER_B_URL ?? "http://127.0.0.1:6768",
-    "bob@example.test",
+    process.env.OMNIGENT_E2E_SERVER_B_USER ?? "bob@example.test",
   ),
 };
 

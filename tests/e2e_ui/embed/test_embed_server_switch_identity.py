@@ -36,14 +36,27 @@ def embed_host_env(
         yield host
 
 
-def open_host_page(page: Page, host: EmbedHost, *, me_delay_ms: int = 0) -> None:
-    """Load the host page connected to Server A and wait for the embedded sidebar."""
+def open_host_page(page: Page, host: EmbedHost, *, hold_me_a: bool = False) -> None:
+    """Load the host page connected to Server A and wait for the embedded sidebar.
+
+    With *hold_me_a*, Server A's ``/v1/me`` answer waits for ``release_me_a``.
+    """
     query: dict[str, str] = {"server": "a"}
-    if me_delay_ms:
-        query["meDelayA"] = str(me_delay_ms)
+    if hold_me_a:
+        query["holdMeA"] = "1"
     page.goto(f"{host.url}/?{urlencode(query)}")
     expect(page.get_by_test_id("host-status")).to_have_text(SERVER_A_STATUS)
     expect(page.get_by_test_id("settings-button")).to_be_visible()
+
+
+def wait_for_request(page: Page, server: str, path_prefix: str) -> None:
+    """Wait until the embed has handed the host transport a request for *server*."""
+    page.wait_for_function(
+        "([server, prefix]) => window.omnigentE2EHost.sent[server]"
+        ".some((r) => r.path.startsWith(prefix))",
+        arg=[server, path_prefix],
+        timeout=_TRANSPORT_WAIT_MS,
+    )
 
 
 def wait_for_answer(page: Page, server: str, path_prefix: str) -> None:
@@ -54,6 +67,10 @@ def wait_for_answer(page: Page, server: str, path_prefix: str) -> None:
         arg=[server, path_prefix],
         timeout=_TRANSPORT_WAIT_MS,
     )
+
+
+def release_me_a(page: Page) -> None:
+    page.evaluate("() => window.omnigentE2EHost.releaseMeA()")
 
 
 def sent_to(page: Page, server: str) -> list[dict[str, Any]]:
@@ -73,7 +90,27 @@ def connect_server_b(page: Page) -> None:
     expect(page.get_by_test_id("host-status")).to_have_text(SERVER_B_STATUS)
 
 
-def test_admin_chrome_follows_the_new_servers_user(
+def expect_no_admin_chrome(page: Page) -> None:
+    expect(page.get_by_test_id("settings-nav-general")).to_be_visible()
+    expect(page.get_by_test_id("settings-nav-policies")).to_have_count(
+        0, timeout=_IDENTITY_SETTLE_MS
+    )
+    expect(page.get_by_test_id("settings-nav-members")).to_have_count(0)
+
+
+def expect_identity_on_server_b(page: Page) -> None:
+    assert embed_identity(page) == {
+        "user": SERVER_B_USER,
+        "isAdmin": False,
+        "serverIdentity": "server-b",
+    }
+    requests_to_b = sent_to(page, "b")
+    assert any(r["path"].startswith("/v1/me") for r in requests_to_b), requests_to_b
+    stamped_alice = [r["path"] for r in requests_to_b if r["embedUser"] == SERVER_A_USER]
+    assert stamped_alice == [], stamped_alice
+
+
+def test_switching_servers_rebinds_identity_and_admin_chrome(
     request: pytest.FixtureRequest, embed_host_env: EmbedHost
 ) -> None:
     page: Page = request.getfixturevalue("page")
@@ -86,56 +123,23 @@ def test_admin_chrome_follows_the_new_servers_user(
     connect_server_b(page)
     wait_for_answer(page, "b", "/v1/sessions")
 
-    expect(page.get_by_test_id("settings-nav-general")).to_be_visible()
-    expect(page.get_by_test_id("settings-nav-policies")).to_have_count(
-        0, timeout=_IDENTITY_SETTLE_MS
-    )
-    expect(page.get_by_test_id("settings-nav-members")).to_have_count(0)
-
-
-def test_identity_is_resolved_on_the_new_server(
-    request: pytest.FixtureRequest, embed_host_env: EmbedHost
-) -> None:
-    page: Page = request.getfixturevalue("page")
-    open_host_page(page, embed_host_env)
-    wait_for_answer(page, "a", "/v1/me")
-
-    connect_server_b(page)
-    wait_for_answer(page, "b", "/v1/sessions")
-
-    assert embed_identity(page) == {
-        "user": SERVER_B_USER,
-        "isAdmin": False,
-        "serverIdentity": "server-b",
-    }
-    requests_to_b = sent_to(page, "b")
-    assert any(r["path"].startswith("/v1/me") for r in requests_to_b), requests_to_b
-    stamped_alice = [r["path"] for r in requests_to_b if r["embedUser"] == SERVER_A_USER]
-    assert stamped_alice == [], stamped_alice
+    expect_no_admin_chrome(page)
+    expect_identity_on_server_b(page)
 
 
 def test_late_answer_from_the_previous_server_is_ignored(
     request: pytest.FixtureRequest, embed_host_env: EmbedHost
 ) -> None:
     page: Page = request.getfixturevalue("page")
-    open_host_page(page, embed_host_env, me_delay_ms=4000)
-    page.wait_for_function(
-        "() => window.omnigentE2EHost.sent.a.some((r) => r.path.startsWith('/v1/me'))",
-        timeout=_TRANSPORT_WAIT_MS,
-    )
+    open_host_page(page, embed_host_env, hold_me_a=True)
+    wait_for_request(page, "a", "/v1/me")
     assert not any(r["path"].startswith("/v1/me") for r in answered_by(page, "a"))
 
     connect_server_b(page)
-    wait_for_answer(page, "a", "/v1/me")
     wait_for_answer(page, "b", "/v1/sessions")
+    release_me_a(page)
+    wait_for_answer(page, "a", "/v1/me")
 
     page.get_by_test_id("settings-button").click()
-    expect(page.get_by_test_id("settings-nav-general")).to_be_visible()
-    expect(page.get_by_test_id("settings-nav-policies")).to_have_count(
-        0, timeout=_IDENTITY_SETTLE_MS
-    )
-    assert embed_identity(page) == {
-        "user": SERVER_B_USER,
-        "isAdmin": False,
-        "serverIdentity": "server-b",
-    }
+    expect_no_admin_chrome(page)
+    expect_identity_on_server_b(page)

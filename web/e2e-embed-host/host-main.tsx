@@ -53,11 +53,17 @@ interface AnsweredRequest {
 
 const params = new URLSearchParams(window.location.search);
 const initialServer: ServerKey = params.get("server") === "b" ? "b" : "a";
-const meDelayA = Number(params.get("meDelayA") ?? "0");
+// `holdMeA=1` holds Server A's `/v1/me` answer until the test releases it.
+const holdMeA = params.get("holdMeA") === "1";
+let releaseMeA: () => void = () => {};
+const meGateA = new Promise<void>((resolve) => {
+  releaseMeA = resolve;
+});
 
 const transportLog = {
   sent: { a: [] as SentRequest[], b: [] as SentRequest[] },
   answered: { a: [] as AnsweredRequest[], b: [] as AnsweredRequest[] },
+  releaseMeA: () => releaseMeA(),
   async identity() {
     return {
       user: await resolveIdentity(),
@@ -86,10 +92,8 @@ function hostConfigFor(server: HostServer): OmnigentHostConfig {
         at: Date.now(),
       });
       const response = await window.fetch(server.prefix + path, { ...init, headers });
-      if (server.key === "a" && meDelayA > 0 && path.startsWith("/v1/me")) {
-        await new Promise<void>((resolve) => {
-          setTimeout(resolve, meDelayA);
-        });
+      if (server.key === "a" && holdMeA && path.startsWith("/v1/me")) {
+        await meGateA;
       }
       transportLog.answered[server.key].push({ path, status: response.status, at: Date.now() });
       return response;
