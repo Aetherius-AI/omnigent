@@ -179,16 +179,7 @@ def not_gateway_backed(
 
 
 def gateway_inference_reports(harness: str) -> bool:
-    """Whether :func:`gateway_inference_map` evaluates *harness*'s family.
-
-    Only the native Claude and Codex families are checked, so ``claude-sdk`` and
-    ``pi`` never appear in a report: their backing is *structurally* unknown,
-    not merely unreported-yet. Callers use this to tell a harness a host has not
-    reported from one it will never report.
-
-    :param harness: Harness id in any spelling, e.g. ``"native-codex"``.
-    :returns: ``True`` when a reported map would carry this harness's family.
-    """
+    """Whether gateway inference evaluates *harness*'s family; never for ``claude-sdk``/``pi``."""
     return _family_spellings(harness) in (CLAUDE_GATEWAY_HARNESSES, CODEX_GATEWAY_HARNESSES)
 
 
@@ -196,25 +187,9 @@ def gateway_backs_static_table(
     gateway: Mapping[str, object] | None,
     harnesses: Iterable[str],
 ) -> bool:
-    """Whether the static ``databricks-*`` table may supply routing candidates.
-
-    Every id in the table is servable only through the gateway, so it is
-    withheld from a harness that cannot reach it:
-
-    - a native family is read from the report; an explicit ``False`` declines;
-    - ``claude-sdk`` and ``pi`` are never named, so their backing follows the
-      host's: a host that reported its families and backs none of them is off
-      the gateway, so decline.
-
-    A host that backs any family, or has not reported at all, keeps the lenient
-    default so an older or pre-report host does not silently lose routing. Only
-    this static-table admission draws the off-gateway line; router *source*
-    selection still treats every unknown as backed.
-
-    :param gateway: A host's ``gateway_inference`` map, or ``None``.
-    :param harnesses: Harness ids to check, e.g. ``("claude-sdk",)``.
-    :returns: ``True`` when every harness may draw from the static table.
-    """
+    """Whether the gateway-only static ``databricks-*`` table may route *harnesses*.
+    Declines an explicit ``False``, or an unreported ``claude-sdk``/``pi`` on a host that backs no
+    reported family; unknown/any-True stays lenient. Admission only, not router source."""
     host_off_gateway = bool(gateway) and not any(value is True for value in gateway.values())
     for harness in harnesses:
         state = gateway_inference_state(gateway, harness)

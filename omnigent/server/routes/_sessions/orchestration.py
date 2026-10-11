@@ -9722,16 +9722,8 @@ def _gateway_backed(host: Host | None, harnesses: Sequence[str]) -> bool:
 
 
 def _static_table_backed(host: Host | None, harnesses: Sequence[str]) -> bool:
-    """Whether *host* may fill a routing menu from the static ``databricks-*`` table.
-
-    Stricter than :func:`_gateway_backed`: the gateway-only ``databricks-*`` ids
-    are withheld from a harness known to be off the gateway. See
-    :func:`gateway_backs_static_table` for the exact rule.
-
-    :param host: The session's target host, or ``None``.
-    :param harnesses: Every harness family the call may land on.
-    :returns: ``True`` when every harness may draw from the static table.
-    """
+    """Whether *host* may fill a routing menu from the gateway-only static ``databricks-*`` table.
+    Stricter than :func:`_gateway_backed`; :func:`gateway_backs_static_table` holds the rule."""
     from omnigent.gateway_inference import gateway_backs_static_table
     from omnigent.server.routing_backend import reported_gateway_inference
 
@@ -9844,15 +9836,7 @@ async def _spawn_static_table_backed(
     conv: Conversation,
     harnesses: Sequence[str],
 ) -> bool:
-    """Whether a spawn over *harnesses* may use the static ``databricks-*`` table.
-
-    The spawn-time sibling of :func:`_static_table_backed`.
-
-    :param request: Used to reach the app's host store.
-    :param conv: The parent session row.
-    :param harnesses: Every harness family the spawn may land on.
-    :returns: ``True`` when every harness may draw from the static table.
-    """
+    """Spawn-time sibling of :func:`_static_table_backed`: may a spawn use the static table?"""
     host_store = getattr(request.app.state, "host_store", None)
     return _static_table_backed(await _session_routing_host(conv, host_store), harnesses)
 

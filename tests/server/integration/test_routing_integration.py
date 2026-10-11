@@ -2243,13 +2243,8 @@ async def test_an_off_gateway_host_never_offers_the_static_table_to_a_turn(
     db_uri: str,
     harness: str,
 ) -> None:
-    """A host off the gateway cannot run databricks-* ids, whatever harness asks.
-
-    The host's gateway report names only the native Claude and Codex spellings
-    (all ``False``); ``claude-sdk`` and ``pi`` are absent from it. With an
-    empty live catalog the turn must decline rather than fill its menu from the
-    static ``databricks-*`` table and pin a model this host cannot serve.
-    """
+    """An off-gateway host must decline a turn, not pin an unservable ``databricks-*`` id.
+    Its report names only Claude/Codex (all ``False``); ``claude-sdk``/``pi`` are absent."""
     from omnigent.server import smart_routing as smart_routing_module
 
     agent = await create_test_agent(
