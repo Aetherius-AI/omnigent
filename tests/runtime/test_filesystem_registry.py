@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from omnigent.runtime.filesystem_registry import (
+    _CURSOR_PLUMBING_PATHS,
     AgentEditFilesystemRegistry,
     GitFilesystemRegistry,
     GitStatusUnavailable,
@@ -595,6 +596,25 @@ def test_agent_edit_registry_hides_omnigent_cursor_plumbing(
             f"Expected get_changed_file to hide .cursor/{name}, matching the git registry."
         )
     assert registry.get_changed_file(conv_id, ".cursor/rules/style.md") is not None
+
+
+def test_cursor_plumbing_allowlist_matches_the_launchers(tmp_path: Path, monkeypatch) -> None:
+    """The hidden paths are exactly the files the Cursor launchers write into a workspace."""
+    from omnigent.harnesses.cursor_native import bridge
+    from omnigent.inner.cursor_executor import _write_cursor_hooks
+
+    # The relay token is written outside the workspace and needs a hardened bridge root.
+    monkeypatch.setattr(bridge, "write_mcp_bridge_config", lambda bridge_dir: None)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    bridge.write_mcp_config(workspace, tmp_path / "bridge")
+    bridge.write_hooks_config(workspace, tmp_path / "bridge")
+    _write_cursor_hooks(str(workspace), "/opt/omnigent/hook.py", "http://127.0.0.1:6767", "conv_1")
+
+    written = {p.relative_to(workspace).as_posix() for p in workspace.rglob("*") if p.is_file()}
+    assert written == _CURSOR_PLUMBING_PATHS, (
+        f"The Cursor launchers now write {sorted(written)}; keep _CURSOR_PLUMBING_PATHS in step."
+    )
 
 
 def test_git_list_changed_files_raises_on_timeout(tmp_path: Path, monkeypatch) -> None:
