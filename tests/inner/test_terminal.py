@@ -3558,14 +3558,14 @@ def test_null_device_problem_accepts_the_real_null_device() -> None:
 def test_null_device_problem_names_what_replaced_the_device(tmp_path: Path) -> None:
     regular = tmp_path / "null"
     regular.write_text("runner-host\n")
-
     assert terminal_mod._null_device_problem(str(regular)) == (
         f"{regular} is a regular file instead of the null character device",
         f"rm -f {regular} && mknod -m 666 {regular} c 1 3",
     )
     # A directory is removed with rmdir, never recursively.
     assert terminal_mod._null_device_problem(str(tmp_path)) == (
-        f"{tmp_path} is a directory instead of the null character device",
+        f"{tmp_path} is a directory instead of the null character device "
+        "(move its contents elsewhere first if rmdir refuses)",
         f"rmdir {tmp_path} && mknod -m 666 {tmp_path} c 1 3",
     )
     missing = tmp_path / "gone"
@@ -3582,16 +3582,42 @@ def test_null_device_problem_names_what_replaced_the_device(tmp_path: Path) -> N
 
 
 @pytest.mark.skipif(not IS_LINUX, reason="the /dev/null diagnosis is Linux-only")
-@pytest.mark.skipif(os.geteuid() == 0, reason="root is not denied directory access")
+def test_null_device_problem_inspects_symlinks_as_entries(tmp_path: Path) -> None:
+    """A link to the real device works; any other link is removed as a link, not its target."""
+    to_device = tmp_path / "link-to-device"
+    to_device.symlink_to(os.devnull)
+    assert terminal_mod._null_device_problem(str(to_device)) is None
+
+    dangling = tmp_path / "dangling"
+    dangling.symlink_to(tmp_path / "nowhere")
+    assert terminal_mod._null_device_problem(str(dangling)) == (
+        f"{dangling} is a dangling symbolic link",
+        f"rm -f {dangling} && mknod -m 666 {dangling} c 1 3",
+    )
+
+    to_dir = tmp_path / "link-to-dir"
+    to_dir.symlink_to(tmp_path)
+    assert terminal_mod._null_device_problem(str(to_dir)) == (
+        f"{to_dir} is a symbolic link to a directory instead of the null character device",
+        f"rm -f {to_dir} && mknod -m 666 {to_dir} c 1 3",
+    )
+
+
+@pytest.mark.skipif(not IS_LINUX, reason="the /dev/null diagnosis is Linux-only")
 def test_null_device_problem_stays_silent_when_the_entry_cannot_be_inspected(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    locked = tmp_path / "locked"
-    locked.mkdir(mode=0o000)
-    try:
-        assert terminal_mod._null_device_problem(str(locked / "null")) is None
-    finally:
-        locked.chmod(0o700)
+    denied = str(tmp_path / "null")
+    real_lstat = os.lstat
+
+    def lstat_denied(path: object, *args: object, **kwargs: object) -> os.stat_result:
+        if path == denied:
+            raise PermissionError(errno.EACCES, "Permission denied", denied)
+        return real_lstat(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "lstat", lstat_denied)
+
+    assert terminal_mod._null_device_problem(denied) is None
 
 
 def test_null_device_problem_is_linux_only(

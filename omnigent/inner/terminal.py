@@ -389,6 +389,7 @@ class TerminalLaunchPrerequisiteError(RuntimeError):
 
 _NULL_DEVICE_TYPE_NAMES: tuple[tuple[Callable[[int], bool], str], ...] = (
     (stat.S_ISREG, "regular file"),
+    (stat.S_ISDIR, "directory"),
     (stat.S_ISFIFO, "named pipe"),
     (stat.S_ISSOCK, "socket"),
     (stat.S_ISBLK, "block device"),
@@ -400,44 +401,64 @@ class _NullDeviceProblem(NamedTuple):
     repair: str
 
 
+def _is_null_device(st: os.stat_result) -> bool:
+    return stat.S_ISCHR(st.st_mode) and (os.major(st.st_rdev), os.minor(st.st_rdev)) == (1, 3)
+
+
+def _entry_kind(st: os.stat_result) -> str:
+    if stat.S_ISCHR(st.st_mode):
+        return f"character device {os.major(st.st_rdev)},{os.minor(st.st_rdev)}"
+    return next(
+        (name for is_kind, name in _NULL_DEVICE_TYPE_NAMES if is_kind(st.st_mode)),
+        "non-device file",
+    )
+
+
 def _null_device_problem(path: str = os.devnull) -> _NullDeviceProblem | None:
     """Describe why *path* cannot serve as the null device and how to recreate it.
 
     glibc's ``daemon()``, which tmux uses to start its server, fails with
     ``ENODEV`` unless ``/dev/null`` is character device 1,3; tmux then only
     reports "server exited unexpectedly". Both the check and the ``mknod``
-    numbers are Linux specifics. Returns ``None`` for a healthy device, another
-    platform, or an entry that cannot be inspected.
+    numbers are Linux specifics. Returns ``None`` for a healthy device (or a
+    link to one), another platform, or an entry that cannot be inspected.
     """
     if not IS_LINUX:
         return None
     quoted = shlex.quote(path)
     mknod = f"mknod -m 666 {quoted} c 1 3"
+    replace = f"rm -f {quoted} && {mknod}"
     try:
-        st = os.stat(path)
+        entry = os.lstat(path)
     except FileNotFoundError:
         return _NullDeviceProblem(f"{path} is missing", mknod)
     except OSError:
         return None
-    if stat.S_ISCHR(st.st_mode):
-        major, minor = os.major(st.st_rdev), os.minor(st.st_rdev)
-        if (major, minor) == (1, 3):
+    if stat.S_ISLNK(entry.st_mode):
+        # The link itself is what rm -f removes, whatever it points at.
+        try:
+            target = os.stat(path)
+        except FileNotFoundError:
+            return _NullDeviceProblem(f"{path} is a dangling symbolic link", replace)
+        except OSError:
+            return None
+        if _is_null_device(target):
             return None
         return _NullDeviceProblem(
-            f"{path} is character device {major},{minor} instead of 1,3",
-            f"rm -f {quoted} && {mknod}",
+            f"{path} is a symbolic link to a {_entry_kind(target)} instead of the null "
+            "character device",
+            replace,
         )
-    if stat.S_ISDIR(st.st_mode):
+    if _is_null_device(entry):
+        return None
+    if stat.S_ISDIR(entry.st_mode):
         return _NullDeviceProblem(
-            f"{path} is a directory instead of the null character device",
+            f"{path} is a directory instead of the null character device "
+            "(move its contents elsewhere first if rmdir refuses)",
             f"rmdir {quoted} && {mknod}",
         )
-    kind = next(
-        (name for is_kind, name in _NULL_DEVICE_TYPE_NAMES if is_kind(st.st_mode)),
-        "non-device file",
-    )
     return _NullDeviceProblem(
-        f"{path} is a {kind} instead of the null character device", f"rm -f {quoted} && {mknod}"
+        f"{path} is a {_entry_kind(entry)} instead of the null character device", replace
     )
 
 

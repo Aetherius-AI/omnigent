@@ -104,3 +104,5 @@ def test_launch_failure_names_regular_file_dev_null(tmp_path: Path) -> None:
         f"launch raised {result['error_type']}: {result['error']!r}; "
         f"user-facing message: {result['user_message']!r}"
     )
+    assert result["error_type"] == "TerminalLaunchPrerequisiteError", result
+    assert "rm -f /dev/null && mknod -m 666 /dev/null c 1 3" in result["user_message"], result

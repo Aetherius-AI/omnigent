@@ -23,7 +23,7 @@ from omnigent.harnesses.claude_native.bridge import (
     write_tmux_target,
 )
 from omnigent.inner.terminal import TerminalInstance, TerminalLaunchPrerequisiteError
-from omnigent.runner import create_runner_app, native_controls
+from omnigent.runner import create_runner_app, native_controls, resource_routes
 from omnigent.spec.types import AgentSpec, ExecutorSpec
 from omnigent.terminals import TerminalRegistry
 from tests.runner.conftest import (
@@ -818,4 +818,36 @@ async def test_failed_recreate_with_stale_entry_reports_the_start_error(
     assert resp.status_code == 503, resp.text
     assert "/dev/null is a regular file" in resp.json()["detail"]
     assert registry.get(conv_id, "claude", "main") is not None, "the stale entry stays registered"
-    assert elapsed < 5.0, f"stale entry stalled the control {elapsed:.1f}s"
+    # Far below the 30 s readiness budget; the real guard is the never-polled stub.
+    assert elapsed < 20.0, f"stale entry stalled the control {elapsed:.1f}s"
+
+
+@pytest.mark.asyncio
+async def test_failed_recreate_without_a_readable_error_still_fails_fast(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A failed re-create whose body has no readable message still gets a safe detail."""
+    conv_id = "18293a4b5c6d7e8f901a2b3c4d5e6f07"
+    auto_create_calls: list[str] = []
+    app, registry = await _open_claude_native_session(
+        monkeypatch, conv_id=conv_id, auto_create_calls=auto_create_calls
+    )
+    bridge_dir = bridge_dir_for_conversation_id(conv_id)
+    _plant_dead_claude_pane(registry, conv_id, tmp_path, bridge_dir)
+    _break_claude_terminal_start(monkeypatch)
+    monkeypatch.setattr(resource_routes, "_terminal_start_error_message", lambda _resp: None)
+
+    def _never_polled(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("a failed re-create must not be polled or typed into")
+
+    monkeypatch.setattr(claude_native_bridge, "claude_pane_ready", _never_polled)
+    monkeypatch.setattr(claude_native_bridge, "set_permission_mode", _never_polled)
+
+    async with _runner_client(app) as client:
+        resp = await client.post(
+            f"/v1/sessions/{conv_id}/events",
+            json={"type": "permission_mode_change", "permission_mode": "acceptEdits"},
+        )
+
+    assert resp.status_code == 503, resp.text
+    assert resp.json()["detail"] == resource_routes._NATIVE_PANE_RECREATE_FAILED

@@ -116,6 +116,12 @@ def _terminal_start_error_message(resp: object) -> str | None:
     return message if isinstance(message, str) and message else None
 
 
+# Relayed when a failed re-create left nothing readable for the client.
+_NATIVE_PANE_RECREATE_FAILED = (
+    "The native terminal could not be re-created; see the runner log for details."
+)
+
+
 def register_resource_routes(
     app: FastAPI,
     *,
@@ -668,8 +674,9 @@ def register_resource_routes(
         (kept in lockstep with ``harness_aliases.NATIVE_HARNESSES``).
 
         Returns the client-safe terminal-start error when the ensure reported
+        one, or a generic re-create failure when it failed without a readable
         one, so a UI control can explain why the pane is still missing; ``None``
-        otherwise. Failures are never raised.
+        when nothing failed. Failures are never raised.
         """
         terminal_name = native_terminal_name(harness_name)
         if terminal_name is None:
@@ -736,7 +743,7 @@ def register_resource_routes(
                 conv_id,
                 extra={"session_id": conv_id},
             )
-            return None
+            return _NATIVE_PANE_RECREATE_FAILED
         status = getattr(resp, "status_code", 200)
         if status >= 400:
             message = _terminal_start_error_message(resp)
@@ -748,7 +755,7 @@ def register_resource_routes(
                 "" if message else "; its body carried no error message to relay",
                 extra={"session_id": conv_id},
             )
-            return message
+            return message or _NATIVE_PANE_RECREATE_FAILED
         return None
 
     @app.get("/v1/sessions/{session_id}/resources/terminals/{terminal_id}")
