@@ -12,17 +12,13 @@ import {
 } from "@/components/ui/dialog";
 import { showToast } from "@/components/ui/toast";
 import {
-  configureIsaacCredential,
   installHarnessOnHost,
   refreshHarnessesOnHost,
-  StoreCredentialError,
   useInstallHarness,
   type Host,
-  type StoreCredentialResult,
 } from "@/hooks/useHosts";
 import { useHarnessSetupSteps } from "@/lib/agentLabels";
 import { copyText } from "@/lib/clipboard";
-import { fetchDatabricksStatus } from "@/lib/databricksIntegration";
 import { cn } from "@/lib/utils";
 import { HarnessCredentialForm } from "@/shell/HarnessCredentialForm";
 
@@ -46,7 +42,7 @@ export interface HarnessFixDialogProps {
 }
 
 type CredentialChoice = "isaac" | "personal";
-type Phase = "choose" | "progress" | "databricks" | "personal" | "credentials" | "error";
+type Phase = "choose" | "progress" | "isaac" | "personal" | "credentials" | "error";
 
 const ISAAC_HARNESSES = new Set([
   "claude",
@@ -64,8 +60,6 @@ const PERSONAL_HARNESSES = new Set([
   "pi",
   "pi-native",
 ]);
-const DATABRICKS_POLL_MS = 1_000;
-
 export function HarnessFixDialog(props: HarnessFixDialogProps) {
   const {
     open,
@@ -96,10 +90,8 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
   const [phase, setPhase] = useState<Phase>(initialPhase);
   const [choice, setChoice] = useState<CredentialChoice>(isaacSupported ? "isaac" : "personal");
   const [error, setError] = useState("");
-  const [connectUrl, setConnectUrl] = useState<string | null>(null);
   const [stillNotSignedIn, setStillNotSignedIn] = useState(false);
   const runId = useRef(0);
-  const databricksWindow = useRef<Window | null>(null);
   const install = useInstallHarness(hostId);
 
   const finish = useCallback(
@@ -117,83 +109,14 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
     setPhase("error");
   }, []);
 
-  const openDatabricksTab = useCallback((url: string) => {
-    if (databricksWindow.current && !databricksWindow.current.closed) {
-      databricksWindow.current.location.href = url;
-      return;
-    }
-    databricksWindow.current = window.open(url, "_blank", "noopener,noreferrer");
+  const authenticate = useCallback((selected: CredentialChoice) => {
+    setStillNotSignedIn(false);
+    setPhase(selected);
   }, []);
-
-  const saveIsaacCredential = useCallback(
-    async (id: number): Promise<void> => {
-      try {
-        const result = await configureIsaacCredential(hostId, harness);
-        if (runId.current !== id) return;
-        databricksWindow.current?.close();
-        databricksWindow.current = null;
-        finish(result.configured_harnesses, "Isaac");
-      } catch (reason) {
-        if (
-          reason instanceof StoreCredentialError &&
-          reason.status === 409 &&
-          reason.code === "databricks_not_connected" &&
-          reason.connectUrl
-        ) {
-          if (runId.current !== id) return;
-          setConnectUrl(reason.connectUrl);
-          openDatabricksTab(reason.connectUrl);
-          setPhase("databricks");
-          return;
-        }
-        throw reason;
-      }
-    },
-    [finish, harness, hostId, openDatabricksTab],
-  );
-
-  const waitForDatabricks = useCallback(
-    async (id: number): Promise<void> => {
-      if (runId.current !== id) return;
-      const status = await fetchDatabricksStatus();
-      if (runId.current !== id) return;
-      if (status.connected) {
-        setPhase("progress");
-        await saveIsaacCredential(id);
-        return;
-      }
-      await new Promise<void>((resolve) => {
-        window.setTimeout(resolve, DATABRICKS_POLL_MS);
-      });
-      return waitForDatabricks(id);
-    },
-    [saveIsaacCredential],
-  );
-
-  const startDatabricksWait = useCallback(
-    (id: number) => {
-      void waitForDatabricks(id).catch((reason) => fail(reason, id));
-    },
-    [fail, waitForDatabricks],
-  );
-
-  const authenticate = useCallback(
-    async (selected: CredentialChoice, id: number) => {
-      if (selected === "personal") {
-        setStillNotSignedIn(false);
-        setPhase("personal");
-        return;
-      }
-      setPhase("progress");
-      await saveIsaacCredential(id);
-    },
-    [saveIsaacCredential],
-  );
 
   const start = useCallback(async () => {
     const id = ++runId.current;
     setError("");
-    setConnectUrl(null);
     setStillNotSignedIn(false);
     try {
       if (mode === "update") {
@@ -215,7 +138,7 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
           return;
         }
       }
-      await authenticate(choice, id);
+      authenticate(choice);
     } catch (reason) {
       fail(reason, id);
     }
@@ -228,7 +151,6 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
     runId.current += 1;
     setChoice(isaacSupported ? "isaac" : "personal");
     setError("");
-    setConnectUrl(null);
     setStillNotSignedIn(false);
     setPhase(initialPhase);
     if (mode === "update") void startRef.current();
@@ -237,38 +159,33 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
     };
   }, [harness, hostId, initialPhase, isaacSupported, mode, open]);
 
-  useEffect(() => {
-    if (phase !== "databricks") return;
-    const id = runId.current;
-    startDatabricksWait(id);
-  }, [phase, startDatabricksWait]);
-
   const setOpen = (nextOpen: boolean) => {
-    if (!nextOpen) {
-      runId.current += 1;
-      databricksWindow.current?.close();
-      databricksWindow.current = null;
-    }
+    if (!nextOpen) runId.current += 1;
     onOpenChange(nextOpen);
   };
 
   const retry = () => {
     runId.current += 1;
     setError("");
-    setConnectUrl(null);
     setStillNotSignedIn(false);
     setPhase(mode === "update" ? "progress" : hasCredentialCards ? "choose" : "credentials");
     if (mode === "update") void start();
   };
 
-  const checkPersonal = async () => {
+  const checkAgain = async () => {
     const id = ++runId.current;
     setStillNotSignedIn(false);
     try {
       const result = await refreshHarnessesOnHost(hostId);
       if (runId.current !== id) return;
       if (result.configured_harnesses[harness] === true) {
-        finish(result.configured_harnesses, "Personal subscription");
+        const credentialLabel =
+          phase === "isaac" && result.gateway_inference?.[harness]
+            ? "Isaac"
+            : phase === "personal"
+              ? "Personal subscription"
+              : undefined;
+        finish(result.configured_harnesses, credentialLabel);
       } else {
         setStillNotSignedIn(true);
       }
@@ -284,8 +201,8 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
     status: "online",
   };
 
-  const onCredentialStored = (result?: StoreCredentialResult) => {
-    if (result) finish(result.configured_harnesses);
+  const onCredentialStored = () => {
+    void checkAgain();
   };
 
   return (
@@ -315,8 +232,12 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
               hostName={hostName}
               stillNotSignedIn={stillNotSignedIn}
             />
-          ) : phase === "databricks" ? (
-            <DatabricksWait connectUrl={connectUrl} onOpen={openDatabricksTab} />
+          ) : phase === "isaac" ? (
+            <IsaacCommand
+              harnessLabel={harnessLabel}
+              hostName={hostName}
+              stillNotSignedIn={stillNotSignedIn}
+            />
           ) : phase === "credentials" ? (
             <CredentialForms
               harnessLabel={harnessLabel}
@@ -352,12 +273,12 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
               </Button>
               <Button onClick={retry}>Try again</Button>
             </>
-          ) : phase === "personal" ? (
+          ) : phase === "personal" || phase === "isaac" ? (
             <>
               <Button variant="outline" onClick={() => setOpen(false)}>
                 Close
               </Button>
-              <Button onClick={() => void checkPersonal()}>Check again</Button>
+              <Button onClick={() => void checkAgain()}>Check again</Button>
             </>
           ) : phase === "credentials" ? (
             <Button variant="outline" onClick={() => setOpen(false)}>
@@ -522,8 +443,9 @@ function PersonalCommand({
       <DialogDescription>Run this in a terminal on {hostName}, then come back.</DialogDescription>
       <CommandRow command={command} label="Copy login command" />
       <p className="text-sm text-muted-foreground">
-        Sign in with your {harness.startsWith("claude") ? "Claude" : "ChatGPT"} plan when it opens
-        the browser.
+        {harness.startsWith("claude")
+          ? "Open the link it prints, then paste the code from your browser back into the terminal."
+          : "Open the link it prints and enter the one-time code."}
       </p>
       {stillNotSignedIn && (
         <p role="status" className="text-sm text-destructive">
@@ -534,30 +456,26 @@ function PersonalCommand({
   );
 }
 
-function DatabricksWait({
-  connectUrl,
-  onOpen,
+function IsaacCommand({
+  harnessLabel,
+  hostName,
+  stillNotSignedIn,
 }: {
-  connectUrl: string | null;
-  onOpen: (url: string) => void;
+  harnessLabel: string;
+  hostName: string;
+  stillNotSignedIn: boolean;
 }) {
   return (
     <>
-      <DialogDescription>
-        Finish connecting Databricks in the browser tab that just opened.
-      </DialogDescription>
-      <div className="flex items-center gap-2.5 text-ui">
-        <Loader2Icon aria-label="In progress" className="size-4 animate-spin" />
-        <span>Waiting for Databricks sign-in</span>
-      </div>
-      {connectUrl && (
-        <button
-          type="button"
-          className="self-start text-sm text-muted-foreground underline underline-offset-4 hover:text-foreground"
-          onClick={() => onOpen(connectUrl)}
-        >
-          Open the Databricks sign-in tab again
-        </button>
+      <DialogDescription>Run this in a terminal on {hostName}, then come back.</DialogDescription>
+      <CommandRow command="omni setup" label="Copy omni setup" />
+      <p className="text-sm text-muted-foreground">
+        Choose {harnessLabel}, then the Databricks Unity Gateway credential.
+      </p>
+      {stillNotSignedIn && (
+        <p role="status" className="text-sm text-destructive">
+          Still not signed in on {hostName}.
+        </p>
       )}
     </>
   );
@@ -574,7 +492,7 @@ function CredentialForms({
   hostName: string;
   harness: string;
   host: Host;
-  onDone: (result?: StoreCredentialResult) => void;
+  onDone: () => void;
 }) {
   return (
     <>
@@ -650,6 +568,7 @@ function dialogTitle(
   hostName: string,
 ): string {
   if (phase === "personal") return `Sign in to ${harnessLabel} on ${hostName}`;
+  if (phase === "isaac") return `Set up Isaac for ${harnessLabel} on ${hostName}`;
   if (phase === "error") {
     if (mode === "update") return `Couldn’t update ${harnessLabel}`;
     if (mode === "install") return `Couldn’t install ${harnessLabel}`;
