@@ -223,24 +223,45 @@ def test_missing_workspace_turn_shows_structured_error_without_error_funnel(
             message=f"session {session_id} never reached status=failed",
         )
 
-        # App logs may be in the named process log, not captured stdout.
-        server_logs = sorted(tmp_path_factory.getbasetemp().glob("e2e_ui_server*/server.log"))
-        assert server_logs, "suite-spawned server log not found under the pytest basetemp"
-        log_files = list(server_logs)
-        for stdout_log in server_logs:
-            banner = re.search(
-                r"^\s*log:\s+(\S+)", stdout_log.read_text(errors="replace"), re.MULTILINE
-            )
-            if banner:
-                process_log = Path(banner.group(1)).expanduser()
-                if process_log.exists():
-                    log_files.append(process_log)
-        log_lines = [
-            line for log in log_files for line in log.read_text(errors="replace").splitlines()
-        ]
+        # App logs land in the named process log, not the captured stdout, and
+        # the server flushes them asynchronously — poll until the refusal record
+        # is on disk instead of racing the first read.
+        def _scan_server_logs() -> list[str]:
+            server_logs = sorted(tmp_path_factory.getbasetemp().glob("e2e_ui_server*/server.log"))
+            assert server_logs, "suite-spawned server log not found under the pytest basetemp"
+            log_files = list(server_logs)
+            for stdout_log in server_logs:
+                banner = re.search(
+                    r"^\s*log:\s+(\S+)", stdout_log.read_text(errors="replace"), re.MULTILINE
+                )
+                if banner:
+                    process_log = Path(banner.group(1)).expanduser()
+                    if process_log.exists():
+                        log_files.append(process_log)
+            return [
+                line for log in log_files for line in log.read_text(errors="replace").splitlines()
+            ]
+
+        def _refusal_records() -> list[str]:
+            return [
+                line
+                for line in _scan_server_logs()
+                if f"session turn refused for {session_id}" in line
+                and _WORKSPACE_MISSING_PREFIX in line
+            ]
+
+        # The categorical WARNING also proves the scan reached the live server log.
+        _wait_until(
+            lambda: bool(_refusal_records()),
+            timeout_s=30.0,
+            message=(
+                "the workspace_missing refusal left no categorical "
+                "'session turn refused' record in the server logs"
+            ),
+        )
         funnel_lines = [
             line
-            for line in log_lines
+            for line in _scan_server_logs()
             if f"session turn failed for {session_id}" in line
             and _WORKSPACE_MISSING_PREFIX in line
             and "ERROR" in line
@@ -249,17 +270,6 @@ def test_missing_workspace_turn_shows_structured_error_without_error_funnel(
             "expected workspace_missing refusal was logged through the "
             "ERROR-level 'session turn failed' funnel that error dashboards "
             f"attribute to server defects:\n{funnel_lines}"
-        )
-        # A refusal record also proves the scan reached the live server log.
-        refusal_lines = [
-            line
-            for line in log_lines
-            if f"session turn refused for {session_id}" in line
-            and _WORKSPACE_MISSING_PREFIX in line
-        ]
-        assert refusal_lines, (
-            "the workspace_missing refusal left no categorical "
-            f"'session turn refused' record in the server logs: {log_files}"
         )
     finally:
         if session_id is not None:
