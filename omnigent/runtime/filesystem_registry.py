@@ -736,7 +736,7 @@ class AgentEditFilesystemRegistry(FilesystemRegistry):
         norm = _normalize_path(path, self._cwd)
         if norm is None:
             return
-        if _is_ephemeral(norm) or _is_harness_plumbing(norm):
+        if _is_ephemeral(norm):
             return
         bytes_: int | None = None
         modified_at: int | None = None
@@ -789,9 +789,9 @@ class AgentEditFilesystemRegistry(FilesystemRegistry):
         last_op: dict[str, str] = {}
         by_path: dict[str, _FileEvent] = {}
         for e in events:
-            # Ephemeral artifacts and harness plumbing are filtered here as a
-            # second line of defence, primarily for events injected without
-            # going through record_change (e.g. in tests).
+            # Ephemeral artifacts are filtered here as a second line of defence
+            # (events injected without record_change, e.g. in tests). Harness
+            # plumbing is hidden only at read time so the raw event is kept.
             if _is_ephemeral(e.path) or _is_harness_plumbing(e.path):
                 continue
             # Events are appended chronologically, so the last write wins for

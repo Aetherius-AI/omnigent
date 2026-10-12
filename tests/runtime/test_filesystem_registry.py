@@ -585,6 +585,12 @@ def test_agent_edit_registry_hides_omnigent_cursor_plumbing(
         _inject(registry, f".cursor/{name}", "created", conv_id)
     _inject(registry, ".cursor/rules/style.md", "created", conv_id)
     _inject(registry, "real_change.py", "created", conv_id)
+    # An agent edit to a plumbing path is recorded but hidden at read time.
+    registry.record_change(".cursor/mcp.json", "modified", conv_id)
+    assert any(
+        e.path == ".cursor/mcp.json" and e.operation == "modified"
+        for e in registry._session_events[conv_id]
+    )
 
     paths = [r["path"] for r in registry.list_changed_files(conv_id, limit=100)]
     assert sorted(paths) == [".cursor/rules/style.md", "real_change.py"], (
@@ -602,9 +608,18 @@ def test_cursor_plumbing_allowlist_matches_the_launchers(tmp_path: Path, monkeyp
     """The hidden paths are exactly the files the Cursor launchers write into a workspace."""
     from omnigent.harnesses.cursor_native import bridge
     from omnigent.inner.cursor_executor import _write_cursor_hooks
+    from omnigent.native import native_policy_hook
 
-    # The relay token is written outside the workspace and needs a hardened bridge root.
+    # Stub the launchers' side effects outside the workspace: the relay token
+    # dir, the real ~/.cursor config, and credential discovery for the hook wrapper.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
     monkeypatch.setattr(bridge, "write_mcp_bridge_config", lambda bridge_dir: None)
+    monkeypatch.setattr(bridge, "enable_mcp_for_workspace", lambda workspace: None)
+    monkeypatch.setattr(bridge, "allow_mcp_tools_in_cli_config", lambda: None)
+    monkeypatch.setattr(
+        native_policy_hook, "policy_hook_wrapper_script", lambda *args: "#!/bin/sh\n"
+    )
     workspace = tmp_path / "ws"
     workspace.mkdir()
     bridge.write_mcp_config(workspace, tmp_path / "bridge")
