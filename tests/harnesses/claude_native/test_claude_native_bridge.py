@@ -37,6 +37,7 @@ from omnigent.harnesses.claude_native.bridge import (
     _LOGIN_GUIDANCE,
     _build_tools,
     _claude_prompt_rendered,
+    _composer_row,
     _escape_unsupported_slash_command,
     _hook_record_from_jsonl_record,
     _is_box_rule,
@@ -8838,6 +8839,26 @@ def test_shell_mode_in_a_box_wider_than_the_pane_still_reads_as_shell_mode() -> 
     )
     assert _claude_prompt_rendered(pane) is False
     assert _occupying_surface(pane) == "shell mode"
+
+
+def test_box_wider_than_the_pane_outranks_the_shortcuts_panel_row() -> None:
+    """
+    The composer is read upward from the closing rule before the row under it.
+
+    With no row of the opening rule reading as a rule, the row under the
+    lowest rule is the ``?`` panel's "! for shell mode" row while that panel
+    is open, so a free chat composer would read as shell mode. Shell mode in
+    the same box must still be reported.
+    """
+    panel = "  ! for shell mode        double tap esc to clear input"
+    title_rows = [f" {_PANE_WIDE_TITLE[:56]}", f"{_PANE_WIDE_TITLE[56:64]} ─"]
+    chat = "\n".join([*title_rows, "❯", "─" * 57, "─" * 10, panel])
+    shell = "\n".join([*title_rows, "!", "─" * 57, "─" * 10, panel])
+    assert _composer_row(chat) == "❯"
+    assert _claude_prompt_rendered(chat) is True
+    assert _occupying_surface(chat) is None
+    assert _composer_row(shell) == "!"
+    assert _occupying_surface(shell) == "shell mode"
 
 
 def test_history_search_in_a_box_wider_than_the_pane_still_reads_as_occupied() -> None:

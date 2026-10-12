@@ -5739,8 +5739,9 @@ def _composer_row(pane: str) -> str | None:
     title, so no row of that rule reads as one, and the closing rule wraps
     onto stub rows. Rules are therefore read as bands (:func:`_rule_bands`),
     and when no composer glyph sits under the opening rule the box is read
-    upward from its closing rule
-    (:func:`_composer_row_above_closing_rule`).
+    upward from its closing rule (:func:`_composer_row_above_closing_rule`)
+    before the row under the lowest rule is tried: with a complete box that
+    row is the ``?`` panel's "! for shell mode" row.
 
     :param pane: Captured pane text from :func:`_capture_pane`.
     :returns: The row's text, e.g. ``"❯ fix the bug"`` or ``"!"`` in shell
@@ -5750,15 +5751,22 @@ def _composer_row(pane: str) -> str | None:
     bands = _rule_bands(non_empty)
     if not bands:
         return None
-    candidates = [bands[-2][1] + 1] if len(bands) >= 2 else []
-    candidates.append(bands[-1][1] + 1)
-    for idx in candidates:
-        if idx >= len(non_empty):
-            continue
-        row = non_empty[idx]
-        if row.strip()[:1] in _COMPOSER_MODE_GLYPHS:
+    if len(bands) >= 2:
+        row = _composer_glyph_row(non_empty, bands[-2][1] + 1)
+        if row is not None:
             return row
-    return _composer_row_above_closing_rule(non_empty, bands[-1][0])
+    row = _composer_row_above_closing_rule(non_empty, bands[-1][0])
+    if row is not None:
+        return row
+    return _composer_glyph_row(non_empty, bands[-1][1] + 1)
+
+
+def _composer_glyph_row(lines: list[str], idx: int) -> str | None:
+    """Return ``lines[idx]`` when it is led by a composer glyph, else ``None``."""
+    if idx >= len(lines):
+        return None
+    row = lines[idx]
+    return row if row.strip()[:1] in _COMPOSER_MODE_GLYPHS else None
 
 
 def _composer_row_above_closing_rule(lines: list[str], closing_rule: int) -> str | None:
