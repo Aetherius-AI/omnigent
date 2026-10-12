@@ -135,8 +135,13 @@ class _ClaudePaneRig:
                 check=False,
             )
             fields = proc.stdout.split()
-            if fields[:1] == ["1"] and len(fields) > 1:
-                return fields[1]
+            if fields[:1] == ["1"]:
+                if len(fields) > 1:
+                    return fields[1]
+                # Ubuntu's tmux links libutempter, whose helper resets SIGCHLD
+                # during pane teardown; a shell exiting then stays an unreaped
+                # zombie with no status until tmux next reaps. Fork a job for it.
+                self._tmux("run-shell", "true", check=False)
             time.sleep(0.05)
         raise AssertionError("pane did not exit in time")
 
