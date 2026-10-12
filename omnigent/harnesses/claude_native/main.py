@@ -653,13 +653,11 @@ def _claude_config_window_spelling(
     model: str | None,
     claude_config: ClaudeNativeUcodeConfig | None,
 ) -> str | None:
-    """Spell *model* the way the config pins it when that pin carries ``[1m]``.
+    """Spell *model* as the config pins it when that pin carries ``[1m]``.
 
-    A spec pin, a persisted pick or a routed id names a served model bare
-    (``databricks-claude-opus-5-5``, ``system.ai.claude-opus-5-5``); launched
-    or ``/model``-ed verbatim, Claude Code would run that same model at its
-    200K default. A pick that already carries the marker, a family alias, and
-    an id the config does not pin pass through unchanged.
+    A spec pin, persisted pick or routed id names a served model bare; spoken
+    verbatim, Claude Code would run the same model at 200K. Marked picks,
+    family aliases and unpinned ids pass through.
 
     :param model: A concrete model id, alias, or ``None``.
     :param claude_config: Resolved provider config for the terminal, or ``None``.
@@ -3450,24 +3448,16 @@ def claude_config_with_1m_window(
 ) -> ClaudeNativeUcodeConfig | None:
     """Spell the config's natively-1M Claude models with Claude Code's ``[1m]`` marker.
 
-    Claude Code sizes a session's context window client-side from the model id
-    it runs on. It knows the canonical Anthropic ids, but a custom endpoint's
-    own spelling (``databricks-claude-opus-5-5``) is unknown to it and falls
-    back to a 200K window. ``[1m]`` is its opt-in: the session is sized at 1M,
-    the ``context-1m`` beta rides the request, and the marker is stripped from
-    the wire model. The family pins are what ``/model opus`` and the picker
-    resolve to, so the marker lives on every spelling this config hands Claude
-    Code — the alias pins, the custom slot, the default, the routable ids and
-    the canonical→served overrides — not just on one launch's ``--model``.
-
-    Only models Claude Code's own catalog serves at 1M natively are marked; a
-    generation whose 1M is a beta opt-in keeps Claude Code's default, as on
-    the Anthropic API. The Anthropic API and Bedrock are left alone: Claude
-    Code recognizes those ids and sizes them itself.
+    Claude Code sizes the context window client-side from the model id and caps
+    an id it does not know (a gateway's ``databricks-claude-opus-5-5``) at 200K;
+    ``[1m]`` is its opt-in and never reaches the wire. The alias pins are what
+    ``/model opus`` resolves to, so every spelling handed to Claude Code carries
+    the marker, not just one launch's ``--model``. Only models its catalog serves
+    at 1M natively qualify; the Anthropic API and Bedrock, whose ids it
+    recognizes, are left alone.
 
     :param claude_config: The resolved launch config, or ``None``.
-    :returns: The config with marked spellings; *claude_config* itself when
-        nothing changes.
+    :returns: The marked config, or *claude_config* itself when nothing changes.
     """
     if claude_config is None or claude_config.env.get(_ANTHROPIC_BEDROCK_BASE_URL_ENV):
         return claude_config
@@ -3507,10 +3497,9 @@ def resolve_native_claude_config(
     The single entry point both native-claude launch paths use (the CLI
     ``omnigent claude`` and the runner's host-spawned auto-create), so the
     native harness honors ``omnigent setup`` exactly like the in-process
-    claude-sdk harness. The provider's own spelling comes from
-    :func:`_resolve_native_claude_provider_config` (precedence documented
-    there); natively-1M Claude models on a custom endpoint are then spelled
-    with Claude Code's window marker (:func:`claude_config_with_1m_window`).
+    claude-sdk harness. :func:`_resolve_native_claude_provider_config` picks
+    the provider (precedence documented there); the result then gets Claude
+    Code's ``[1m]`` window marker via :func:`claude_config_with_1m_window`.
 
     :param spec: The agent spec, or ``None`` for the bare ``omnigent
         claude`` launch.
