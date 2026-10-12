@@ -2828,10 +2828,9 @@ async def _post_pi_native_effort_notice(
 
 
 _CODEX_THREAD_RESET_NOTICE = (
-    "Codex reported an internal error while loading this session's saved transcript, "
-    "so Omnigent started a fresh Codex thread instead of failing the turn. The chat "
-    "history here is intact, but Codex's own memory of the earlier turns is not "
-    "restored."
+    "Codex could not load this session's saved transcript, so Omnigent started a fresh "
+    "Codex thread instead of failing the turn. The chat history here is intact, but "
+    "Codex's own memory of the earlier turns is not restored."
 )
 
 
@@ -4599,7 +4598,8 @@ async def _launch_codex_native_tui(
         resolve_harness_config,
     )
 
-    _codex_harness_cfg = load_effective_config()
+    # Read project config from the session workspace; the runner's cwd may be gone.
+    _codex_harness_cfg = load_effective_config(workspace=workspace)
     # Honor configured wrappers while keeping the host-provisioned binary
     # immune to ambient OMNIGENT_CODEX_PATH overrides.
     _, _codex_overrides = resolve_harness_config(_codex_harness_cfg)
@@ -4793,6 +4793,10 @@ async def _auto_create_codex_terminal(
     import socket as _socket
     from pathlib import Path
 
+    # A relaunch after an in-place upgrade must not import new code into an
+    # old process: the first launch loads the resume/fork module graph too.
+    import omnigent.harnesses.codex_native.main as _codex_native_main  # noqa: F401
+    import omnigent.harnesses.codex_native.process_registry as _process_registry  # noqa: F401
     from omnigent.harnesses.codex_native.app_server import (
         CodexAppServerClient,
         CodexAppServerResponseError,
@@ -4802,6 +4806,7 @@ async def _auto_create_codex_terminal(
         codex_session_meta_model_provider,
         fresh_codex_launch_catalog,
         is_unreadable_thread_error,
+        native_codex_launch_pins_model_provider,
         preload_codex_thread_for_resume,
         resolve_native_codex_launch,
     )
@@ -5367,6 +5372,11 @@ async def _auto_create_codex_terminal(
                 launch_config.external_session_id,
                 terminal_launch_args=launch_config.terminal_launch_args,
                 cwd=Path(workspace),
+                model_provider=(
+                    _session_meta_provider
+                    if native_codex_launch_pins_model_provider(_codex_launch)
+                    else None
+                ),
                 retain_client=codex_remote_resume_omits_permission_args(
                     app_server.codex_cli_version
                 ),
@@ -5581,15 +5591,17 @@ async def _auto_create_codex_terminal(
     return terminal_view
 
 
-def _codex_terminal_exit_summary(instance: TerminalInstance, *, before_thread: bool) -> str:
+def _terminal_exit_summary(
+    instance: TerminalInstance, runtime_name: str, *, before_thread: bool
+) -> str:
     """Describe a TUI startup exit without inventing an unavailable status."""
     exit_status = instance.last_exit_status()
     status_text = f" with status {exit_status}" if exit_status is not None else ""
     stage = "before starting a thread" if before_thread else "before becoming available"
-    return f"Codex terminal exited{status_text} {stage}."
+    return f"{runtime_name} terminal exited{status_text} {stage}."
 
 
-def _codex_startup_terminal_output(instance: TerminalInstance) -> str | None:
+def _startup_terminal_output(instance: TerminalInstance) -> str | None:
     """Apply the same capture gate and bounds to both startup-error paths."""
     from omnigent.harnesses.diagnostics import sanitize_diagnostic_text
     from omnigent.process_logging import harness_stderr_capture_enabled
@@ -5605,7 +5617,7 @@ class _CodexTerminalExited(RuntimeError):
 
     def __init__(self, instance: TerminalInstance) -> None:
         self.instance = instance
-        super().__init__(_codex_terminal_exit_summary(instance, before_thread=True))
+        super().__init__(_terminal_exit_summary(instance, "Codex", before_thread=True))
 
 
 class _CodexSignInPromptSeen(RuntimeError):
@@ -5961,7 +5973,7 @@ async def _codex_discover_thread_and_forward(
                             ),
                         )
                         if harness_stderr_capture_enabled():
-                            diagnostics["terminal_last_output"] = _codex_startup_terminal_output(
+                            diagnostics["terminal_last_output"] = _startup_terminal_output(
                                 diag_instance
                             )
                 except Exception as diagnostics_error:  # noqa: BLE001
@@ -6031,7 +6043,7 @@ async def _codex_discover_thread_and_forward(
                 if isinstance(exc, _CodexTerminalExited):
                     # The app-server stayed healthy; lead with the TUI's actual
                     # failure instead of the generic thread-discovery wrapper.
-                    summary = _codex_terminal_exit_summary(exc.instance, before_thread=True)
+                    summary = _terminal_exit_summary(exc.instance, "Codex", before_thread=True)
                 else:
                     if isinstance(exc, TimeoutError):
                         timeout_seconds = (
@@ -7674,12 +7686,29 @@ def _native_terminal_start_error_payload(
     from omnigent.harnesses.claude_native.bridge import ClaudeNativeHookInterpreterMismatchError
     from omnigent.terminals.registry import TerminalExitedDuringLaunch
 
-    if runtime_name == "Codex" and isinstance(exc, TerminalExitedDuringLaunch):
-        message = _codex_terminal_exit_summary(exc.instance, before_thread=False)
-        # A failed diagnostic read must not hide the known terminal-exit cause.
+    if isinstance(exc, TerminalExitedDuringLaunch):
+        # The exit status and captured output ride on the exception for every
+        # runtime. A failed diagnostic read must not hide the known
+        # terminal-exit cause.
+        output: str | None = None
+        diagnosis = None
         with contextlib.suppress(Exception):
-            if output := _codex_startup_terminal_output(exc.instance):
-                message += f"\nCodex startup terminal output:\n{output}"
+            from omnigent.runner.launch_failure import classify_terminal_failure
+
+            output = _startup_terminal_output(exc.instance)
+            diagnosis = classify_terminal_failure(
+                command=exc.instance.command,
+                exit_status=exc.instance.last_exit_status(),
+                output=output,
+            )
+        if diagnosis is not None:
+            message = f"{diagnosis.title}: {diagnosis.cause}"
+            if diagnosis.remediation:
+                message = f"{message} {diagnosis.remediation}"
+        else:
+            message = _terminal_exit_summary(exc.instance, runtime_name, before_thread=False)
+            if output:
+                message += f"\n{runtime_name} startup terminal output:\n{output}"
     elif isinstance(exc, ClaudeNativeHookInterpreterMismatchError):
         message = (
             "Claude Code is Windows-native, but Omnigent is running under WSL. "
@@ -10166,6 +10195,8 @@ async def _session_labels_for_runner_spawn(
         ``"conv_abc123"``.
     :returns: String label mapping. Empty on lookup failure.
     """
+    from omnigent.inner.databricks_executor import DatabricksAuthError
+
     path = f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}/labels"
     try:
         resp = await server_client.get(
@@ -10180,7 +10211,9 @@ async def _session_labels_for_runner_spawn(
             extra={"session_id": session_id},
         )
         return {}
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, DatabricksAuthError) as exc:
+        # DatabricksAuthError: the host credential service couldn't sign the
+        # request. Like any other lookup failure, that must not fail the turn.
         _logger.warning(
             "Failed to resolve session labels; session=%s error=%s",
             session_id,

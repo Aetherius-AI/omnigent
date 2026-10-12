@@ -145,6 +145,9 @@ _MAX_SEEN_BTW_KEYS = 64
 # progress rather than that a healthy backlog drain simply took a long time.
 _FORWARD_LOOP_STALL_DEADLINE_S = 300.0
 _POST_TIMEOUT_S = 10.0
+# A child-history POST carries up to 100 items and can outlast the live lane's
+# budget; that lane runs off the latency-sensitive path, so it gets more room.
+_SUBAGENT_POST_TIMEOUT_S = 30.0
 _MAX_SEEN_SOURCE_IDS = 2000
 _SUBAGENT_FORWARD_CONCURRENCY = 8
 # A batch gets a bounded number of attempts before it is split into
@@ -884,6 +887,9 @@ class _ForwardDedupeState:
     # partial answer.
     btw_pending_key: str | None = None
     posted_btw_keys: dict[str, None] = field(default_factory=dict)
+    # Session already logged as moved off this runner, so the notice is not
+    # repeated for every item dropped afterwards.
+    session_not_bound_logged_for: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1249,6 +1255,7 @@ async def forward_claude_transcript_to_session(
     observer_stderr_offset = 0
     transcript_diagnostics = _TranscriptDiscoveryDiagnostics(started_at=time.monotonic())
     timeout = httpx.Timeout(_POST_TIMEOUT_S)
+    subagent_timeout = httpx.Timeout(_SUBAGENT_POST_TIMEOUT_S)
     from omnigent.cli_auth import open_server_client
 
     async with (
@@ -1264,7 +1271,7 @@ async def forward_claude_transcript_to_session(
             base_url,
             headers=headers,
             auth=auth,
-            timeout=timeout,
+            timeout=subagent_timeout,
             event_dispatcher=event_dispatcher,
         ) as subagent_client,
     ):
@@ -3481,19 +3488,28 @@ async def _create_fork_replacement_session(
     return new_session_id
 
 
-def _stop_failure_detail(record: ClaudeHookRecord) -> str | None:
+def _stop_failure_detail(record: ClaudeHookRecord, *, session_id: str) -> str | None:
     """
     Return the reason a ``StopFailure`` hook gives for its failed turn.
 
-    The hook carries the error text Claude Code rendered, which the transcript
-    mirror can deliver after the failed edge or not at all; without it the
-    server borrows the turn's last prose or reports no detail.
+    When ``error_details`` was absent a WARNING is emitted so the missing
+    field is observable in structured logs; the server can then fall back
+    to the committed API-error text from its own store.
 
     :param record: ``StopFailure`` hook record.
-    :returns: The error text, a category-only fallback, or ``None``.
+    :param session_id: Session id for structured warning logs on fallback.
+    :returns: The error detail, a category-only fallback, or ``None``.
     """
     if record.failure_message is not None:
         return record.failure_message
+    _logger.warning(
+        "StopFailure hook carried no error_details; using fallback detail; "
+        "session=%s event_cursor=%s category=%s",
+        session_id,
+        record.event_cursor,
+        record.failure_category,
+        extra={"session_id": session_id},
+    )
     if record.failure_category is not None:
         return f"Claude Code ended the turn with an API error ({record.failure_category})."
     return None
@@ -3541,7 +3557,7 @@ def _stop_failure_context(
     parent_claude_session_ids: Collection[str],
     diagnostic_health: Callable[[], FailureContext] | None = None,
 ) -> FailureContext:
-    """Preserve hook evidence separately from last-assistant display text."""
+    """Preserve hook evidence separately from the displayed error detail."""
     reason = _subagent_hook_reason(record, parent_claude_session_ids)
     context: dict[str, object] = {
         **(record.failure_context or {}),
@@ -3567,7 +3583,7 @@ def _stop_failure_context(
         "failure_decision": "suppressed" if reason else "session_failed",
         "suppression_reason": reason,
         "detail_source": (
-            "hook_last_assistant_message"
+            "hook_error_details"
             if record.failure_message is not None
             else "hook_error_category"
             if record.failure_category is not None
@@ -4228,7 +4244,9 @@ async def _forward_available_status_events(
                 # the UI can name the shells. Dropped on ``failed`` for the same
                 # reason as the count (the server clears the tally there).
                 background_tasks=(None if status == "failed" else record.background_tasks),
-                failure_detail=_stop_failure_detail(record) if status == "failed" else None,
+                failure_detail=_stop_failure_detail(record, session_id=session_id)
+                if status == "failed"
+                else None,
                 failure_context=failure_context,
             )
         except httpx.HTTPError as exc:
@@ -4778,13 +4796,20 @@ async def _forward_available_items(
                     delivered_ambiguous=False,
                     http_status=_http_status_for_log(exc),
                 )
-                await _post_forwarder_failed_status(
-                    client,
-                    session_id=session_id,
-                    reason=f"transcript item {item.source_id} rejected",
-                    source_id=retry_key,
-                    response_id=current_response_id,
-                )
+                if _is_session_not_bound(exc):
+                    # The session now lives on another runner; a failed status
+                    # from this one would fail it there.
+                    _log_session_not_bound_once(
+                        dedupe, session_id=session_id, source_id=item.source_id
+                    )
+                else:
+                    await _post_forwarder_failed_status(
+                        client,
+                        session_id=session_id,
+                        reason=f"transcript item {item.source_id} rejected",
+                        source_id=retry_key,
+                        response_id=current_response_id,
+                    )
                 seen.add(item.source_id)
                 seen_source_ids.append(item.source_id)
                 updated = TranscriptForwardState(
@@ -6280,6 +6305,37 @@ async def _post_forwarder_failed_status(
         )
 
 
+def _log_session_not_bound_once(
+    dedupe: _ForwardDedupeState,
+    *,
+    session_id: str,
+    source_id: str,
+) -> None:
+    """
+    Log that a session left this runner, once per session.
+
+    :param dedupe: Forwarder state remembering the session already logged.
+    :param session_id: Omnigent session/conversation id.
+    :param source_id: Source id of the dropped transcript item, e.g.
+        ``"item-1:0:message"``; never the item content.
+    :returns: None.
+    """
+    if dedupe.session_not_bound_logged_for == session_id:
+        return
+    dedupe.session_not_bound_logged_for = session_id
+    _logger.info(
+        "Claude transcript item dropped: session is no longer bound to this runner; "
+        "session=%s source_id=%s",
+        session_id,
+        source_id,
+        extra=debug_event(
+            "claude_forwarder_session_not_bound",
+            session_id=session_id,
+            source_id=source_id,
+        ),
+    )
+
+
 async def _post_external_session_todos(
     client: httpx.AsyncClient,
     *,
@@ -6316,6 +6372,19 @@ def _is_permanent_http_error(exc: httpx.HTTPError) -> bool:
         return False
     status_code = exc.response.status_code
     return 400 <= status_code < 500 and status_code not in _HTTP_TRANSIENT_STATUS_CODES
+
+
+def _is_session_not_bound(exc: httpx.HTTPError) -> bool:
+    """
+    Return whether ``exc`` means the session no longer belongs to this runner.
+
+    The runner event tunnel answers 403 for a session that was moved to another
+    runner while this runner's Claude pane and forwarder stayed alive.
+
+    :param exc: HTTP exception raised while posting an Omnigent event.
+    :returns: ``True`` for a 403 status response, otherwise ``False``.
+    """
+    return _http_status_for_log(exc) == 403
 
 
 def _is_subagent_delivery_not_confirmed(exc: httpx.HTTPError) -> bool:
