@@ -514,6 +514,9 @@ _DETERMINISTIC_HANDSHAKE_ERRORS: tuple[type[Exception], ...] = (
 
 def _connection_error_is_retryable(exc: Exception, stage: str) -> bool:
     """Whether reconnecting can recover from *exc* failing the tunnel at *stage*."""
+    if stage in {"hello", "protocol"}:
+        # Nothing has reached the store yet, so the frame itself is at fault.
+        return False
     if stage == "connected":
         # The server accepted this registration once; a later fault is a
         # disconnect worth retrying.

@@ -6,7 +6,6 @@ import os
 import re
 import signal
 import subprocess
-import sys
 import time
 import uuid
 from pathlib import Path
@@ -17,6 +16,7 @@ import yaml
 
 from omnigent.host import HOST_FATAL_EXIT_CODE
 from omnigent.process_logging import PROCESS_LOG_FILE_ENV_VAR
+from tests._helpers.compat import apply_runner_env, compat_runner_cwd, runner_executable
 from tests.e2e.conftest import POLL_INTERVAL_S
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -46,20 +46,24 @@ def _spawn_omnigent_host(
     """Run the user's ``omnigent host --server <url>`` with *home* as its identity."""
     console_log = home / "console.log"
     process_log = home / "host.log"
-    env = {
-        **os.environ,
-        "HOME": str(home),
-        "OMNIGENT_CONFIG_HOME": str(home / "config"),
-        "OMNIGENT_DATA_DIR": str(home / "data"),
-        PROCESS_LOG_FILE_ENV_VAR: str(process_log),
-        "PYTHONPATH": os.pathsep.join([str(_REPO_ROOT), os.environ.get("PYTHONPATH", "")]).rstrip(
-            os.pathsep
-        ),
-    }
+    # Runner compat mode pins an older host build; apply_runner_env drops the
+    # worktree PYTHONPATH there so that build is not shadowed.
+    env = apply_runner_env(
+        {
+            **os.environ,
+            "HOME": str(home),
+            "OMNIGENT_CONFIG_HOME": str(home / "config"),
+            "OMNIGENT_DATA_DIR": str(home / "data"),
+            PROCESS_LOG_FILE_ENV_VAR: str(process_log),
+            "PYTHONPATH": os.pathsep.join(
+                [str(_REPO_ROOT), os.environ.get("PYTHONPATH", "")]
+            ).rstrip(os.pathsep),
+        }
+    )
     with console_log.open("wb") as console:
         proc = subprocess.Popen(
             [
-                sys.executable,
+                runner_executable(),
                 "-m",
                 "omnigent",
                 "host",
@@ -68,7 +72,7 @@ def _spawn_omnigent_host(
                 "--non-interactive",
             ],
             env=env,
-            cwd=str(_REPO_ROOT),
+            cwd=compat_runner_cwd() or str(_REPO_ROOT),
             stdin=subprocess.DEVNULL,
             stdout=console,
             stderr=subprocess.STDOUT,
@@ -122,6 +126,7 @@ def _stop(proc: subprocess.Popen[bytes]) -> None:
         proc.wait(timeout=10)
 
 
+@pytest.mark.min_server_version("0.18.0")
 @pytest.mark.timeout(300)
 def test_renamed_host_colliding_with_registered_name_fails_loudly(
     live_server: str,
@@ -169,6 +174,11 @@ def test_renamed_host_colliding_with_registered_name_fails_loudly(
         assert proc.returncode == HOST_FATAL_EXIT_CODE, (
             f"omnigent host exited with code {proc.returncode}, expected "
             f"HOST_FATAL_EXIT_CODE={HOST_FATAL_EXIT_CODE}:\n{console_text[-2000:]}"
+        )
+        log_text = _read(process_log)
+        assert "Reconnecting in" not in log_text, (
+            f"omnigent host reconnected before exiting on a deterministic registration "
+            f"error:\n{log_text[-2500:]}"
         )
         assert "Could not connect" in console_text, (
             f"omnigent host exited without the loud failure banner:\n{console_text[-2000:]}"

@@ -686,6 +686,20 @@ async def test_registration_failure_retryability_follows_the_error(
     assert registry.get(_HOST_ID) is None
 
 
+async def test_binary_hello_frame_is_refused_without_retry(
+    host_app: tuple[FastAPI, HostRegistry, HostStore],
+) -> None:
+    """A failure before registration never asks the host to reconnect."""
+    app, registry, _store = host_app
+    comm = await _connect_route(app, _TUNNEL_PATH)
+    await comm.send_input({"type": "websocket.receive", "bytes": b"\x00"})
+
+    error = await _expect_connection_error(comm)
+    assert error.stage == "hello"
+    assert error.retryable is False
+    assert registry.get(_HOST_ID) is None
+
+
 async def test_registry_failure_marks_persisted_host_offline(
     host_app: tuple[FastAPI, HostRegistry, HostStore],
     monkeypatch: pytest.MonkeyPatch,
