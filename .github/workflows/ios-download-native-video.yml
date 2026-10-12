@@ -2,7 +2,7 @@ name: Temporary iOS download native video
 
 on:
   push:
-    branches: [test/ios-download-native-video]
+    branches: [test/ios-download-native-video-capture]
 
 jobs:
   record:

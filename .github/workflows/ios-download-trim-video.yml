@@ -18,7 +18,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p raw trimmed
-          gh run download 38189470190 \
+          gh run download 38191314999 \
             --repo omnigent-ai/omnigent \
             --name ios-download-native-before-after \
             --dir raw
