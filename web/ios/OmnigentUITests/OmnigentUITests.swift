@@ -27,6 +27,7 @@ final class OmnigentUITests: XCTestCase {
       "--omnigent-server-url", serverURL,
     ]
     app.launch()
+    app.activate()
     let webView = app.webViews.firstMatch
     XCTAssertTrue(webView.waitForExistence(timeout: 90), "Expected the real Omnigent web app.")
 
