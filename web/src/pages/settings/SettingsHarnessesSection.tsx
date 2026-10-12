@@ -382,9 +382,11 @@ function reconfigurationReason(reason: string | null) {
 function HarnessStatusText({
   status,
   configuredCredential,
+  hideSetupWarning = false,
 }: {
   status: ReturnType<typeof harnessStatus>;
   configuredCredential?: string;
+  hideSetupWarning?: boolean;
 }) {
   if (status.ready) {
     return (
@@ -396,7 +398,7 @@ function HarnessStatusText({
       </span>
     );
   }
-  if (status.needsSetup) {
+  if (status.needsSetup && !hideSetupWarning) {
     const label = reconfigurationReason(status.reason);
     return (
       <Tooltip>
@@ -473,6 +475,7 @@ function HarnessCard({
             <span className="truncate text-ui font-medium text-foreground">{entry.name}</span>
             <HarnessStatusText
               status={status}
+              hideSetupWarning={mode === "install" && canFix}
               configuredCredential={
                 status.ready && canSetup
                   ? credentialLabel(host, entry.harness, configuredCredential)
@@ -667,7 +670,7 @@ function HarnessWarning({
         <p>{copy}</p>
       </div>
       {!host.sandbox_provider && (
-        <Button size="sm" variant="outline" onClick={() => onFix(mode)}>
+        <Button size="sm" onClick={() => onFix(mode)}>
           {action}
         </Button>
       )}

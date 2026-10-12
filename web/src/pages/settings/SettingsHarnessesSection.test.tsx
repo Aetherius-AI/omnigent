@@ -267,6 +267,7 @@ describe("Harnesses grid", () => {
     expect(dialog.getAttribute("data-harness")).toBe("codex-native");
     expect(dialog.getAttribute("data-host")).toBe("h1");
     expect(dialog.getAttribute("data-mode")).toBe("install");
+    expect(within(card("codex-native")).queryByText("Needs reconfiguration")).toBeNull();
   });
 
   it("uses the existing inventory label instead of guessing a personal subscription", () => {
