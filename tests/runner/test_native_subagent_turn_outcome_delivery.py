@@ -308,6 +308,108 @@ async def test_grace_timer_cancel_does_not_settle_reused_dispatch() -> None:
         subagent_work._session_inboxes_ref.pop(parent_id, None)
 
 
+def _patch_claude_interrupt(monkeypatch: pytest.MonkeyPatch, *, grace_s: float) -> None:
+    """Stub the claude bridge injection and shorten the grace timer for a test."""
+    import omnigent.harnesses.claude_native.bridge as claude_bridge
+    from omnigent.runner.native import interrupt as interrupt_mod
+
+    async def _fake_bridge_id(*, server_client: Any, session_id: str) -> str:
+        del server_client
+        return session_id
+
+    monkeypatch.setattr(interrupt_mod, "_claude_native_bridge_id_for_session", _fake_bridge_id)
+    monkeypatch.setattr(claude_bridge, "bridge_dir_for_bridge_id", lambda bid: f"dir/{bid}")
+    monkeypatch.setattr(claude_bridge, "inject_interrupt", lambda bridge_dir, *, timeout_s: None)
+    monkeypatch.setattr(interrupt_mod, "_NATIVE_INTERRUPT_CANCEL_GRACE_S", grace_s)
+
+
+@pytest.mark.asyncio
+async def test_confirmed_completion_corrects_grace_cancelled_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A survivor's confirmed turn-end overturns the grace timer's cancellation.
+
+    The interrupt's grace timer fires first and delivers ``cancelled`` to the
+    parent, but the child survived the Escape and finishes the turn. Its
+    confirmed turn-end edge must correct the provisional cancellation and reach
+    the parent with the real result, not be dropped as already delivered.
+    """
+    _patch_claude_interrupt(monkeypatch, grace_s=0.05)
+
+    rig = _Rig("claude-native")
+    try:
+        async with _runner_client(rig.app) as client:
+            await rig.create_child_session(client)
+            resp = await client.post(
+                f"/v1/sessions/{rig.child_id}/events", json={"type": "interrupt"}
+            )
+            assert resp.status_code == 204, resp.text
+
+            # No confirming edge follows, so the grace timer fires and tells the
+            # parent the dispatch was cancelled.
+            await asyncio.sleep(0.2)
+            assert [(item["status"], item["output"]) for item in rig.drained()] == [
+                ("cancelled", "")
+            ]
+
+            # The child actually survived; its forwarder posts the confirmed
+            # turn-end completion carrying the real result.
+            resp = await rig.post_status(
+                client, {"status": "idle", "turn_completed": True, "output": "the verdict"}
+            )
+            assert resp.status_code == 204, resp.text
+        assert [(item["status"], item["output"]) for item in rig.drained()] == [
+            ("completed", "the verdict")
+        ], "the survivor's confirmed completion must correct the provisional cancellation"
+    finally:
+        rig.close()
+
+
+@pytest.mark.asyncio
+async def test_confirmed_completion_corrects_drained_grace_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The correction must survive the parent draining the cancellation notice.
+
+    After the grace timer's ``cancelled`` is delivered, the parent reads its
+    inbox and drains it (recording a drained-delivery tombstone). The survivor's
+    later confirmed completion must still correct the record and re-reach the
+    parent, not be swallowed by the tombstone.
+    """
+    from omnigent.runner.tool_dispatch import _cleanup_drained_subagent_work
+
+    _patch_claude_interrupt(monkeypatch, grace_s=0.05)
+
+    rig = _Rig("claude-native")
+    try:
+        async with _runner_client(rig.app) as client:
+            await rig.create_child_session(client)
+            resp = await client.post(
+                f"/v1/sessions/{rig.child_id}/events", json={"type": "interrupt"}
+            )
+            assert resp.status_code == 204, resp.text
+
+            await asyncio.sleep(0.2)
+            cancelled = rig.drained()
+            assert [(item["status"], item["output"]) for item in cancelled] == [("cancelled", "")]
+
+            # The parent drains the cancellation: the drain's cleanup records the
+            # drained-delivery tombstone for this child.
+            for payload in cancelled:
+                await _cleanup_drained_subagent_work(payload, server_client=None)
+            assert rig.child_id in subagent_work._drained_delivered_subagent_children
+
+            resp = await rig.post_status(
+                client, {"status": "idle", "turn_completed": True, "output": "the verdict"}
+            )
+            assert resp.status_code == 204, resp.text
+        assert [(item["status"], item["output"]) for item in rig.drained()] == [
+            ("completed", "the verdict")
+        ], "a confirmed completion must correct even a drained provisional cancellation"
+    finally:
+        rig.close()
+
+
 def test_cancelled_inbox_line_surfaces_output_before_cancellation() -> None:
     """The parent-readable line keeps a cancelled dispatch's real output."""
     from omnigent.runner.tool_dispatch import _format_async_task_item
@@ -327,3 +429,27 @@ def test_cancelled_inbox_line_surfaces_output_before_cancellation() -> None:
     )
     silent = _format_async_task_item({**payload, "output": ""})
     assert silent == "[System: sub-agent task task1 cancelled — researcher:cite-check]"
+
+
+def test_corrected_completion_line_notes_superseded_cancellation() -> None:
+    """A completion correcting a cancellation tells the parent it superseded it."""
+    from omnigent.runner.tool_dispatch import _format_async_task_item
+
+    payload = {
+        "type": "sub_agent",
+        "handle_id": "task1",
+        "agent": "researcher",
+        "title": "cite-check",
+        "status": "completed",
+        "output": "the verdict",
+        "corrected_status": "cancelled",
+    }
+    assert _format_async_task_item(payload) == (
+        "[System: sub-agent task task1 completed — researcher:cite-check "
+        "returned: the verdict, superseding its earlier cancelled notice]"
+    )
+    silent = _format_async_task_item({**payload, "output": ""})
+    assert silent == (
+        "[System: sub-agent task task1 completed — researcher:cite-check "
+        "produced no output, superseding its earlier cancelled notice]"
+    )

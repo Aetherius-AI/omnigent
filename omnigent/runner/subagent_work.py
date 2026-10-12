@@ -131,7 +131,12 @@ class _SubagentWorkEntry:
     :param delivered: Whether the terminal payload has been pushed to
         the parent's inbox.
     :param cancellation_confirmed: Whether a native terminal edge confirmed
-        an abort, rather than an interrupt merely being requested.
+        an abort, rather than an interrupt merely being requested. An
+        unconfirmed (optimistic grace-timer) cancellation can be corrected
+        by a surviving child's later confirmed completion.
+    :param corrected_status: The provisional status this terminal report
+        overturned, e.g. ``"cancelled"`` when a confirmed completion
+        corrected an optimistic cancellation. ``None`` for a direct report.
     :param launch_timed_out: Whether the recorded ``failed`` came from the
         launch-liveness reaper rather than from the child itself. Such a
         failure is a guess ("no start acknowledgment"), so a genuine
@@ -151,6 +156,7 @@ class _SubagentWorkEntry:
     completed_at: float | None = None
     delivered: bool = False
     cancellation_confirmed: bool = False
+    corrected_status: str | None = None
     launch_timed_out: bool = False
 
 
@@ -179,6 +185,11 @@ class _SubagentDeliveryAck:
 _subagent_work_by_child: dict[str, _SubagentWorkEntry] = {}
 _subagent_work_by_parent: dict[str, set[str]] = {}
 _drained_delivered_subagent_children: set[str] = set()
+# Optimistic (grace-timer) cancellations that were delivered and then drained,
+# retained so a surviving child's confirmed completion can still correct the
+# parent's record under the same dispatch. A confirmed abort is never kept
+# here, and a new send to the child or session teardown clears the entry.
+_provisional_cancelled_subagent_work: dict[str, _SubagentWorkEntry] = {}
 # Parents whose restart-recovery scan completed in this process, plus a
 # per-parent lock so an init racing a sys_read_inbox drain cannot run two
 # scans that both pass the registry check and queue one result twice.
@@ -299,6 +310,7 @@ def register_subagent_work(
         created_by=created_by,
     )
     _drained_delivered_subagent_children.discard(child_session_id)
+    _provisional_cancelled_subagent_work.pop(child_session_id, None)
     _subagent_work_by_child[child_session_id] = entry
     _subagent_work_by_parent.setdefault(parent_session_id, set()).add(child_session_id)
     return entry
@@ -361,6 +373,12 @@ def unregister_subagent_work(
         return
     if remember_drained_delivery and entry.delivered:
         _drained_delivered_subagent_children.add(child_session_id)
+        if entry.status == "cancelled" and not entry.cancellation_confirmed:
+            # Keep an optimistic cancellation so a surviving child's confirmed
+            # completion can still correct this drained record.
+            _provisional_cancelled_subagent_work[child_session_id] = entry
+        else:
+            _provisional_cancelled_subagent_work.pop(child_session_id, None)
     _subagent_work_by_child.pop(child_session_id, None)
     _in_flight_send_locks.pop(child_session_id, None)
     children = _subagent_work_by_parent.get(entry.parent_session_id)
@@ -385,10 +403,12 @@ def unregister_subagent_work_for_session(session_id: str) -> None:
     """
     unregister_subagent_work(session_id)
     _drained_delivered_subagent_children.discard(session_id)
+    _provisional_cancelled_subagent_work.pop(session_id, None)
     _in_flight_send_locks.pop(session_id, None)
     for child_id in list(_subagent_work_by_parent.get(session_id, set())):
         _subagent_work_by_child.pop(child_id, None)
         _drained_delivered_subagent_children.discard(child_id)
+        _provisional_cancelled_subagent_work.pop(child_id, None)
         _in_flight_send_locks.pop(child_id, None)
     _subagent_work_by_parent.pop(session_id, None)
 
@@ -603,6 +623,7 @@ def mark_subagent_work_terminal(
     status: str,
     output: str | None,
     only_if_work_id: str | None = None,
+    confirmed_completion: bool = False,
 ) -> _SubagentDeliveryAck:
     """
     Mark a sub-agent dispatch terminal and notify the parent inbox.
@@ -625,9 +646,15 @@ def mark_subagent_work_terminal(
         entry is still that dispatch. A delayed op (an interrupt's grace-timer
         cancel) bound to the dispatch it was raised for is dropped when a newer
         send has replaced the entry, so an old timer never cancels new work.
+    :param confirmed_completion: Whether this ``completed`` report is a
+        confirmed turn-end (not a bare quiescence idle). A confirmed
+        completion corrects an optimistic cancellation that was already
+        delivered or drained for the same dispatch, so a child that survived
+        an interrupt still reaches the parent with its real result.
     :returns: Delivery acknowledgement for this terminal report.
     :raises ValueError: If ``status`` is not terminal.
     """
+    corrects_cancellation = confirmed_completion and status == "completed"
     if status not in _SUBAGENT_TERMINAL_STATUSES:
         raise ValueError(
             f"sub-agent terminal status must be one of "
@@ -635,6 +662,9 @@ def mark_subagent_work_terminal(
         )
     entry = _subagent_work_by_child.get(child_session_id)
     if entry is None:
+        provisional = _provisional_cancelled_subagent_work.get(child_session_id)
+        if corrects_cancellation and provisional is not None:
+            return _deliver_corrected_completion(provisional, output)
         if child_session_id in _drained_delivered_subagent_children:
             return _SubagentDeliveryAck(
                 entry=None,
@@ -659,6 +689,15 @@ def mark_subagent_work_terminal(
             reason=_SUBAGENT_DELIVERY_SUPERSEDED_DISPATCH,
         )
     if entry.status in _SUBAGENT_TERMINAL_STATUSES:
+        if (
+            corrects_cancellation
+            and entry.status == "cancelled"
+            and not entry.cancellation_confirmed
+            and entry.delivered
+        ):
+            # The child survived an optimistic cancellation and finished; its
+            # confirmed completion corrects the already-delivered record.
+            return _deliver_corrected_completion(entry, output)
         # ``failed`` outranks ``completed``: a quiescence-derived ``completed``
         # (the watcher's ``idle`` edge) can be recorded — and delivered — before
         # the turn's real ``failed`` edge lands. The failure must replace it and
@@ -704,6 +743,38 @@ def mark_subagent_work_terminal(
     return _deliver_subagent_completion(entry)
 
 
+def _deliver_corrected_completion(
+    cancelled_entry: _SubagentWorkEntry, output: str | None
+) -> _SubagentDeliveryAck:
+    """
+    Overturn an optimistic cancellation with the child's confirmed completion.
+
+    Re-registers the dispatch under its original ``work_id`` (clearing the
+    drained-delivery and provisional-cancel tombstones) and delivers the real
+    result, noting the cancellation it superseded so the parent-readable line
+    can explain the correction.
+
+    :param cancelled_entry: The provisional-cancelled entry being corrected.
+    :param output: The surviving child's confirmed completion output.
+    :returns: Delivery acknowledgement for the corrected completion.
+    """
+    entry = register_subagent_work(
+        parent_session_id=cancelled_entry.parent_session_id,
+        child_session_id=cancelled_entry.child_session_id,
+        agent=cancelled_entry.agent,
+        title=cancelled_entry.title,
+        wrapper_label=cancelled_entry.wrapper_label,
+        created_by=cancelled_entry.created_by,
+        work_id=cancelled_entry.work_id,
+    )
+    entry.status = "completed"
+    entry.output = output
+    entry.completed_at = time.time()
+    entry.corrected_status = cancelled_entry.status
+    entry.delivered = False
+    return _deliver_subagent_completion(entry)
+
+
 def _deliver_subagent_completion(entry: _SubagentWorkEntry) -> _SubagentDeliveryAck:
     """
     Push a terminal sub-agent payload into the parent session inbox.
@@ -739,20 +810,21 @@ def _deliver_subagent_completion(entry: _SubagentWorkEntry) -> _SubagentDelivery
         output = (
             "[System: sub-agent completed with no output]" if entry.status == "completed" else ""
         )
-    inbox.put_nowait(
-        {
-            "type": "sub_agent",
-            "work_id": entry.work_id,
-            "task_id": entry.child_session_id,
-            "handle_id": entry.child_session_id,
-            "conversation_id": entry.child_session_id,
-            "tool_name": entry.agent,
-            "agent": entry.agent,
-            "title": entry.title,
-            "status": entry.status,
-            "output": output,
-        }
-    )
+    item: _JsonObject = {
+        "type": "sub_agent",
+        "work_id": entry.work_id,
+        "task_id": entry.child_session_id,
+        "handle_id": entry.child_session_id,
+        "conversation_id": entry.child_session_id,
+        "tool_name": entry.agent,
+        "agent": entry.agent,
+        "title": entry.title,
+        "status": entry.status,
+        "output": output,
+    }
+    if entry.corrected_status is not None:
+        item["corrected_status"] = entry.corrected_status
+    inbox.put_nowait(item)
     entry.delivered = True
     return _SubagentDeliveryAck(
         entry=entry,

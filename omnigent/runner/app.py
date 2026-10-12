@@ -4507,12 +4507,14 @@ def create_runner_app(
         status: str,
         output: str | None,
         only_if_work_id: str | None = None,
+        confirmed_completion: bool = False,
     ) -> _SubagentDeliveryAck:
         ack = mark_subagent_work_terminal(
             child_session_id,
             status=status,
             output=output,
             only_if_work_id=only_if_work_id,
+            confirmed_completion=confirmed_completion,
         )
         if ack.entry is not None and ack.delivered_now:
             _schedule_subagent_wake(ack.entry)
@@ -6579,6 +6581,7 @@ def create_runner_app(
                     conversation_id,
                     status=terminal_status,
                     output=output if output is not None else "",
+                    confirmed_completion=terminal_status == "completed",
                 )
             elif ambiguous_idle:
                 # This harness's forwarder marks genuine turn completions
@@ -6613,10 +6616,16 @@ def create_runner_app(
                     )
                 elif status == "idle":
                     _native_interrupt_runner.clear_pending_interrupt(conversation_id)
+                    # Reaching here means a confirmed turn-end (``turn_completed``)
+                    # or a legacy harness's idle completion, never a bare
+                    # quiescence idle (that returns via ``ambiguous_idle``). Such
+                    # a confirmed completion corrects an optimistic cancellation
+                    # the grace timer may have already delivered for this dispatch.
                     delivery_ack = _mark_subagent_terminal_and_wake(
                         conversation_id,
                         status="completed",
                         output=output if output is not None else "",
+                        confirmed_completion=True,
                     )
                 elif status == "failed":
                     _native_interrupt_runner.clear_pending_interrupt(conversation_id)

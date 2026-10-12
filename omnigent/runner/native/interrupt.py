@@ -620,6 +620,10 @@ class NativeInterruptRunner:
             status="cancelled",
             output=None,
         )
+        if delivery_ack.entry is not None:
+            # The kill confirms the abort, so a late survivor completion must
+            # not overturn this cancellation.
+            delivery_ack.entry.cancellation_confirmed = True
         if not delivery_ack.delivered and (
             delivery_ack.entry is not None or conv_id in self._session_sub_agent_names
         ):
@@ -692,6 +696,10 @@ class NativeInterruptRunner:
             status="cancelled",
             output=None,
         )
+        if delivery_ack.entry is not None:
+            # The kill confirms the abort, so a late survivor completion must
+            # not overturn this cancellation.
+            delivery_ack.entry.cancellation_confirmed = True
         if not delivery_ack.delivered and (
             delivery_ack.entry is not None or conv_id in self._session_sub_agent_names
         ):
