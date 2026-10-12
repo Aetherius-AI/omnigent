@@ -324,6 +324,23 @@ pane greyed out behind "Bridge closed: terminal session ended", a deleted
 session, a result list emptied by fixture cleanup — means the recording outlived
 the test body. Fix the stop point and re-record; do not caption around it.
 
+A caption describes what is on screen, so every claim it makes about the screen
+needs screen evidence: a driver assertion on a visible element, a saved
+screenshot, or a frame you extracted and looked at. Backend state is not screen
+evidence. A transcript read (`GET /v1/sessions/{id}/items`), a persisted-item
+flag, a runner log line, or an HTTP status says what the server stored, not what
+the viewer sees, and the two diverge: the Claude-native forwarder streams each
+`MessageDisplay` chunk to the Chat view as a `response.output_text.delta` event
+while the final transcript item is still in flight, so a reply the server later
+rejects (`transcript item … rejected`) has already been painted on screen when
+the error pill appears. Caption the frames — "the streamed reply text fills the
+chat, then the turn ends in the 'transcript item … rejected' error pill; the
+reply is never saved" — never "no reply bubble appears", and keep the transcript
+check in `evidence`. Read every frame you extract against each screen claim in
+the caption, above all a claim that something is absent: a frame that shows it
+contradicts the caption, so rewrite the caption to the frame or re-record.
+Frames you extracted but never compared with the caption verify nothing.
+
 For each recording, write a short **`caption`** in its handoff entry describing
 **the actions that clip performs** — the ordered steps a viewer watches, ending in
 what the clip shows: e.g. `"start a session → open the model picker → select the
