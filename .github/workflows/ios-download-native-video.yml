@@ -30,41 +30,17 @@ jobs:
           cp web/ios/Omnigent/OmnigentWebView.swift /tmp/OmnigentWebView.fixed.swift
           cp web/ios/Omnigent.xcodeproj/project.pbxproj /tmp/project.fixed.pbxproj
 
-      - name: Record before fix
+      - name: Reuse validated before recording
         env:
-          DEVICE_ID: ${{ steps.simulator.outputs.id }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          git show 74990643498adee3416399da8a7688b4a8638ba1:web/ios/Omnigent/OmnigentWebView.swift > web/ios/Omnigent/OmnigentWebView.swift
-          git show 74990643498adee3416399da8a7688b4a8638ba1:web/ios/Omnigent.xcodeproj/project.pbxproj > web/ios/Omnigent.xcodeproj/project.pbxproj
-          xcodebuild build-for-testing \
-            -project web/ios/Omnigent.xcodeproj \
-            -scheme Omnigent \
-            -configuration Debug \
-            -destination "generic/platform=iOS Simulator" \
-            -derivedDataPath /tmp/before-derived \
-            CODE_SIGNING_ALLOWED=NO
-          xcrun simctl boot "$DEVICE_ID" > /tmp/simulator-boot.log 2>&1 &
-          sleep 30
-          xcrun simctl io "$DEVICE_ID" recordVideo --codec=h264 /tmp/before.mp4 &
-          VIDEO_PID=$!
-          sleep 2
-          set +e
-          xcodebuild test-without-building \
-            -project web/ios/Omnigent.xcodeproj \
-            -scheme Omnigent \
-            -configuration Debug \
-            -destination "platform=iOS Simulator,id=$DEVICE_ID" \
-            -derivedDataPath /tmp/before-derived \
-            -only-testing:OmnigentUITests/OmnigentUITests/testNativeDownloadBeforeVideo \
-            -parallel-testing-enabled NO \
-            CODE_SIGNING_ALLOWED=NO
-          TEST_STATUS=$?
-          set -e
-          sleep 2
-          kill -INT "$VIDEO_PID"
-          wait "$VIDEO_PID" || true
-          test "$TEST_STATUS" -eq 0
+          mkdir -p /tmp/baseline
+          gh run download 38189470190 \
+            --repo omnigent-ai/omnigent \
+            --name ios-download-native-before-after \
+            --dir /tmp/baseline
+          cp /tmp/baseline/before.mp4 /tmp/before.mp4
 
       - name: Record after fix
         env:
@@ -81,6 +57,8 @@ jobs:
             -destination "generic/platform=iOS Simulator" \
             -derivedDataPath /tmp/after-derived \
             CODE_SIGNING_ALLOWED=NO
+          xcrun simctl boot "$DEVICE_ID" 2>/dev/null || true
+          xcrun simctl bootstatus "$DEVICE_ID" -b
           xcrun simctl io "$DEVICE_ID" recordVideo --codec=h264 /tmp/after.mp4 &
           VIDEO_PID=$!
           sleep 2
