@@ -903,6 +903,54 @@ def test_unpinned_family_alias_passes_through_on_the_anthropic_api() -> None:
     assert claude_native.resolve_claude_native_model_selection("opus", config) == "opus"
 
 
+def test_model_selection_speaks_the_configs_window_spelling() -> None:
+    """A bare or namespaced pick of a ``[1m]``-pinned model launches on the marked spelling.
+
+    A spec pin, a persisted pick or a routed id names the model bare; launched
+    verbatim it would run the same model at Claude Code's 200K default.
+    Aliases, non-Claude ids and models the config does not pin pass through.
+    """
+    config = claude_native.ClaudeNativeUcodeConfig(
+        env={
+            "ANTHROPIC_BASE_URL": "https://example.databricks.com/ai-gateway/anthropic",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "databricks-claude-opus-5-5[1m]",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "databricks-claude-haiku-4-5",
+        },
+        model="databricks-claude-opus-5-5[1m]",
+        routable_models=(
+            "databricks-claude-opus-5-5[1m]",
+            "databricks-claude-opus-4-8[1m]",
+            "databricks-claude-haiku-4-5",
+        ),
+    )
+    select = claude_native.resolve_claude_native_model_selection
+
+    assert select("databricks-claude-opus-5-5", config) == "databricks-claude-opus-5-5[1m]"
+    assert select("system.ai.claude-opus-5-5", config) == "databricks-claude-opus-5-5[1m]"
+    assert select("databricks-claude-opus-4-8", config) == "databricks-claude-opus-4-8[1m]"
+    assert select("databricks-claude-opus-5-5[1m]", config) == "databricks-claude-opus-5-5[1m]"
+    assert select("databricks-claude-haiku-4-5", config) == "databricks-claude-haiku-4-5"
+    assert select("databricks-gpt-5-6", config) == "databricks-gpt-5-6"
+    assert select("opus", config) == "opus"
+    assert select("opus[1m]", config) == "opus[1m]"
+    assert select(None, config) is None
+
+
+def test_model_selection_keeps_an_explicit_1m_pick_on_a_bare_pin() -> None:
+    """On the Anthropic API a ``[1m]`` pick is the user's opt-in; a bare pin never strips it."""
+    config = claude_native.ClaudeNativeUcodeConfig(
+        env={
+            "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-4-8",
+        },
+        model="claude-opus-4-8",
+    )
+    select = claude_native.resolve_claude_native_model_selection
+
+    assert select("claude-opus-4-8[1m]", config) == "claude-opus-4-8[1m]"
+    assert select("claude-opus-4-8", config) == "claude-opus-4-8"
+
+
 def test_launch_model_takes_the_custom_slot_when_no_alias_names_it() -> None:
     """A routed older generation gets its own spelling for later ``/model``."""
     from omnigent.models.claude_model_vocabulary import claude_model_command_arg
@@ -8740,15 +8788,150 @@ def test_resolve_native_claude_config_databricks_provider_uses_ucode(
         {"databricks": {"kind": "databricks", "default": True, "profile": "oss"}},
     )
     seen: dict[str, str | None] = {}
-    monkeypatch.setattr(
-        claude_native,
-        "_ucode_config_for_profile",
-        lambda profile, *, refresh_models=True: seen.setdefault("profile", profile),
-    )
+
+    def _record_profile(profile: str | None, *, refresh_models: bool = True) -> None:
+        seen["profile"] = profile
+
+    monkeypatch.setattr(claude_native, "_ucode_config_for_profile", _record_profile)
 
     claude_native.resolve_native_claude_config(spec=_no_auth_claude_spec())
     # The databricks provider's own profile drove the ucode lookup.
     assert seen["profile"] == "oss"
+
+
+_GATEWAY_URL = "https://example.databricks.com/ai-gateway/anthropic"
+
+
+def test_window_marker_spells_a_gateways_native_1m_models() -> None:
+    """Every spelling a gateway config hands Claude Code carries ``[1m]`` for a native-1M model.
+
+    Claude Code sizes the window from the id it runs on and caps an unknown
+    gateway id at 200K. The alias pins are what ``/model opus`` resolves to,
+    so they need the marker as much as the launch default; the generations
+    whose 1M is a beta opt-in and Haiku keep Claude Code's own default.
+    """
+    config = claude_native.ClaudeNativeUcodeConfig(
+        env={
+            "ANTHROPIC_BASE_URL": _GATEWAY_URL,
+            "ANTHROPIC_DEFAULT_FABLE_MODEL": "databricks-claude-fable-5",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "databricks-claude-opus-5-5",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "databricks-claude-sonnet-4-6",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "databricks-claude-haiku-4-5",
+            "ANTHROPIC_CUSTOM_MODEL_OPTION": "databricks-claude-sonnet-5",
+            "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "Sonnet 5",
+            "CLAUDE_CODE_USE_GATEWAY": "1",
+        },
+        api_key_helper="printf token",
+        model="databricks-claude-opus-5-5",
+        routable_models=(
+            "databricks-claude-opus-5-5",
+            "databricks-claude-opus-4-6",
+            "databricks-claude-sonnet-5",
+            "databricks-claude-haiku-4-5",
+        ),
+        model_overrides={
+            "claude-opus-5-5": "databricks-claude-opus-5-5",
+            "claude-opus-4-6": "databricks-claude-opus-4-6",
+        },
+    )
+
+    marked = claude_native.claude_config_with_1m_window(config)
+
+    assert marked is not None
+    assert marked.env == {
+        **config.env,
+        "ANTHROPIC_DEFAULT_FABLE_MODEL": "databricks-claude-fable-5[1m]",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "databricks-claude-opus-5-5[1m]",
+        "ANTHROPIC_CUSTOM_MODEL_OPTION": "databricks-claude-sonnet-5[1m]",
+    }
+    assert marked.model == "databricks-claude-opus-5-5[1m]"
+    assert marked.routable_models == (
+        "databricks-claude-opus-5-5[1m]",
+        "databricks-claude-opus-4-6",
+        "databricks-claude-sonnet-5[1m]",
+        "databricks-claude-haiku-4-5",
+    )
+    assert marked.model_overrides == {
+        "claude-opus-5-5": "databricks-claude-opus-5-5[1m]",
+        "claude-opus-4-6": "databricks-claude-opus-4-6",
+    }
+    assert marked.api_key_helper == config.api_key_helper
+    # The provider's own spelling is left as the builder produced it.
+    assert config.env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "databricks-claude-opus-5-5"
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        claude_native.ClaudeNativeUcodeConfig(
+            env={
+                "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-5",
+            },
+            model="claude-opus-5",
+        ),
+        claude_native.ClaudeNativeUcodeConfig(
+            env={
+                "ANTHROPIC_BEDROCK_BASE_URL": "https://bedrock.example",
+                "CLAUDE_CODE_USE_BEDROCK": "1",
+            },
+            model="us.anthropic.claude-opus-5-20260101-v1:0",
+        ),
+        claude_native.ClaudeNativeUcodeConfig(
+            env={
+                "ANTHROPIC_BASE_URL": _GATEWAY_URL,
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "databricks-claude-haiku-4-5",
+            },
+            model="databricks-claude-sonnet-4-6",
+        ),
+    ],
+    ids=["anthropic-api", "bedrock", "nothing-1m"],
+)
+def test_window_marker_leaves_recognized_endpoints_and_200k_configs_alone(
+    config: claude_native.ClaudeNativeUcodeConfig,
+) -> None:
+    """Claude Code sizes the Anthropic API's and Bedrock's ids itself; nothing to mark here."""
+    assert claude_native.claude_config_with_1m_window(config) is config
+    assert claude_native.claude_config_with_1m_window(None) is None
+
+
+def test_resolve_native_claude_config_marks_the_gateway_pins(
+    _isolated_provider_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The resolved launch config spells the gateway's natively-1M pins with ``[1m]``.
+
+    Databricks discovery pins ``opus`` to the plain gateway id; launched bare,
+    or re-selected through ``/model opus``, Opus 5.5 ran at Claude Code's 200K
+    default instead of its 1M window.
+    """
+    _seed_config(
+        _isolated_provider_config,
+        {"databricks": {"kind": "databricks", "default": True, "profile": "oss"}},
+    )
+    ucode = claude_native.ClaudeNativeUcodeConfig(
+        env={
+            "ANTHROPIC_BASE_URL": _GATEWAY_URL,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "databricks-claude-opus-5-5",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "databricks-claude-haiku-4-5",
+        },
+        api_key_helper="printf token",
+        model="databricks-claude-opus-5-5",
+        routable_models=("databricks-claude-opus-5-5", "databricks-claude-haiku-4-5"),
+    )
+    monkeypatch.setattr(
+        claude_native, "_ucode_config_for_profile", lambda profile, *, refresh_models=True: ucode
+    )
+
+    cfg = claude_native.resolve_native_claude_config(spec=_no_auth_claude_spec())
+
+    assert cfg is not None
+    assert cfg.env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "databricks-claude-opus-5-5[1m]"
+    assert cfg.env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "databricks-claude-haiku-4-5"
+    assert cfg.model == "databricks-claude-opus-5-5[1m]"
+    assert cfg.routable_models == (
+        "databricks-claude-opus-5-5[1m]",
+        "databricks-claude-haiku-4-5",
+    )
 
 
 def test_resolve_native_claude_config_ambient_key(

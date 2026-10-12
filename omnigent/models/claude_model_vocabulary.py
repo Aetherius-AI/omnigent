@@ -121,6 +121,75 @@ def normalized_model_id(model: str) -> str:
     return prefix_folded_model_id(model).removesuffix("[1m]")
 
 
+#: Claude Code's client-side 1M-window marker. It sizes a session's context
+#: window from the model id alone: this suffix selects 1M (and the
+#: ``context-1m`` beta) and is stripped before the request leaves the client.
+LONG_CONTEXT_MARKER = "[1m]"
+
+#: First version of each family that Claude Code's own catalog serves at 1M
+#: natively, i.e. a first-party alias reaches 1M with no opt-in. Earlier
+#: generations get 1M only through the explicit ``[1m]`` beta opt-in.
+_NATIVE_1M_MIN_VERSION: dict[str, tuple[int, ...]] = {
+    "opus": (4, 7),
+    "sonnet": (5,),
+    "fable": (5,),
+}
+
+
+def _claude_model_version(canonical: str) -> tuple[int, ...]:
+    """The version segments of a canonical Claude id, e.g. ``(4, 7)``.
+
+    A date stamp (``-20250514``) or a vendor revision (``-v1:0``) ends the
+    version; neither is a Claude version component.
+    """
+    version: list[int] = []
+    for segment in _SEGMENT_RE.split(canonical):
+        if segment.isdigit() and len(segment) < 4:
+            version.append(int(segment))
+        elif version:
+            break
+    return tuple(version)
+
+
+def serves_1m_natively(model_id: str) -> bool:
+    """Whether Claude Code's catalog serves *model_id*'s model at 1M natively.
+
+    :param model_id: Any spelling of a model id, e.g.
+        ``"databricks-claude-opus-5-5"`` or ``"claude-sonnet-4-6[1m]"``.
+    :returns: ``True`` for Opus 4.7+, Sonnet 5+ and Fable 5+; ``False`` for
+        Haiku, for the generations whose 1M is a beta opt-in (Opus 4.6,
+        Sonnet 4.x), and for anything that spells no Claude model.
+    """
+    canonical = canonical_claude_id(model_id.removesuffix(LONG_CONTEXT_MARKER))
+    if canonical is None:
+        return False
+    segments = _SEGMENT_RE.split(canonical)
+    for family, minimum in _NATIVE_1M_MIN_VERSION.items():
+        if family in segments:
+            return _claude_model_version(canonical) >= minimum
+    return False
+
+
+def model_id_with_1m_marker(model_id: str) -> str:
+    """Spell a natively-1M Claude id with Claude Code's ``[1m]`` window marker.
+
+    Claude Code knows the canonical ids and sizes them itself, but a gateway's
+    own spelling (``databricks-claude-opus-5-5``) is unknown to it and falls
+    back to a 200K window. The marker is its opt-in, so every spelling Omnigent
+    hands it for such a model carries one. Already-marked ids, family aliases,
+    non-Claude ids and the generations Claude Code does not serve at 1M
+    natively pass through unchanged.
+
+    :param model_id: A model id, e.g. ``"system.ai.claude-opus-5"``.
+    :returns: The marked id (``"system.ai.claude-opus-5[1m]"``), or
+        *model_id* stripped of surrounding whitespace when nothing changes.
+    """
+    spelled = model_id.strip()
+    if spelled.lower().endswith(LONG_CONTEXT_MARKER) or not serves_1m_natively(spelled):
+        return spelled
+    return f"{spelled}{LONG_CONTEXT_MARKER}"
+
+
 def alias_pins(env: Mapping[str, str] | None = None) -> dict[str, str]:
     """Read the session's alias → model-id pinning.
 

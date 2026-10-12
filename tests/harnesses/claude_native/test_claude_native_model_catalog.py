@@ -167,6 +167,36 @@ async def test_catalog_uses_cli_managed_picker_for_every_launch_config(
     ]
 
 
+@pytest.mark.parametrize(
+    ("pinned", "label"),
+    [
+        ("databricks-claude-opus-5-5[1m]", "Opus 5.5 (1M context)"),
+        ("databricks-claude-opus-5-5", "Opus 5.5"),
+    ],
+    ids=["marked", "bare"],
+)
+async def test_catalog_labels_a_pinned_alias_by_family_and_window(
+    monkeypatch: pytest.MonkeyPatch, pinned: str, label: str
+) -> None:
+    """A gateway pin is labelled by family and version, not by the pinned id.
+
+    Claude Code labels a pinned alias row with the pinned id itself, so the
+    picker read ``databricks-claude-opus-5-5[1m]`` for the workspace's Opus.
+    """
+    _stub_picker(
+        monkeypatch,
+        [{"value": "opus", "resolvedModel": pinned, "displayName": pinned}],
+        default=pinned,
+    )
+    config = claude_native.ClaudeNativeUcodeConfig(
+        env={"ANTHROPIC_BASE_URL": "https://example.databricks.com/ai-gateway/anthropic"},
+        model=pinned,
+    )
+    assert await claude_native.claude_model_catalog(config) == [
+        {"id": "opus", "model": pinned, "displayName": label, "isDefault": True}
+    ]
+
+
 @pytest.mark.parametrize("failure", [None, "unsupported", "exit", "timeout"])
 async def test_catalog_falls_back_for_older_claude(
     monkeypatch: pytest.MonkeyPatch, failure: str | None

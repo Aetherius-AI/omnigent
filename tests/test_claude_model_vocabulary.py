@@ -5,6 +5,7 @@ import pytest
 from omnigent.models.claude_model_vocabulary import (
     claude_model_alias,
     claude_model_command_arg,
+    model_id_with_1m_marker,
     model_vocabulary_env,
     normalized_model_id,
     picker_command_values,
@@ -12,6 +13,7 @@ from omnigent.models.claude_model_vocabulary import (
     prefix_folded_model_id,
     served_alias_pins,
     served_canonical_overrides,
+    serves_1m_natively,
 )
 
 # A ucode-style launch pinning: each family alias mapped to a gateway id,
@@ -162,6 +164,54 @@ def test_prefix_fold_strips_the_namespace_but_keeps_the_context_marker() -> None
     assert prefix_folded_model_id("databricks-claude-sonnet-5") == "claude-sonnet-5"
     assert prefix_folded_model_id("Claude-Opus-4-8[1M]") == "claude-opus-4-8[1m]"
     assert prefix_folded_model_id("claude-haiku-4-5") == "claude-haiku-4-5"
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        # Natively-1M generations, in every spelling a gateway or spec uses.
+        ("databricks-claude-opus-5-5", "databricks-claude-opus-5-5[1m]"),
+        ("system.ai.claude-opus-5", "system.ai.claude-opus-5[1m]"),
+        ("claude-opus-4-8", "claude-opus-4-8[1m]"),
+        ("databricks-claude-opus-4-7", "databricks-claude-opus-4-7[1m]"),
+        ("databricks-claude-sonnet-5", "databricks-claude-sonnet-5[1m]"),
+        ("system.ai.claude-fable-5", "system.ai.claude-fable-5[1m]"),
+        ("claude-fable-5-1", "claude-fable-5-1[1m]"),
+        # A date stamp is not a version: Opus 4.7 stays 1M, Opus 4.0 stays 200K.
+        (
+            "us.anthropic.claude-opus-4-7-20260101-v1:0",
+            "us.anthropic.claude-opus-4-7-20260101-v1:0[1m]",
+        ),
+        ("us.anthropic.claude-opus-4-20250514-v1:0", "us.anthropic.claude-opus-4-20250514-v1:0"),
+        ("claude-sonnet-4-5-20250929", "claude-sonnet-4-5-20250929"),
+        # Generations whose 1M is a beta opt-in keep Claude Code's default.
+        ("databricks-claude-opus-4-6", "databricks-claude-opus-4-6"),
+        ("databricks-claude-opus-4-5", "databricks-claude-opus-4-5"),
+        ("databricks-claude-sonnet-4-6", "databricks-claude-sonnet-4-6"),
+        ("databricks-claude-3-7-sonnet", "databricks-claude-3-7-sonnet"),
+        ("claude-3-5-sonnet-20241022", "claude-3-5-sonnet-20241022"),
+        # 200K-only families, non-Claude ids and bare aliases pass through.
+        ("databricks-claude-haiku-4-5", "databricks-claude-haiku-4-5"),
+        ("databricks-gpt-5-6", "databricks-gpt-5-6"),
+        ("system.ai.glm-5-3", "system.ai.glm-5-3"),
+        ("opus", "opus"),
+        # Idempotent, case-insensitively, and whitespace-trimmed.
+        ("system.ai.claude-opus-5[1m]", "system.ai.claude-opus-5[1m]"),
+        ("claude-sonnet-5[1M]", "claude-sonnet-5[1M]"),
+        ("  system.ai.claude-opus-5  ", "system.ai.claude-opus-5[1m]"),
+        ("", ""),
+    ],
+)
+def test_window_marker_opts_only_natively_1m_models_in(model: str, expected: str) -> None:
+    """Claude Code reads 1M only from ``[1m]``; mark exactly the ids it serves at 1M natively."""
+    assert model_id_with_1m_marker(model) == expected
+    assert serves_1m_natively(model) is expected.lower().endswith("[1m]")
+
+
+def test_window_marker_leaves_alias_bracket_variants_to_claude_code() -> None:
+    """``sonnet[1m]`` is a settable alias, not a model id: no family version to judge."""
+    assert model_id_with_1m_marker("sonnet[1m]") == "sonnet[1m]"
+    assert serves_1m_natively("sonnet[1m]") is False
 
 
 def test_catalog_prefixes_match_the_routing_defaults() -> None:

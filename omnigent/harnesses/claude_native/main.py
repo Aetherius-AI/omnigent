@@ -118,10 +118,15 @@ from omnigent.inner._subprocess_lifecycle import (
 from omnigent.models import model_catalog
 from omnigent.models.claude_model_vocabulary import (
     ALIAS_MODEL_ENV_VARS,
+    CLAUDE_MODEL_ALIASES,
     CUSTOM_MODEL_OPTION_ENV_VAR,
     CUSTOM_MODEL_OPTION_NAME_ENV_VAR,
     LEGACY_CUSTOM_SLOT_ROW_ID,
+    LONG_CONTEXT_MARKER,
+    alias_pins,
     claude_model_alias,
+    model_id_with_1m_marker,
+    normalized_model_id,
     served_canonical_overrides,
 )
 from omnigent.native._native_resume_hint import echo_native_resume_hint
@@ -619,14 +624,17 @@ def resolve_claude_native_model_selection(
     pane to a model nobody chose (an unpinned family alias used to degrade
     to the provider's default model this way — a Fable pick landed on
     Opus). An out-of-band unpinned alias on a gateway endpoint now fails
-    visibly at inference instead of silently running the default.
+    visibly at inference instead of silently running the default. The one
+    rewrite that keeps the model is the window marker: a concrete id the
+    config pins with ``[1m]`` is spoken in that spelling (see
+    :func:`_claude_config_window_spelling`).
 
     :param model: Persisted picker id, built-in alias, or concrete model id.
     :param claude_config: Resolved provider config for the terminal.
     :returns: A model identifier suitable for ``--model`` or ``/model``.
     """
     if model != _UCODE_CLAUDE_CUSTOM_TIER:
-        return model
+        return _claude_config_window_spelling(model, claude_config)
     if claude_config is not None:
         custom_model = claude_config.env.get(_ANTHROPIC_CUSTOM_MODEL_OPTION_ENV)
         if custom_model:
@@ -639,6 +647,48 @@ def resolve_claude_native_model_selection(
     # No provider config pins the custom slot: hand Claude Code its own
     # ``sonnet`` alias and let it resolve the current Sonnet itself.
     return "sonnet"
+
+
+def _claude_config_window_spelling(
+    model: str | None,
+    claude_config: ClaudeNativeUcodeConfig | None,
+) -> str | None:
+    """Spell *model* the way the config pins it when that pin carries ``[1m]``.
+
+    A spec pin, a persisted pick or a routed id names a served model bare
+    (``databricks-claude-opus-5-5``, ``system.ai.claude-opus-5-5``); launched
+    or ``/model``-ed verbatim, Claude Code would run that same model at its
+    200K default. A pick that already carries the marker, a family alias, and
+    an id the config does not pin pass through unchanged.
+
+    :param model: A concrete model id, alias, or ``None``.
+    :param claude_config: Resolved provider config for the terminal, or ``None``.
+    :returns: The config's marked spelling of the same model, else *model*.
+    """
+    if claude_config is None or not model or not model.strip():
+        return model
+    candidate = model.strip()
+    if (
+        candidate.lower().endswith(LONG_CONTEXT_MARKER)
+        or candidate.lower().partition("[")[0] in CLAUDE_MODEL_ALIASES
+    ):
+        return model
+    wanted = normalized_model_id(candidate)
+    pinned = (
+        claude_config.model,
+        claude_config.env.get(_ANTHROPIC_MODEL_ENV),
+        claude_config.env.get(_ANTHROPIC_CUSTOM_MODEL_OPTION_ENV),
+        *alias_pins(claude_config.env).values(),
+        *claude_config.routable_models,
+    )
+    for spelling in pinned:
+        if (
+            spelling
+            and spelling.lower().endswith(LONG_CONTEXT_MARKER)
+            and normalized_model_id(spelling) == wanted
+        ):
+            return spelling
+    return model
 
 
 def claude_config_with_routed_arms_pinned(
@@ -1077,6 +1127,11 @@ def _claude_alias_row(alias: str, resolution: dict[str, str]) -> dict[str, objec
     """
     label = resolution.get("label")
     model = resolution.get("model") or alias
+    family = alias.partition("[")[0]
+    if label == model and family in CLAUDE_MODEL_ALIASES and "claude-" in model.lower():
+        # A pinned alias is labelled with the pinned id itself; show the
+        # family and version instead ("Opus 5.5", not "databricks-claude-opus-5-5[1m]").
+        label = _claude_model_display_name(family, model)
     if label and model.endswith("[1m]") and "1M context" not in label:
         label = f"{label} (1M context)"
     return {"id": alias, "model": model, "displayName": label or alias}
@@ -3390,6 +3445,58 @@ def _connect_broker_claude_config() -> ClaudeNativeUcodeConfig | None:
     return ClaudeNativeUcodeConfig(env=env, api_key_helper=api_key_helper, model=model)
 
 
+def claude_config_with_1m_window(
+    claude_config: ClaudeNativeUcodeConfig | None,
+) -> ClaudeNativeUcodeConfig | None:
+    """Spell the config's natively-1M Claude models with Claude Code's ``[1m]`` marker.
+
+    Claude Code sizes a session's context window client-side from the model id
+    it runs on. It knows the canonical Anthropic ids, but a custom endpoint's
+    own spelling (``databricks-claude-opus-5-5``) is unknown to it and falls
+    back to a 200K window. ``[1m]`` is its opt-in: the session is sized at 1M,
+    the ``context-1m`` beta rides the request, and the marker is stripped from
+    the wire model. The family pins are what ``/model opus`` and the picker
+    resolve to, so the marker lives on every spelling this config hands Claude
+    Code — the alias pins, the custom slot, the default, the routable ids and
+    the canonical→served overrides — not just on one launch's ``--model``.
+
+    Only models Claude Code's own catalog serves at 1M natively are marked; a
+    generation whose 1M is a beta opt-in keeps Claude Code's default, as on
+    the Anthropic API. The Anthropic API and Bedrock are left alone: Claude
+    Code recognizes those ids and sizes them itself.
+
+    :param claude_config: The resolved launch config, or ``None``.
+    :returns: The config with marked spellings; *claude_config* itself when
+        nothing changes.
+    """
+    if claude_config is None or claude_config.env.get(_ANTHROPIC_BEDROCK_BASE_URL_ENV):
+        return claude_config
+    if _serves_canonical_anthropic_ids(claude_config):
+        return claude_config
+    model_keys = {
+        *ALIAS_MODEL_ENV_VARS.values(),
+        _ANTHROPIC_CUSTOM_MODEL_OPTION_ENV,
+        _ANTHROPIC_MODEL_ENV,
+    }
+    env = {
+        key: model_id_with_1m_marker(value) if key in model_keys and value.strip() else value
+        for key, value in claude_config.env.items()
+    }
+    marked = replace(
+        claude_config,
+        env=env,
+        model=model_id_with_1m_marker(claude_config.model) if claude_config.model else None,
+        routable_models=tuple(
+            dict.fromkeys(model_id_with_1m_marker(m) for m in claude_config.routable_models)
+        ),
+        model_overrides={
+            canonical: model_id_with_1m_marker(served)
+            for canonical, served in claude_config.model_overrides.items()
+        },
+    )
+    return claude_config if marked == claude_config else marked
+
+
 def resolve_native_claude_config(
     *,
     spec: AgentSpec | None,
@@ -3398,6 +3505,33 @@ def resolve_native_claude_config(
     """Resolve the native Claude Code launch config across all offerings.
 
     The single entry point both native-claude launch paths use (the CLI
+    ``omnigent claude`` and the runner's host-spawned auto-create), so the
+    native harness honors ``omnigent setup`` exactly like the in-process
+    claude-sdk harness. The provider's own spelling comes from
+    :func:`_resolve_native_claude_provider_config` (precedence documented
+    there); natively-1M Claude models on a custom endpoint are then spelled
+    with Claude Code's window marker (:func:`claude_config_with_1m_window`).
+
+    :param spec: The agent spec, or ``None`` for the bare ``omnigent
+        claude`` launch.
+    :param refresh_models: Query Databricks for the workspace's current Claude
+        model services while resolving the ucode config. Capability checks that
+        only need the routing shape pass ``False`` to stay network-free.
+    :returns: The launch config, or ``None`` to use Claude's own login.
+    """
+    return claude_config_with_1m_window(
+        _resolve_native_claude_provider_config(spec=spec, refresh_models=refresh_models)
+    )
+
+
+def _resolve_native_claude_provider_config(
+    *,
+    spec: AgentSpec | None,
+    refresh_models: bool = True,
+) -> ClaudeNativeUcodeConfig | None:
+    """The provider's own spelling of the launch config, before the window marker.
+
+    Shared by both native-claude launch paths (the CLI
     ``omnigent claude`` and the runner's host-spawned auto-create), so the
     native harness honors ``omnigent setup`` exactly like the in-process
     claude-sdk harness. Precedence mirrors
