@@ -513,12 +513,14 @@ def test_ensure_host_daemon_reuses_healthy_background_daemon(
 def test_ensure_host_daemon_publishes_runner_env_manifest_on_spawn(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Spawn publishes the sanitized env: named passthrough vars in, DB URI and unlisted out."""
+    """Spawn publishes the sanitized env: named passthrough vars in; DB URI,
+    host token, and unlisted values out."""
     captured: dict[str, object] = {}
     _patch_daemon_spawn(monkeypatch, tmp_path, captured)
     monkeypatch.setenv("OMNIGENT_RUNNER_ENV_PASSTHROUGH", "MY_GATEWAY_URL")
     monkeypatch.setenv("MY_GATEWAY_URL", "https://llm.example.test")
     monkeypatch.setenv("OMNIGENT_DATABASE_URI", "postgresql://u:pw@h/db")
+    monkeypatch.setenv("OMNIGENT_HOST_TOKEN", "secret-host-token")
     monkeypatch.setenv("UNRELATED_SECRET", "synthetic-secret")
 
     _ensure_host_daemon(None)
@@ -527,12 +529,14 @@ def test_ensure_host_daemon_publishes_runner_env_manifest_on_spawn(
     assert isinstance(env, dict)
     assert env["MY_GATEWAY_URL"] == "https://llm.example.test"
     assert env["OMNIGENT_DATABASE_URI"] == "postgresql://u:pw@h/db"
+    assert env["OMNIGENT_HOST_TOKEN"] == "secret-host-token"
     manifest = read_runner_env_manifest("local", base_dir=tmp_path)
     assert manifest is not None
     assert manifest["OMNIGENT_RUNNER_ENV_PASSTHROUGH"] == "MY_GATEWAY_URL"
     assert manifest["MY_GATEWAY_URL"] == "https://llm.example.test"
     assert "UNRELATED_SECRET" not in manifest
     assert "OMNIGENT_DATABASE_URI" not in manifest
+    assert "OMNIGENT_HOST_TOKEN" not in manifest
 
 
 def test_ensure_host_daemon_refreshes_runner_env_manifest_on_background_reuse(
@@ -571,6 +575,40 @@ def test_ensure_host_daemon_refreshes_runner_env_manifest_on_background_reuse(
     assert manifest is not None
     assert manifest["CLAUDE_CODE_ENABLE_TELEMETRY"] == "1"
     assert manifest["OTEL_RESOURCE_ATTRIBUTES"] == "deployment.environment=second-launch"
+
+
+def test_ensure_host_daemon_refreshes_runner_env_manifest_on_remote_background_reuse(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Reusing a remote background daemon publishes the current invocation's env."""
+    captured: dict[str, object] = {}
+    _patch_daemon_spawn(monkeypatch, tmp_path, captured)
+    target = "https://server.example.com"
+    _write_daemon_registry_record(
+        tmp_path,
+        pid=4242,
+        target=target,
+        mode="server",
+        server_url=target,
+        log_path=str(tmp_path / "daemon.log"),
+        started_at=1_000_000,
+    )
+    monkeypatch.setattr(cli, "_pid_is_recorded_daemon", lambda record: cli._pid_alive(record.pid))
+    monkeypatch.setattr(cli, "_pid_alive", lambda pid: True)
+    write_runner_env_manifest(
+        target, {"PATH": "/usr/bin", "MY_GATEWAY_TOKEN": "first-launch"}, base_dir=tmp_path
+    )
+    monkeypatch.setenv("OMNIGENT_RUNNER_ENV_PASSTHROUGH", "MY_GATEWAY_TOKEN")
+    monkeypatch.setenv("MY_GATEWAY_TOKEN", "second-launch")
+    monkeypatch.setenv("OMNIGENT_HOST_TOKEN", "secret-host-token")
+
+    _ensure_host_daemon(target)
+
+    assert "args" not in captured  # reused, not respawned
+    manifest = read_runner_env_manifest(target, base_dir=tmp_path)
+    assert manifest is not None
+    assert manifest["MY_GATEWAY_TOKEN"] == "second-launch"
+    assert "OMNIGENT_HOST_TOKEN" not in manifest
 
 
 def test_ensure_host_daemon_refreshes_local_manifest_when_addressed_by_loopback_url(
@@ -941,6 +979,36 @@ def test_ensure_host_daemon_stops_spawned_daemon_that_never_claims(
     assert "did not claim its registry record" in str(excinfo.value)
     assert str(log_path) in str(excinfo.value)
     assert stopped == [4242]
+    assert read_runner_env_manifest("https://server.example.com", base_dir=tmp_path) is None
+
+
+def test_ensure_host_daemon_deletes_manifest_when_spawn_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A failed spawn leaves no orphaned runner-env manifest on disk."""
+    monkeypatch.setattr(cli, "_HOST_PID_PATH", tmp_path / "host.pid")
+    monkeypatch.setattr(cli, "_build_host_daemon_env", lambda **_kw: {"PATH": "/usr/bin"})
+    monkeypatch.setattr(cli, "server_config_signature", lambda **_kw: "sig")
+    monkeypatch.setattr(cli, "_spawn_host_daemon_process", lambda **_kw: None)
+
+    assert _ensure_host_daemon("https://server.example.com") is False
+    assert read_runner_env_manifest("https://server.example.com", base_dir=tmp_path) is None
+
+
+def test_publish_runner_env_manifest_warns_on_oserror(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A failed manifest write is reported, not raised, and keeps the prior manifest."""
+    monkeypatch.setattr(cli, "_HOST_PID_PATH", tmp_path / "host.pid")
+
+    def _raise(*_a: object, **_kw: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(cli, "_write_runner_env_manifest_impl", _raise)
+
+    cli._publish_runner_env_manifest("local", {"PATH": "/usr/bin"})
+
+    assert "could not refresh the runner environment" in capsys.readouterr().err
 
 
 def test_ensure_host_daemon_stops_spawned_daemon_on_identity_mismatch(

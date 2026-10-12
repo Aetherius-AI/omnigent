@@ -176,7 +176,10 @@ def _owned_private_file(info: os.stat_result) -> bool:
     if not stat.S_ISREG(info.st_mode):
         return False
     if not hasattr(os, "getuid"):
-        return True
+        # Without POSIX ownership (e.g. Windows), the trust boundary cannot be
+        # enforced, so never trust the file: runner launches fall back to the
+        # host's own environment.
+        return False
     return info.st_uid == os.getuid() and not info.st_mode & 0o077
 
 

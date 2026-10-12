@@ -3574,6 +3574,8 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
     expected_host_id = _load_existing_host_id()
     spawned = _spawn_host_daemon_process(args=args, env=daemon_env)
     if spawned is None:
+        # No daemon will read the manifest published above; drop it.
+        _delete_runner_env_manifest_impl(target, base_dir=_HOST_PID_PATH.parent)
         _record_host_state("start_failed")
         return False
     claimed = _wait_for_daemon_claim(target, spawned)
@@ -3581,6 +3583,9 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
         _record_host_state("start_timeout")
         _stop_spawned_host_daemon_process(spawned)
         _delete_spawned_daemon_record(target, spawned)
+        # Nothing claimed the record, so no daemon serves this target: drop the
+        # orphaned manifest alongside the (absent) record.
+        _delete_runner_env_manifest_impl(target, base_dir=_HOST_PID_PATH.parent)
         # The spawned daemon (or a concurrent winner) never wrote its record:
         # it likely crashed during startup. Point at its log so the failure is
         # diagnosable instead of silently absent from `host status`.
@@ -3697,9 +3702,13 @@ def _build_host_daemon_env(
     return env
 
 
-# Local-server-only settings never reach runners; keep them out of the on-disk
-# manifest (the database URI may embed a password).
-_RUNNER_ENV_MANIFEST_EXCLUDED: frozenset[str] = frozenset({"OMNIGENT_DATABASE_URI"})
+# Credentials the runner launch never consumes stay out of the on-disk manifest
+# to limit secret-at-rest exposure: the database URI may embed a password, and
+# the host identity token authenticates the daemon itself, which the runner-env
+# filter never forwards to runners.
+_RUNNER_ENV_MANIFEST_EXCLUDED: frozenset[str] = frozenset(
+    {"OMNIGENT_DATABASE_URI", "OMNIGENT_HOST_TOKEN"}
+)
 
 
 def _publish_runner_env_manifest(target: str, daemon_env: Mapping[str, str]) -> None:

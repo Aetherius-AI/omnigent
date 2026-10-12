@@ -1354,7 +1354,14 @@ class HostProcess:
         if manifest is None:
             return os.environ
         host_owned = {k: v for k, v in os.environ.items() if self._launch_env.get(k) != v}
-        return {**manifest, **host_owned}
+        # A variable the host unset after launch (e.g. a startup-only context var
+        # popped during init) is host-owned too; drop it so the manifest cannot
+        # resurrect it on every runner launch.
+        host_deleted = self._launch_env.keys() - os.environ.keys()
+        merged = {**manifest, **host_owned}
+        for name in host_deleted:
+            merged.pop(name, None)
+        return merged
 
     def _tracked_runner_pids(self) -> set[int]:
         """Return child PIDs whose exit status still belongs to a process handle.

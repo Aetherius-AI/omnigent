@@ -532,3 +532,36 @@ def test_host_launches_runners_from_the_target_manifest(
         "DATABRICKS_CONFIG_PROFILE": "omnigent-host",
     }
     assert foreground._runner_launch_base_env() is os.environ
+
+
+def test_runner_launch_base_env_drops_host_deleted_variables(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A variable the host unset after launch is not resurrected from the manifest."""
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("STARTUP_CONTEXT_ENV", "boot")
+    background = HostProcess(
+        identity=HostIdentity(host_id="host_deleted", name="test"),
+        server_url="http://localhost:8000",
+        runner_env_target="local",
+        launch_env=dict(os.environ),
+    )
+    # The host pops a startup-only variable after capturing its launch env.
+    monkeypatch.delenv("STARTUP_CONTEXT_ENV", raising=False)
+    write_runner_env_manifest("local", {"PATH": "/usr/bin", "STARTUP_CONTEXT_ENV": "stale"})
+
+    base_env = background._runner_launch_base_env()
+
+    assert "STARTUP_CONTEXT_ENV" not in base_env
+    assert base_env["PATH"] == "/usr/bin"
+
+
+def test_runner_env_manifest_untrusted_without_posix_ownership(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without POSIX ownership semantics (e.g. Windows) the manifest is never trusted."""
+    write_runner_env_manifest("local", {"PATH": "/usr/bin"}, base_dir=tmp_path)
+    assert read_runner_env_manifest("local", base_dir=tmp_path) == {"PATH": "/usr/bin"}
+
+    monkeypatch.delattr(os, "getuid", raising=False)
+    assert read_runner_env_manifest("local", base_dir=tmp_path) is None
