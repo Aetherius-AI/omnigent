@@ -1,161 +1,201 @@
-"""SDK-harness MCP startup failures surface on the agent-info popover.
+"""An SDK-harness session whose MCP server cannot start must show the failure in the web UI.
 
-An SDK-harness session (claude-sdk, openai-agents, ...) whose MCP server
-fails to start used to show the user nothing: the runner's ``tools/list``
-proxy dropped the per-server failure and the server only logged a one-line
-``runner MCP server '<name>' unavailable`` WARN, so the session looked stuck
-or quietly answered without the tool. Failure notices stay out of the
-conversation viewport (they are setup diagnostics, not conversation
-content); instead the header agent-info trigger flips to a warning state
-and the popover's Tools section names each failed server with its error.
-
-This test drives the real journey rather than fabricating an ``mcp_startup``
-map: it registers an SDK-harness agent whose only tool is an unreachable
-HTTP MCP server, opens the session, and exercises the product's own
-runner-backed ``tools/list`` endpoint so the runner reports the failure. It
-then asserts the failure surfaces on the agent-info diagnostics surface and
-stays out of the chat viewport.
+Native harnesses report MCP startup through ``external_mcp_startup`` and the chat
+shows a startup band. SDK harnesses (claude-sdk, openai-agents) list MCP tools through
+the runner's per-turn ``tools/list`` proxy instead, and its per-server failures must
+reach the user as well, not only the server log.
 """
 
 from __future__ import annotations
 
-import io
 import json
-import tarfile
-import time
-from collections.abc import Iterator
+import re
+import shutil
+import uuid
+from pathlib import Path
 
 import httpx
 import pytest
-from playwright.sync_api import Page, expect
+import yaml
+from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import Locator, Page, expect
 
-_TRIGGER = '[data-testid="agent-info-trigger"]'
-_FAILURE_ICON = '[data-testid="agent-info-mcp-failure-icon"]'
-_FAILURE_BLOCK = '[data-testid="mcp-startup-failures"]'
-_STARTUP_BAND = '[data-testid="mcp-startup-indicator"]'
-_CHAT_NOTICE = "MCP startup incomplete"
-_SERVER_NAME = "pipeshub"
+from tests._helpers.session import bind_session_runner, bundle_files, post_session_bundle
+from tests.e2e_ui.conftest import (
+    _REPO_ROOT,
+    _ensure_runner_online,
+    _server_state,
+    configure_mock_llm,
+    reset_mock_llm,
+    set_fallback_mock_llm,
+)
 
-# An SDK-harness agent whose only tool is a remote HTTP MCP server that
-# never accepts a connection. gpt-4o-mini keeps the openai-agents harness on
-# the in-process mock (no provider auth) — see the conftest agent-YAML note.
-_AGENT_YAML = f"""\
-spec_version: 1
-name: mcp_startup_failure_probe
-prompt: |
-  You are an assistant with one tool, {_SERVER_NAME}, a remote knowledge base.
-  Use {_SERVER_NAME} to look up documents when the user asks about one.
-
-executor:
-  model: gpt-4o-mini
-  config:
-    harness: openai-agents
-
-os_env:
-  type: caller_process
-  cwd: .
-  sandbox:
-    type: none
-
-tools:
-  {_SERVER_NAME}:
-    type: mcp
-    url: "http://127.0.0.1:9/mcp"
-"""
+_MCP_SERVER = "pipeshub"
+# TCP port 9 refuses connections, so the runner's MCP connect fails immediately.
+_MCP_URL = "http://127.0.0.1:9/mcp"
+_CLAUDE_MODEL = "claude-sonnet-4-20250514"
+_OPENAI_MODEL = "gpt-4o-mini"
+_ASSISTANT = '[data-testid="message-bubble"][data-role="assistant"]'
+_WORKING = '[data-testid="working-indicator"]'
+_BAND = '[data-testid="mcp-startup-indicator"]'
+_FAILURE_WORDS = r"(?:fail\w*|unavailable|error\w*|unreachable|could not|cannot)"
+# The server name and a failure word within a few words of each other, in either order.
+_NOTICE = re.compile(
+    rf"{_MCP_SERVER}\W+(?:\w+\W+){{0,6}}?{_FAILURE_WORDS}"
+    rf"|{_FAILURE_WORDS}\W+(?:\w+\W+){{0,8}}?{_MCP_SERVER}",
+    re.I,
+)
 
 
-@pytest.fixture
-def unreachable_mcp_session(
-    live_server: str,
-    runner_id: str,
-) -> Iterator[tuple[str, str]]:
-    """A runner-bound SDK-harness session whose only MCP server is unreachable.
+def _runner_visible_model_url(mock_llm_server_url: str) -> str:
+    """Return the mock model URL the runner itself can reach.
 
-    :param live_server: Spawned/prepared server base URL.
-    :param runner_id: Token-bound runner id the session dispatches to.
-    :returns: ``(base_url, session_id)``.
+    The workflow-owned reproduction environment relays the mock through a
+    per-invocation port that only this test process can see.
     """
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        data = _AGENT_YAML.encode()
-        info = tarfile.TarInfo("config.yaml")
-        info.size = len(data)
-        tar.addfile(info, io.BytesIO(data))
+    if not _server_state.get("workflow_owned"):
+        return mock_llm_server_url
+    state = json.loads((_REPO_ROOT / ".omnigent" / "repro-env" / "environment.json").read_text())
+    return str(state["mock_url"])
 
-    create = httpx.post(
-        f"{live_server}/v1/sessions",
-        data={"metadata": json.dumps({})},
-        files={"bundle": ("agent.tar.gz", buf.getvalue(), "application/gzip")},
-        timeout=30.0,
-    )
-    create.raise_for_status()
-    session_id = str(create.json()["session_id"])
-    httpx.patch(
-        f"{live_server}/v1/sessions/{session_id}",
-        json={"runner_id": runner_id},
-        timeout=10.0,
-    ).raise_for_status()
+
+def _agent_spec(name: str, harness: str, model_url: str) -> dict[str, object]:
+    executor: dict[str, object] = {"harness": harness}
+    if harness == "claude-sdk":
+        executor.update(
+            model=_CLAUDE_MODEL,
+            context_window=200_000,
+            auth={"type": "api_key", "api_key": "mock-key", "base_url": model_url},
+        )
+    else:
+        executor["model"] = _OPENAI_MODEL
+    return {
+        "name": name,
+        "prompt": "You are a terse assistant. When asked about documents, use the pipeshub tool.",
+        "executor": executor,
+        "tools": {_MCP_SERVER: {"type": "mcp", "url": _MCP_URL}},
+    }
+
+
+def _create_session(base_url: str, runner_id: str, harness: str, model_url: str) -> str:
+    """Register an agent whose only tool is the unreachable MCP server and bind its session."""
+    name = f"mcp-down-{harness}-{uuid.uuid4().hex[:6]}"
+    spec = yaml.safe_dump(_agent_spec(name, harness, model_url), sort_keys=False).encode()
+    bundle = bundle_files({f"{name}.yaml": spec})
+    created = post_session_bundle(httpx.post, f"{base_url}/v1/sessions", bundle, timeout=30.0)
+    created.raise_for_status()
+    session_id = str(created.json()["session_id"])
+    bind_session_runner(httpx.patch, base_url, session_id, runner_id, timeout=10.0)
+    agent = httpx.get(f"{base_url}/v1/sessions/{session_id}/agent", timeout=10.0)
+    agent.raise_for_status()
+    assert agent.json()["harness"] == harness
+    assert [srv["name"] for srv in agent.json()["mcp_servers"]] == [_MCP_SERVER]
+    return session_id
+
+
+def _safe_text(locator: Locator) -> str:
+    """Visible text of the first match, or empty when it is absent or closes."""
     try:
-        yield live_server, session_id
-    finally:
-        httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
+        return locator.first.inner_text(timeout=3_000)
+    except (AssertionError, PlaywrightError):
+        return ""
 
 
-def _request_tools_list(base_url: str, session_id: str) -> None:
-    """Enumerate the session's MCP tools through the product's runner proxy.
+def _mcp_tools_offered(mock_url: str, nonce: str) -> set[str]:
+    """Names of MCP-server tools the model was offered during the nonce's turn."""
+    requests = httpx.get(f"{mock_url}/mock/requests", timeout=10.0).json()["requests"]
+    turn_requests = [r for r in requests if nonce in json.dumps(r)]
+    assert turn_requests, "the scripted turn never reached the mock model"
+    offered: set[str] = set()
+    for req in turn_requests:
+        for tool in req.get("tools") or []:
+            name = tool.get("name") or (tool.get("function") or {}).get("name") or ""
+            if _MCP_SERVER in name:
+                offered.add(name)
+    return offered
 
-    The runner tries to connect to the unreachable server and reports the
-    per-server failure, which the server publishes through
-    ``session.mcp_startup``.
-    """
-    httpx.post(
-        f"{base_url}/v1/sessions/{session_id}/mcp",
-        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
-        timeout=60.0,
-    )
 
-
-def test_sdk_harness_mcp_startup_failure_surfaced_in_web_ui(
-    page: Page,
-    unreachable_mcp_session: tuple[str, str],
+@pytest.mark.timeout(600)
+@pytest.mark.parametrize("harness", ["claude-sdk", "openai-agents"])
+def test_mcp_startup_failure_is_visible_in_sdk_harness_session(
+    request: pytest.FixtureRequest,
+    live_server: str,
+    mock_llm_server_url: str,
+    tmp_path_factory: pytest.TempPathFactory,
+    harness: str,
 ) -> None:
-    """A failed MCP server is named on the agent-info surface, not the chat.
+    """Send one message on an SDK-harness agent whose MCP server is unreachable.
 
-    Journey: open a session on an SDK-harness agent whose only tool is an
-    unreachable MCP server; the runner's tool enumeration fails; the header
-    agent-info trigger flips to a warning state; opening the popover names
-    the failed server and its error; the failure never appears in the chat
-    viewport.
-
-    :param page: Playwright page fixture.
-    :param unreachable_mcp_session: ``(base_url, session_id)``.
-    :returns: None.
+    Journey: open the session, ask for the pipeshub tool, wait for the reply, then
+    look at the chat and the "Agent tools and policies" popover. The runner's
+    connect to pipeshub fails and the model is never offered its tools, so the
+    user must see a notice naming pipeshub as failed somewhere on the page.
     """
-    base_url, session_id = unreachable_mcp_session
-
-    page.goto(f"{base_url}/c/{session_id}")
-    expect(page.get_by_role("textbox", name="Message the agent")).to_be_visible(timeout=20_000)
-
-    # The session stream is snapshot-plus-live-tail with no replay, so a
-    # failure published between snapshot load and live subscribe is missed;
-    # re-request the tool list until the diagnostics surface reflects it.
-    deadline = time.monotonic() + 30.0
-    while True:
-        _request_tools_list(base_url, session_id)
+    if harness == "claude-sdk" and shutil.which("claude") is None:
+        pytest.skip("claude-sdk needs the Claude Code CLI on PATH")
+    respawned = _ensure_runner_online(live_server, tmp_path_factory)
+    try:
+        runner_id = str(_server_state["runner_id"])
+        session_id = _create_session(
+            live_server, runner_id, harness, _runner_visible_model_url(mock_llm_server_url)
+        )
         try:
-            expect(page.locator(_FAILURE_ICON)).to_be_visible(timeout=3_000)
-            break
-        except AssertionError:
-            if time.monotonic() >= deadline:
-                raise
+            reset_mock_llm(mock_llm_server_url)
+            nonce = f"q3-{uuid.uuid4().hex[:6]}"
+            # Neutral reply: no server name and no failure word, so the only way the
+            # notice regex can match is a notice the product itself renders.
+            reply = f"Here is a summary of the Q3 roadmap from what I already know. [{nonce}]"
+            configure_mock_llm(
+                mock_llm_server_url,
+                [{"text": reply}] * 6,
+                key=f"mcp-down-{nonce}",
+                match=nonce,
+                required_tools=[],
+            )
+            for model in (_CLAUDE_MODEL, _OPENAI_MODEL):
+                set_fallback_mock_llm(mock_llm_server_url, model, reply)
 
-    # The failure is a setup diagnostic, never conversation content.
-    expect(page.get_by_text(_CHAT_NOTICE)).to_have_count(0)
-    expect(page.locator(_STARTUP_BAND)).to_have_count(0)
+            page: Page = request.getfixturevalue("page")
+            page.goto(f"{live_server}/c/{session_id}")
+            composer = page.get_by_role("textbox", name="Message the agent")
+            expect(composer).to_be_enabled(timeout=30_000)
+            composer.fill(f"Use pipeshub to find the Q3 roadmap document. [{nonce}]")
+            page.get_by_role("button", name="Send", exact=True).click()
+            expect(page.locator(_ASSISTANT).filter(has_text=nonce)).to_be_visible(timeout=180_000)
+            expect(page.locator(_WORKING)).to_have_count(0, timeout=60_000)
 
-    # The agent-info popover names the failed server and its error.
-    page.locator(_TRIGGER).click()
-    failure_block = page.locator(_FAILURE_BLOCK)
-    expect(failure_block).to_be_visible(timeout=5_000)
-    expect(failure_block).to_contain_text(_SERVER_NAME)
-    expect(failure_block).to_contain_text("failed to start")
+            offered = _mcp_tools_offered(mock_llm_server_url, nonce)
+            assert not offered, f"{_MCP_SERVER} connected after all; tools offered: {offered}"
+
+            band_text = _safe_text(page.locator(_BAND))
+            trigger = page.get_by_test_id("agent-info-trigger")
+            trigger_label = trigger.get_attribute("aria-label")
+            panel_text = ""
+            try:
+                trigger.scroll_into_view_if_needed()
+                trigger.click()
+                expect(page.get_by_test_id("agent-info-panel")).to_be_visible(timeout=10_000)
+                panel_text = _safe_text(page.get_by_test_id("agent-info-panel"))
+            except (AssertionError, PlaywrightError):
+                pass
+
+            output_dir = Path(str(request.config.getoption("--output")))
+            output_dir.mkdir(parents=True, exist_ok=True)
+            page.screenshot(path=str(output_dir / f"mcp-startup-failure-{harness}.png"))
+
+            visible = bool(_NOTICE.search(f"{band_text}\n{panel_text}"))
+            observed = {
+                "band_text": band_text[:200],
+                "trigger_label": trigger_label,
+                "panel_excerpt": panel_text[:400],
+            }
+            assert visible, (
+                f"the {harness} session replied without {_MCP_SERVER} but no chat band or "
+                f"agent-info popover names {_MCP_SERVER} as failed to start; observed={observed}"
+            )
+        finally:
+            httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
+    finally:
+        if respawned is not None:
+            respawned.terminate()
+            respawned.wait(timeout=5)
