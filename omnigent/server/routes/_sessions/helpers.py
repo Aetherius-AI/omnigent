@@ -6388,7 +6388,7 @@ async def _await_settled_managed_launch(launch: ManagedLaunch) -> None:
         )
         if remaining <= 0:
             raise OmnigentError(
-                "The session's managed sandbox is still provisioning; try again shortly",
+                f"The session's managed sandbox is still {launch.stage}; try again shortly",
                 code=ErrorCode.RUNNER_UNAVAILABLE,
             )
         with contextlib.suppress(asyncio.TimeoutError):

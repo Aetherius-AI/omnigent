@@ -29,6 +29,8 @@ from omnigent.onboarding.sandboxes.registry import (
 
 PROVIDER = "localexec"
 _PGID_FILE = ".omnigent-host.pgid"
+# Bounds a wedged launch command so the suite fails diagnosably instead of hanging.
+_RUN_TIMEOUT_S = 600
 
 
 @dataclass(frozen=True)
@@ -73,14 +75,20 @@ class LocalExecLauncher(SandboxLauncher):
         home = self._home(sandbox_id)
         if not home.is_dir():
             raise click.ClickException(f"sandbox '{sandbox_id}' does not exist")
-        completed = subprocess.run(
-            ["bash", "-c", command],
-            cwd=home,
-            env=self._environment(sandbox_id),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        try:
+            completed = subprocess.run(
+                ["bash", "-c", command],
+                cwd=home,
+                env=self._environment(sandbox_id),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=_RUN_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise click.ClickException(
+                f"command timed out after {_RUN_TIMEOUT_S}s in sandbox '{sandbox_id}': {command}"
+            ) from exc
         if check and completed.returncode != 0:
             detail = completed.stderr.strip() or completed.stdout.strip()
             raise click.ClickException(
@@ -123,11 +131,12 @@ def terminate_process_group(pgid: int) -> None:
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
             os.killpg(pgid, sig)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             break
-        time.sleep(1.0)
+        if sig != signal.SIGKILL:
+            time.sleep(1.0)
     with contextlib.suppress(ChildProcessError):
-        os.waitpid(pgid, os.WNOHANG)
+        os.waitpid(-pgid, os.WNOHANG)
 
 
 def contribution() -> SandboxProviderContribution:

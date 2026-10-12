@@ -859,7 +859,7 @@ async def test_parked_message_rides_out_a_clone_longer_than_the_rendezvous_budge
     import threading
 
     env = managed_session_env
-    budget_s = 0.3
+    budget_s = 1.0
     monkeypatch.setattr(
         "omnigent.server.managed_hosts.MANAGED_LAUNCH_RENDEZVOUS_TIMEOUT_S", budget_s
     )
@@ -951,11 +951,9 @@ async def test_managed_launch_progress_surfaces_on_snapshot_and_stream(
 
     env = managed_session_env
     monkeypatch.setattr("omnigent.server.managed_hosts.MANAGED_HOST_ONLINE_TIMEOUT_S", 10)
-    # This test asserts the happy-path "ready" progress edge; fake the
-    # runner tunnel connect so settlement is driven by progress ordering,
-    # not by the runner WebSocket harness. The fake also records the stage
-    # the launch tracker holds while the runner connect is pending: a parked
-    # message's budget must be counting "connecting" by then, not "starting".
+    # Fake the runner tunnel connect so settlement is driven by progress ordering,
+    # not the runner WebSocket harness; the fake also records the tracker stage
+    # during the pending connect, which must be "connecting", not "starting".
     tracker = env.app.state.managed_launches
     session_ids: list[str] = []
     stages_while_connecting: list[str] = []

@@ -558,6 +558,8 @@ class ManagedLaunchTracker:
         entry = self._by_session.get(session_id)
         if entry is None or entry.settled.is_set():
             return
+        # Timestamp first: an unsynchronized reader that pairs the new timestamp
+        # with the stale stage only refreshes a budget; the reverse order could 503.
         entry.progressed_at = time.monotonic()
         entry.stage = stage
 

@@ -220,7 +220,7 @@ def deployment(
     env = {
         **os.environ,
         "OMNIGENT_CONFIG": str(server_config),
-        # Keep the server's own log next to the test's artifacts for triage.
+        # Isolate the server's state under the test's scratch directory.
         "OMNIGENT_DATA_DIR": str(scratch / "data"),
         "OMNIGENT_WEB_UI_DIST": str(_BUILD_OUTPUT),
         "OPENAI_BASE_URL": f"{mock_llm_server_url}/v1",
@@ -268,7 +268,11 @@ def deployment(
         )
         set_fallback_mock_llm(mock_llm_server_url, "gpt-4o-mini", "Mock LLM response.")
         agents = httpx.get(f"{base_url}/v1/agents", timeout=10).json()["data"]
-        agent_id = next(a["id"] for a in agents if a["name"] == "hello_world")
+        agent_id = next((a["id"] for a in agents if a["name"] == "hello_world"), None)
+        assert agent_id is not None, (
+            f"agent 'hello_world' not registered; agents: {agents}\n"
+            f"{server_log.read_text()[-3000:]}"
+        )
         yield _Deployment(base_url=base_url, sandbox_root=sandbox_root, agent_id=agent_id)
     finally:
         server.send_signal(signal.SIGTERM)
@@ -278,7 +282,7 @@ def deployment(
             server.kill()
             server.wait(timeout=5)
         for pgid_file in sandbox_root.glob("*/.omnigent-host.pgid"):
-            with contextlib.suppress(ProcessLookupError, ValueError):
+            with contextlib.suppress(ProcessLookupError, PermissionError, ValueError):
                 os.killpg(int(pgid_file.read_text()), signal.SIGKILL)
         git_server.shutdown()
         git_server.server_close()

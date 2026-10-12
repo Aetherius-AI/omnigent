@@ -16,10 +16,10 @@ from omnigent.server.routes._sessions.helpers import (
     _provision_managed_sandbox,
 )
 
-# Parked windows stay well inside the budget so event-loop scheduling delay
-# on a loaded runner cannot push a stage past it.
+# Parked windows are 40% of the budget, so event-loop scheduling delay on a
+# loaded runner cannot push a stage past it.
 _BUDGET_S = 1.0
-_WINDOW_S = 0.5
+_WINDOW_S = 0.4
 _SESSION = "conv_1"
 
 
@@ -81,14 +81,15 @@ async def test_clone_past_its_own_ceiling_still_gives_up(
     monkeypatch: pytest.MonkeyPatch, waiters: list[asyncio.Task[None]]
 ) -> None:
     """The clone budget is a ceiling, not an open-ended wait."""
-    monkeypatch.setattr(managed_hosts, "MANAGED_LAUNCH_CLONE_RENDEZVOUS_TIMEOUT_S", 2 * _BUDGET_S)
+    monkeypatch.setattr(managed_hosts, "MANAGED_LAUNCH_CLONE_RENDEZVOUS_TIMEOUT_S", 4 * _BUDGET_S)
     tracker = _begin("cloning")
     waiter = _wait_on(tracker, waiters)
+    # Past the ordinary budget but well inside the clone ceiling.
     await _still_parked(waiter, _BUDGET_S + _WINDOW_S)
     with pytest.raises(OmnigentError) as excinfo:
-        await asyncio.wait_for(waiter, timeout=3 * _BUDGET_S)
+        await asyncio.wait_for(waiter, timeout=6 * _BUDGET_S)
     assert excinfo.value.code == ErrorCode.RUNNER_UNAVAILABLE
-    assert "still provisioning" in str(excinfo.value)
+    assert "still cloning" in str(excinfo.value)
 
 
 async def test_budget_restarts_at_every_stage(waiters: list[asyncio.Task[None]]) -> None:
@@ -98,7 +99,7 @@ async def test_budget_restarts_at_every_stage(waiters: list[asyncio.Task[None]])
     for stage in ("starting", "connecting"):
         await _still_parked(waiter, _WINDOW_S)
         tracker.advance(_SESSION, stage)
-    # 1.5 budgets have passed in total; the current stage is well inside its own.
+    # 1.2 budgets have passed in total; the current stage is well inside its own.
     await _still_parked(waiter, _WINDOW_S)
     tracker.finish(_SESSION)
     await asyncio.wait_for(waiter, timeout=1.0)
@@ -111,7 +112,7 @@ async def test_stalled_bounded_stage_still_gives_up() -> None:
     with pytest.raises(OmnigentError) as excinfo:
         await asyncio.wait_for(_await_settled_managed_launch(launch), timeout=5 * _BUDGET_S)
     assert excinfo.value.code == ErrorCode.RUNNER_UNAVAILABLE
-    assert "still provisioning" in str(excinfo.value)
+    assert "still starting" in str(excinfo.value)
 
 
 async def test_failure_during_the_clone_surfaces_its_reason(
