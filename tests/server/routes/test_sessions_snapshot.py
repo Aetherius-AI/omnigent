@@ -470,6 +470,62 @@ _NATIVE_SUB_AGENT_CHILDREN = (
 )
 
 
+async def _assert_native_child_reports_parent_without_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    *,
+    parent_spec: AgentSpec,
+    conversations: dict[str, Conversation],
+    agent_id: str,
+    expected_agent_name: str,
+    expected_sub_agent_name: str,
+    child_label: str,
+) -> None:
+    """Snapshot ``conv_child`` and assert it reports the parent and logs no warning."""
+    conv_store = _ConversationStore([], conversations=conversations)
+
+    class _AgentStore:
+        @staticmethod
+        def get(requested_id: str) -> Any:
+            assert requested_id == agent_id
+            return type(
+                "StoredAgent",
+                (),
+                {
+                    "id": agent_id,
+                    "name": expected_agent_name,
+                    "bundle_location": "bundle",
+                    "session_id": None,
+                    "operator_authored": True,
+                },
+            )()
+
+    class _AgentCache:
+        @staticmethod
+        def load(requested_id: str, bundle_location: str, *, expand_env: bool = True) -> Any:
+            assert (requested_id, bundle_location) == (agent_id, "bundle")
+            return type("LoadedAgent", (), {"spec": parent_spec})()
+
+    monkeypatch.setattr("omnigent.runtime.get_runner_client", lambda: None)
+    monkeypatch.setattr("omnigent.runtime.get_runner_router", lambda: None)
+
+    with caplog.at_level(logging.WARNING, logger="omnigent.server.routes._sessions.orchestration"):
+        child = await _get_session_snapshot(
+            conv_store,  # type: ignore[arg-type]
+            "conv_child",
+            agent_store=_AgentStore(),  # type: ignore[arg-type]
+            agent_cache=_AgentCache(),  # type: ignore[arg-type]
+        )
+
+    assert child.agent_name == expected_agent_name
+    assert child.sub_agent_name == expected_sub_agent_name
+    unresolved = [r for r in caplog.records if "did not resolve" in r.getMessage()]
+    assert not unresolved, (
+        f"snapshot of the {child_label} child warned about an unresolved "
+        f"sub-agent: {[r.getMessage() for r in unresolved]!r}"
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("parent_name", "harness", "parent_wrapper", "child_wrapper", "sub_agent_name", "title"),
@@ -515,47 +571,15 @@ async def test_session_snapshot_native_sub_agent_child_reports_parent_without_wa
             labels={_CLAUDE_NATIVE_WRAPPER_LABEL_KEY: child_wrapper},
         ),
     }
-    conv_store = _ConversationStore([], conversations=conversations)
-
-    class _AgentStore:
-        @staticmethod
-        def get(agent_id: str) -> Any:
-            assert agent_id == "ag_native"
-            return type(
-                "StoredAgent",
-                (),
-                {
-                    "id": agent_id,
-                    "name": parent_name,
-                    "bundle_location": "bundle",
-                    "session_id": None,
-                    "operator_authored": True,
-                },
-            )()
-
-    class _AgentCache:
-        @staticmethod
-        def load(agent_id: str, bundle_location: str, *, expand_env: bool = True) -> Any:
-            assert (agent_id, bundle_location) == ("ag_native", "bundle")
-            return type("LoadedAgent", (), {"spec": parent_spec})()
-
-    monkeypatch.setattr("omnigent.runtime.get_runner_client", lambda: None)
-    monkeypatch.setattr("omnigent.runtime.get_runner_router", lambda: None)
-
-    with caplog.at_level(logging.WARNING, logger="omnigent.server.routes._sessions.orchestration"):
-        child = await _get_session_snapshot(
-            conv_store,  # type: ignore[arg-type]
-            "conv_child",
-            agent_store=_AgentStore(),  # type: ignore[arg-type]
-            agent_cache=_AgentCache(),  # type: ignore[arg-type]
-        )
-
-    assert child.agent_name == parent_name
-    assert child.sub_agent_name == sub_agent_name
-    unresolved = [r for r in caplog.records if "did not resolve" in r.getMessage()]
-    assert not unresolved, (
-        f"snapshot of the native {sub_agent_name!r} child warned about an unresolved "
-        f"sub-agent: {[r.getMessage() for r in unresolved]!r}"
+    await _assert_native_child_reports_parent_without_warning(
+        monkeypatch,
+        caplog,
+        parent_spec=parent_spec,
+        conversations=conversations,
+        agent_id="ag_native",
+        expected_agent_name=parent_name,
+        expected_sub_agent_name=sub_agent_name,
+        child_label=f"native {sub_agent_name!r}",
     )
 
 
@@ -593,47 +617,15 @@ async def test_session_snapshot_acp_mirrored_sub_agent_child_reports_parent_with
             labels={_ACP_SUBAGENT_ID_LABEL_KEY: "sub_abc123"},
         ),
     }
-    conv_store = _ConversationStore([], conversations=conversations)
-
-    class _AgentStore:
-        @staticmethod
-        def get(agent_id: str) -> Any:
-            assert agent_id == "ag_devin"
-            return type(
-                "StoredAgent",
-                (),
-                {
-                    "id": agent_id,
-                    "name": "devin-native-ui",
-                    "bundle_location": "bundle",
-                    "session_id": None,
-                    "operator_authored": True,
-                },
-            )()
-
-    class _AgentCache:
-        @staticmethod
-        def load(agent_id: str, bundle_location: str, *, expand_env: bool = True) -> Any:
-            assert (agent_id, bundle_location) == ("ag_devin", "bundle")
-            return type("LoadedAgent", (), {"spec": parent_spec})()
-
-    monkeypatch.setattr("omnigent.runtime.get_runner_client", lambda: None)
-    monkeypatch.setattr("omnigent.runtime.get_runner_router", lambda: None)
-
-    with caplog.at_level(logging.WARNING, logger="omnigent.server.routes._sessions.orchestration"):
-        child = await _get_session_snapshot(
-            conv_store,  # type: ignore[arg-type]
-            "conv_child",
-            agent_store=_AgentStore(),  # type: ignore[arg-type]
-            agent_cache=_AgentCache(),  # type: ignore[arg-type]
-        )
-
-    assert child.agent_name == "devin-native-ui"
-    assert child.sub_agent_name == "mathutils"
-    unresolved = [r for r in caplog.records if "did not resolve" in r.getMessage()]
-    assert not unresolved, (
-        f"snapshot of the ACP-mirrored 'mathutils' child warned about an unresolved "
-        f"sub-agent: {[r.getMessage() for r in unresolved]!r}"
+    await _assert_native_child_reports_parent_without_warning(
+        monkeypatch,
+        caplog,
+        parent_spec=parent_spec,
+        conversations=conversations,
+        agent_id="ag_devin",
+        expected_agent_name="devin-native-ui",
+        expected_sub_agent_name="mathutils",
+        child_label="ACP-mirrored 'mathutils'",
     )
 
 
