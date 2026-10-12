@@ -1602,7 +1602,8 @@ struct OmnigentWebView: UIViewRepresentable {
       }
       let disposition = (response.response as? HTTPURLResponse)?
         .value(forHTTPHeaderField: "Content-Disposition")
-      let isAttachment = disposition?
+      let isAttachment =
+        disposition?
         .split(separator: ";", maxSplits: 1)
         .first?
         .trimmingCharacters(in: .whitespacesAndNewlines)
