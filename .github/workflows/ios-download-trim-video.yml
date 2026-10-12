@@ -29,7 +29,7 @@ jobs:
             -vf "scale=720:-2,drawtext=text='BEFORE — download exits Omnigent':fontcolor=white:fontsize=28:box=1:boxcolor=black@0.75:boxborderw=14:x=(w-text_w)/2:y=70" \
             -c:v libx264 -preset medium -crf 22 -movflags +faststart -an \
             trimmed/before-ios-download-bug.mp4
-          ffmpeg -y -v error -ss 75 -t 10 -i raw/after.mp4 \
+          ffmpeg -y -v error -ss 108 -t 16 -i raw/after.mp4 \
             -vf "scale=720:-2,drawtext=text='AFTER — native share panel, app stays open':fontcolor=white:fontsize=25:box=1:boxcolor=black@0.75:boxborderw=14:x=(w-text_w)/2:y=70" \
             -c:v libx264 -preset medium -crf 22 -movflags +faststart -an \
             trimmed/after-ios-download-fixed.mp4
