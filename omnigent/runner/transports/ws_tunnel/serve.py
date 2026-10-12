@@ -627,7 +627,7 @@ async def serve_tunnel(
             # Classified once, for the counter and the debug-log row alike.
             local_shutdown = (
                 shutdown_event is not None and shutdown_event.is_set()
-            ) or isinstance(disconnect_error, asyncio.CancelledError)
+            ) or isinstance(terminal_error, asyncio.CancelledError)
             if connected_this_attempt:
                 record_websocket_disconnected(
                     "runner",

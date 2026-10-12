@@ -2,8 +2,12 @@
 
 import asyncio
 import logging
+import threading
 
 import pytest
+from websockets.datastructures import Headers
+from websockets.exceptions import InvalidStatus
+from websockets.http11 import Response
 
 from omnigent.runner.transports.ws_tunnel import serve
 from tests.runner.transports.ws_tunnel.test_serve import _Closed, _noop_app
@@ -135,3 +139,55 @@ async def test_retry_does_not_inherit_callers_handled_exception(
     assert len(attempts) == 1
     assert attempts[0]["outcome"] == "graceful_shutdown"
     assert len(retries) == 1
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_auth_retry_is_a_local_shutdown(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    class Provider:
+        def __call__(self) -> str:
+            return "synthetic-token"
+
+        def invalidate(self) -> bool:
+            started.set()
+            assert release.wait(5)
+            return True
+
+    async def once(*args: object, **kwargs: object) -> None:
+        raise InvalidStatus(Response(401, "Unauthorized", Headers(), b""))
+
+    monkeypatch.setattr(serve, "_serve_tunnel_once", once)
+    with caplog.at_level(logging.INFO, logger=serve.__name__):
+        task = asyncio.create_task(
+            serve.serve_tunnel(
+                _noop_app,
+                server_url="http://synthetic",
+                runner_version="test",
+                runner_id="runner-test",
+                auth_token_factory=Provider(),
+            )
+        )
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            release.set()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    attempts = [
+        r.attributes
+        for r in caplog.records
+        if getattr(r, "event_name", None) == "runner_tunnel_attempt_finished"
+    ]
+    assert len(attempts) == 1
+    assert attempts[0]["outcome"] == "cancelled"
+    assert attempts[0]["terminal_error_type"] == "CancelledError"
+    assert attempts[0]["source_error_type"] == "InvalidStatus"
+    assert attempts[0]["disconnect_reason"] == "local_shutdown"
