@@ -7156,7 +7156,7 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
       });
     });
 
-    const snapshotRaces: Array<{
+    const snapshotRaces: {
       name: string;
       id: string;
       /** A second reader of the session snapshot, started before or after the bind. */
@@ -7164,7 +7164,7 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
       snapshotStartup: Record<string, McpServerStartup> | null;
       liveServers: Record<string, McpServerStartup>;
       expected: Record<string, string> | null;
-    }> = [
+    }[] = [
       {
         name: "the bind snapshot is still loading",
         id: "conv_mcp_race",
