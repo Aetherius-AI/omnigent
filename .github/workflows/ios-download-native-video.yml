@@ -13,6 +13,24 @@ jobs:
         with:
           fetch-depth: 0
 
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version-file: ".python-version"
+
+      - uses: ./.github/actions/setup-pnpm
+
+      - uses: ./.github/actions/setup-uv
+        with:
+          enable-cache: true
+
+      - name: Install and build real Omnigent app
+        env:
+          NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+        run: |
+          uv sync --locked --extra all --group test
+          pnpm install --frozen-lockfile --filter web
+          pnpm --filter web run build
+
       - name: Select iPhone Simulator
         id: simulator
         run: |
@@ -28,19 +46,35 @@ jobs:
       - name: Save fixed implementation
         run: |
           cp web/ios/Omnigent/OmnigentWebView.swift /tmp/OmnigentWebView.fixed.swift
-          cp web/ios/Omnigent.xcodeproj/project.pbxproj /tmp/project.fixed.pbxproj
+          git show origin/main:web/ios/Omnigent/OmnigentWebView.swift \
+            > web/ios/Omnigent/OmnigentWebView.swift
 
-      - name: Reuse validated before recording
+      - name: Build and record real File Viewer before fix
         env:
-          GH_TOKEN: ${{ github.token }}
+          DEVICE_ID: ${{ steps.simulator.outputs.id }}
+          OMNIGENT_IOS_DEVICE_ID: ${{ steps.simulator.outputs.id }}
+          OMNIGENT_IOS_DERIVED_DATA: /tmp/before-derived
+          OMNIGENT_IOS_TEST_METHOD: testNativeDownloadBeforeVideo
         run: |
           set -euo pipefail
-          mkdir -p /tmp/baseline
-          gh run download 38189470190 \
-            --repo omnigent-ai/omnigent \
-            --name ios-download-native-before-after \
-            --dir /tmp/baseline
-          cp /tmp/baseline/before.mp4 /tmp/before.mp4
+          xcodebuild build-for-testing \
+            -project web/ios/Omnigent.xcodeproj \
+            -scheme Omnigent \
+            -configuration Debug \
+            -destination "generic/platform=iOS Simulator" \
+            -derivedDataPath "$OMNIGENT_IOS_DERIVED_DATA" \
+            -only-testing:OmnigentUITests \
+            CODE_SIGNING_ALLOWED=NO
+          xcrun simctl boot "$DEVICE_ID" 2>/dev/null || true
+          xcrun simctl bootstatus "$DEVICE_ID" -b
+          xcrun simctl io "$DEVICE_ID" recordVideo --codec=h264 /tmp/before.mp4 &
+          VIDEO_PID=$!
+          trap 'kill -INT "$VIDEO_PID" 2>/dev/null || true' EXIT
+          uv run pytest tests/e2e_ui/mobile/test_ios_native_download_capture.py \
+            --ui-skip-build -vv -s
+          kill -INT "$VIDEO_PID"
+          wait "$VIDEO_PID" || true
+          trap - EXIT
 
       - name: Record after fix
         env:
@@ -48,7 +82,6 @@ jobs:
         run: |
           set -euo pipefail
           cp /tmp/OmnigentWebView.fixed.swift web/ios/Omnigent/OmnigentWebView.swift
-          cp /tmp/project.fixed.pbxproj web/ios/Omnigent.xcodeproj/project.pbxproj
           xcrun simctl uninstall "$DEVICE_ID" ai.omnigent.ios 2>/dev/null || true
           xcodebuild build-for-testing \
             -project web/ios/Omnigent.xcodeproj \
@@ -56,28 +89,21 @@ jobs:
             -configuration Debug \
             -destination "generic/platform=iOS Simulator" \
             -derivedDataPath /tmp/after-derived \
+            -only-testing:OmnigentUITests \
             CODE_SIGNING_ALLOWED=NO
           xcrun simctl boot "$DEVICE_ID" 2>/dev/null || true
           xcrun simctl bootstatus "$DEVICE_ID" -b
           xcrun simctl io "$DEVICE_ID" recordVideo --codec=h264 /tmp/after.mp4 &
           VIDEO_PID=$!
-          sleep 2
-          set +e
-          xcodebuild test-without-building \
-            -project web/ios/Omnigent.xcodeproj \
-            -scheme Omnigent \
-            -configuration Debug \
-            -destination "platform=iOS Simulator,id=$DEVICE_ID" \
-            -derivedDataPath /tmp/after-derived \
-            -only-testing:OmnigentUITests/OmnigentUITests/testNativeDownloadAfterVideo \
-            -parallel-testing-enabled NO \
-            CODE_SIGNING_ALLOWED=NO
-          TEST_STATUS=$?
-          set -e
-          sleep 2
+          trap 'kill -INT "$VIDEO_PID" 2>/dev/null || true' EXIT
+          OMNIGENT_IOS_DEVICE_ID="$DEVICE_ID" \
+          OMNIGENT_IOS_DERIVED_DATA=/tmp/after-derived \
+          OMNIGENT_IOS_TEST_METHOD=testNativeDownloadAfterVideo \
+            uv run pytest tests/e2e_ui/mobile/test_ios_native_download_capture.py \
+              --ui-skip-build -vv -s
           kill -INT "$VIDEO_PID"
           wait "$VIDEO_PID" || true
-          test "$TEST_STATUS" -eq 0
+          trap - EXIT
 
       - name: Upload native recordings
         if: always()

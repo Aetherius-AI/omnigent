@@ -7,65 +7,53 @@ final class OmnigentUITests: XCTestCase {
   }
 
   func testNativeDownloadBeforeVideo() throws {
-    try runNativeDownloadVideo(expectShareSheet: false)
+    try runRealFileViewerDownload(expectShareSheet: false)
   }
 
   func testNativeDownloadAfterVideo() throws {
-    try runNativeDownloadVideo(expectShareSheet: true)
+    try runRealFileViewerDownload(expectShareSheet: true)
   }
 
-  private func runNativeDownloadVideo(expectShareSheet: Bool) throws {
-    let server = try MockHTTPServer { _, path in
-      if path == "/download.txt" {
-        return (
-          200,
-          [
-            "content-disposition": "attachment; filename=omnigent-download-demo.txt",
-            "content-type": "text/plain",
-          ],
-          Data("Downloaded from the native Omnigent app.\n".utf8)
-        )
-      }
-      let html = """
-        <!doctype html>
-        <meta name="viewport" content="width=device-width,initial-scale=1">
-        <style>
-          body { background:#09090b; color:#fafafa; font:18px -apple-system; padding:64px 24px; }
-          h1 { font-size:28px; margin-bottom:12px; }
-          p { color:#a1a1aa; line-height:1.5; margin-bottom:36px; }
-          a { display:block; background:#fafafa; color:#18181b; text-align:center;
-              padding:16px; border-radius:14px; font-weight:700; text-decoration:none; }
-        </style>
-        <h1>Native file download</h1>
-        <p>Tap below to download a file without leaving this Omnigent session.</p>
-        <a href="/download.txt" download>Download file</a>
-        """
-      return (200, ["content-type": "text/html; charset=utf-8"], Data(html.utf8))
-    }
-
+  private func runRealFileViewerDownload(expectShareSheet: Bool) throws {
+    let environment = ProcessInfo.processInfo.environment
+    let serverURL = try XCTUnwrap(environment["OMNIGENT_IOS_E2E_SERVER_URL"])
+    let filename = try XCTUnwrap(environment["OMNIGENT_IOS_E2E_FILENAME"])
     let app = XCUIApplication(bundleIdentifier: "ai.omnigent.ios")
     app.launchArguments = [
-      "--omnigent-reset-state", "--omnigent-server-url", "http://localhost:\(server.port)",
+      "--omnigent-reset-state", "--omnigent-server-url", serverURL,
     ]
     app.launch()
-    sleep(5)
+    let webView = app.webViews.firstMatch
+    XCTAssertTrue(webView.waitForExistence(timeout: 90), "Expected the real Omnigent web app.")
 
-    let download = app.webViews.links["Download file"]
-    XCTAssertTrue(download.waitForExistence(timeout: 30))
+    let conversationActions = webView.buttons["Conversation actions"]
+    XCTAssertTrue(conversationActions.waitForExistence(timeout: 60))
+    conversationActions.tap()
+    let files = webView.descendants(matching: .any).matching(identifier: "Files").firstMatch
+    XCTAssertTrue(files.waitForExistence(timeout: 20))
+    files.tap()
+
+    let file = webView.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", filename)).firstMatch
+    XCTAssertTrue(file.waitForExistence(timeout: 60), "Expected seeded workspace file \(filename).")
+    file.tap()
+    XCTAssertTrue(webView.staticTexts[filename].waitForExistence(timeout: 30))
+
+    let moreActions = webView.buttons["More actions"]
+    XCTAssertTrue(moreActions.waitForExistence(timeout: 30))
+    moreActions.tap()
+    let download = webView.descendants(matching: .any).matching(identifier: "Download file").firstMatch
+    XCTAssertTrue(download.waitForExistence(timeout: 20))
     sleep(2)
     download.tap()
     if expectShareSheet {
-      sleep(5)
-      XCTAssertTrue(
-        app.state == .runningForeground,
-        "Expected Omnigent to remain foreground after downloading a file."
-      )
-      XCTAssertTrue(
-        app.webViews.links["Download file"].waitForExistence(timeout: 10),
-        "Expected the Omnigent download page to remain open behind the share sheet."
-      )
+      XCTAssertTrue(app.buttons["Save to Files"].waitForExistence(timeout: 30))
+      XCTAssertEqual(app.state, .runningForeground)
+      XCTAssertTrue(webView.staticTexts[filename].exists)
+    } else {
+      sleep(8)
+      XCTAssertFalse(app.buttons["Save to Files"].exists)
     }
-    sleep(10)
+    sleep(6)
   }
 
   func testLocalServerSnapshot() throws {
