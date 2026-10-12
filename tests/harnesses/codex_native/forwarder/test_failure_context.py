@@ -147,6 +147,12 @@ _PROVIDER_KEYS = frozenset(
             "unexpected status 502 Bad Gateway: <html>upstream unavailable</html>, url: https://host/x",
             {"http_status": 502},
         ),
+        # A rejection quoted inside another error is not this turn's rejection.
+        (
+            'tool output contained "unexpected status 401 Unauthorized: {"error_code":"X"}" '
+            "but the turn failed while writing the patch",
+            {"http_status": None},
+        ),
     ],
 )
 def test_gateway_rejection_message_supplies_status_and_error_code(
@@ -166,7 +172,7 @@ def test_gateway_rejection_message_supplies_status_and_error_code(
     context = error.failure_context
     assert context is not None
     assert context["native_error_category"] == "responseStreamConnectionFailed"
-    assert context["http_status"] == expected["http_status"]
+    assert context.get("http_status") == expected["http_status"]
     assert {key: context[key] for key in _PROVIDER_KEYS & set(context)} == {
         key: expected[key] for key in _PROVIDER_KEYS & set(expected)
     }

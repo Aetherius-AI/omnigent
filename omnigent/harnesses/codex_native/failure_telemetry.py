@@ -10,8 +10,9 @@ from omnigent.native.failure_telemetry import FailureContext, normalize_failure_
 _FLAT_VARIANT_KEYS = ("type", "kind", "variant")
 # codex-cli reports a rejected gateway request as
 # ``unexpected status <code> <reason>: <body>, url: <url>``, where ``<body>`` is
-# the gateway's JSON error envelope when it returned one.
-_GATEWAY_REJECTION = re.compile(r"unexpected status (?P<code>[1-5][0-9]{2})\b[^:\n]*:\s*")
+# the gateway's JSON error envelope when it returned one. Anchored to a line
+# start so quoted text inside another error cannot pose as the rejection.
+_GATEWAY_REJECTION = re.compile(r"(?m)^unexpected status (?P<code>[1-5][0-9]{2})\b[^:\n]*:\s*")
 _GATEWAY_MESSAGE_MAX_CHARS = 16384
 
 
@@ -33,16 +34,22 @@ def codex_error_info(info: object) -> tuple[str | None, int | None]:
         status = info.get("httpStatusCode")
         if variant is None:
             # Externally tagged: ``{"<variant>": {"httpStatusCode": N}}``, tolerating
-            # sibling metadata keys beside the tag.
-            for key, value in info.items():
-                if (
-                    isinstance(key, str)
-                    and key not in _FLAT_VARIANT_KEYS
-                    and isinstance(value, dict)
-                ):
-                    variant = key
-                    status = value.get("httpStatusCode")
+            # sibling metadata keys beside the tag. The nested dict that carries the
+            # status is the tag; otherwise the first dict is, and a flat status stays.
+            tagged = [
+                (key, value)
+                for key, value in info.items()
+                if isinstance(key, str)
+                and key not in _FLAT_VARIANT_KEYS
+                and isinstance(value, dict)
+            ]
+            for key, value in tagged:
+                if "httpStatusCode" in value:
+                    variant, status = key, value["httpStatusCode"]
                     break
+            else:
+                if tagged:
+                    variant = tagged[0][0]
     valid_status = status if type(status) is int and 100 <= status <= 599 else None
     return variant, valid_status
 
@@ -59,7 +66,7 @@ def _gateway_rejection(message: str) -> tuple[int | None, dict[str, object]]:
         return status, {}
     try:
         decoded, _ = json.JSONDecoder().raw_decode(body)
-    except ValueError:
+    except (ValueError, RecursionError):
         return status, {}
     return status, decoded if isinstance(decoded, dict) else {}
 

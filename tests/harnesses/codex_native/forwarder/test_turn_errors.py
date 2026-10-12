@@ -976,6 +976,37 @@ async def test_live_terminal_turn_error_posts_provider_evidence(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_live_terminal_turn_error_with_unparseable_gateway_body_still_fails(
+    tmp_path: Path,
+) -> None:
+    """A pathologically nested gateway body cannot keep the failed edge from posting."""
+    _seed_active_turn(tmp_path, "turn_123")
+    params = {
+        "threadId": "thread_123",
+        "turn": {
+            "id": "turn_123",
+            "status": "failed",
+            "error": {
+                "message": 'unexpected status 502 Bad Gateway: {"a":' + "[" * 12000,
+                "codexErrorInfo": {"responseStreamConnectionFailed": {"httpStatusCode": None}},
+            },
+        },
+    }
+    client = _RecordingClient()
+
+    edge = fwd._terminal_turn_status_edge(tmp_path, "turn/completed", params)
+    await fwd._post_turn_status_edge(client, "conv_x", edge)
+
+    assert len(client.posts) == 1
+    data = client.posts[0][1]["data"]
+    assert data["status"] == "failed"
+    context = data["failure_context"]
+    assert context["http_status"] == 502
+    assert context["native_error_category"] == "responseStreamConnectionFailed"
+    assert "provider_error_code" not in context
+
+
+@pytest.mark.asyncio
 async def test_standalone_error_notification_posts_provider_evidence(tmp_path: Path) -> None:
     """The non-retrying ``error`` notification keeps the HTTP status and error variant."""
     client = _RecordingClient()
@@ -1040,9 +1071,20 @@ async def test_resume_terminal_turn_error_posts_provider_evidence(tmp_path: Path
 @pytest.mark.parametrize(
     ("info", "message", "expected"),
     [
-        # Sibling metadata beside the tagged variant must not hide a typed 401.
+        # Sibling metadata beside the tagged variant must not hide a typed 401,
+        # whether it follows the tag, precedes it as a dict, or carries the status flat.
         (
             {"httpConnectionFailed": {"httpStatusCode": 401}, "retryAfterMs": 250},
+            _NEUTRAL_MESSAGE,
+            fwd._CODEX_ERROR_KIND_AUTH,
+        ),
+        (
+            {"details": {"attempt": 3}, "httpConnectionFailed": {"httpStatusCode": 401}},
+            _NEUTRAL_MESSAGE,
+            fwd._CODEX_ERROR_KIND_AUTH,
+        ),
+        (
+            {"httpConnectionFailed": {}, "httpStatusCode": 401},
             _NEUTRAL_MESSAGE,
             fwd._CODEX_ERROR_KIND_AUTH,
         ),
@@ -1064,6 +1106,25 @@ def test_classify_codex_error_wire_variants(info: object, message: str, expected
     assert fwd._classify_codex_error({"codexErrorInfo": info}, message) == expected
 
 
-def test_codex_error_info_ignores_nested_flat_tag() -> None:
-    """A dict under a flat tag key is malformed metadata, not an externally tagged variant."""
-    assert fwd.codex_error_info({"type": {"nested": True}}) == (None, None)
+@pytest.mark.parametrize(
+    ("info", "expected"),
+    [
+        # A dict under a flat tag key is malformed metadata, not a tagged variant.
+        ({"type": {"nested": True}}, (None, None)),
+        # The nested dict carrying the status is the tag, wherever it sits.
+        (
+            {"details": {"attempt": 3}, "httpConnectionFailed": {"httpStatusCode": 401}},
+            ("httpConnectionFailed", 401),
+        ),
+        # A tag without a nested status keeps the flat sibling status.
+        ({"httpConnectionFailed": {}, "httpStatusCode": 401}, ("httpConnectionFailed", 401)),
+        # codex-cli 0.154's connection-failure shape: a tag with no status.
+        (
+            {"responseStreamDisconnected": {"httpStatusCode": None}},
+            ("responseStreamDisconnected", None),
+        ),
+    ],
+)
+def test_codex_error_info_reads_tagged_shapes(info: object, expected: tuple) -> None:
+    """The variant and status survive the externally tagged shapes the wire can carry."""
+    assert fwd.codex_error_info(info) == expected
