@@ -8904,25 +8904,57 @@ def test_claude_prompt_rendered_ignores_a_menu_row_above_a_rule() -> None:
     assert _claude_prompt_rendered(pane) is False
 
 
-def test_claude_prompt_rendered_ignores_a_menu_row_under_an_indented_row_ending_in_a_glyph() -> (
-    None
-):
+@pytest.mark.parametrize(
+    "row",
+    [
+        "  ⎿  the build output trails off here ─",
+        "Build cancelled ─",
+    ],
+    ids=["indented-transcript-row", "unindented-content-row"],
+)
+def test_claude_prompt_rendered_ignores_a_menu_row_under_a_glyph_terminated_line(row: str) -> None:
     """
-    An indented transcript row trailing off in ``─`` is not a wrapped rule's tail.
+    Content ending in ``─`` above a menu's selected row is not a wrapped rule.
 
-    A wrapped opening rule starts at the pane edge or one space in, while
-    transcript and draft rows are indented further, so a menu's selected row
-    under such a row does not become the composer even with a rule below it.
+    A wrapped opening rule wraps the closing rule too, and the one shape that
+    keeps a single-row closing rule is a title one space in; an indented
+    transcript row or ordinary output at the pane edge is neither, so the
+    selected row under it does not become the composer even with a rule below.
     """
     pane = "\n".join(
         [
-            "  ⎿  the build output trails off here ─",
+            row,
             "❯ 2. No (recommended)",
             "─" * 57,
             "  Enter to confirm · Esc to cancel",
         ]
     )
     assert _claude_prompt_rendered(pane) is False
+
+
+def test_claude_prompt_rendered_ignores_an_echoed_prompt_under_a_glyph_terminated_line() -> None:
+    """
+    An echoed prompt above a dialog's rule is not a composer.
+
+    A transcript line at the pane edge can end in a rule glyph, but a box
+    wider than the pane wraps its closing rule onto more than one row, and
+    the one single-row shape is the title that exactly fills the opening
+    rule, one space in. A full-width line ending in ``─`` over a scrollback
+    ``❯`` above a dialog's rule is neither, so the dialog keeps the gate shut.
+    """
+    pane = "\n".join(
+        [
+            "● build output trails off… ─",
+            "❯ old prompt echo",
+            "─" * 40,
+            "  Rewind",
+            "  Restore the code and/or conversation to the point before…",
+            "  ❯ (current)",
+            "  Enter to continue · Esc to cancel",
+        ]
+    )
+    assert _claude_prompt_rendered(pane) is False
+    assert _occupying_surface(pane) == "an overlay"
 
 
 @pytest.mark.parametrize(

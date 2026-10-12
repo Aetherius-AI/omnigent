@@ -5755,7 +5755,7 @@ def _composer_row(pane: str) -> str | None:
         row = _composer_glyph_row(non_empty, bands[-2][1] + 1)
         if row is not None:
             return row
-    row = _composer_row_above_closing_rule(non_empty, bands[-1][0])
+    row = _composer_row_above_closing_rule(non_empty, bands[-1])
     if row is not None:
         return row
     return _composer_glyph_row(non_empty, bands[-1][1] + 1)
@@ -5769,7 +5769,9 @@ def _composer_glyph_row(lines: list[str], idx: int) -> str | None:
     return row if row.strip()[:1] in _COMPOSER_MODE_GLYPHS else None
 
 
-def _composer_row_above_closing_rule(lines: list[str], closing_rule: int) -> str | None:
+def _composer_row_above_closing_rule(
+    lines: list[str], closing_rule: tuple[int, int]
+) -> str | None:
     """
     Return the composer row when no row of the box's opening rule reads as one.
 
@@ -5778,20 +5780,30 @@ def _composer_row_above_closing_rule(lines: list[str], closing_rule: int) -> str
     :func:`_is_box_rule` finds nothing above ``❯``. The box is still
     framed: its composer is the mode-glyph row above the closing rule, past
     the draft's indented continuation rows, and the row above it ends in
-    the opening rule's glyph (:func:`_is_rule_tail`). A menu's selected row
-    or an echoed prompt has no such row above it.
+    the opening rule's glyph (:func:`_is_rule_tail`). A box wider than the
+    pane wraps its closing rule onto further rows as well; the one shape
+    that keeps a single-row closing rule is a title that exactly fills the
+    opening rule, one space in (:func:`_is_edge_aligned_title_row`). An
+    echoed prompt under a transcript line that happens to end in a rule
+    glyph meets neither condition.
 
     :param lines: Non-empty pane rows, in order.
-    :param closing_rule: Index in *lines* of the closing rule's first row.
+    :param closing_rule: ``(first, last)`` row span of the closing rule.
     :returns: The composer row, or ``None`` when the rows above the closing
         rule are not framed that way.
     """
-    idx = closing_rule - 1
+    first, last = closing_rule
+    idx = first - 1
     while idx > 0 and lines[idx].startswith("  "):
         idx -= 1
     if idx < 1 or lines[idx].strip()[:1] not in _COMPOSER_MODE_GLYPHS:
         return None
-    return lines[idx] if _is_rule_tail(lines[idx - 1]) else None
+    above = lines[idx - 1]
+    if not _is_rule_tail(above):
+        return None
+    if first == last and not _is_edge_aligned_title_row(above):
+        return None
+    return lines[idx]
 
 
 def _claude_prompt_rendered(pane: str) -> bool:
@@ -5928,6 +5940,20 @@ def _is_rule_tail(line: str) -> bool:
     if any(ch in _BOX_RULE_CHARS for ch in label):
         return False
     return not label or label.endswith(" ")
+
+
+def _is_edge_aligned_title_row(line: str) -> bool:
+    """
+    Return whether a row is a title filling the opening rule: one space in, then a glyph.
+
+    :param line: A single pane line, e.g. ``" a title as wide as the pane ─"``.
+    :returns: ``True`` for a labelled row whose only lead is the rule's edge.
+    """
+    if not line.startswith(" ") or line.startswith("  "):
+        return False
+    stripped = line.strip()
+    trail = len(stripped) - len(stripped.rstrip(_TITLED_RULE_EDGE_GLYPHS))
+    return trail >= 1 and bool(stripped[:-trail].strip())
 
 
 def _is_edge_glyph_run(line: str) -> bool:

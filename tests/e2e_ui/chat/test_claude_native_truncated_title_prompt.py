@@ -126,9 +126,14 @@ def _rename_from_terminal(page: Page, mirror: PaneMirror, title: str) -> None:
     page.wait_for_timeout(500)
     page.keyboard.press("Enter")
     marker = title[:12]
+    # The confirmation and the echoed title wrap at the pane width, so match
+    # them with the row breaks removed.
     _wait_for(
         page,
-        lambda: "renamed" in mirror.text().lower() and marker in mirror.text(),
+        lambda: (
+            "renamed" in mirror.text().lower().replace("\n", "")
+            and marker in mirror.text().replace("\n", "")
+        ),
         _RENAME_TIMEOUT_S,
         f"Claude Code to confirm the rename to {title[:24]!r}",
     )

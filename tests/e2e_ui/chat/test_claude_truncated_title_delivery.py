@@ -75,7 +75,9 @@ def test_web_message_reaches_claude_beneath_a_truncated_title(
     assert advert is not None
     tmux = ["tmux", "-S", advert["socket_path"]]
     target = advert["tmux_target"]
-    title = "Check resilient message delivery beneath a session title wider than the terminal " * 3
+    title = " ".join(
+        ["Check resilient message delivery beneath a session title wider than the terminal"] * 3
+    )
     subprocess.run(
         [*tmux, "send-keys", "-t", target, "-l", "/rename " + title], check=True, timeout=10
     )
