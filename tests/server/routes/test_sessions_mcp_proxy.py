@@ -124,6 +124,7 @@ def published(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
 
     monkeypatch.setattr(_helpers_mod, "session_stream", _RecordingStream)
     monkeypatch.setattr(_helpers_mod, "_session_mcp_startup_cache", {})
+    monkeypatch.setattr(_helpers_mod, "_runner_mcp_startup_sessions", set())
     return events
 
 
@@ -299,3 +300,66 @@ async def test_mcp_tools_list_sanitizes_old_runner_failure_text(
         assert "signed-token-xyz" not in text
         assert "fake-bearer-abc" not in text
         assert "https://blob.example.com/mcp?[REDACTED]" in text
+
+
+@pytest.mark.asyncio
+async def test_mcp_tools_list_native_harness_clears_runner_published_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    published: list[dict[str, object]],
+) -> None:
+    """Replacing an SDK agent with a native one must not leave the SDK failure cached."""
+    session_id = "conv_sdk_to_native"
+    await _handle_mcp_tools_list(
+        rpc_id=1,
+        session_id=session_id,
+        runner_router=_StubRunnerRouter({"pipeshub": "401 Unauthorized"}),  # type: ignore[arg-type]
+    )
+    assert session_id in _helpers_mod._session_mcp_startup_cache
+
+    from omnigent.server.routes import sessions as sessions_facade
+
+    monkeypatch.setattr(sessions_facade, "_resolve_harness", lambda conv, **_kw: "claude-native")
+
+    class _StubConversationStore:
+        def get_conversation(self, conversation_id: str) -> object:
+            del conversation_id
+            return object()
+
+    await _handle_mcp_tools_list(
+        rpc_id=2,
+        session_id=session_id,
+        runner_router=_StubRunnerRouter({}),  # type: ignore[arg-type]
+        conversation_store=_StubConversationStore(),  # type: ignore[arg-type]
+    )
+
+    assert len(published) == 2
+    assert published[1]["servers"] == {"pipeshub": {"status": "ready", "error": None}}
+    assert session_id not in _helpers_mod._session_mcp_startup_cache
+    assert session_id not in _helpers_mod._runner_mcp_startup_sessions
+
+
+@pytest.mark.asyncio
+async def test_mcp_tools_list_unknown_owner_keeps_runner_published_failures(
+    published: list[dict[str, object]],
+) -> None:
+    """A transient store error must neither publish nor clear anything."""
+    session_id = "conv_sdk_store_flaky"
+    await _handle_mcp_tools_list(
+        rpc_id=1,
+        session_id=session_id,
+        runner_router=_StubRunnerRouter({"pipeshub": "401 Unauthorized"}),  # type: ignore[arg-type]
+    )
+
+    class _FailingConversationStore:
+        def get_conversation(self, conversation_id: str) -> object:
+            raise RuntimeError(f"store unavailable for {conversation_id}")
+
+    await _handle_mcp_tools_list(
+        rpc_id=2,
+        session_id=session_id,
+        runner_router=_StubRunnerRouter({}),  # type: ignore[arg-type]
+        conversation_store=_FailingConversationStore(),  # type: ignore[arg-type]
+    )
+
+    assert len(published) == 1
+    assert _helpers_mod._session_mcp_startup_cache[session_id]["pipeshub"].status == "failed"

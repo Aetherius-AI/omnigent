@@ -229,6 +229,7 @@ from omnigent.server.routes._sessions.common import (  # noqa: F401
     _pushed_model_options_cache,
     _read_explicit_unread,
     _read_last_seen,
+    _runner_mcp_startup_sessions,
     _session_active_response_cache,
     _session_background_task_count_cache,
     _session_background_tasks_cache,
@@ -5326,21 +5327,25 @@ def _publish_runner_mcp_startup_failures(session_id: str, failures: dict[str, st
     if servers == previous:
         return
     _publish_mcp_startup(session_id, servers)
+    if session_id in _session_mcp_startup_cache:
+        _runner_mcp_startup_sessions.add(session_id)
+    else:
+        _runner_mcp_startup_sessions.discard(session_id)
 
 
-async def _runner_owns_mcp_startup_publish(
+async def _mcp_startup_owner(
     session_id: str,
     conversation_store: ConversationStore | None,
     agent_store: AgentStore | None,
-) -> bool:
-    """Return whether the runner owns startup publishing for this session.
+) -> Literal["runner", "native"] | None:
+    """Return which side owns startup publishing for this session, if known.
 
-    When the harness cannot be resolved, skip publishing: a missed publish is
+    ``None`` means the harness could not be resolved: a missed publish is
     retried on the next ``tools/list``, while folding a native forwarder's
     ``starting`` servers to ``ready`` would falsely clear its startup band.
     """
     if conversation_store is None:
-        return True
+        return "runner"
     try:
         conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
     except Exception:  # noqa: BLE001 — an unresolvable session must not break tools/list
@@ -5350,7 +5355,7 @@ async def _runner_owns_mcp_startup_publish(
             exc_info=True,
             extra={"session_id": session_id},
         )
-        return False
+        return None
     harness = _resolve_harness(conv, agent_store=agent_store)
     if harness is None:
         _logger.warning(
@@ -5358,10 +5363,10 @@ async def _runner_owns_mcp_startup_publish(
             session_id,
             extra={"session_id": session_id},
         )
-        return False
+        return None
     from omnigent.harness_aliases import is_native_harness
 
-    return not is_native_harness(harness)
+    return "native" if is_native_harness(harness) else "runner"
 
 
 def _publish_model_options(session_id: str) -> None:
@@ -11319,10 +11324,13 @@ async def _handle_mcp_tools_list(
     for srv, msg in failures.items():
         _logger.warning("runner MCP server %r unavailable: %s", srv, msg)
     # Resolve ownership only when there is something to publish or clear.
-    if (failures or _session_mcp_startup_cache.get(session_id)) and (
-        await _runner_owns_mcp_startup_publish(session_id, conversation_store, agent_store)
-    ):
-        _publish_runner_mcp_startup_failures(session_id, failures)
+    if failures or _session_mcp_startup_cache.get(session_id):
+        owner = await _mcp_startup_owner(session_id, conversation_store, agent_store)
+        if owner == "runner":
+            _publish_runner_mcp_startup_failures(session_id, failures)
+        elif owner == "native" and session_id in _runner_mcp_startup_sessions:
+            # The session moved to a native harness; its runner-published failures are obsolete.
+            _publish_runner_mcp_startup_failures(session_id, {})
 
     _logger.debug(
         "MCP tools/list: session=%r returning %d tools, %d failures",
