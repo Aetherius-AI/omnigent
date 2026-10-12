@@ -196,6 +196,7 @@ async def install_setup(
                     request_id=frame.request_id,
                     status=reply.get("status", "ok"),
                     configured_harnesses=reply.get("configured_harnesses"),
+                    version=reply.get("version"),
                     error=reply.get("error"),
                 )
             await comm.send_input(
@@ -262,6 +263,7 @@ async def test_install_harness_returns_refreshed_readiness(
     replies["claude"] = {
         "status": "ok",
         "configured_harnesses": {"claude": True, "claude-native": True},
+        "version": "2.1.295",
     }
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -272,6 +274,7 @@ async def test_install_harness_returns_refreshed_readiness(
     assert body["object"] == "harness_install"
     assert body["harness"] == "claude"
     assert body["configured_harnesses"]["claude"] is True
+    assert body["version"] == "2.1.295"
 
 
 async def test_install_harness_tolerates_a_garbled_gateway_inference(

@@ -774,6 +774,9 @@ class HostInstallHarnessResultFrame:
         after the install attempt, e.g. ``{"claude-native": True,
         "codex-native": "needs-auth"}``. ``None`` when the install could
         not run (the server keeps its prior readiness view).
+    :param version: Installed CLI version after the operation, e.g.
+        ``"1.18.4"``. ``None`` when an older host does not report it or the
+        version could not be determined.
     :param gateway_inference: Per-harness flag for whether that family's
         launch on this host resolves AI-Gateway-backed inference, e.g.
         ``{"claude-native": True, "codex": False}`` (see
@@ -787,6 +790,7 @@ class HostInstallHarnessResultFrame:
     request_id: str
     status: str
     configured_harnesses: dict[str, HarnessAvailability] | None = None
+    version: str | None = None
     gateway_inference: dict[str, bool] | None = None
     error: str | None = None
 
@@ -1584,6 +1588,7 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "request_id": frame.request_id,
                 "status": frame.status,
                 "configured_harnesses": frame.configured_harnesses,
+                "version": frame.version,
                 "gateway_inference": frame.gateway_inference,
                 "error": frame.error,
             }
@@ -2609,6 +2614,7 @@ def _decode_install_harness_result(msg: _JsonObject) -> HostInstallHarnessResult
         request_id=_required_str(msg, "request_id"),
         status=_required_str(msg, "status"),
         configured_harnesses=_optional_str_availability_map(msg, "configured_harnesses"),
+        version=_optional_nullable_str(msg, "version"),
         gateway_inference=optional_str_bool_map(msg, "gateway_inference"),
         error=_optional_nullable_str(msg, "error"),
     )

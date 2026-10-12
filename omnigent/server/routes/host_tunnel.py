@@ -816,6 +816,7 @@ async def _receive_loop(
                     {
                         "status": frame.status,
                         "configured_harnesses": frame.configured_harnesses,
+                        "version": frame.version,
                         "gateway_inference": frame.gateway_inference,
                         "error": frame.error,
                     }

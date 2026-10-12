@@ -368,7 +368,8 @@ async def _proxy_install_harness(
     :param harness: The UI harness identifier to install, e.g. ``"claude"``.
     :returns: Dict with the result fields: ``status`` (``"ok"`` /
         ``"failed"``), ``configured_harnesses`` (the refreshed readiness map or
-        ``None``), ``gateway_inference`` (the refreshed per-harness
+        ``None``), ``version`` (the installed CLI version or ``None``),
+        ``gateway_inference`` (the refreshed per-harness
         AI-Gateway-backed inference map or ``None``), ``error`` (string or
         ``None``).
     :raises HTTPException: 504 on timeout, 502 on connection drop.
@@ -1469,7 +1470,8 @@ def create_hosts_router(
         :param host_id: Host identifier, e.g. ``"host_a1b2c3d4..."``.
         :param harness: Harness identifier to install, e.g. ``"claude"``.
         :returns: ``{"object": "harness_install", "harness": ...,
-            "configured_harnesses": {...}, "gateway_inference": {...} | None}``
+            "configured_harnesses": {...}, "version": str | None,
+            "gateway_inference": {...} | None}``
             — the host's refreshed readiness map so the UI can flip the badge
             without a reconnect, plus its refreshed gateway-inference map
             (``None`` when the host didn't report one).
@@ -1555,6 +1557,7 @@ def create_hosts_router(
             "object": "harness_install",
             "harness": harness,
             "configured_harnesses": result.get("configured_harnesses") or {},
+            "version": result.get("version"),
             # Passed through as-is: ``None`` is "unknown", not "none backed".
             "gateway_inference": installed_gateway,
         }
