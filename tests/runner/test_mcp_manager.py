@@ -255,6 +255,35 @@ class TestDescribeConnectError:
         assert "fake-key-xyz" not in described
         assert "api_key=<redacted>" in described
 
+    def test_unwraps_exception_groups_to_their_causes(self) -> None:
+        from omnigent.runner.mcp_manager import _describe_connect_error
+
+        inner = ExceptionGroup(  # noqa: F821 — Python >=3.12
+            "unhandled errors in a TaskGroup",
+            [ConnectionRefusedError("All connection attempts failed")],
+        )
+        exc = ExceptionGroup("unhandled errors in a TaskGroup", [inner])  # noqa: F821
+        assert _describe_connect_error(exc) == (
+            "ConnectionRefusedError: All connection attempts failed"
+        )
+
+    def test_lists_every_error_in_a_group_and_redacts_each(self) -> None:
+        from omnigent.runner.mcp_manager import _describe_connect_error
+
+        exc = ExceptionGroup(  # noqa: F821 — Python >=3.12
+            "unhandled errors in a TaskGroup",
+            [
+                RuntimeError("401 for url 'https://mcp.example.com/sse?token=secret123'"),
+                TimeoutError("handshake timed out"),
+            ],
+        )
+        described = _describe_connect_error(exc)
+        assert "secret123" not in described
+        assert described == (
+            "RuntimeError: 401 for url 'https://mcp.example.com/sse?<redacted>'; "
+            "TimeoutError: handshake timed out"
+        )
+
 
 @pytest.mark.asyncio
 async def test_pool_reuses_connection_for_same_spec(

@@ -38,12 +38,20 @@ _CREDENTIAL_PAIR = re.compile(
 )
 
 
+def _leaf_exceptions(exc: BaseException) -> list[BaseException]:
+    """Flatten nested exception groups down to the errors that occurred."""
+    if isinstance(exc, BaseExceptionGroup):  # noqa: F821 — Python >=3.12
+        return [leaf for sub in exc.exceptions for leaf in _leaf_exceptions(sub)]
+    return [exc]
+
+
 def _describe_connect_error(exc: Exception) -> str:
     """Scrub common credential carriers from a connection error.
 
     This is best-effort: credentials embedded in a URL path are not removed.
     """
-    message = f"{type(exc).__name__}: {exc}"
+    # The MCP client raises TaskGroup ExceptionGroups whose own text hides the cause.
+    message = "; ".join(f"{type(leaf).__name__}: {leaf}" for leaf in _leaf_exceptions(exc))
     message = _URL_USERINFO.sub(r"\1<redacted>@", message)
     message = _URL_QUERY_OR_FRAGMENT.sub(r"\1?<redacted>", message)
     return _CREDENTIAL_PAIR.sub(r"\1<redacted>", message)
