@@ -1470,10 +1470,9 @@ async def test_managed_token_is_revalidated_after_websocket_accept(
     await communicator.send_input(
         {"type": "websocket.receive", "text": _make_hello(name=f"managed-{_HOST_ID}")},
     )
-    response = await communicator.receive_output(timeout=budget(1.0))
-    if response["type"] == "websocket.send":
-        response = await communicator.receive_output(timeout=budget(1.0))
-    assert response["type"] == "websocket.close"
+    error = await _expect_connection_error(communicator)
+    assert error.stage == "registration"
+    assert error.retryable is False
     assert registry.get(_HOST_ID) is None
     detached = store.get_host(_HOST_ID)
     assert detached is not None
