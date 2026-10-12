@@ -275,11 +275,11 @@ import DevinColor from "@lobehub/icons/es/Devin/components/Color";
 import KiroColor from "@lobehub/icons/es/Kiro/components/Color";
 import { type PullRequest, usePullRequestInfo } from "@/hooks/usePullRequests";
 import {
-  deriveRepoName,
   localMachineLabel,
   resolveThisMachineHostId,
   SANDBOX_REPO_LABEL_KEY,
 } from "./NewChatDialog";
+import { deriveRepoName } from "@/lib/repoName";
 import { useDesktopHostId } from "./RevealInFileManager";
 import { ForkSessionDialog } from "./ForkSessionDialog";
 import { SessionActionMenuItem } from "@/components/SessionActionMenuItem";

@@ -41,7 +41,6 @@ import {
   composeSandboxWorkspaces,
   composerWorktreeHeaderState,
   deriveHomeDir,
-  deriveRepoName,
   describeCreateError,
   displayNameForHost,
   harnessUnavailableReasonOnHost,
@@ -725,17 +724,6 @@ describe("sandbox repository helpers", () => {
       ]),
     ).toEqual(["https://github.com/org/api#main", "https://github.com/org/web"]);
     expect(composeSandboxWorkspaces([])).toEqual([]);
-  });
-
-  it.each<[string, string | null]>([
-    ["https://github.com/org/repo", "repo"],
-    // .git stripped — matches the server's clone-directory rule.
-    ["https://github.com/org/repo.git", "repo"],
-    ["git@github.com:org/repo.git", "repo"],
-    ["https://github.com/org/repo/", "repo"],
-    ["", null],
-  ])("deriveRepoName(%j) === %j", (url, expected) => {
-    expect(deriveRepoName(url)).toBe(expected);
   });
 
   it.each<[string, string]>([
@@ -7437,6 +7425,38 @@ describe("NewChatLandingScreen", () => {
     await waitFor(() =>
       expect(screen.getByTestId("new-chat-landing-repo-chip")).toHaveTextContent("api"),
     );
+  });
+
+  it("seeds the fallback agent's repositories when the remembered agent is unavailable", async () => {
+    authenticatedFetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: "conv_new" }),
+    } as unknown as Response);
+    localStorage.setItem(LAST_AGENT_KEY, "a-gone");
+    localStorage.setItem(
+      "omnigent:last-sandbox-repos",
+      JSON.stringify({
+        "a-gone": [{ url: "https://github.com/org/gone", branch: "" }],
+        a1: [{ url: "https://github.com/org/api", branch: "" }],
+      }),
+    );
+    renderLanding({ managed_sandboxes_enabled: true });
+    fireEvent.pointerDown(screen.getByTestId("new-chat-landing-host-chip"), { button: 0 });
+    fireEvent.click(screen.getByTestId("new-chat-landing-sandbox-option"));
+    // The remembered agent no longer exists, so the launch falls back to the default
+    // agent and the chip seeds that agent's repositories, not the missing agent's.
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-repo-chip")).toHaveTextContent("api"),
+    );
+    fireEvent.change(screen.getByTestId("new-chat-landing-input"), {
+      target: { value: "audit the repo" },
+    });
+    fireEvent.submit(screen.getByTestId("new-chat-landing-composer"));
+    await waitFor(() => expect(authenticatedFetchMock).toHaveBeenCalledTimes(1));
+    const [, init] = authenticatedFetchMock.mock.calls[0];
+    const body = JSON.parse((init as RequestInit).body as string) as Record<string, unknown>;
+    expect(body.agent_id).toBe("a1");
+    expect(body.workspaces).toEqual(["https://github.com/org/api"]);
   });
 
   it("carries the picked provider in the managed create when several are offered", async () => {

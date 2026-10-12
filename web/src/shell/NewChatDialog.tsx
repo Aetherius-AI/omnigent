@@ -161,6 +161,7 @@ import {
 import { getCliServerUrl, getOmnigentHostConfig } from "@/lib/host";
 import { quoteShellArgument } from "@/lib/shell";
 import { readLastAgentId, writeLastAgentId } from "@/lib/agentPreferences";
+import { deriveRepoName } from "@/lib/repoName";
 import {
   readLastHostChoice,
   writeLastHostChoice,
@@ -1010,24 +1011,6 @@ export function composeSandboxWorkspaces(repos: LastSandboxRepo[]): string[] {
 // Max repos a managed sandbox may clone — mirrors the server's
 // `_MAX_MANAGED_WORKSPACES` so the picker stops adding before a create 422s.
 const MAX_SANDBOX_REPOS = 10;
-
-/**
- * Derive a repository's display name from its URL.
- *
- * Last path segment with a trailing ``.git`` stripped — the same rule
- * the server uses for the clone directory, so the chip label matches
- * the workspace directory the session will get.
- *
- * @param url Repository URL, e.g. ``"https://github.com/org/repo.git"``.
- * @returns The name, e.g. ``"repo"``; ``null`` when underivable.
- */
-export function deriveRepoName(url: string): string | null {
-  const t = url.trim().replace(/\/+$/, "");
-  if (t === "") return null;
-  const last = t.split(/[/:]/).pop() ?? "";
-  const name = last.endsWith(".git") ? last.slice(0, -4) : last;
-  return name === "" ? null : name;
-}
 
 /** Shared trigger styling for the repo/branch comboboxes. */
 const COMBOBOX_TRIGGER_CLASS =
@@ -2473,16 +2456,14 @@ export function NewChatLandingScreen() {
   const addSandboxRepo = useCallback(
     (url: string, branch = ""): void => {
       const u = url.trim();
-      if (u === "") return;
-      setSandboxRepoSelections((prev) => {
-        // Cap at the provider's limit so a selection can't only fail with a 422
-        // at create; a duplicate URL is a no-op that leaves the seed untouched.
-        if (prev.some((r) => r.url === u) || prev.length >= maxSandboxRepos) return prev;
-        sandboxReposSeededRef.current = false;
-        return [...prev, { url: u, branch: branch.trim() }];
-      });
+      // Cap at the provider's limit so a selection can't only fail with a 422
+      // at create; a duplicate URL is a no-op that leaves the seed untouched.
+      if (u === "" || sandboxRepoSelections.some((r) => r.url === u)) return;
+      if (sandboxRepoSelections.length >= maxSandboxRepos) return;
+      sandboxReposSeededRef.current = false;
+      setSandboxRepoSelections([...sandboxRepoSelections, { url: u, branch: branch.trim() }]);
     },
-    [maxSandboxRepos],
+    [maxSandboxRepos, sandboxRepoSelections],
   );
   const removeSandboxRepo = useCallback((url: string): void => {
     sandboxReposSeededRef.current = false;

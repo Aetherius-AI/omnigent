@@ -25,6 +25,11 @@ _AGENT_B = "codex-native-ui"
 _CREATE_RE = re.compile(r"/v1/sessions(\?.*)?$")
 _SESSION_URL_RE = re.compile(r"/c/([0-9a-f]{32})$")
 
+pytestmark = pytest.mark.skipif(
+    importlib.util.find_spec("modal") is not None,
+    reason="needs the Modal SDK absent so every managed launch fails right after create",
+)
+
 
 @pytest.fixture
 def browser_context_args(browser_context_args: dict[str, Any]) -> dict[str, Any]:
@@ -39,9 +44,6 @@ def managed_sandbox_server(
 ) -> Iterator[str]:
     """A server offering managed sandboxes whose launches fail (no Modal SDK)."""
     del built_spa
-    assert importlib.util.find_spec("modal") is None, (
-        "this module needs the Modal SDK absent so every managed launch fails right after create"
-    )
     tmp = tmp_path_factory.mktemp("managed_sandbox_server")
     config = tmp / "config.yaml"
     config.write_text("sandbox:\n  provider: modal\n  server_url: http://127.0.0.1\n")

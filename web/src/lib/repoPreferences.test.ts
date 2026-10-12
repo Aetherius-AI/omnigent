@@ -96,12 +96,13 @@ describe("repoPreferences", () => {
     expect(readLastSandboxRepos(CODEX)).toEqual([]);
   });
 
-  it("ignores the single-repo preference written by builds before multi-repo and clears it on write", () => {
-    localStorage.setItem(
-      LEGACY_SINGLE_REPO_KEY,
-      JSON.stringify({ url: "https://github.com/org/legacy.git", branch: "main" }),
-    );
+  it("ignores the single-repo preference written by builds before multi-repo and purges it", () => {
+    const legacy = JSON.stringify({ url: "https://github.com/org/legacy.git", branch: "main" });
+    localStorage.setItem(LEGACY_SINGLE_REPO_KEY, legacy);
     expect(readLastSandboxRepos(CLAUDE)).toEqual([]);
+    expect(localStorage.getItem(LEGACY_SINGLE_REPO_KEY)).toBeNull();
+
+    localStorage.setItem(LEGACY_SINGLE_REPO_KEY, legacy);
     writeLastSandboxRepos(CLAUDE, [{ url: "https://github.com/org/a.git", branch: "" }]);
     expect(localStorage.getItem(LEGACY_SINGLE_REPO_KEY)).toBeNull();
   });

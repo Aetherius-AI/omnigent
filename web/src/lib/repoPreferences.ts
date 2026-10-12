@@ -3,7 +3,7 @@
 // agent's remembered repos from riding into another agent's launch.
 
 const STORAGE_KEY = "omnigent:last-sandbox-repos";
-// Single-repo key written by builds before multi-repo; cleared on write.
+// Single-repo key written by builds before multi-repo; purged on every read or write.
 const LEGACY_STORAGE_KEY = "omnigent:last-sandbox-repo";
 
 /**
@@ -37,6 +37,7 @@ function normalizeEntry(value: unknown): LastSandboxRepo | null {
 // so it is ignored rather than attributed to anyone.
 function readMap(): Record<string, unknown> {
   try {
+    window.localStorage.removeItem(LEGACY_STORAGE_KEY);
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) return {};
     const parsed = JSON.parse(raw) as unknown;
@@ -70,9 +71,10 @@ export function writeLastSandboxRepos(
     const cleaned = repos
       .map((r) => ({ url: stripUrlUserinfo(r.url.trim()), branch: r.branch.trim() }))
       .filter((r) => r.url !== "");
+    // Read and write run in one synchronous call; a concurrent tab can at worst
+    // lose a preference.
     const { [agentId]: _previous, ...others } = readMap();
     const map = cleaned.length === 0 ? others : { ...others, [agentId]: cleaned };
-    window.localStorage.removeItem(LEGACY_STORAGE_KEY);
     if (Object.keys(map).length === 0) {
       window.localStorage.removeItem(STORAGE_KEY);
       return;

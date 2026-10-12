@@ -3,7 +3,7 @@ import { FolderIcon, GitForkIcon } from "lucide-react";
 import { COMPOSER_WORKSPACE_COLLAPSED_LABEL_CLASS } from "./ChatComposer";
 import type { ComposerBranchState } from "@/hooks/useComposerGitStatus";
 import { cn } from "@/lib/utils";
-import { deriveRepoName } from "@/shell/NewChatDialog";
+import { deriveRepoName } from "@/lib/repoName";
 
 /** Trailing path segment, e.g. ``feature-login``. */
 function pathTail(path: string): string {
