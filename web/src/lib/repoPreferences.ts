@@ -38,6 +38,10 @@ function normalizeEntry(value: unknown): LastSandboxRepo | null {
 function readMap(): Record<string, unknown> {
   try {
     window.localStorage.removeItem(LEGACY_STORAGE_KEY);
+  } catch {
+    // A blocked purge must not prevent reading the current preference.
+  }
+  try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) return {};
     const parsed = JSON.parse(raw) as unknown;

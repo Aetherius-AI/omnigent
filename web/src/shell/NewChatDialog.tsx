@@ -2456,23 +2456,34 @@ export function NewChatLandingScreen() {
   const addSandboxRepo = useCallback(
     (url: string, branch = ""): void => {
       const u = url.trim();
+      if (u === "") return;
       // Cap at the provider's limit so a selection can't only fail with a 422
       // at create; a duplicate URL is a no-op that leaves the seed untouched.
-      if (u === "" || sandboxRepoSelections.some((r) => r.url === u)) return;
-      if (sandboxRepoSelections.length >= maxSandboxRepos) return;
-      sandboxReposSeededRef.current = false;
-      setSandboxRepoSelections([...sandboxRepoSelections, { url: u, branch: branch.trim() }]);
+      const isNoOp = (list: LastSandboxRepo[]) =>
+        list.some((r) => r.url === u) || list.length >= maxSandboxRepos;
+      if (!isNoOp(sandboxRepoSelections)) sandboxReposSeededRef.current = false;
+      setSandboxRepoSelections((prev) =>
+        isNoOp(prev) ? prev : [...prev, { url: u, branch: branch.trim() }],
+      );
     },
     [maxSandboxRepos, sandboxRepoSelections],
   );
-  const removeSandboxRepo = useCallback((url: string): void => {
-    sandboxReposSeededRef.current = false;
-    setSandboxRepoSelections((prev) => prev.filter((r) => r.url !== url));
-  }, []);
-  const setSandboxRepoBranch = useCallback((url: string, branch: string): void => {
-    sandboxReposSeededRef.current = false;
-    setSandboxRepoSelections((prev) => prev.map((r) => (r.url === url ? { ...r, branch } : r)));
-  }, []);
+  const removeSandboxRepo = useCallback(
+    (url: string): void => {
+      if (sandboxRepoSelections.some((r) => r.url === url)) sandboxReposSeededRef.current = false;
+      setSandboxRepoSelections((prev) => prev.filter((r) => r.url !== url));
+    },
+    [sandboxRepoSelections],
+  );
+  const setSandboxRepoBranch = useCallback(
+    (url: string, branch: string): void => {
+      if (sandboxRepoSelections.some((r) => r.url === url && r.branch !== branch)) {
+        sandboxReposSeededRef.current = false;
+      }
+      setSandboxRepoSelections((prev) => prev.map((r) => (r.url === url ? { ...r, branch } : r)));
+    },
+    [sandboxRepoSelections],
+  );
   // Free-text URL being typed into the "paste a URL" adder (not yet added).
   const [pendingRepoUrl, setPendingRepoUrl] = useState<string>("");
   // When the server advertises the GitHub App and the caller has connected

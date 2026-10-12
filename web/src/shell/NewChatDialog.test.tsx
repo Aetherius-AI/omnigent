@@ -7390,6 +7390,38 @@ describe("NewChatLandingScreen", () => {
     expect(screen.getByTestId("new-chat-landing-repo-chip")).toHaveTextContent("mine");
   });
 
+  it("keeps the list empty when the seeded repository was removed and the agent changes", async () => {
+    localStorage.setItem(
+      "omnigent:last-sandbox-repos",
+      JSON.stringify({
+        a1: [{ url: "https://github.com/org/api", branch: "" }],
+        a2: [{ url: "https://github.com/org/codex-repo", branch: "" }],
+      }),
+    );
+    renderLanding({ managed_sandboxes_enabled: true });
+    fireEvent.pointerDown(screen.getByTestId("new-chat-landing-host-chip"), { button: 0 });
+    fireEvent.click(screen.getByTestId("new-chat-landing-sandbox-option"));
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-repo-chip")).toHaveTextContent("api"),
+    );
+    fireEvent.click(screen.getByTestId("new-chat-landing-repo-chip"));
+    fireEvent.click(screen.getByTestId("new-chat-landing-repo-remove"));
+    expect(screen.getByTestId("new-chat-landing-repo-chip")).toHaveAttribute(
+      "aria-label",
+      "Sandbox repositories: None selected",
+    );
+
+    // Deliberately picking no repository is the user's own choice, so switching
+    // agents must not swap in Codex's remembered repository.
+    fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
+    fireEvent.click(screen.getByTestId("new-chat-landing-agent-a2"));
+    expect(screen.getByTestId("new-chat-landing-agent-select")).toHaveAccessibleName(/^Codex/);
+    expect(screen.getByTestId("new-chat-landing-repo-chip")).toHaveAttribute(
+      "aria-label",
+      "Sandbox repositories: None selected",
+    );
+  });
+
   it("re-seeds the agent's remembered repositories after an in-place project reset", async () => {
     localStorage.setItem(
       "omnigent:last-sandbox-repos",

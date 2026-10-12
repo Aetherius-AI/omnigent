@@ -122,6 +122,19 @@ describe("repoPreferences", () => {
     expect(readLastSandboxRepos(CLAUDE)).toEqual([]);
   });
 
+  it("still reads the map when purging the legacy key is blocked", () => {
+    localStorage.setItem(
+      KEY,
+      JSON.stringify({ [CLAUDE]: [{ url: "https://github.com/org/a.git", branch: "" }] }),
+    );
+    vi.spyOn(Storage.prototype, "removeItem").mockImplementation(() => {
+      throw new Error("writes blocked");
+    });
+    expect(readLastSandboxRepos(CLAUDE)).toEqual([
+      { url: "https://github.com/org/a.git", branch: "" },
+    ]);
+  });
+
   it("never throws when storage is inaccessible", () => {
     vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
       throw new Error("quota exceeded");
