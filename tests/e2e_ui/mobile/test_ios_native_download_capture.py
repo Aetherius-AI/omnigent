@@ -8,6 +8,7 @@ import shutil
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -36,11 +37,14 @@ def test_real_ios_file_viewer_download(
     device_id = os.environ["OMNIGENT_IOS_DEVICE_ID"]
     derived_data = os.environ["OMNIGENT_IOS_DERIVED_DATA"]
     method = os.environ["OMNIGENT_IOS_TEST_METHOD"]
+    server_host = os.environ.get("OMNIGENT_IOS_SERVER_HOST", "127.0.0.1")
+    server_port = urlsplit(base_url).port
+    native_base_url = f"http://{server_host}:{server_port}"
     products = Path(derived_data) / "Build" / "Products" / "Debug-iphonesimulator"
     test_bundles = list(products.glob("OmnigentUITests-Runner.app/PlugIns/OmnigentUITests.xctest"))
     assert len(test_bundles) == 1, test_bundles
     (test_bundles[0] / "ios-e2e-config.json").write_text(
-        json.dumps({"serverURL": f"{base_url}/c/{session_id}", "filename": _FILENAME})
+        json.dumps({"serverURL": f"{native_base_url}/c/{session_id}", "filename": _FILENAME})
     )
     subprocess.run(
         [

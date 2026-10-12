@@ -1037,6 +1037,7 @@ def live_server(
     # instead of being shadowed by the worktree.
     apply_server_env(env, _REPO_ROOT)
     log_handle = open(log_path, "w")  # noqa: SIM115 — handle lives for Popen lifetime; closed in finally
+    bind_host = os.environ.get("OMNIGENT_E2E_BIND_HOST", "127.0.0.1")
     server_argv = [
         server_executable(),
         # Equivalent of the unit tests' ``monkeypatch.setattr(presence,
@@ -1053,7 +1054,7 @@ def live_server(
         + "from omnigent.cli import main; main()",
         "server",
         "--host",
-        "127.0.0.1",
+        bind_host,
         "--port",
         str(port),
         "--database-uri",

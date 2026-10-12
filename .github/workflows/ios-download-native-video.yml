@@ -8,6 +8,8 @@ jobs:
   record:
     runs-on: macos-26
     timeout-minutes: 45
+    env:
+      OMNIGENT_E2E_BIND_HOST: 0.0.0.0
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -42,6 +44,9 @@ jobs:
             puts phone.fetch("udid")
           ')"
           echo "id=$DEVICE_ID" >> "$GITHUB_OUTPUT"
+          HOST_IP="$(ipconfig getifaddr en0 || ipconfig getifaddr en1)"
+          test -n "$HOST_IP"
+          echo "OMNIGENT_IOS_SERVER_HOST=$HOST_IP" >> "$GITHUB_ENV"
 
       - name: Save fixed implementation
         run: |
