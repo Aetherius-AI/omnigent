@@ -599,7 +599,11 @@ def is_loopback_url(url: str) -> bool:
         ``127.0.0.0/8``, or ``::1``; ``False`` otherwise, including a URL
         with no host.
     """
-    host = urlsplit(url).hostname
+    try:
+        host = urlsplit(url).hostname
+    except ValueError:
+        # A malformed authority (e.g. an unterminated IPv6 bracket) is not loopback.
+        return False
     if host is None:
         return False
     if host == "localhost" or host.endswith(".localhost"):

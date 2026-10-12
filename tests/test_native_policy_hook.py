@@ -797,6 +797,8 @@ def test_post_evaluate_with_retry_remote_callback_honours_ambient_proxy(
         "http://[fe80::1]:6767/x",
         "not a url",
         "",
+        "http://[bad",
+        "http://[::1",
     ],
 )
 def test_is_loopback_url_matches_the_sdk_helper(url: str) -> None:

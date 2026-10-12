@@ -104,9 +104,8 @@ def _is_loopback_host(host: str) -> bool:
 class _CorporateProxy:
     """Forward proxy standing in for a remote egress proxy.
 
-    Forwards ``_MODEL_HOST`` to the mock LLM. Answers loopback destinations
-    with 502, as a remote proxy does when ``127.0.0.1:<port>`` is refused on
-    its own host, and refuses every other destination.
+    Forwards ``_MODEL_HOST`` to the mock LLM, answers loopback destinations
+    with 502, and refuses every other destination.
     """
 
     def __init__(self, model_upstream: str) -> None:
