@@ -1,7 +1,6 @@
 """E2E: the Antigravity SDK brain must surface a run_command approval, not a fatal deny.
 
-Polly asks for shell work against a scripted mock Gemini through a real ``omnigent host``.
-Approving the card runs the command; rejecting it leaves the command unrun."""
+Polly asks for shell work through a real ``omnigent host``; Approve runs it, Reject does not."""
 
 from __future__ import annotations
 
@@ -73,9 +72,7 @@ def _run_in_fresh_loop(coro: Coroutine[Any, Any, None]) -> None:
 class _MockGemini:
     """Gemini ``streamGenerateContent`` mock whose first model turn calls ``run_command``.
 
-    The proposed command creates ``marker`` in the workspace, so whether the
-    command actually ran is visible on disk, not just in the transcript.
-    """
+    The proposed command creates ``marker`` in the workspace, so a run is visible on disk."""
 
     def __init__(self, workspace: str) -> None:
         self.requests: list[dict[str, Any]] = []
