@@ -1,15 +1,9 @@
 """E2E regression: reaping a failed or cancelled claude-native delivery must not
 block the runner's asyncio event loop.
 
-A real tmux pane is advertised through the production ``write_tmux_target`` and
-reached through a ``tmux`` shim that holds ``kill-session`` for
-:data:`_KILL_DELAY_S` -- a slow tmux server, made deterministic. A 10ms
-heartbeat on the same loop records its longest pause; cleanup that blocks the
-loop shows up as a pause of at least the kill delay.
-
-Runs with no LLM, no ``claude`` binary and no server -- only ``tmux``::
-
-    pytest tests/e2e/test_claude_native_reap_event_loop_e2e.py -v
+A real tmux pane sits behind a ``tmux`` shim that holds ``kill-session`` for
+:data:`_KILL_DELAY_S`; a 10ms heartbeat on the same loop records its longest
+pause. Needs only ``tmux``: no LLM, ``claude`` binary, or server.
 """
 
 from __future__ import annotations
@@ -221,9 +215,8 @@ async def test_exited_terminal_cleanup_does_not_block_event_loop(
 ) -> None:
     """A terminal that exits before the input box renders fails the turn, and
     reaping its pane must not pause the rest of the loop."""
-    # Exit 0: the turn still fails readiness and reaps, but the failure logs
-    # without a traceback, so the gap measures only the reap -- not the
-    # unrelated cost of error-logging a crash.
+    # Exit 0: the turn still fails and reaps, but logs without a traceback, so
+    # the gap measures only the reap and not the cost of error-logging a crash.
     pane_rig.start_pane("echo 'Claude Code is starting...'; sleep 0.5; exit 0")
     assert pane_rig.wait_pane_dead() == "0"
     monkeypatch.setattr(

@@ -2168,14 +2168,8 @@ async def test_repeated_cancellation_mid_reap_completes_kill_before_unlock(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """
-    Cancellation arriving while cleanup waits on tmux never orphans the kill.
-
-    After a cancelled delivery drains, the pane kill runs off the loop.
-    A further cancel delivered mid-kill must not abandon it: the
-    injection lock stays held until the kill finished, and only then
-    does the cancellation propagate.
-    """
+    """A cancel arriving mid-kill never orphans the kill: the injection lock stays
+    held until the kill finishes, and only then does the cancellation propagate."""
     inject_started = threading.Event()
     inject_release = threading.Event()
     reap_started = threading.Event()

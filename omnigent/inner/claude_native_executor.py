@@ -345,11 +345,11 @@ class ClaudeNativeExecutor(Executor):
             raise
 
     async def _reap_failed_turn(self) -> str | None:
-        """Kill the failed turn's pane off-loop and drain cleanup before releasing its lock.
+        """Kill the failed turn's pane off-loop, finishing the kill before any cancel propagates.
 
-        Repeated cancellation is delayed until the worker finishes, then re-raised.
-        The worker inherits context outside the cancelled injection scope.
-        Return a cleanup error, or None if the pane was killed or already gone."""
+        Returns a cleanup error, or None when the pane was killed or already gone."""
+        # Created outside cancellable_injection, so the delivery's cancellation
+        # flag cannot reject the kill's own tmux command.
         worker = asyncio.create_task(asyncio.to_thread(self._kill_failed_session))
         cancelled = False
         while not worker.done():
