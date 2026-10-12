@@ -7204,6 +7204,52 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
       expect(useChatStore.getState().mcpStartupFailures).toEqual({ pipeshub: "fresh" });
     });
 
+    it("keeps a live failure map even when another fetch of the session was in flight", async () => {
+      let resolveSnapshot!: (response: Response) => void;
+      const snapshot = new Promise<Response>((resolve) => {
+        resolveSnapshot = resolve;
+      });
+      fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (
+          url.split("?")[0] === "/v1/sessions/conv_mcp_inflight" &&
+          (init?.method ?? "GET") === "GET"
+        ) {
+          return snapshot;
+        }
+        return defaultFetchHandler(input, init);
+      });
+      // A component read of the same session is already fetching when the bind starts.
+      const sibling = client.fetchQuery({
+        queryKey: ["session", "conv_mcp_inflight"],
+        queryFn: () => getSessionSlim("conv_mcp_inflight"),
+        staleTime: 0,
+        retry: false,
+      });
+      await tick();
+
+      const switching = useChatStore.getState().switchTo("conv_mcp_inflight");
+      await tick();
+      handleSessionEvent({
+        type: "session_mcp_startup",
+        conversationId: "conv_mcp_inflight",
+        servers: { pipeshub: { status: "failed", error: "fresh" } },
+      });
+      resolveSnapshot(
+        mockResponse({
+          id: "conv_mcp_inflight",
+          agent_id: "agent_xyz",
+          status: "idle",
+          created_at: 0,
+          items: [],
+          mcp_startup: null,
+        }),
+      );
+      await Promise.all([sibling, switching]);
+
+      expect(useChatStore.getState().mcpStartupFailures).toEqual({ pipeshub: "fresh" });
+    });
+
     it("does not confuse user-chosen server names with Object.prototype members", () => {
       useChatStore.setState({ mcpStartupFailures: null });
       handleSessionEvent({

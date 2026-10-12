@@ -4077,33 +4077,38 @@ function updateMcpStartupLaunch(
     : { pending, dismissed: pending ? false : launch.dismissed };
 }
 
-/** Joined requests may predate live text, so they cannot prove a new launch. */
-/** Startup state captured before a snapshot fetch; `undefined` while another fetch is in flight. */
-type McpStartupBeforeFetch =
-  Pick<ConversationState, "mcpStartupLaunch" | "mcpStartupFailures"> | undefined;
+/** MCP startup state captured before a snapshot fetch. */
+interface McpStartupBeforeFetch {
+  /** `undefined` while another fetch is in flight: a joined request cannot prove a new launch. */
+  launch: ConversationState["mcpStartupLaunch"] | undefined;
+  failures: ConversationState["mcpStartupFailures"];
+}
 
 function mcpStartupBeforeSnapshot(
   id: string,
   state: Pick<ConversationState, "mcpStartupLaunch" | "mcpStartupFailures"> | null,
-): McpStartupBeforeFetch {
-  if (queryClient?.getQueryState(["session", id])?.fetchStatus === "fetching") return undefined;
+): McpStartupBeforeFetch | undefined {
   if (state === null) return undefined;
-  return { mcpStartupLaunch: state.mcpStartupLaunch, mcpStartupFailures: state.mcpStartupFailures };
+  const fetching = queryClient?.getQueryState(["session", id])?.fetchStatus === "fetching";
+  return {
+    launch: fetching ? undefined : state.mcpStartupLaunch,
+    failures: state.mcpStartupFailures,
+  };
 }
 
 function mcpStartupSnapshotPatch(
   session: Session,
   state: Pick<ConversationState, "mcpStartupLaunch" | "mcpStartupFailures">,
-  mcpBeforeFetch: McpStartupBeforeFetch,
+  mcpBeforeFetch: McpStartupBeforeFetch | undefined,
 ): Pick<ConversationState, "mcpStartup" | "mcpStartupLaunch" | "mcpStartupFailures"> {
   // Fresh text creates a new latch object; older snapshots cannot rearm it.
   const launch =
-    state.mcpStartupLaunch === mcpBeforeFetch?.mcpStartupLaunch
+    state.mcpStartupLaunch === mcpBeforeFetch?.launch
       ? updateMcpStartupLaunch(state.mcpStartupLaunch, session.terminalPending ?? false)
       : state.mcpStartupLaunch;
   // A startup event that landed during the fetch is newer than the snapshot.
   const failures =
-    mcpBeforeFetch !== undefined && state.mcpStartupFailures !== mcpBeforeFetch.mcpStartupFailures
+    mcpBeforeFetch !== undefined && state.mcpStartupFailures !== mcpBeforeFetch.failures
       ? state.mcpStartupFailures
       : settledMcpFailures(session.mcpStartup);
   return {
@@ -4156,7 +4161,7 @@ function sessionBindingPatch(
     | "llmModel"
     | "sessionModelOverride"
   >,
-  mcpBeforeFetch: McpStartupBeforeFetch,
+  mcpBeforeFetch: McpStartupBeforeFetch | undefined,
 ): Pick<
   ChatState,
   | "isNativeTerminalSession"
@@ -4772,7 +4777,7 @@ const RECONNECT_BACKFILL_MAX_PAGES = 4;
 function reconnectStatusPatch(
   session: Session,
   s: ChatState,
-  mcpBeforeFetch: McpStartupBeforeFetch,
+  mcpBeforeFetch: McpStartupBeforeFetch | undefined,
 ): Partial<ChatState> {
   const patch: Partial<ChatState> = {
     sessionStatus: session.status,
@@ -4897,7 +4902,12 @@ async function reconcileActiveSessionStatus(
   ) {
     return;
   }
-  set((s) => reconnectStatusPatch(session, s, stateBeforeFetch));
+  set((s) =>
+    reconnectStatusPatch(session, s, {
+      launch: stateBeforeFetch.mcpStartupLaunch,
+      failures: stateBeforeFetch.mcpStartupFailures,
+    }),
+  );
   if (session.usageIncluded === false) void hydrateSessionUsage(id);
   const ignored = nativePreviewTombstonesByController.get(controller);
   if (
@@ -5104,7 +5114,7 @@ async function rehydrateWindowOnReconnect(
   set: Setter,
   get: Getter,
   ignoredNativeMessageIds: Set<string>,
-  mcpBeforeFetch: McpStartupBeforeFetch,
+  mcpBeforeFetch: McpStartupBeforeFetch | undefined,
 ): Promise<void> {
   // Pinned at entry (still the caller's generation — its guards just passed).
   const generation = get().historyGeneration;
