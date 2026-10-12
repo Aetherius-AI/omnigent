@@ -24,6 +24,9 @@ from omnigent.host import databricks_credential as broker
         True,
         17,
         {"connected": "yes", "token": "t", "workspace_host": "https://workspace.example"},
+        {"connected": 1, "token": "t", "workspace_host": "https://workspace.example"},
+        {"connected": True, "token": "  ", "workspace_host": "https://workspace.example"},
+        {"connected": True, "token": "t"},
         {"connected": True, "token": 17, "workspace_host": "https://workspace.example"},
         {"connected": True, "token": True, "workspace_host": "https://workspace.example"},
         {
@@ -149,7 +152,10 @@ def test_real_token_helper_keeps_stdout_as_token_protocol(mode: str, tmp_path: P
         if k in {"PATH", "LANG", "LC_ALL", "SSL_CERT_FILE", "SYSTEMROOT", "WINDIR"}
     }
     env.update(
-        OMNIGENT_CONFIG_HOME=str(tmp_path / "config"), OMNIGENT_DATA_DIR=str(tmp_path / "data")
+        OMNIGENT_CONFIG_HOME=str(tmp_path / "config"),
+        OMNIGENT_DATA_DIR=str(tmp_path / "data"),
+        # The worktree is not necessarily pip-installed; import omnigent from it.
+        PYTHONPATH=str(Path(__file__).resolve().parents[2]),
     )
     try:
         result = subprocess.run(
@@ -175,4 +181,6 @@ def test_real_token_helper_keeps_stdout_as_token_protocol(mode: str, tmp_path: P
     assert "synthetic-host-token" not in result.stderr
     assert "synthetic-vended-token" not in result.stderr
     if mode != "success":
-        assert json.loads(result.stderr)["event_name"] == "databricks_broker_request"
+        diagnostic = json.loads(result.stderr.strip().splitlines()[-1])
+        assert diagnostic["event_name"] == "databricks_broker_request"
+        assert diagnostic["outcome"] == {"declined": "not_connected"}.get(mode, mode)

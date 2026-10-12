@@ -81,8 +81,10 @@ def _fetch(server: str, host_id: str, host_token: str) -> dict | None:
 
     A connected reply must be a JSON object with a boolean ``connected`` and
     non-empty string ``workspace_host`` and ``token``; a not-connected object is
-    returned as-is. Every attempt records bounded outcome and latency metadata:
-    one stderr JSON line from the auth command, the host logger elsewhere.
+    returned as-is. Each attempt is logged with bounded outcome and latency
+    metadata: the host logger records every outcome (DEBUG for a fast success),
+    while the auth command echoes only INFO-and-above outcomes as one stderr
+    JSON line so a fast success stays silent.
     """
     started = time.monotonic()
     helper_attempt = _token_helper_attempt.get()
