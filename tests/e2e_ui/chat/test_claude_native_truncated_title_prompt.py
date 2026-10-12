@@ -129,6 +129,22 @@ def _frame_around_prompt(pane: str) -> tuple[str, list[str]] | None:
     return None
 
 
+def _frame_shape(frame: tuple[str, list[str]] | None, cols: int) -> str | None:
+    """Return ``"wrapped"`` or ``"clipped"`` for a title frame around ``❯``, else ``None``."""
+    if frame is None:
+        return None
+    above, below = frame
+    if not above.rstrip().endswith("─"):
+        return None
+    # A wrapped box has a full-width closing row continuing onto rows no wider
+    # than the pane; a clipped title sits one space in and ends in "… ─".
+    if len(below) >= 2 and below[0] == "─" * cols and all(0 < len(row) <= cols for row in below):
+        return "wrapped"
+    if above.startswith(" ") and not above.startswith("  ") and above.rstrip().endswith("… ─"):
+        return "clipped"
+    return None
+
+
 def _rename_from_terminal(page: Page, mirror: PaneMirror, title: str) -> None:
     """Type ``/rename <title>`` into the embedded TUI and wait for Claude Code's confirmation."""
     _focus_tui(page)
@@ -153,7 +169,6 @@ def _rename_from_terminal(page: Page, mirror: PaneMirror, title: str) -> None:
         _RENAME_TIMEOUT_S,
         f"Claude Code to confirm the rename to {title[:24]!r}",
     )
-    page.wait_for_timeout(1500)
 
 
 def _transcript_errors(base_url: str, session_id: str) -> list[str]:
@@ -205,31 +220,26 @@ def test_native_claude_composer_delivers_under_title_wider_than_terminal(
         )
 
         _rename_from_terminal(page, mirror, title)
+        _wait_for(
+            page,
+            lambda: _frame_shape(_frame_around_prompt(mirror.text()), mirror.cols) is not None,
+            10.0,
+            "the retitled frame around ❯ to settle",
+        )
         pane = mirror.text()
         frame = _frame_around_prompt(pane)
-        assert frame is not None, f"no ❯ row after /rename; pane was:\n{pane}"
+        shape = _frame_shape(frame, mirror.cols)
+        assert frame is not None and shape is not None, (
+            f"expected a wrapped or clipped title frame around ❯; pane was:\n{pane}"
+        )
         above, below = frame
         _log.info(
-            "terminal %dx%d; rows around the composer after /rename: above=%r below=%r",
+            "terminal %dx%d; %s frame after /rename: above=%r below=%r",
             mirror.cols,
             mirror.rows,
+            shape,
             above,
             below,
-        )
-        # The renderer either wrapped the box (a full-width closing row that
-        # continues onto rows no wider than the pane) or clipped the title one
-        # space in with "…"; both leave the opening rule's trailing glyph
-        # directly above ❯.
-        wrapped = (
-            len(below) >= 2
-            and below[0] == "─" * mirror.cols
-            and all(0 < len(row) <= mirror.cols for row in below)
-        )
-        clipped = (
-            above.startswith(" ") and not above.startswith("  ") and above.rstrip().endswith("… ─")
-        )
-        assert above.rstrip().endswith("─") and (wrapped or clipped), (
-            f"expected a wrapped or clipped title frame around ❯; pane was:\n{pane}"
         )
         page.wait_for_timeout(2000)
 
