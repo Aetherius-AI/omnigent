@@ -35,8 +35,8 @@ jobs:
           DEVICE_ID: ${{ steps.simulator.outputs.id }}
         run: |
           set -euo pipefail
-          git show 3a845634d^:web/ios/Omnigent/OmnigentWebView.swift > web/ios/Omnigent/OmnigentWebView.swift
-          git show 3a845634d^:web/ios/Omnigent.xcodeproj/project.pbxproj > web/ios/Omnigent.xcodeproj/project.pbxproj
+          git show 74990643498adee3416399da8a7688b4a8638ba1:web/ios/Omnigent/OmnigentWebView.swift > web/ios/Omnigent/OmnigentWebView.swift
+          git show 74990643498adee3416399da8a7688b4a8638ba1:web/ios/Omnigent.xcodeproj/project.pbxproj > web/ios/Omnigent.xcodeproj/project.pbxproj
           xcodebuild build-for-testing \
             -project web/ios/Omnigent.xcodeproj \
             -scheme Omnigent \
