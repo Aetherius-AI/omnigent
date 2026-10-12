@@ -28,6 +28,7 @@ Run::
 
 from __future__ import annotations
 
+import contextlib
 import ipaddress
 import json
 import os
@@ -422,7 +423,10 @@ def test_native_claude_prompt_survives_ambient_proxy(
         expect(page.locator(_ASSISTANT, has_text=token).first).to_be_visible(timeout=30_000)
     finally:
         if session_id is not None:
-            httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
+            # A failed session delete must not skip tearing down the runner
+            # process and proxy below, which would leak them across tests.
+            with contextlib.suppress(httpx.HTTPError):
+                httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
         if runner is not None and runner.poll() is None:
             runner.terminate()
             try:

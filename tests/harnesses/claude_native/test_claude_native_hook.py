@@ -268,6 +268,7 @@ def test_clear_session_start_hook_rotates_before_printing_conversation_url(
         """
 
         captured_timeouts: list[object] = []
+        captured_trust_env: list[object] = []
 
         def __init__(self, *, headers: dict[str, str], timeout: object, **_kwargs: object) -> None:
             """
@@ -279,6 +280,7 @@ def test_clear_session_start_hook_rotates_before_printing_conversation_url(
             """
             del headers
             self.captured_timeouts.append(timeout)
+            self.captured_trust_env.append(_kwargs.get("trust_env"))
 
         def __enter__(self) -> _FakeHttpxClient:
             """
@@ -416,6 +418,9 @@ def test_clear_session_start_hook_rotates_before_printing_conversation_url(
     ]
     recorded = (bridge_dir / "hooks.jsonl").read_text(encoding="utf-8")
     assert '"omnigent_clear_rotated_to":"conv_new"' in recorded
+    # The loopback relay must be reached directly, never through an ambient
+    # proxy that would fail the banner-gating rotation closed.
+    assert _FakeHttpxClient.captured_trust_env == [False]
     # The /clear rotation gates Claude's welcome banner and must fail
     # fast — it uses _SESSION_ROTATION_TIMEOUT_S, NOT the day-long
     # permission long-poll budget. If this regresses to
@@ -451,6 +456,7 @@ def test_fork_session_start_hook_forks_before_printing_conversation_url(
         """
 
         captured_timeouts: list[object] = []
+        captured_trust_env: list[object] = []
 
         def __init__(self, *, headers: dict[str, str], timeout: object, **_kwargs: object) -> None:
             """
@@ -462,6 +468,7 @@ def test_fork_session_start_hook_forks_before_printing_conversation_url(
             """
             del headers
             self.captured_timeouts.append(timeout)
+            self.captured_trust_env.append(_kwargs.get("trust_env"))
 
         def __enter__(self) -> _FakeHttpxClient:
             """
@@ -611,6 +618,9 @@ def test_fork_session_start_hook_forks_before_printing_conversation_url(
     assert '"omnigent_claude_session_was_seen":false' in recorded
     assert '"omnigent_fork_detected":true' in recorded
     assert '"omnigent_fork_rotated_to":"conv_fork"' in recorded
+    # The loopback relay must be reached directly, never through an ambient
+    # proxy that would fail the banner-gating rotation closed.
+    assert _FakeHttpxClient.captured_trust_env == [False]
     # The /fork rotation gates Claude's welcome banner and must fail
     # fast — it uses _SESSION_ROTATION_TIMEOUT_S, NOT the day-long
     # permission long-poll budget. If this regresses to
@@ -844,6 +854,49 @@ def test_permission_request_hook_posts_to_active_session_from_bridge_config(
     assert posted["headers"] == {"Authorization": "Bearer xyz"}
     assert json.loads(captured.out)["hookSpecificOutput"]["permissionDecision"] == "allow"
     assert captured.err == ""
+
+
+@pytest.mark.parametrize(
+    ("url", "expected_trust_env"),
+    [
+        ("http://127.0.0.1:8787/v1/sessions/conv_x/hooks/permission-request", False),
+        ("http://localhost:8787/v1/sessions/conv_x/hooks/permission-request", False),
+        (
+            "https://omnigents.example.databricksapps.com/v1/sessions/conv_x/hooks/permission-request",
+            True,
+        ),
+    ],
+)
+def test_post_hook_with_reattach_bypasses_proxy_only_for_loopback(
+    monkeypatch: pytest.MonkeyPatch, url: str, expected_trust_env: bool
+) -> None:
+    """A loopback permission callback bypasses the ambient proxy; a remote one keeps it."""
+    captured_trust_env: list[object] = []
+
+    class _Client:
+        def __init__(self, **kwargs: object) -> None:
+            captured_trust_env.append(kwargs.get("trust_env"))
+
+        def __enter__(self) -> _Client:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def post(self, request_url: str, *, json: dict[str, object]) -> httpx.Response:
+            del json
+            return httpx.Response(
+                200,
+                text='{"hookSpecificOutput":{"permissionDecision":"allow"}}',
+                request=httpx.Request("POST", request_url),
+            )
+
+    monkeypatch.setattr(native_policy_hook.httpx, "Client", _Client)
+
+    resp = claude_native_hook._post_hook_with_reattach(url, {}, {}, "claude permission")
+    assert resp is not None
+    assert resp.status_code == 200
+    assert captured_trust_env == [expected_trust_env]
 
 
 def _prepare_permission_bridge(tmp_path: Path, session_id: str) -> Path:
