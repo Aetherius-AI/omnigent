@@ -904,12 +904,7 @@ def test_unpinned_family_alias_passes_through_on_the_anthropic_api() -> None:
 
 
 def test_model_selection_speaks_the_configs_window_spelling() -> None:
-    """A bare or namespaced pick of a ``[1m]``-pinned model launches on the marked spelling.
-
-    A spec pin, a persisted pick or a routed id names the model bare; launched
-    verbatim it would run the same model at Claude Code's 200K default.
-    Aliases, non-Claude ids and models the config does not pin pass through.
-    """
+    """A bare or namespaced pick of a ``[1m]``-pinned model is spoken in the marked spelling."""
     config = claude_native.ClaudeNativeUcodeConfig(
         env={
             "ANTHROPIC_BASE_URL": "https://example.databricks.com/ai-gateway/anthropic",
@@ -8805,11 +8800,7 @@ _GATEWAY_URL = "https://example.databricks.com/ai-gateway/anthropic"
 def test_window_marker_spells_a_gateways_native_1m_models() -> None:
     """Every spelling a gateway config hands Claude Code carries ``[1m]`` for a native-1M model.
 
-    Claude Code sizes the window from the id it runs on and caps an unknown
-    gateway id at 200K. The alias pins are what ``/model opus`` resolves to,
-    so they need the marker as much as the launch default; the generations
-    whose 1M is a beta opt-in and Haiku keep Claude Code's own default.
-    """
+    Beta-opt-in generations and Haiku keep Claude Code's own default."""
     config = claude_native.ClaudeNativeUcodeConfig(
         env={
             "ANTHROPIC_BASE_URL": _GATEWAY_URL,
@@ -8898,12 +8889,7 @@ def test_window_marker_leaves_recognized_endpoints_and_200k_configs_alone(
 def test_resolve_native_claude_config_marks_the_gateway_pins(
     _isolated_provider_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The resolved launch config spells the gateway's natively-1M pins with ``[1m]``.
-
-    Databricks discovery pins ``opus`` to the plain gateway id; launched bare,
-    or re-selected through ``/model opus``, Opus 5.5 ran at Claude Code's 200K
-    default instead of its 1M window.
-    """
+    """The resolved ucode config spells the gateway's natively-1M pins with ``[1m]``."""
     _seed_config(
         _isolated_provider_config,
         {"databricks": {"kind": "databricks", "default": True, "profile": "oss"}},

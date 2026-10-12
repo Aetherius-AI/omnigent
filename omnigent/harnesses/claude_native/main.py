@@ -655,14 +655,7 @@ def _claude_config_window_spelling(
 ) -> str | None:
     """Spell *model* as the config pins it when that pin carries ``[1m]``.
 
-    A spec pin, persisted pick or routed id names a served model bare; spoken
-    verbatim, Claude Code would run the same model at 200K. Marked picks,
-    family aliases and unpinned ids pass through.
-
-    :param model: A concrete model id, alias, or ``None``.
-    :param claude_config: Resolved provider config for the terminal, or ``None``.
-    :returns: The config's marked spelling of the same model, else *model*.
-    """
+    Marked picks, family aliases and ids the config does not pin pass through."""
     if claude_config is None or not model or not model.strip():
         return model
     candidate = model.strip()
@@ -3448,21 +3441,15 @@ def claude_config_with_1m_window(
 ) -> ClaudeNativeUcodeConfig | None:
     """Spell the config's natively-1M Claude models with Claude Code's ``[1m]`` marker.
 
-    Claude Code sizes the context window client-side from the model id and caps
-    an id it does not know (a gateway's ``databricks-claude-opus-5-5``) at 200K;
-    ``[1m]`` is its opt-in and never reaches the wire. The alias pins are what
-    ``/model opus`` resolves to, so every spelling handed to Claude Code carries
-    the marker, not just one launch's ``--model``. Only models its catalog serves
-    at 1M natively qualify; the Anthropic API and Bedrock, whose ids it
-    recognizes, are left alone.
-
-    :param claude_config: The resolved launch config, or ``None``.
-    :returns: The marked config, or *claude_config* itself when nothing changes.
-    """
+    Returns *claude_config* itself when nothing changes."""
+    # Claude Code recognizes Anthropic and Bedrock ids and sizes them itself; only
+    # a custom endpoint's unknown ids fall back to its 200K default.
     if claude_config is None or claude_config.env.get(_ANTHROPIC_BEDROCK_BASE_URL_ENV):
         return claude_config
     if _serves_canonical_anthropic_ids(claude_config):
         return claude_config
+    # The marker is Claude Code's only 1M opt-in for an unknown id and never reaches
+    # the wire; ``/model opus`` resolves to the alias pin, so every pin carries it.
     model_keys = {
         *ALIAS_MODEL_ENV_VARS.values(),
         _ANTHROPIC_CUSTOM_MODEL_OPTION_ENV,
@@ -3494,20 +3481,8 @@ def resolve_native_claude_config(
 ) -> ClaudeNativeUcodeConfig | None:
     """Resolve the native Claude Code launch config across all offerings.
 
-    The single entry point both native-claude launch paths use (the CLI
-    ``omnigent claude`` and the runner's host-spawned auto-create), so the
-    native harness honors ``omnigent setup`` exactly like the in-process
-    claude-sdk harness. :func:`_resolve_native_claude_provider_config` picks
-    the provider (precedence documented there); the result then gets Claude
-    Code's ``[1m]`` window marker via :func:`claude_config_with_1m_window`.
-
-    :param spec: The agent spec, or ``None`` for the bare ``omnigent
-        claude`` launch.
-    :param refresh_models: Query Databricks for the workspace's current Claude
-        model services while resolving the ucode config. Capability checks that
-        only need the routing shape pass ``False`` to stay network-free.
-    :returns: The launch config, or ``None`` to use Claude's own login.
-    """
+    :func:`_resolve_native_claude_provider_config` (precedence and parameters there),
+    then :func:`claude_config_with_1m_window`."""
     return claude_config_with_1m_window(
         _resolve_native_claude_provider_config(spec=spec, refresh_models=refresh_models)
     )
@@ -3520,7 +3495,7 @@ def _resolve_native_claude_provider_config(
 ) -> ClaudeNativeUcodeConfig | None:
     """The provider's own spelling of the launch config, before the window marker.
 
-    Shared by both native-claude launch paths (the CLI
+    The single entry point both native-claude launch paths use (the CLI
     ``omnigent claude`` and the runner's host-spawned auto-create), so the
     native harness honors ``omnigent setup`` exactly like the in-process
     claude-sdk harness. Precedence mirrors

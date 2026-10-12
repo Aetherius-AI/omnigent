@@ -1,22 +1,6 @@
-"""UI journey: a claude-native session on a gateway Opus 5.5 shows its context window.
+"""A claude-native session on a gateway Opus 5.5 shows its 1M window in the composer ring.
 
-Reported on a Databricks Sandbox: selecting Opus 5.5 showed a 200K context window
-although the model serves 1M. Databricks discovery pins Claude Code's ``opus``
-alias to the plain gateway id (``databricks-claude-opus-5-5``), which Claude Code
-does not recognize and sizes at its 200K default; the launch config now spells
-that pin with Claude Code's ``[1m]`` window marker. This journey pins the same
-plain id through the mock anthropic provider config, so the real ``claude`` CLI
-launches on it against the mock Anthropic endpoint.
-
-Journey, on the real web SPA against a live server + runner:
-
-1. open a new claude-native session; the Terminal view reaches "connected"
-2. open Configure session → model picker and choose the Opus row
-3. send a message and wait for the assistant reply
-4. hover the composer context ring and read "<used> / <window> tokens"
-
-Regression guard: the window reads 1M for Opus 5.5.
-"""
+Real ``claude`` CLI against a mock gateway that pins ``opus`` to the plain gateway id."""
 
 from __future__ import annotations
 
@@ -93,11 +77,7 @@ def opus_gateway_claude_session(
 
 
 def _wait_for_opus_row(base_url: str, session_id: str) -> None:
-    """Fail early when the launch config did not pin Opus 5.5 into the picker.
-
-    The row spells the model as Claude Code resolves the alias, window marker
-    included, so the comparison folds the marker away.
-    """
+    """Fail early when the picker lacks Opus 5.5 (its row carries the ``[1m]`` marker)."""
     deadline = time.monotonic() + _PICKER_ROW_TIMEOUT_S
     rows: list[dict[str, object]] = []
     wanted = normalized_model_id(OPUS_GATEWAY_ID)

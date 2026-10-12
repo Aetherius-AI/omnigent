@@ -178,11 +178,7 @@ async def test_catalog_uses_cli_managed_picker_for_every_launch_config(
 async def test_catalog_labels_a_pinned_alias_by_family_and_window(
     monkeypatch: pytest.MonkeyPatch, pinned: str, label: str
 ) -> None:
-    """A gateway pin is labelled by family and version, not by the pinned id.
-
-    Claude Code labels a pinned alias row with the pinned id itself, so the
-    picker read ``databricks-claude-opus-5-5[1m]`` for the workspace's Opus.
-    """
+    """A pinned alias row that Claude Code labels with the pinned id is relabelled by family."""
     _stub_picker(
         monkeypatch,
         [{"value": "opus", "resolvedModel": pinned, "displayName": pinned}],

@@ -137,8 +137,7 @@ _NATIVE_1M_MIN_VERSION: dict[str, tuple[int, ...]] = {
 def _claude_model_version(canonical: str) -> tuple[int, ...]:
     """The version segments of a canonical Claude id, e.g. ``(4, 7)``.
 
-    A date stamp (``-20250514``) or vendor revision (``-v1:0``) ends the version.
-    """
+    A date stamp (``-20250514``) or vendor revision (``-v1:0``) ends the version."""
     version: list[int] = []
     for segment in _SEGMENT_RE.split(canonical):
         if segment.isdigit() and len(segment) < 4:
@@ -151,10 +150,7 @@ def _claude_model_version(canonical: str) -> tuple[int, ...]:
 def serves_1m_natively(model_id: str) -> bool:
     """Whether Claude Code's catalog serves *model_id*'s model at 1M natively.
 
-    :param model_id: Any spelling of a model id, e.g. ``"databricks-claude-opus-5-5"``.
-    :returns: ``True`` for Opus 4.7+, Sonnet 5+ and Fable 5+; ``False`` for Haiku,
-        the beta-opt-in generations (Opus 4.6, Sonnet 4.x) and non-Claude ids.
-    """
+    ``True`` for Opus 4.7+, Sonnet 5+ and Fable 5+ in any spelling of the id."""
     canonical = canonical_claude_id(model_id.removesuffix(LONG_CONTEXT_MARKER))
     if canonical is None:
         return False
@@ -168,12 +164,7 @@ def serves_1m_natively(model_id: str) -> bool:
 def model_id_with_1m_marker(model_id: str) -> str:
     """Spell a natively-1M Claude id with Claude Code's ``[1m]`` window marker.
 
-    Claude Code caps a gateway id it does not know at 200K; the marker is its
-    opt-in. Marked ids, aliases, non-Claude ids and 200K generations pass through.
-
-    :param model_id: A model id, e.g. ``"system.ai.claude-opus-5"``.
-    :returns: ``"system.ai.claude-opus-5[1m]"``, or the stripped *model_id*.
-    """
+    Marked ids, aliases, non-Claude ids and 200K generations pass through, stripped."""
     spelled = model_id.strip()
     if spelled.lower().endswith(LONG_CONTEXT_MARKER) or not serves_1m_natively(spelled):
         return spelled

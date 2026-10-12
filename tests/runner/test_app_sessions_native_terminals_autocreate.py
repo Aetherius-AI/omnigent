@@ -5050,12 +5050,9 @@ async def test_auto_create_claude_terminal_launch_gate_folds_a_gateway_namespace
 async def test_auto_create_claude_terminal_launches_a_bare_pick_on_its_1m_spelling(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A persisted bare pick of a ``[1m]``-pinned gateway model launches marked.
+    """A persisted bare pick of a ``[1m]``-pinned gateway model launches on the marked spelling.
 
-    Sessions pinned before the window marker existed, and routed picks, persist
-    the plain gateway id. The gate must read it as the pinned model and launch
-    Claude Code on the marked spelling: neither refuse it nor run it at 200K.
-    """
+    The launch gate neither refuses the bare pick nor resets it."""
     from omnigent.harnesses.claude_native.main import ClaudeNativeUcodeConfig
 
     monkeypatch.setattr(claude_native_bridge, "_TRUSTED_PARENT", tmp_path)
