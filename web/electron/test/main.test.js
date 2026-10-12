@@ -1188,14 +1188,11 @@ describe("Databricks auth mode wiring", () => {
     const origin = new URL(workspace).origin;
     assert.deepEqual(h.calls.forgottenTokens, [origin]);
     assert.equal(h.api.windows.get(other).origin, null);
-    assert.match(
-      new URLSearchParams(otherLoads.at(-1)[1].search).get("error"),
-      /^You're signed out of /,
-    );
+    assert.equal(new URLSearchParams(otherLoads.at(-1)[1].search).get("error"), null);
     assert.ok(h.calls.cookiesRemoved.some(([, name]) => name === "DBAUTH"));
     assert.equal(h.api.windows.get(h.win).origin, null);
     const params = new URLSearchParams(h.calls.loadFile.at(-1)[1].search);
-    assert.equal(params.get("error"), `You're signed out of ${new URL(workspace).host}.`);
+    assert.equal(params.get("error"), null);
     assert.equal(params.get("url"), workspace);
   });
 
@@ -1211,6 +1208,7 @@ describe("Databricks auth mode wiring", () => {
     item.click();
     await tick();
     assert.deepEqual(h.calls.forgottenTokens, [new URL(workspace).origin]);
+    assert.equal(new URLSearchParams(h.calls.loadFile.at(-1)[1].search).get("error"), null);
     // Back on the setup page, there's nothing to sign out of.
     assert.equal(item.enabled, false);
   });
@@ -1346,7 +1344,7 @@ describe("Databricks auth mode wiring", () => {
     await tick();
     assert.equal(h.overlay.hint, null, "the reconnect was cancelled");
     const params = new URLSearchParams(h.calls.loadFile.at(-1)[1].search);
-    assert.equal(params.get("error"), `You're signed out of ${new URL(workspace).host}.`);
+    assert.equal(params.get("error"), null);
   });
 
   it("clears the cookie and says so when forgetting the token fails", async (t) => {
@@ -1492,6 +1490,55 @@ describe("Databricks auth mode wiring", () => {
     assert.equal(h.calls.auth[1][2].interactive, false);
     assert.deepEqual(h.calls.loadURL[1], [`${workspace}/c/deep-linked`]);
   });
+
+  for (const v2 of [false, true]) {
+    it(`opens a clean selector without stored credentials, then signs in on Connect (v2=${v2})`, async (t) => {
+      const origin = new URL(workspace).origin;
+      const workspaceNetwork = createWorkspaceNetwork(origin, {
+        oauth: {
+          getValidStoredToken: async () => {
+            throw Object.assign(new Error("no stored token"), { errorCode: "NO_STORED_TOKEN" });
+          },
+          runInteractiveLogin: async () => {
+            workspaceNetwork.browserSignIns++;
+            return { tokens: { access_token: "token" }, issuerOrigin: origin };
+          },
+        },
+      });
+      const h = loadNavigationHarness({
+        isPackaged: true,
+        env: { OMNIGENT_SERVER_SELECTOR_V2: v2 ? "1" : "0" },
+        savedServerUrl: workspace,
+        serverUrl: workspace,
+        managedServers: v2 ? [workspace] : [],
+        databricksMode: "browser",
+        network: workspaceNetwork,
+      });
+      t.after(h.cleanup);
+      h.api.registerIpc();
+      h.api.createWindow();
+      await until(() => h.calls.loadFile.length === 1, "the server selector");
+      const [page, options] = h.calls.loadFile[0];
+      const params = new URLSearchParams(options.search);
+      assert.equal(path.basename(page), v2 ? "server-selector-v2.html" : "index.html");
+      assert.equal(params.get("error"), null);
+      assert.equal(params.get("url"), workspace);
+      assert.equal(params.get("step"), "server");
+      assert.equal(h.api.windows.get(h.win).origin, null);
+      assert.deepEqual(h.calls.loadURL, []);
+      assert.equal(workspaceNetwork.sessionCreates, 0);
+      assert.equal(workspaceNetwork.browserSignIns, 0);
+
+      await h.ipc.get("omnigent:set-server-url")(
+        { sender: h.webContents, senderFrame: { url: h.webContents.getURL() } },
+        workspace,
+      );
+      assert.equal(workspaceNetwork.browserSignIns, 1);
+      assert.equal(workspaceNetwork.sessionCreates, 1);
+      assert.deepEqual(h.calls.loadURL, [[workspace]]);
+      assert.equal(h.api.windows.get(h.win).origin, origin);
+    });
+  }
 
   it("upgrades a saved HTTP workspace before restoring authentication", async (t) => {
     const target = "https://workspace.cloud.databricks.com/omnigent?o=123";
@@ -3933,7 +3980,7 @@ describe("OIDC system-browser sign-in wiring", () => {
     assert.deepEqual(h.calls.loadURL.at(-1), [`${server}/c/1`]);
   });
 
-  it("signs out in place and says so on the connect screen", async (t) => {
+  it("signs out in place and returns to the connect screen without an error", async (t) => {
     const h = loadNavigationHarness({
       serverUrl: server,
       manifest: oidcManifest,
@@ -3951,7 +3998,8 @@ describe("OIDC system-browser sign-in wiring", () => {
     await settle();
     assert.equal(prevented, true);
     assert.equal(h.calls.oidc.signOut, 1);
-    assert.equal(setupQuery(h).get("error"), "You're signed out of omni.example.");
+    assert.equal(setupQuery(h).get("url"), server);
+    assert.equal(setupQuery(h).get("error"), null);
   });
 
   it("signs out from the server picker, as the app's own sign-out does", async (t) => {
@@ -3970,7 +4018,26 @@ describe("OIDC system-browser sign-in wiring", () => {
     assert.equal(await h.ipc.get("omnigent:sign-out-of-server")(pageEvent), true);
     await settle();
     assert.equal(h.calls.oidc.signOut, 1);
-    assert.equal(setupQuery(h).get("error"), "You're signed out of omni.example.");
+    assert.equal(setupQuery(h).get("url"), server);
+    assert.equal(setupQuery(h).get("error"), null);
+  });
+
+  it("still reports an incomplete sign-out when clearing the session cookie fails", async (t) => {
+    const h = loadNavigationHarness({
+      serverUrl: server,
+      manifest: oidcManifest,
+      oidc: { refresh: minted("renewed") },
+      acceptedSessions: new Set(["renewed"]),
+    });
+    t.after(h.cleanup);
+    await h.api.loadServerUrl(h.win, server);
+    h.electron.session.defaultSession.cookies.remove = async () => {
+      throw new Error("cookie store unavailable");
+    };
+    assert.equal(await h.api.signOutOfServer(h.win), false);
+    await settle();
+    assert.equal(setupQuery(h).get("url"), server);
+    assert.match(setupQuery(h).get("error"), /^Couldn't finish signing out of /);
   });
 
   it("enables Sign Out only once the browser sign-in finished", async (t) => {
