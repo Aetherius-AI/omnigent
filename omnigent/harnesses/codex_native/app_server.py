@@ -109,6 +109,7 @@ from omnigent.util.reasoning_effort import (
     CODEX_NATIVE_EFFORTS,
     EFFORT_ORDER,
     clamp_effort_for_model,
+    effort_for_model_switch,
 )
 
 _logger = logging.getLogger(__name__)
@@ -4569,7 +4570,8 @@ async def apply_codex_thread_collaboration_mode(
 ) -> None:
     """Switch a loaded thread's collaboration mode via ``thread/settings/update``,
     keeping ``settings.developer_instructions`` null so a value there cannot replace
-    Codex's built-in Plan Mode prompt. ``effort`` is clamped to what ``model`` accepts."""
+    Codex's built-in Plan Mode prompt. ``effort`` is clamped to what ``model``
+    accepts; with none requested, a capped model gets its supported fallback."""
     client = client_for_transport(transport, client_name="omnigent-codex-native-runner")
     try:
         await asyncio.wait_for(client.connect(), timeout=_EFFORT_CONNECT_TIMEOUT_SECONDS)
@@ -4582,9 +4584,7 @@ async def apply_codex_thread_collaboration_mode(
                         "mode": mode,
                         "settings": {
                             "model": model,
-                            "reasoning_effort": (
-                                clamp_effort_for_model(effort, model) if effort else None
-                            ),
+                            "reasoning_effort": effort_for_model_switch(effort or None, model),
                             "developer_instructions": None,
                         },
                     },

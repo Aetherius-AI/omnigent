@@ -134,6 +134,20 @@ Tests under `tests/browser_ui/` stub every backend call and need no instance:
   `tests/e2e_ui/start_session/test_composer_transition.py::test_selected_model_survives_delayed_create`
 - **`effort-picker`, new-session composer:**
   `tests/e2e_ui/start_session/test_codex_effort_prelaunch.py::test_new_codex_session_gear_offers_reasoning_effort`
+- **`codex-plan-mode`, new-session composer:**
+  `tests/e2e_ui/start_session/test_codex_plan_mode_prelaunch_create.py::test_new_codex_session_arms_plan_mode_and_seeds_create_label`
+  (arm, badge, create label, Plan still offered in the session) and
+  `tests/e2e_ui/chat/test_codex_plan_mode_prelaunch_turn.py::test_prelaunch_plan_mode_governs_the_first_turn`
+  (real Codex: the first turn carries Codex's Plan Mode preset). Manually, pick
+  a Codex agent, choose **+ → Plan**, send "Add a hello.txt file with a
+  greeting." and expect a plan, not a file; on a server older than 0.18 the
+  entry is disabled with the reason.
+- **`codex-plan-mode`, in-session:**
+  `tests/e2e_ui/chat/test_codex_plan_mode_respected.py::test_codex_plan_mode_reaches_the_model`.
+  A failed launch-time switch is reconciled back to Default before the first
+  turn (`tests/runner/test_app_sessions_native_terminals_runtime.py`,
+  `test_codex_discover_thread_reports_default_when_plan_mode_is_not_applied`);
+  the badge then shows Default rather than an inactive Plan.
 - **`model-picker`, `effort-picker`, refused change:** the rollback cases in
   `web/src/store/chatStore.test.ts` and the composer case in
   `web/src/pages/ChatPage.composer.test.tsx` (`pnpm --dir web test`). Manually,

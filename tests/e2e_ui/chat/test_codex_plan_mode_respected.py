@@ -37,6 +37,9 @@ from tests.e2e_ui.messages.test_native_codex_render_parity import (
 # Codex's built-in "plan" collaboration-mode preset (codex CLI >= 0.154.0): the
 # model should receive this when Plan mode is engaged.
 _PLAN_MODE_PRESET = "You are in **Plan Mode**"
+# Opening of the codex-native wrapper's authored instructions (see
+# omnigent/harnesses/codex_native/main.py).
+_WRAPPER_INSTRUCTIONS_MARKER = "Codex is running in the session terminal"
 
 
 def _developer_instruction_texts(requests: list[dict]) -> list[str]:
@@ -101,5 +104,11 @@ def test_codex_plan_mode_reaches_the_model(
     developer_texts = _developer_instruction_texts(requests)
     assert any(_PLAN_MODE_PRESET in text for text in developer_texts), (
         "plan-mode coding turn reached the model without Codex's Plan Mode preset; "
+        f"developer instructions seen: {json.dumps(developer_texts)[:1500]}"
+    )
+    # The wrapper's authored instructions still arrive through the additive
+    # top-level config key alongside the preset.
+    assert any(_WRAPPER_INSTRUCTIONS_MARKER in text for text in developer_texts), (
+        "the agent's authored instructions no longer reach the model; "
         f"developer instructions seen: {json.dumps(developer_texts)[:1500]}"
     )

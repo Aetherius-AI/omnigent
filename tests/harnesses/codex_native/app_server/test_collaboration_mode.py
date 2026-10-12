@@ -102,3 +102,30 @@ async def test_collaboration_mode_switch_bounds_an_unanswered_app_server(
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(switch, timeout=2)
     client.close.assert_awaited_once()
+
+
+async def test_collaboration_mode_switch_guards_a_capped_models_default_effort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no effort requested, a model whose gateway caps its ladder gets that
+    model's fallback instead of inheriting a config default it would reject."""
+    from omnigent.util import reasoning_effort
+
+    caps = reasoning_effort.ModelEffortCaps(
+        fallback={"glm-5": "high"}, unsupported={"glm-5": frozenset({"xhigh"})}
+    )
+    monkeypatch.setattr(reasoning_effort, "model_effort_caps", lambda _caps=None: caps)
+    client = AsyncMock(spec=app_server.CodexAppServerClient)
+    client.request.return_value = {"result": {}}
+    monkeypatch.setattr(app_server, "client_for_transport", lambda *_a, **_k: client)
+
+    await app_server.apply_codex_thread_collaboration_mode(
+        "ws://127.0.0.1:1", "thread_fresh", "plan", model="glm-5"
+    )
+
+    settings = client.request.await_args.args[1]["collaborationMode"]["settings"]
+    assert settings == {
+        "model": "glm-5",
+        "reasoning_effort": "high",
+        "developer_instructions": None,
+    }
