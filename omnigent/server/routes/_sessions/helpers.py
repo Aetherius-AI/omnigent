@@ -4957,9 +4957,8 @@ def _publish_status(
     elif status == "idle":
         session_live_state.persist_scheduled_run_completion(session_id, "succeeded")
     elif status == "failed":
-        # Server-originated failed turns log once here: expected launch
-        # refusals at WARNING, other failures at ERROR. Runner-relayed failures
-        # are already logged runner-side and bypass this path.
+        # Every failed edge logs once here: expected launch refusals at
+        # WARNING, every other failure at ERROR.
         origin = failure_origin or "unattributed"
         failure_code = error.code if error is not None else "none"
         if error is not None and error.code in _SAFE_LAUNCH_REFUSAL_CODES:

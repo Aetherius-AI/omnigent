@@ -101,25 +101,26 @@ def _spawn_server(
     # Host-generated per-launch runner tokens must be accepted.
     env.pop("OMNIGENT_RUNNER_TUNNEL_TOKEN", None)
 
-    log_handle = open(server_log, "w")  # noqa: SIM115 — lives for the Popen lifetime; closed by the caller
-    proc = subprocess.Popen(
-        [
-            server_executable(),
-            "-m",
-            "omnigent.cli",
-            "server",
-            "--port",
-            str(port),
-            "--database-uri",
-            f"sqlite:///{db_path}",
-            "--artifact-location",
-            str(artifact_dir),
-        ],
-        env=env,
-        cwd=compat_server_cwd(),
-        stdout=log_handle,
-        stderr=subprocess.STDOUT,
-    )
+    # The child inherits its own descriptor, so the parent's handle can close.
+    with open(server_log, "w") as log_handle:
+        proc = subprocess.Popen(
+            [
+                server_executable(),
+                "-m",
+                "omnigent.cli",
+                "server",
+                "--port",
+                str(port),
+                "--database-uri",
+                f"sqlite:///{db_path}",
+                "--artifact-location",
+                str(artifact_dir),
+            ],
+            env=env,
+            cwd=compat_server_cwd(),
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+        )
     deadline = time.monotonic() + HEALTH_TIMEOUT_S
     while time.monotonic() < deadline:
         try:
@@ -132,13 +133,12 @@ def _spawn_server(
         time.sleep(POLL_INTERVAL_S)
     else:
         proc.kill()
-        log_handle.close()
+        proc.wait()
         raise RuntimeError(
             f"server didn't pass health within {HEALTH_TIMEOUT_S}s; "
             f"log tail:\n{server_log.read_text()[-3000:]}"
         )
     if proc.poll() is not None:
-        log_handle.close()
         raise RuntimeError(
             f"server exited early (code {proc.returncode}); "
             f"log tail:\n{server_log.read_text()[-3000:]}"
