@@ -15,9 +15,12 @@ final class OmnigentUITests: XCTestCase {
   }
 
   private func runRealFileViewerDownload(expectShareSheet: Bool) throws {
-    let environment = ProcessInfo.processInfo.environment
-    let serverURL = try XCTUnwrap(environment["OMNIGENT_IOS_E2E_SERVER_URL"])
-    let filename = try XCTUnwrap(environment["OMNIGENT_IOS_E2E_FILENAME"])
+    let configURL = try XCTUnwrap(
+      Bundle(for: type(of: self)).url(forResource: "ios-e2e-config", withExtension: "json"))
+    let config = try XCTUnwrap(
+      try JSONSerialization.jsonObject(with: Data(contentsOf: configURL)) as? [String: String])
+    let serverURL = try XCTUnwrap(config["serverURL"])
+    let filename = try XCTUnwrap(config["filename"])
     let app = XCUIApplication(bundleIdentifier: "ai.omnigent.ios")
     app.launchArguments = [
       "--omnigent-reset-state", "--omnigent-server-url", serverURL,

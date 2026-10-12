@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -27,6 +28,7 @@ def ios_download_session(seeded_session: tuple[str, str]) -> Iterator[tuple[str,
         shutil.rmtree(workspace, ignore_errors=True)
 
 
+@pytest.mark.timeout(600)
 def test_real_ios_file_viewer_download(
     ios_download_session: tuple[str, str],
 ) -> None:
@@ -34,11 +36,12 @@ def test_real_ios_file_viewer_download(
     device_id = os.environ["OMNIGENT_IOS_DEVICE_ID"]
     derived_data = os.environ["OMNIGENT_IOS_DERIVED_DATA"]
     method = os.environ["OMNIGENT_IOS_TEST_METHOD"]
-    env = {
-        **os.environ,
-        "OMNIGENT_IOS_E2E_SERVER_URL": f"{base_url}/c/{session_id}",
-        "OMNIGENT_IOS_E2E_FILENAME": _FILENAME,
-    }
+    products = Path(derived_data) / "Build" / "Products" / "Debug-iphonesimulator"
+    test_bundles = list(products.glob("OmnigentUITests-Runner.app/PlugIns/OmnigentUITests.xctest"))
+    assert len(test_bundles) == 1, test_bundles
+    (test_bundles[0] / "ios-e2e-config.json").write_text(
+        json.dumps({"serverURL": f"{base_url}/c/{session_id}", "filename": _FILENAME})
+    )
     subprocess.run(
         [
             "xcodebuild",
@@ -59,6 +62,7 @@ def test_real_ios_file_viewer_download(
             "CODE_SIGNING_ALLOWED=NO",
         ],
         cwd=_REPO_ROOT,
-        env=env,
+        env=os.environ,
         check=True,
+        timeout=420,
     )
