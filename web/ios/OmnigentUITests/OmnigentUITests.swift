@@ -32,7 +32,7 @@ final class OmnigentUITests: XCTestCase {
     XCTAssertTrue(webView.waitForExistence(timeout: 90), "Expected the real Omnigent web app.")
 
     sleep(40)
-    app.coordinate(withNormalizedOffset: CGVector(dx: 0.92, dy: 0.033)).tap()
+    app.coordinate(withNormalizedOffset: CGVector(dx: 0.91, dy: 0.092)).tap()
     let files = webView.descendants(matching: .any).matching(identifier: "Files").firstMatch
     XCTAssertTrue(files.waitForExistence(timeout: 20))
     files.tap()
