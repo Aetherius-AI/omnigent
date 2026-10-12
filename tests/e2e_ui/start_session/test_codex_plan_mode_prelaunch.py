@@ -1,60 +1,42 @@
-"""E2E (hermetic): a new Codex session must offer Plan mode before the first prompt.
-Codex's landing add menu left Plan disabled until the session existed; the landing must
-arm Plan for Codex and seed the ``omnigent.codex_native.collaboration_mode`` label."""
+"""E2E (hermetic): the new-session composer must let Codex Plan mode be armed.
+
+With a Codex (codex-native) agent selected on the New Session landing screen,
+the composer's add (+) menu shows a Plan item, but for codex-native it is
+disabled and tooltipped "This harness does not support plan mode", so a
+plan-first user cannot arm Plan mode before typing the first prompt. The same
+Plan toggle works in-session, after the first submit; see
+``tests/e2e_ui/chat/test_codex_model_metadata.py``.
+
+Only the server edges the landing screen consults (hosts, agents, model
+options) are faked, like the sibling ``test_start_session.py`` and
+``test_codex_effort_prelaunch.py``.
+"""
 
 from __future__ import annotations
 
 import json
 import re
 from typing import Any
-from urllib.parse import urlparse
 
 from playwright.async_api import Route, async_playwright, expect
 
-from tests.e2e_ui.start_session.helpers import select_landing_agent
 from tests.e2e_ui.start_session.test_start_session import (
     _HOST_ID,
     _codex_native_agents_body,
     _register_common_routes,
     _run_in_fresh_loop,
-    _wait_until,
 )
 
-_CODEX_AGENT_ID = "ag_codex_e2e"
-_COLLABORATION_MODE_LABEL_KEY = "omnigent.codex_native.collaboration_mode"
 
-
-def test_new_codex_session_offers_plan_mode_before_first_prompt(
+def test_new_codex_session_can_arm_plan_mode_before_submit(
     seeded_session: tuple[str, str],
 ) -> None:
-    """Plan mode can be engaged on the landing screen and rides the create call."""
+    """The landing add-menu Plan item is selectable for a Codex agent."""
     base_url, session_id = seeded_session
-    _run_in_fresh_loop(_drive(base_url, session_id))
+    _run_in_fresh_loop(_drive_codex_plan_prelaunch(base_url, session_id))
 
 
-async def _stamp_codex_native_session(page: Any, session_id: str) -> None:
-    """Make the browser see the created session as the codex-native wrapper."""
-
-    async def handle(route: Route) -> None:
-        if route.request.method != "GET":
-            await route.continue_()
-            return
-        response = await route.fetch()
-        payload = await response.json()
-        payload["labels"] = {**payload.get("labels", {}), "omnigent.wrapper": "codex-native-ui"}
-        await route.fulfill(
-            status=200,
-            headers={**response.headers, "content-type": "application/json"},
-            body=json.dumps(payload),
-        )
-
-    await page.route(
-        lambda url: urlparse(url).path == f"/v1/sessions/{session_id}",
-        handle,
-    )
-
-
-async def _drive(base_url: str, session_id: str) -> None:
+async def _drive_codex_plan_prelaunch(base_url: str, session_id: str) -> None:
     async with async_playwright() as pw:
         browser = await pw.chromium.launch()
         context = await browser.new_context()
@@ -67,11 +49,20 @@ async def _drive(base_url: str, session_id: str) -> None:
                 create_bodies=create_bodies,
                 agents_body=_codex_native_agents_body(),
             )
+
+            # Neutralize agent discovery so ONLY the stubbed Codex agent feeds
+            # the picker — a native agent another test left behind on the
+            # shared server would rank ahead and auto-select instead.
+            async def handle_agent_scan(route: Route) -> None:
+                await route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps({"data": []}),
+                )
+
             await page.route(
-                re.compile(r"/v1/sessions\?(?!.*pinned=).*visibility=mine"),
-                lambda route: route.fulfill(json={"data": []}),
+                re.compile(r"/v1/sessions\?(?!.*pinned=).*visibility=mine"), handle_agent_scan
             )
-            await _stamp_codex_native_session(page, session_id)
             await page.add_init_script(
                 f"""window.localStorage.setItem(
                     "omnigent:recent-workspaces",
@@ -83,41 +74,17 @@ async def _drive(base_url: str, session_id: str) -> None:
             await page.get_by_test_id("new-chat-landing-input").wait_for(
                 state="visible", timeout=30_000
             )
-            await select_landing_agent(page, _CODEX_AGENT_ID)
 
             await page.get_by_test_id("new-chat-landing-attach").click()
             await expect(page.get_by_test_id("new-chat-landing-add-menu")).to_be_visible()
-            landing_plan = page.get_by_test_id("composer-plan-action")
-            await expect(landing_plan).to_be_visible()
-            landing_plan_enabled = await landing_plan.is_enabled()
-            if landing_plan_enabled:
-                await landing_plan.click()
-                # The armed pick is visible before anything is typed.
-                await expect(page.get_by_test_id("new-chat-landing-plan-mode")).to_be_visible()
-            else:
-                await page.keyboard.press("Escape")
-            await expect(page.get_by_test_id("new-chat-landing-add-menu")).to_be_hidden()
+            plan_item = page.get_by_test_id("composer-plan-action")
+            await expect(plan_item).to_be_visible()
 
-            await page.get_by_test_id("new-chat-landing-input").fill(
-                "Plan how to add a hello.txt file with a greeting"
+            await expect(plan_item).not_to_have_attribute(
+                "title", "This harness does not support plan mode"
             )
-            await page.get_by_test_id("new-chat-landing-submit").click()
-            await _wait_until(lambda: len(create_bodies) == 1)
-            await page.wait_for_url(f"**/c/{session_id}**", timeout=30_000)
-
-            # The in-session composer keeps offering Plan mode after launch.
-            await page.get_by_test_id("composer-attach").click()
-            await expect(page.get_by_test_id("composer-plan-action")).to_be_enabled(timeout=15_000)
-            await page.keyboard.press("Escape")
-
-            assert landing_plan_enabled, (
-                "the new-session composer's Plan entry is disabled for Codex; "
-                "Plan mode is only selectable after the first prompt is submitted"
-            )
-            body = create_bodies[0]
-            assert body["agent_id"] == _CODEX_AGENT_ID, body
-            labels = body.get("labels") or {}
-            assert labels.get(_COLLABORATION_MODE_LABEL_KEY) == "plan", body
+            # Radix marks a disabled menu item with an empty-string data-disabled.
+            await expect(plan_item).not_to_have_attribute("data-disabled", "")
         finally:
             await context.close()
             await browser.close()

@@ -5802,10 +5802,14 @@ async def _apply_codex_prelaunch_plan_mode(
     thread_id: str,
     launch_model: str | None,
     launch_effort: str | None,
-) -> None:
-    """Apply the session's persisted ``collaboration_mode`` label to switch its Codex
-    thread into Plan mode at launch, falling back to the config's pinned model. On
-    failure it only logs (best-effort) and the session stays in Default mode."""
+) -> bool:
+    """Switch the session's Codex thread into Plan mode at launch.
+
+    The label is persisted before the runner can act on it, so a failed switch
+    is reported back as Default rather than leaving the UI claiming Plan.
+
+    :returns: Whether the thread now runs in Plan mode.
+    """
     from omnigent.harnesses.codex_native.app_server import apply_codex_thread_collaboration_mode
     from omnigent.harnesses.codex_native.bridge import read_codex_home_config_model
 
@@ -5818,28 +5822,77 @@ async def _apply_codex_prelaunch_plan_mode(
             session_id,
             extra={"session_id": session_id},
         )
-        return
+    else:
+        try:
+            await apply_codex_thread_collaboration_mode(
+                codex_ws_url, thread_id, "plan", model=model, effort=launch_effort
+            )
+        except Exception:  # noqa: BLE001 — a failed switch must not sink the launch
+            _logger.warning(
+                "codex-native: could not apply Plan mode to thread %s for session %s; the "
+                "session starts in Default mode",
+                thread_id,
+                session_id,
+                exc_info=True,
+                extra={"session_id": session_id},
+            )
+        else:
+            _logger.info(
+                "codex-native: Plan mode applied to thread %s for session %s (model=%s)",
+                thread_id,
+                session_id,
+                model,
+                extra={"session_id": session_id},
+            )
+            return True
+    await _report_codex_collaboration_mode(session_id, "default")
+    return False
+
+
+async def _report_codex_collaboration_mode(session_id: str, mode: str) -> None:
+    """Record the mode the thread actually runs, via the forwarder's event type.
+
+    The server rewrites the session label and notifies the UI. Best-effort.
+    """
+    from omnigent.cli_auth import open_server_client
+    from omnigent.runner._entry import _make_auth_token_factory, _RunnerDatabricksAuth
+
+    auth_factory = _make_auth_token_factory()
+    auth_token = auth_factory() if auth_factory is not None else None
+    headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
     try:
-        await apply_codex_thread_collaboration_mode(
-            codex_ws_url, thread_id, "plan", model=model, effort=launch_effort
-        )
-    except Exception:  # noqa: BLE001 — a failed switch must not sink the launch
+        async with open_server_client(
+            _required_runner_env("RUNNER_SERVER_URL"),
+            headers=headers,
+            auth=_RunnerDatabricksAuth(auth_factory),
+            timeout=httpx.Timeout(10.0),
+        ) as client:
+            response = await client.post(
+                f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}/events",
+                json={
+                    "type": "external_codex_collaboration_mode_change",
+                    "data": {"mode": mode},
+                },
+            )
+    except httpx.HTTPError:
         _logger.warning(
-            "codex-native: could not apply Plan mode to thread %s for session %s; the "
-            "session starts in Default mode",
-            thread_id,
+            "codex-native: could not report collaboration mode %r for session %s; the "
+            "session label may still claim a mode the thread does not run",
+            mode,
             session_id,
             exc_info=True,
             extra={"session_id": session_id},
         )
         return
-    _logger.info(
-        "codex-native: Plan mode applied to thread %s for session %s (model=%s)",
-        thread_id,
-        session_id,
-        model,
-        extra={"session_id": session_id},
-    )
+    if response.status_code >= 400:
+        _logger.warning(
+            "codex-native: server rejected collaboration mode %r for session %s (%s); the "
+            "session label may still claim a mode the thread does not run",
+            mode,
+            session_id,
+            response.status_code,
+            extra={"session_id": session_id},
+        )
 
 
 async def _codex_discover_thread_and_forward(
