@@ -26,15 +26,10 @@ final class OmnigentUITests: XCTestCase {
       "--omnigent-reset-state", "--omnigent-server-url", serverURL,
     ]
     app.launch()
-    let denyNotifications = app.buttons.matching(
-      NSPredicate(format: "label BEGINSWITH[c] 'Don'"))
-      .firstMatch
-    if denyNotifications.waitForExistence(timeout: 20) {
-      denyNotifications.tap()
-    } else {
-      // iOS 26 can render this system sheet outside the app accessibility tree.
-      app.coordinate(withNormalizedOffset: CGVector(dx: 0.26, dy: 0.79)).tap()
-    }
+    sleep(5)
+    let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+    springboard.coordinate(withNormalizedOffset: CGVector(dx: 0.26, dy: 0.79)).tap()
+    app.activate()
     let webView = app.webViews.firstMatch
     XCTAssertTrue(webView.waitForExistence(timeout: 90), "Expected the real Omnigent web app.")
 
