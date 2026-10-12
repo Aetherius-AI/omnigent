@@ -116,10 +116,13 @@ _NAMED_SECRET_PATTERN = re.compile(
     rf"(?i)((?<![\w.-])[\w.-]*(?:token|api(?:[_-]|[ \t]+)?key|secret|password|credential)"
     rf"\b[\"']?\s*[:=]\s*)({_AUTHORIZATION_VALUE})"
 )
-# Any scheme's query or fragment: signed URLs carry their token there.
+# Any scheme's query or fragment: signed URLs carry their token there. The scheme
+# must start a token, so a long alphanumeric run is scanned once, not per offset.
 _URL_QUERY_OR_FRAGMENT = re.compile(
-    r"([a-z][a-z0-9+.-]*://[^\s'\"]+?)([?#])[^\s'\"]*", re.IGNORECASE
+    r"(?<![\w.+-])([a-z][a-z0-9+.-]*://[^\s'\"]+?)([?#])[^\s'\"]*", re.IGNORECASE
 )
+# Diagnostics shown to users are bounded before redaction; the rest is noise.
+_MAX_DIAGNOSTIC_CHARS = 4000
 _WHITESPACE_SECRET_PATTERN = re.compile(
     # Scan prefixes only from each key's start, as for assignment keys above.
     # Generic token/secret/credential labels require a prefix to distinguish them from prose.
@@ -185,6 +188,8 @@ def redact_log_text(text: str, *, include_whitespace_credentials: bool = False) 
 
 def redact_diagnostic_text(text: str) -> str:
     """Redact an error shown to users: drop URL queries and fragments, then secrets."""
+    if len(text) > _MAX_DIAGNOSTIC_CHARS:
+        text = text[:_MAX_DIAGNOSTIC_CHARS] + "…"
     text = _URL_QUERY_OR_FRAGMENT.sub(rf"\1\2{_REDACTED}", text)
     return redact_log_text(text, include_whitespace_credentials=True)
 
