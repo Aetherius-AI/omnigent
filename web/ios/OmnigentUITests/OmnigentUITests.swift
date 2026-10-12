@@ -25,11 +25,16 @@ final class OmnigentUITests: XCTestCase {
     app.launchArguments = [
       "--omnigent-reset-state", "--omnigent-server-url", serverURL,
     ]
+    addUIInterruptionMonitor(withDescription: "Notification permission") { alert in
+      let deny = alert.buttons.matching(NSPredicate(format: "label BEGINSWITH[c] 'Don'"))
+        .firstMatch
+      guard deny.exists else { return false }
+      deny.tap()
+      return true
+    }
     app.launch()
     sleep(5)
-    let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
-    springboard.coordinate(withNormalizedOffset: CGVector(dx: 0.26, dy: 0.60)).tap()
-    app.activate()
+    app.tap()
     let webView = app.webViews.firstMatch
     XCTAssertTrue(webView.waitForExistence(timeout: 90), "Expected the real Omnigent web app.")
 
