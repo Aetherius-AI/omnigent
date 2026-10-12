@@ -48,7 +48,8 @@ final class OmnigentUITests: XCTestCase {
     sleep(2)
     download.tap()
     if expectShareSheet {
-      XCTAssertTrue(app.buttons["Save to Files"].waitForExistence(timeout: 30))
+      let saveToFiles = app.descendants(matching: .any).matching(identifier: "Save to Files").firstMatch
+      XCTAssertTrue(saveToFiles.waitForExistence(timeout: 30))
       XCTAssertEqual(app.state, .runningForeground)
       XCTAssertTrue(webView.staticTexts[filename].exists)
     } else {
