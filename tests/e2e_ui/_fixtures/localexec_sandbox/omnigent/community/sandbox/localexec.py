@@ -94,6 +94,7 @@ class LocalExecLauncher(SandboxLauncher):
         self, sandbox_id: str, command: str, *, log_path: str = "/tmp/omnigent-host.log"
     ) -> RemoteCommandResult:
         home = self._home(sandbox_id)
+        # Only the basename is kept: the log always lands in the sandbox HOME.
         with open(home / Path(log_path).name, "ab") as log:
             process = subprocess.Popen(
                 ["sh", "-c", supervise_host_command(command)],
@@ -104,6 +105,7 @@ class LocalExecLauncher(SandboxLauncher):
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
+        # start_new_session=True makes the child a group leader, so pid == pgid.
         (home / _PGID_FILE).write_text(str(process.pid))
         return RemoteCommandResult(returncode=0, stdout="launched\n", stderr="")
 
@@ -111,7 +113,8 @@ class LocalExecLauncher(SandboxLauncher):
         home = self._home(sandbox_id)
         pgid_file = home / _PGID_FILE
         if pgid_file.is_file():
-            terminate_process_group(int(pgid_file.read_text()))
+            with contextlib.suppress(ValueError):
+                terminate_process_group(int(pgid_file.read_text()))
         shutil.rmtree(home, ignore_errors=True)
 
 

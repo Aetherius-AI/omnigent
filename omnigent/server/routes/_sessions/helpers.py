@@ -6370,10 +6370,10 @@ async def _await_settled_managed_launch(launch: ManagedLaunch) -> None:
     The rendezvous a message POST takes when it races a background
     managed launch (create-time provisioning, relaunch, or wake). It
     resolves as soon as the launch settles and surfaces the recorded
-    reason on failure. The budget restarts at every reported stage, and
-    an open-ended stage (``MANAGED_LAUNCH_OPEN_ENDED_STAGES``, the clone)
-    is waited out entirely, so only a launch stuck in one bounded stage
-    for the whole budget is given up on.
+    reason on failure. The budget restarts at every reported stage and
+    the clone gets its own, far larger one
+    (``launch_stage_rendezvous_timeout_s``), so only a launch stuck in
+    one stage for that stage's whole budget is given up on.
 
     :param launch: The session's tracker entry.
     :raises OmnigentError: 503 when the launch failed or stalled.
@@ -6381,21 +6381,21 @@ async def _await_settled_managed_launch(launch: ManagedLaunch) -> None:
     from omnigent.server import managed_hosts
 
     while not launch.settled.is_set():
-        wait_s = managed_hosts.MANAGED_LAUNCH_PROGRESS_POLL_S
-        if launch.stage not in managed_hosts.MANAGED_LAUNCH_OPEN_ENDED_STAGES:
-            remaining = (
-                launch.progressed_at
-                + managed_hosts.MANAGED_LAUNCH_RENDEZVOUS_TIMEOUT_S
-                - time.monotonic()
+        remaining = (
+            launch.progressed_at
+            + managed_hosts.launch_stage_rendezvous_timeout_s(launch.stage)
+            - time.monotonic()
+        )
+        if remaining <= 0:
+            raise OmnigentError(
+                "The session's managed sandbox is still provisioning; try again shortly",
+                code=ErrorCode.RUNNER_UNAVAILABLE,
             )
-            if remaining <= 0:
-                raise OmnigentError(
-                    "The session's managed sandbox is still provisioning; try again shortly",
-                    code=ErrorCode.RUNNER_UNAVAILABLE,
-                )
-            wait_s = min(wait_s, remaining)
         with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(launch.settled.wait(), timeout=wait_s)
+            await asyncio.wait_for(
+                launch.settled.wait(),
+                timeout=min(managed_hosts.MANAGED_LAUNCH_PROGRESS_POLL_S, remaining),
+            )
     if launch.error is not None:
         raise OmnigentError(
             f"The session's managed sandbox failed to launch: {launch.error}",

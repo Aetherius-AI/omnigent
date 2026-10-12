@@ -863,9 +863,6 @@ async def test_parked_message_rides_out_a_clone_longer_than_the_rendezvous_budge
     monkeypatch.setattr(
         "omnigent.server.managed_hosts.MANAGED_LAUNCH_RENDEZVOUS_TIMEOUT_S", budget_s
     )
-    monkeypatch.setattr(
-        "omnigent.server.managed_hosts.MANAGED_LAUNCH_PROGRESS_POLL_S", 0.02, raising=False
-    )
     clone_gate = threading.Event()
 
     def _hold_clone(command: str) -> None:
@@ -899,18 +896,29 @@ async def test_parked_message_rides_out_a_clone_longer_than_the_rendezvous_budge
             },
         )
     )
-    # Several budgets pass with the clone still held: the message must stay
-    # parked on the cloning stage rather than time out.
-    done, _ = await asyncio.wait({message_task}, timeout=4 * budget_s)
-    assert not done, (
-        f"message POST gave up mid-clone: "
-        f"{message_task.result().status_code} {message_task.result().text}"
-    )
-    snapshot = await env.client.get(f"/v1/sessions/{session_id}")
-    assert snapshot.status_code == 200, snapshot.text
-    assert snapshot.json()["sandbox_status"] == {"stage": "cloning", "error": None}
+    parked = False
+    try:
+        # Several budgets pass with the clone still held: the message must stay
+        # parked on the cloning stage rather than time out.
+        done, _ = await asyncio.wait({message_task}, timeout=4 * budget_s)
+        if done:
+            exc = message_task.exception()
+            detail = (
+                repr(exc)
+                if exc is not None
+                else f"{message_task.result().status_code} {message_task.result().text}"
+            )
+            pytest.fail(f"message POST gave up mid-clone: {detail}")
+        snapshot = await env.client.get(f"/v1/sessions/{session_id}")
+        assert snapshot.status_code == 200, snapshot.text
+        assert snapshot.json()["sandbox_status"] == {"stage": "cloning", "error": None}
+        parked = True
+    finally:
+        # Release the launcher thread even when an assertion above fails.
+        clone_gate.set()
+        if not parked:
+            message_task.cancel()
 
-    clone_gate.set()
     message_resp = await asyncio.wait_for(message_task, timeout=15.0)
     assert message_resp.status_code == 503, message_resp.text
     assert "still provisioning" not in message_resp.text
@@ -945,12 +953,19 @@ async def test_managed_launch_progress_surfaces_on_snapshot_and_stream(
     monkeypatch.setattr("omnigent.server.managed_hosts.MANAGED_HOST_ONLINE_TIMEOUT_S", 10)
     # This test asserts the happy-path "ready" progress edge; fake the
     # runner tunnel connect so settlement is driven by progress ordering,
-    # not by the runner WebSocket harness.
-    monkeypatch.setattr(
-        env.app.state.tunnel_registry,
-        "wait_for_runner",
-        lambda _runner_id, *, timeout_s: asyncio.sleep(0, result=object()),
-    )
+    # not by the runner WebSocket harness. The fake also records the stage
+    # the launch tracker holds while the runner connect is pending: a parked
+    # message's budget must be counting "connecting" by then, not "starting".
+    tracker = env.app.state.managed_launches
+    session_ids: list[str] = []
+    stages_while_connecting: list[str] = []
+
+    async def _fake_wait_for_runner(_runner_id: str, *, timeout_s: float) -> object:
+        launch = tracker.get(session_ids[0])
+        stages_while_connecting.append(launch.stage if launch is not None else "<settled>")
+        return object()
+
+    monkeypatch.setattr(env.app.state.tunnel_registry, "wait_for_runner", _fake_wait_for_runner)
     loop = asyncio.get_running_loop()
     gate = threading.Event()
     host_futures: list[asyncio.Future[ApplicationCommunicator]] = []
@@ -979,6 +994,7 @@ async def test_managed_launch_progress_surfaces_on_snapshot_and_stream(
     )
     assert resp.status_code == 201, resp.text
     session_id = resp.json()["id"]
+    session_ids.append(session_id)
 
     # The create route seeds the progress cache before scheduling the
     # background task, so the snapshot a navigating client cold-loads
@@ -1029,6 +1045,7 @@ async def test_managed_launch_progress_surfaces_on_snapshot_and_stream(
     # means the background task stopped reporting after the host
     # bound; "failed" here means the launch itself broke.
     assert stages == ["cloning", "starting", "connecting", "ready"]
+    assert stages_while_connecting == ["connecting"]
 
     # A settled launch clears the snapshot field — from here the
     # session looks like any host-bound session and a reloading
@@ -1860,7 +1877,9 @@ def _runner_exited_app(db_uri: str, tmp_path: Path) -> tuple[FastAPI, SqlAlchemy
     return app, conv_store
 
 
-async def _report_runner_exited(app: FastAPI, runner_id: str) -> ApplicationCommunicator:
+async def _report_runner_exited(
+    app: FastAPI, runner_id: str, *, had_connected: bool | None = None
+) -> ApplicationCommunicator:
     """Connect a host to ``app`` and send a ``host.runner_exited`` frame.
 
     :param app: The full server app.
@@ -1874,14 +1893,12 @@ async def _report_runner_exited(app: FastAPI, runner_id: str) -> ApplicationComm
     accepted = await comm.receive_output(timeout=5.0)
     assert accepted["type"] == "websocket.accept", f"tunnel refused: {accepted!r}"
     await comm.send_input({"type": "websocket.receive", "text": _make_hello()})
-    await comm.send_input(
-        {
-            "type": "websocket.receive",
-            "text": encode_host_frame(
-                HostRunnerExitedFrame(runner_id=runner_id, error="exited with code 1")
-            ),
-        }
+    report = json.loads(
+        encode_host_frame(HostRunnerExitedFrame(runner_id=runner_id, error="exited with code 1"))
     )
+    if had_connected is not None:
+        report["had_connected"] = had_connected
+    await comm.send_input({"type": "websocket.receive", "text": json.dumps(report)})
     return comm
 
 
@@ -2020,10 +2037,12 @@ def _persisted_task_error(
     return sessions_module._last_task_error_from_labels(refreshed.labels)
 
 
+@pytest.mark.parametrize("connection_source", ["replica", "host"])
 async def test_runner_exited_after_connect_keeps_idle_session_idle(
     db_uri: str,
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
+    connection_source: str,
 ) -> None:
     """
     A host death after its runner connected does not fail the idle session.
@@ -2037,13 +2056,19 @@ async def test_runner_exited_after_connect_keeps_idle_session_idle(
     from omnigent.server import session_live_state
 
     app, conv_store = _runner_exited_app(db_uri, tmp_path)
-    conv = conv_store.create_conversation(agent_id=None, runner_id="runner_ran_idle")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        agent = await create_test_agent(client, name="runner-idle")
+    conv = conv_store.create_conversation(agent_id=agent["id"], runner_id="runner_ran_idle")
     conv_store.set_session_live_status(conv.id, "idle")
-    # The runner tunnel connected on this replica (stamped on connect/ping).
-    session_live_state.touch_runner_liveness(["runner_ran_idle"])
+    if connection_source == "replica":
+        session_live_state.touch_runner_liveness(["runner_ran_idle"])
+    else:
+        assert session_live_state.last_liveness_stamp("runner_ran_idle") is None
 
     caplog.set_level("WARNING", logger="omnigent")
-    _comm = await _report_runner_exited(app, "runner_ran_idle")
+    _comm = await _report_runner_exited(
+        app, "runner_ran_idle", had_connected=True if connection_source == "host" else None
+    )
     async with asyncio.timeout(5.0):
         while not _disconnect_decisions(caplog, conv.id):
             await asyncio.sleep(0.01)
@@ -2059,12 +2084,19 @@ async def test_runner_exited_after_connect_keeps_idle_session_idle(
     assert refreshed is not None
     assert refreshed.live_status == "idle"
     assert _persisted_task_error(conv_store, conv.id) is None
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/v1/sessions/{conv.id}")
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "idle"
+    assert response.json()["last_task_error"] is None
 
 
+@pytest.mark.parametrize("had_connected", [None, False])
 async def test_runner_exited_before_connect_fails_idle_session(
     db_uri: str,
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
+    had_connected: bool | None,
 ) -> None:
     """
     A runner that died before connecting still fails its idle session.
@@ -2077,7 +2109,7 @@ async def test_runner_exited_before_connect_fails_idle_session(
     conv_store.set_session_live_status(conv.id, "idle")
 
     caplog.set_level("WARNING", logger="omnigent")
-    _comm = await _report_runner_exited(app, "runner_never_connected")
+    _comm = await _report_runner_exited(app, "runner_never_connected", had_connected=had_connected)
     async with asyncio.timeout(5.0):
         while _persisted_task_error(conv_store, conv.id) is None:
             await asyncio.sleep(0.01)
@@ -2094,10 +2126,12 @@ async def test_runner_exited_before_connect_fails_idle_session(
     assert getattr(failed[0], "attributes", {})["code"] == "runner_failed_to_start"
 
 
+@pytest.mark.parametrize("connection_source", ["replica", "host"])
 async def test_runner_exited_after_connect_fails_mid_turn_session(
     db_uri: str,
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
+    connection_source: str,
 ) -> None:
     """
     A connected runner's death still fails a session that was mid-turn.
@@ -2110,10 +2144,15 @@ async def test_runner_exited_after_connect_fails_mid_turn_session(
     app, conv_store = _runner_exited_app(db_uri, tmp_path)
     conv = conv_store.create_conversation(agent_id=None, runner_id="runner_ran_mid_turn")
     conv_store.set_session_live_status(conv.id, "running")
-    session_live_state.touch_runner_liveness(["runner_ran_mid_turn"])
+    if connection_source == "replica":
+        session_live_state.touch_runner_liveness(["runner_ran_mid_turn"])
+    else:
+        assert session_live_state.last_liveness_stamp("runner_ran_mid_turn") is None
 
     caplog.set_level("WARNING", logger="omnigent")
-    _comm = await _report_runner_exited(app, "runner_ran_mid_turn")
+    _comm = await _report_runner_exited(
+        app, "runner_ran_mid_turn", had_connected=True if connection_source == "host" else None
+    )
     async with asyncio.timeout(5.0):
         while _persisted_task_error(conv_store, conv.id) is None:
             await asyncio.sleep(0.01)

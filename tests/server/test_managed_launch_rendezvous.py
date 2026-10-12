@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from types import SimpleNamespace
 
 import pytest
@@ -15,14 +16,28 @@ from omnigent.server.routes._sessions.helpers import (
     _provision_managed_sandbox,
 )
 
-_BUDGET_S = 0.5
+# Parked windows stay well inside the budget so event-loop scheduling delay
+# on a loaded runner cannot push a stage past it.
+_BUDGET_S = 1.0
+_WINDOW_S = 0.5
 _SESSION = "conv_1"
 
 
 @pytest.fixture(autouse=True)
 def _short_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(managed_hosts, "MANAGED_LAUNCH_RENDEZVOUS_TIMEOUT_S", _BUDGET_S)
-    monkeypatch.setattr(managed_hosts, "MANAGED_LAUNCH_PROGRESS_POLL_S", 0.01, raising=False)
+    monkeypatch.setattr(managed_hosts, "MANAGED_LAUNCH_PROGRESS_POLL_S", 0.01)
+
+
+@pytest.fixture
+async def waiters() -> AsyncIterator[list[asyncio.Task[None]]]:
+    """Parked rendezvous tasks, cancelled after the test so a failed assertion
+    leaves no pending task behind."""
+    tasks: list[asyncio.Task[None]] = []
+    yield tasks
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def _begin(stage: str | None = None) -> ManagedLaunchTracker:
@@ -33,36 +48,58 @@ def _begin(stage: str | None = None) -> ManagedLaunchTracker:
     return tracker
 
 
-def _wait_on(tracker: ManagedLaunchTracker) -> asyncio.Task[None]:
+def _wait_on(
+    tracker: ManagedLaunchTracker, waiters: list[asyncio.Task[None]]
+) -> asyncio.Task[None]:
     launch = tracker.get(_SESSION)
     assert launch is not None
-    return asyncio.create_task(_await_settled_managed_launch(launch))
+    task = asyncio.create_task(_await_settled_managed_launch(launch))
+    waiters.append(task)
+    return task
 
 
 async def _still_parked(waiter: asyncio.Task[None], for_s: float) -> None:
     done, _ = await asyncio.wait({waiter}, timeout=for_s)
-    assert not done, "the rendezvous resolved while the launch was still in flight"
+    if done:
+        outcome = waiter.exception() or "resolved successfully"
+        pytest.fail(f"the rendezvous ended while the launch was still in flight: {outcome!r}")
 
 
-async def test_clone_longer_than_the_budget_keeps_the_message_parked() -> None:
-    """A launch may sit in ``cloning`` for longer than the whole budget."""
+async def test_clone_longer_than_the_budget_keeps_the_message_parked(
+    waiters: list[asyncio.Task[None]],
+) -> None:
+    """A launch may sit in ``cloning`` for longer than the whole stage budget."""
     tracker = _begin("cloning")
-    waiter = _wait_on(tracker)
+    waiter = _wait_on(tracker, waiters)
     await _still_parked(waiter, 3 * _BUDGET_S)
     tracker.advance(_SESSION, "starting")
     tracker.finish(_SESSION)
     await asyncio.wait_for(waiter, timeout=1.0)
 
 
-async def test_budget_restarts_at_every_stage() -> None:
+async def test_clone_past_its_own_ceiling_still_gives_up(
+    monkeypatch: pytest.MonkeyPatch, waiters: list[asyncio.Task[None]]
+) -> None:
+    """The clone budget is a ceiling, not an open-ended wait."""
+    monkeypatch.setattr(managed_hosts, "MANAGED_LAUNCH_CLONE_RENDEZVOUS_TIMEOUT_S", 2 * _BUDGET_S)
+    tracker = _begin("cloning")
+    waiter = _wait_on(tracker, waiters)
+    await _still_parked(waiter, _BUDGET_S + _WINDOW_S)
+    with pytest.raises(OmnigentError) as excinfo:
+        await asyncio.wait_for(waiter, timeout=3 * _BUDGET_S)
+    assert excinfo.value.code == ErrorCode.RUNNER_UNAVAILABLE
+    assert "still provisioning" in str(excinfo.value)
+
+
+async def test_budget_restarts_at_every_stage(waiters: list[asyncio.Task[None]]) -> None:
     """Bounded stages that each fit the budget never add up to a timeout."""
     tracker = _begin()
-    waiter = _wait_on(tracker)
+    waiter = _wait_on(tracker, waiters)
     for stage in ("starting", "connecting"):
-        await _still_parked(waiter, 0.4 * _BUDGET_S)
+        await _still_parked(waiter, _WINDOW_S)
         tracker.advance(_SESSION, stage)
-    # 1.2 budgets have passed in total; the current stage is well inside its own.
-    await _still_parked(waiter, 0.4 * _BUDGET_S)
+    # 1.5 budgets have passed in total; the current stage is well inside its own.
+    await _still_parked(waiter, _WINDOW_S)
     tracker.finish(_SESSION)
     await asyncio.wait_for(waiter, timeout=1.0)
 
@@ -77,9 +114,11 @@ async def test_stalled_bounded_stage_still_gives_up() -> None:
     assert "still provisioning" in str(excinfo.value)
 
 
-async def test_failure_during_the_clone_surfaces_its_reason() -> None:
+async def test_failure_during_the_clone_surfaces_its_reason(
+    waiters: list[asyncio.Task[None]],
+) -> None:
     tracker = _begin("cloning")
-    waiter = _wait_on(tracker)
+    waiter = _wait_on(tracker, waiters)
     await _still_parked(waiter, 2 * _BUDGET_S)
     tracker.fail(_SESSION, "managed sandbox host startup failed: clone exited 128")
     with pytest.raises(OmnigentError) as excinfo:

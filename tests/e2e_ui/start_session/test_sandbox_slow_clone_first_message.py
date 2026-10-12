@@ -19,7 +19,7 @@ from threading import Thread
 import httpx
 import pytest
 import yaml
-from playwright.sync_api import Page, expect
+from playwright.sync_api import Locator, Page, Response, expect
 
 from tests._helpers.compat import apply_server_env, server_executable
 from tests.e2e_ui.conftest import (
@@ -80,8 +80,11 @@ class _GitSmartHttpHandler(BaseHTTPRequestHandler):
             if value := self.headers.get(header):
                 env[variable] = value
         completed = subprocess.run(
-            ["git", "http-backend"], input=body, env=env, capture_output=True, check=True
+            ["git", "http-backend"], input=body, env=env, capture_output=True, check=False
         )
+        if completed.returncode != 0:
+            self.send_error(500, explain=completed.stderr.decode(errors="replace")[:500])
+            return
         raw_headers, _, payload = completed.stdout.partition(b"\r\n\r\n")
         status = 200
         headers: list[tuple[str, str]] = []
@@ -104,12 +107,14 @@ class _GitSmartHttpHandler(BaseHTTPRequestHandler):
     def _write_throttled(self, payload: bytes) -> None:
         chunk = 16 * 1024
         started = time.monotonic()
-        for offset in range(0, len(payload), chunk):
-            self.wfile.write(payload[offset : offset + chunk])
-            self.wfile.flush()
-            delay = started + (offset + chunk) / self.bytes_per_second - time.monotonic()
-            if delay > 0:
-                time.sleep(delay)
+        # A clone the sandbox gave up on closes the socket mid-transfer.
+        with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+            for offset in range(0, len(payload), chunk):
+                self.wfile.write(payload[offset : offset + chunk])
+                self.wfile.flush()
+                delay = started + (offset + chunk) / self.bytes_per_second - time.monotonic()
+                if delay > 0:
+                    time.sleep(delay)
 
 
 def _bare_repo(scratch: Path, name: str, *, payload_mib: int) -> None:
@@ -215,13 +220,17 @@ def deployment(
     env = {
         **os.environ,
         "OMNIGENT_CONFIG": str(server_config),
+        # Keep the server's own log next to the test's artifacts for triage.
+        "OMNIGENT_DATA_DIR": str(scratch / "data"),
         "OMNIGENT_WEB_UI_DIST": str(_BUILD_OUTPUT),
         "OPENAI_BASE_URL": f"{mock_llm_server_url}/v1",
         "OPENAI_API_KEY": "mock-key",
         "ANTHROPIC_API_KEY": "",
     }
     apply_server_env(env, _REPO_ROOT)
-    env["PYTHONPATH"] = os.pathsep.join([str(_FIXTURE_ROOT), env.get("PYTHONPATH", "")])
+    env["PYTHONPATH"] = os.pathsep.join(
+        path for path in (str(_FIXTURE_ROOT), env.get("PYTHONPATH", "")) if path
+    )
     server_log = scratch / "server.log"
     with open(server_log, "wb") as log:
         server = subprocess.Popen(
@@ -229,6 +238,9 @@ def deployment(
                 server_executable(),
                 "-c",
                 "import omnigent.server.managed_hosts as m; "
+                # A bare read first: a renamed constant fails here instead of
+                # silently leaving the default budget in place.
+                "m.MANAGED_LAUNCH_RENDEZVOUS_TIMEOUT_S; "
                 f"m.MANAGED_LAUNCH_RENDEZVOUS_TIMEOUT_S = {_RENDEZVOUS_BUDGET_S}; "
                 "from omnigent.cli import main; main()",
                 "server",
@@ -266,7 +278,7 @@ def deployment(
             server.kill()
             server.wait(timeout=5)
         for pgid_file in sandbox_root.glob("*/.omnigent-host.pgid"):
-            with contextlib.suppress(ProcessLookupError):
+            with contextlib.suppress(ProcessLookupError, ValueError):
                 os.killpg(int(pgid_file.read_text()), signal.SIGKILL)
         git_server.shutdown()
         git_server.server_close()
@@ -311,7 +323,38 @@ def _select_sandbox_repo(page: Page, repo: str) -> None:
     expect(repo_input).to_have_count(0)
 
 
-def _start_sandbox_session(page: Page, base_url: str, repo: str, agent_id: str) -> str:
+@dataclass(frozen=True)
+class _StartedSession:
+    session_id: str
+    sent_at: float
+    failed_message_posts: list[str]
+
+
+@dataclass(frozen=True)
+class _LaunchOutcome:
+    since_send_s: float
+    indicator: str
+    error_pill: str | None
+
+
+def _watch_failed_message_posts(page: Page) -> list[str]:
+    failures: list[str] = []
+
+    def record(response: Response) -> None:
+        request = response.request
+        if request.method == "POST" and "/events" in response.url and response.status >= 400:
+            try:
+                body = response.text()
+            except Exception:  # the body may be gone once the page navigates
+                body = "<body unavailable>"
+            failures.append(f"HTTP {response.status} {response.url}: {body[:300]}")
+
+    page.on("response", record)
+    return failures
+
+
+def _start_sandbox_session(page: Page, base_url: str, repo: str, agent_id: str) -> _StartedSession:
+    failed_message_posts = _watch_failed_message_posts(page)
     page.goto(f"{base_url}/")
     prompt = page.get_by_test_id("new-chat-landing-input")
     expect(prompt).to_be_visible(timeout=30_000)
@@ -319,21 +362,53 @@ def _start_sandbox_session(page: Page, base_url: str, repo: str, agent_id: str) 
     _select_sandbox_repo(page, repo)
     prompt.fill(_PROMPT)
     page.get_by_test_id("new-chat-landing-submit").click()
+    sent_at = time.monotonic()
     expect(page).to_have_url(re.compile(r"/c/[0-9a-f]{32}$"), timeout=30_000)
-    return page.url.rsplit("/", 1)[-1]
+    return _StartedSession(
+        session_id=page.url.rsplit("/", 1)[-1],
+        sent_at=sent_at,
+        failed_message_posts=failed_message_posts,
+    )
 
 
-def test_first_message_survives_slow_monorepo_clone(page: Page, deployment: _Deployment) -> None:
+def _wait_for_launch_outcome(
+    page: Page, launching: Locator, started: _StartedSession, output_path: Path
+) -> _LaunchOutcome:
+    """Poll until the launch indicator clears or an error pill appears, whichever is first."""
+    error_pill = page.get_by_test_id("error-pill")
+    while True:
+        indicator = "".join(launching.all_inner_texts()[:1])
+        pills = error_pill.all_inner_texts()
+        since_send_s = time.monotonic() - started.sent_at
+        if pills:
+            output_path.mkdir(parents=True, exist_ok=True)
+            page.screenshot(path=str(output_path / "error-pill-appeared.png"))
+            return _LaunchOutcome(since_send_s, indicator, pills[0])
+        if not indicator:
+            return _LaunchOutcome(since_send_s, indicator, None)
+        assert since_send_s < 180, f"launch indicator still shows {indicator!r} after 180s"
+        page.wait_for_timeout(500)
+
+
+def test_first_message_survives_slow_monorepo_clone(
+    page: Page, deployment: _Deployment, output_path: str
+) -> None:
     """A large-repo sandbox session must not fail its first message while cloning: the
     throttled clone outlives the lowered rendezvous budget, and the parked message must
     wait it out instead of surfacing a runner-unavailable error pill."""
-    _start_sandbox_session(page, deployment.base_url, _MONOREPO, deployment.agent_id)
+    started = _start_sandbox_session(page, deployment.base_url, _MONOREPO, deployment.agent_id)
     launching = page.get_by_test_id("runner-starting-indicator")
     expect(launching).to_contain_text("Cloning repository", timeout=60_000)
 
-    # Let the clone finish and the host connect, then require the first message
-    # to have ridden it out with no runner-unavailable error pill.
+    outcome = _wait_for_launch_outcome(page, launching, started, Path(output_path))
+    # The launch itself completes either way; the parked message must have ridden it out.
     expect(launching).to_have_count(0, timeout=180_000)
+    assert outcome.error_pill is None, (
+        f"session {started.session_id}: error pill {outcome.error_pill!r} appeared "
+        f"{outcome.since_send_s:.0f}s after send while the launch indicator read "
+        f"{outcome.indicator!r} (rendezvous budget {_RENDEZVOUS_BUDGET_S}s); "
+        f"failed message POSTs: {started.failed_message_posts}"
+    )
     expect(page.get_by_test_id("error-pill")).to_have_count(0)
     expect(page.locator(_ASSISTANT)).to_have_count(1)
 
