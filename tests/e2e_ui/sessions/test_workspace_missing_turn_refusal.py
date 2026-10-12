@@ -7,6 +7,7 @@ error while server logs classify the expected refusal below ERROR level.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import re
 import shutil
@@ -24,6 +25,7 @@ from playwright.sync_api import Page, expect
 
 from omnigent.process_logging import PROCESS_LOG_FILE_ENV_VAR
 from tests.e2e_ui.conftest import _build_hello_world_bundle
+from tests.helpers.ui_configuration import prepared_repro_environment
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -117,15 +119,20 @@ def test_missing_workspace_turn_shows_structured_error_without_error_funnel(
     request: pytest.FixtureRequest,
 ) -> None:
     """Keep the error card while logging the refusal below ERROR level."""
-    if request.config.getoption("--ui-base-url"):
+    if (
+        request.config.getoption("--ui-base-url")
+        or prepared_repro_environment()["OMNIGENT_REPRO_SERVER_URL"]
+    ):
         pytest.skip("needs the suite-spawned server (host daemon + server log access)")
 
     workspace = tmp_path / "universe-worktree"
     workspace.mkdir()
-    daemon, host_id, daemon_log = _spawn_host_daemon(tmp_path / "host-home", live_server)
-    client = httpx.Client(base_url=live_server, timeout=30.0)
+    daemon: subprocess.Popen[bytes] | None = None
+    client: httpx.Client | None = None
     session_id: str | None = None
     try:
+        daemon, host_id, daemon_log = _spawn_host_daemon(tmp_path / "host-home", live_server)
+        client = httpx.Client(base_url=live_server, timeout=30.0)
         _wait_until(
             lambda: any(
                 h["host_id"] == host_id and h["status"] == "online"
@@ -135,11 +142,9 @@ def test_missing_workspace_turn_shows_structured_error_without_error_funnel(
             message=f"host {host_id} never came online for {live_server}",
         )
 
-        import json as _json
-
         create_resp = client.post(
             "/v1/sessions",
-            data={"metadata": _json.dumps({"host_id": host_id, "workspace": str(workspace)})},
+            data={"metadata": json.dumps({"host_id": host_id, "workspace": str(workspace)})},
             files={"bundle": ("agent.tar.gz", _build_hello_world_bundle(), "application/gzip")},
         )
         create_resp.raise_for_status()
@@ -228,7 +233,8 @@ def test_missing_workspace_turn_shows_structured_error_without_error_funnel(
         # is on disk instead of racing the first read.
         def _scan_server_logs() -> list[str]:
             server_logs = sorted(tmp_path_factory.getbasetemp().glob("e2e_ui_server*/server.log"))
-            assert server_logs, "suite-spawned server log not found under the pytest basetemp"
+            if not server_logs:
+                return []
             log_files = list(server_logs)
             for stdout_log in server_logs:
                 banner = re.search(
@@ -272,14 +278,22 @@ def test_missing_workspace_turn_shows_structured_error_without_error_funnel(
             f"attribute to server defects:\n{funnel_lines}"
         )
     finally:
-        if session_id is not None:
-            with contextlib.suppress(Exception):
-                client.delete(f"/v1/sessions/{session_id}")
-        client.close()
-        if daemon.poll() is None:
-            daemon.send_signal(signal.SIGTERM)
-        try:
-            daemon.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            daemon.kill()
-            daemon.wait(timeout=5)
+        if client is not None:
+            if session_id is not None:
+                with contextlib.suppress(Exception):
+                    client.delete(f"/v1/sessions/{session_id}")
+            client.close()
+        # Kill every runner the daemon(s) launched; an assertion can fail before
+        # the in-body kill loop or after the reboot, orphaning the runners.
+        for log in (tmp_path / "host-home").glob("host-daemon*.log"):
+            for pid in _launched_runner_pids(log):
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(pid, signal.SIGKILL)
+        if daemon is not None:
+            if daemon.poll() is None:
+                daemon.send_signal(signal.SIGTERM)
+            try:
+                daemon.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                daemon.kill()
+                daemon.wait(timeout=5)

@@ -51,18 +51,19 @@ _SOURCE_ROOTS = (
 _KPI_TURN_FAILED_PREFIX = "session turn failed for "
 
 
-def _ensure_worktree_on_pythonpath() -> None:
+def _ensure_worktree_on_pythonpath(monkeypatch: pytest.MonkeyPatch) -> None:
     """Prepend this checkout's absolute roots to runner subprocess PYTHONPATH.
 
     The daemon passes PYTHONPATH through, but runners start in the workspace.
+    ``monkeypatch`` scopes the mutation so later tests keep their own value.
     """
     existing = os.environ.get("PYTHONPATH", "")
     parts = existing.split(os.pathsep) if existing else []
     roots = [str(root) for root in _SOURCE_ROOTS]
-    if all(root in parts for root in roots):
-        return
     prepend = [root for root in roots if root not in parts]
-    os.environ["PYTHONPATH"] = os.pathsep.join([*prepend, *parts])
+    if not prepend:
+        return
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join([*prepend, *parts]))
 
 
 _AGENT_YAML = "\n".join(
@@ -178,14 +179,16 @@ def _error_items(client: httpx.Client, session_id: str) -> list[dict]:
 def test_missing_workspace_relaunch_is_not_logged_as_turn_failure(
     tmp_path: Path,
     mock_llm_server_url: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Preserve the error item without logging the refusal as an ERROR."""
     server_proc: subprocess.Popen | None = None
     server_log: Path | None = None
+    client: httpx.Client | None = None
     daemon = None
     gen1_pid: int | None = None
     try:
-        _ensure_worktree_on_pythonpath()
+        _ensure_worktree_on_pythonpath(monkeypatch)
 
         server_proc, base_url, server_log = _spawn_server(
             tmp_path=tmp_path / "server",
@@ -290,6 +293,8 @@ def test_missing_workspace_relaunch_is_not_logged_as_turn_failure(
             "turn failure (KPI-counted). Offending server log line(s):\n" + "\n".join(offending)
         )
     finally:
+        if client is not None:
+            client.close()
         if gen1_pid is not None and _pid_alive(gen1_pid):
             with contextlib.suppress(ProcessLookupError):
                 os.kill(gen1_pid, signal.SIGKILL)

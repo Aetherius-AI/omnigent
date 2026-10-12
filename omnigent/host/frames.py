@@ -109,7 +109,7 @@ def classify_launch_refusal(
         :data:`WORKSPACE_MISSING_ERROR_CODE`, or ``None`` when the failure
         is not a safe categorical refusal.
     """
-    if error_code is not None and error_code in SAFE_LAUNCH_REFUSAL_CODES:
+    if error_code in SAFE_LAUNCH_REFUSAL_CODES:
         return error_code
     # Rolling upgrade: an older host sends this exact categorical reason
     # with no error_code.
