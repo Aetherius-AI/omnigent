@@ -502,10 +502,9 @@ def create_host_tunnel_router(
     return router
 
 
-# Failures the server reproduces for the same hello on every connect: a name or
-# ownership conflict (the store already retried a racing first insert once), a
-# registration the store rejects (deleted host, expired managed launch token),
-# or column data the database refuses.
+# Failures reproduced for the same hello on every connect: name/ownership
+# conflicts, store-rejected registrations (deleted host, expired launch
+# token), and column data the database refuses.
 _DETERMINISTIC_HANDSHAKE_ERRORS: tuple[type[Exception], ...] = (
     IntegrityError,
     DataError,

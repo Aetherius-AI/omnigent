@@ -205,26 +205,6 @@ def test_upsert_retries_once_after_racing_first_insert(
     assert fetched.user_id == "alice@example.com"
 
 
-def test_upsert_does_not_retry_an_ownership_conflict(
-    host_store: HostStore, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The deliberate hijack rejection is final on the first attempt."""
-    host_store.upsert_on_connect(
-        host_id="0c9b8a7f6e5d4c3b2a1f0e9d8c7b6a5f",
-        name="laptop",
-        user_id="alice@example.com",
-    )
-    attempts = _record_write_attempts(monkeypatch)
-
-    with pytest.raises(HostOwnershipConflict):
-        host_store.upsert_on_connect(
-            host_id="0c9b8a7f6e5d4c3b2a1f0e9d8c7b6a5f",
-            name="laptop",
-            user_id="mallory@example.com",
-        )
-    assert attempts == ["upsert_host_on_connect"]
-
-
 def test_upsert_name_collision_fails_after_one_retry(
     host_store: HostStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -496,29 +476,30 @@ def test_reown_host_id_across_owner_change_preserves_conversation_binding(
 
 
 def test_reown_disabled_rejects_foreign_owner_claiming_host_id(
-    host_store: HostStore,
+    host_store: HostStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Without reown opt-in, a different owner cannot claim a host_id.
 
     The deployed multi-user boundary (W2-class host hijack): Alice owns
     ``host_x``; Bob connecting with the same host_id under the default
-    ``allow_host_id_reown=False`` must NOT be able to re-own it. The
-    host_id UNIQUE constraint fires (the same IntegrityError the host
-    tunnel relies on to fail the handshake closed), so Bob never takes
-    over Alice's host and Alice's row is untouched.
+    ``allow_host_id_reown=False`` must NOT be able to re-own it. The store
+    raises :class:`HostOwnershipConflict` on the first attempt (the
+    IntegrityError subclass the host tunnel relies on to fail the handshake
+    closed, never retried), so Bob never takes over Alice's host and
+    Alice's row is untouched.
     """
-    from sqlalchemy.exc import IntegrityError
-
     host_store.upsert_on_connect(
         host_id="5d23e459b50e20479abf5d3fa8e2f936", name="alice-box", user_id="alice@example.com"
     )
+    attempts = _record_write_attempts(monkeypatch)
 
-    with pytest.raises(IntegrityError):
+    with pytest.raises(HostOwnershipConflict):
         host_store.upsert_on_connect(
             host_id="5d23e459b50e20479abf5d3fa8e2f936",
             name="bob-box",
             user_id="bob@example.com",
         )
+    assert attempts == ["upsert_host_on_connect"]
 
     # Alice still owns host_x; Bob got nothing.
     assert [h.user_id for h in host_store.list_hosts(user_id="alice@example.com")] == [

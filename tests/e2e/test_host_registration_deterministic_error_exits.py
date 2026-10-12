@@ -47,8 +47,7 @@ def _spawn_omnigent_host(
     """Run the user's ``omnigent host --server <url>`` with *home* as its identity."""
     console_log = home / "console.log"
     process_log = home / "host.log"
-    # Runner compat mode pins an older host build; apply_runner_env drops the
-    # worktree PYTHONPATH there so that build is not shadowed.
+    # Compat mode: apply_runner_env strips the worktree PYTHONPATH so the pinned build wins.
     env = apply_runner_env(
         {
             **os.environ,
@@ -116,14 +115,17 @@ def _wait_for_host_online(
     )
 
 
-def _wait_for_host_offline(client: httpx.Client, host_id: str) -> None:
+def _wait_for_host_offline(
+    client: httpx.Client, host_id: str, proc: subprocess.Popen[bytes]
+) -> None:
     deadline = time.monotonic() + _ONLINE_TIMEOUT_S
     while time.monotonic() < deadline:
         if _host_status(client, host_id) != "online":
             return
         time.sleep(POLL_INTERVAL_S)
     raise AssertionError(
-        f"host {host_id} is still online {_ONLINE_TIMEOUT_S:.0f}s after its process stopped"
+        f"host {host_id} still reported online {_ONLINE_TIMEOUT_S:.0f}s after being stopped "
+        f"(process exit code: {proc.poll()})"
     )
 
 
@@ -163,7 +165,7 @@ def test_renamed_host_colliding_with_registered_name_fails_loudly(
             procs.append(proc)
             _wait_for_host_online(http_client, host_id, proc, console_log, process_log)
             _stop(proc)
-            _wait_for_host_offline(http_client, host_id)
+            _wait_for_host_offline(http_client, host_id, proc)
 
         _write_identity(host_b, host_id=host_b_id, name=shared_name)
         # The host appends to its process log; drop the clean first run so the
@@ -202,9 +204,10 @@ def test_renamed_host_colliding_with_registered_name_fails_loudly(
         assert "Could not connect" in console_text, (
             f"omnigent host exited without the loud failure banner:\n{console_text[-2000:]}"
         )
+        failure_text = console_text.split("Could not connect", 1)[1]
         assert (
-            "Host connection failed during registration" in console_text
-            and "UNIQUE constraint failed" in console_text
+            "Host connection failed during registration" in failure_text
+            and shared_name in failure_text
         ), (
             f"the failure banner does not carry the server's registration error:\n"
             f"{console_text[-2000:]}"
