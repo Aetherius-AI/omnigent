@@ -58,3 +58,80 @@ async def test_terminal_outcome_has_one_correlated_row(
     assert not any(
         getattr(r, "event_name", None) == "runner_tunnel_disconnected" for r in caplog.records
     )
+
+
+@pytest.mark.asyncio
+async def test_shutdown_after_retryable_error_does_not_log_or_wait_for_retry(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    shutdown = asyncio.Event()
+
+    async def once(*args: object, **kwargs: object):
+        shutdown.set()
+        raise OSError("connection dropped during shutdown")
+
+    monkeypatch.setattr(serve, "_serve_tunnel_once", once)
+    with caplog.at_level(logging.INFO, logger=serve.__name__):
+        await serve.serve_tunnel(
+            _noop_app,
+            server_url="http://synthetic",
+            runner_version="test",
+            runner_id="runner-test",
+            shutdown_event=shutdown,
+        )
+
+    attempts = [
+        r.attributes
+        for r in caplog.records
+        if getattr(r, "event_name", None) == "runner_tunnel_attempt_finished"
+    ]
+    assert len(attempts) == 1
+    assert attempts[0]["outcome"] == "shutdown_after_error"
+    assert attempts[0]["source_error_type"] == "OSError"
+    assert attempts[0].get("terminal_error_type") is None
+    assert not any(
+        getattr(r, "event_name", None) == "runner_tunnel_disconnected" for r in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_retry_does_not_inherit_callers_handled_exception(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    shutdown = asyncio.Event()
+    calls = 0
+
+    async def once(*args: object, **kwargs: object):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("retryable connection error")
+        shutdown.set()
+        return serve._CloseDetails(1000, "shutdown", 1000, 1000)
+
+    monkeypatch.setattr(serve, "_serve_tunnel_once", once)
+    monkeypatch.setattr(serve, "_INITIAL_RECONNECT_DELAY_S", 0)
+    with caplog.at_level(logging.INFO, logger=serve.__name__):
+        try:
+            raise RuntimeError("unrelated caller exception")
+        except RuntimeError:
+            await serve.serve_tunnel(
+                _noop_app,
+                server_url="http://synthetic",
+                runner_version="test",
+                runner_id="runner-test",
+                shutdown_event=shutdown,
+            )
+
+    attempts = [
+        r.attributes
+        for r in caplog.records
+        if getattr(r, "event_name", None) == "runner_tunnel_attempt_finished"
+    ]
+    retries = [
+        r for r in caplog.records if getattr(r, "event_name", None) == "runner_tunnel_disconnected"
+    ]
+    assert calls == 2
+    assert len(attempts) == 1
+    assert attempts[0]["outcome"] == "graceful_shutdown"
+    assert len(retries) == 1
