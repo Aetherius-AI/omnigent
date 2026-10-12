@@ -154,7 +154,7 @@ def test_editor_ctrl_click_relative_link_does_not_open_a_bogus_session_tab(
     request: pytest.FixtureRequest,
     seeded_relative_links_session: tuple[str, str],
 ) -> None:
-    """Ctrl-clicking ``[plan](plan.md)`` in Edit mode must not open ``/c/plan.md``."""
+    """Ctrl-clicking ``[plan](plan.md)`` in Edit mode opens ``plan.md`` in the viewer."""
     base_url, session_id = seeded_relative_links_session
     page: Page = request.getfixturevalue("page")
     opened: list[Page] = []
@@ -173,5 +173,7 @@ def test_editor_ctrl_click_relative_link_does_not_open_a_bogus_session_tab(
         bogus_tabs = [popup.url for popup in opened if "/c/plan.md" in popup.url]
         assert not bogus_tabs, f"a new tab opened on a session named after the file: {bogus_tabs}"
         expect(page).to_have_url(_session_url(session_id))
+        expect(page.get_by_role("button", name="Close plan.md", exact=True).first).to_be_visible()
+        expect(file_viewer.get_by_text(_PLAN_BODY).first).to_be_visible()
     finally:
         page.context.close()
