@@ -698,7 +698,7 @@ _session_mcp_startup_cache: WorkspaceScopedCache[str, dict[str, McpServerStartup
 )
 # Sessions whose cached startup map came from runner ``tools/list`` failures rather
 # than a native forwarder, so a later harness change can clear it.
-_runner_mcp_startup_sessions: set[str] = set()
+_runner_mcp_startup_sessions: WorkspaceScopedSet[str] = WorkspaceScopedSet()
 
 
 _model_options_cache: WorkspaceScopedCache[str, list[dict[str, Any]]] = WorkspaceScopedCache()
