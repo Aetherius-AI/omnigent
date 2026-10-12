@@ -1292,7 +1292,13 @@ def seeded_session(
     create_resp.raise_for_status()
     session_id = create_resp.json()["session_id"]
 
-    bind_session_runner(httpx.patch, live_server, session_id, runner_id, timeout=10.0)
+    bind_session_runner(
+        httpx.patch,
+        live_server,
+        session_id,
+        runner_id,
+        timeout=_HEALTH_TIMEOUT_S,
+    )
 
     try:
         yield (live_server, session_id)
