@@ -82,7 +82,7 @@ final class NativeNotificationManager: NSObject, UNUserNotificationCenterDelegat
 
   private func requestAuthorizationIfNeeded() async -> Bool {
     #if DEBUG
-      guard !ProcessInfo.processInfo.isOmnigentScreenshotRun else { return false }
+      guard !ProcessInfo.processInfo.isOmnigentNotificationPromptSuppressed else { return false }
     #endif
 
     let settings = await center.notificationSettings()
@@ -105,9 +105,10 @@ final class NativeNotificationManager: NSObject, UNUserNotificationCenterDelegat
 
 #if DEBUG
   extension ProcessInfo {
-    fileprivate var isOmnigentScreenshotRun: Bool {
+    fileprivate var isOmnigentNotificationPromptSuppressed: Bool {
       environment["OMNIGENT_SCREENSHOT_APP_URL"] != nil
         || arguments.contains("-FASTLANE_SNAPSHOT")
+        || arguments.contains("--omnigent-skip-notification-permission")
     }
   }
 #endif

@@ -23,18 +23,10 @@ final class OmnigentUITests: XCTestCase {
     let filename = try XCTUnwrap(config["filename"])
     let app = XCUIApplication(bundleIdentifier: "ai.omnigent.ios")
     app.launchArguments = [
-      "--omnigent-reset-state", "--omnigent-server-url", serverURL,
+      "--omnigent-reset-state", "--omnigent-skip-notification-permission",
+      "--omnigent-server-url", serverURL,
     ]
-    addUIInterruptionMonitor(withDescription: "Notification permission") { alert in
-      let deny = alert.buttons.matching(NSPredicate(format: "label BEGINSWITH[c] 'Don'"))
-        .firstMatch
-      guard deny.exists else { return false }
-      deny.tap()
-      return true
-    }
     app.launch()
-    sleep(5)
-    app.tap()
     let webView = app.webViews.firstMatch
     XCTAssertTrue(webView.waitForExistence(timeout: 90), "Expected the real Omnigent web app.")
 
