@@ -3546,3 +3546,75 @@ async def test_read_join_wrapped_asks_tmux_to_join_wrapped_rows(tmp_path: Path) 
     assert calls[1] == ("capture-pane", "-t", instance.tmux_target, "-p", "-J")
     assert plain["screen"] == joined["screen"]
     assert "https://signin.example.com/device?user_code=ABCDEFGH" in joined["screen"]
+
+
+def test_null_device_problem_accepts_the_real_null_device() -> None:
+    assert terminal_mod._null_device_problem() is None
+
+
+def test_null_device_problem_names_what_replaced_the_device(tmp_path: Path) -> None:
+    regular = tmp_path / "null"
+    regular.write_text("runner-host\n")
+
+    assert terminal_mod._null_device_problem(str(regular)) == (
+        f"{regular} is a regular file instead of the null character device"
+    )
+    assert terminal_mod._null_device_problem(str(tmp_path)) == (
+        f"{tmp_path} is a directory instead of the null character device"
+    )
+    assert terminal_mod._null_device_problem(str(tmp_path / "gone")) == (
+        f"{tmp_path / 'gone'} is missing (No such file or directory)"
+    )
+
+
+@pytest.mark.parametrize("null_device_broken", [False, True])
+async def test_launch_failure_explains_a_broken_null_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, null_device_broken: bool
+) -> None:
+    """tmux's bare "server exited unexpectedly" is explained when /dev/null is broken.
+
+    glibc's ``daemon()`` refuses to start the tmux server unless /dev/null is the
+    null device, and tmux reports nothing about why. A healthy device keeps the
+    plain launch error, so unrelated tmux failures are not blamed on it.
+    """
+    instance = TerminalInstance(
+        name="claude",
+        session_key="main",
+        socket_path=tmp_path / "tmux.sock",
+        private_dir=tmp_path,
+    )
+
+    async def spawn(*_args: object, **_kwargs: object) -> _ProcessWithStdout:
+        return _ProcessWithStdout(returncode=1, stderr=b"server exited unexpectedly")
+
+    monkeypatch.setattr(
+        terminal_mod,
+        "asyncio",
+        SimpleNamespace(create_subprocess_exec=spawn, subprocess=asyncio.subprocess),
+    )
+    problem = (
+        "/dev/null is a regular file instead of the null character device"
+        if null_device_broken
+        else None
+    )
+    monkeypatch.setattr(terminal_mod, "_null_device_problem", lambda path="/dev/null": problem)
+
+    with pytest.raises(RuntimeError) as info:
+        await instance.launch(cwd=tmp_path)
+
+    assert not instance.running
+    launch_error = "tmux launch failed (rc=1): server exited unexpectedly"
+    if not null_device_broken:
+        assert not isinstance(info.value, terminal_mod.TerminalLaunchPrerequisiteError)
+        assert str(info.value) == launch_error
+        return
+    assert isinstance(info.value, terminal_mod.TerminalLaunchPrerequisiteError)
+    message = str(info.value)
+    assert message == (
+        "tmux cannot start its server because /dev/null is a regular file instead of the "
+        "null character device. Recreate the device with `mknod -m 666 /dev/null c 1 3` "
+        "(as root) or restart the container, then retry."
+    )
+    assert str(tmp_path) not in message
+    assert isinstance(info.value.__cause__, RuntimeError)
+    assert str(info.value.__cause__) == launch_error

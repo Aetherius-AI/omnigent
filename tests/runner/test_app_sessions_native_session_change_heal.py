@@ -22,7 +22,7 @@ from omnigent.harnesses.claude_native.bridge import (
     bridge_dir_for_conversation_id,
     write_tmux_target,
 )
-from omnigent.inner.terminal import TerminalInstance
+from omnigent.inner.terminal import TerminalInstance, TerminalLaunchPrerequisiteError
 from omnigent.runner import create_runner_app, native_controls
 from omnigent.spec.types import AgentSpec, ExecutorSpec
 from omnigent.terminals import TerminalRegistry
@@ -679,3 +679,99 @@ async def test_failed_recreate_does_not_wait(
         f"a recreate that made no pane must not be polled; got {pane_ready_calls!r}"
     )
     assert elapsed < 5.0, f"failed recreate stalled {elapsed:.1f}s instead of failing fast"
+
+
+_BROKEN_NULL_DEVICE = (
+    "tmux cannot start its server because /dev/null is a regular file instead of the null "
+    "character device. Recreate the device with `mknod -m 666 /dev/null c 1 3` (as root) or "
+    "restart the container, then retry."
+)
+
+
+def _break_claude_terminal_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every Claude terminal re-create fail the way a broken ``/dev/null`` does."""
+
+    async def _launch_fails(*_args: object, **_kwargs: object) -> SessionResourceView:
+        raise TerminalLaunchPrerequisiteError(_BROKEN_NULL_DEVICE) from RuntimeError(
+            "tmux launch failed (rc=1): server exited unexpectedly"
+        )
+
+    for target in (
+        "omnigent.runner.native.orchestration._auto_create_claude_terminal",
+        "omnigent.runner.native._auto_create_claude_terminal",
+        "omnigent.runner.native.orchestration._launch_claude",
+        "omnigent.runner.native._launch_claude",
+    ):
+        monkeypatch.setattr(target, _launch_fails)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("conv_id", "event", "error_code"),
+    [
+        (
+            "c3d4e5f60718293a4b5c6d7e8f901a2b",
+            {"type": "permission_mode_change", "permission_mode": "acceptEdits"},
+            "claude_native_permission_mode_failed",
+        ),
+        (
+            "d4e5f60718293a4b5c6d7e8f901a2b3c",
+            {"type": "effort_change", "effort": "high"},
+            "claude_native_effort_failed",
+        ),
+        (
+            "e5f60718293a4b5c6d7e8f901a2b3c4d",
+            {"type": "model_change", "model": "claude-opus-4-7"},
+            "claude_native_model_failed",
+        ),
+        (
+            "f60718293a4b5c6d7e8f901a2b3c4d5e",
+            {"type": "compact"},
+            "claude_native_compact_failed",
+        ),
+    ],
+    ids=["permission_mode_change", "effort_change", "model_change", "compact"],
+)
+async def test_failed_recreate_reports_the_terminal_start_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    conv_id: str,
+    event: dict[str, Any],
+    error_code: str,
+) -> None:
+    """A control on a pane that cannot be re-created explains the start failure.
+
+    The heal used to swallow the ensure's error, so the injection timed out with
+    "tmux target is not advertised yet; wait for the terminal to launch" — a wait
+    hint for a terminal that can never start — and the client got the generic
+    log pointer. The 503 must carry the terminal-start error instead.
+    """
+    auto_create_calls: list[str] = []
+    app, registry = await _open_claude_native_session(
+        monkeypatch, conv_id=conv_id, auto_create_calls=auto_create_calls
+    )
+    bridge_dir = bridge_dir_for_conversation_id(conv_id)
+    _plant_dead_claude_pane(registry, conv_id, tmp_path, bridge_dir)
+    _break_claude_terminal_start(monkeypatch)
+
+    def _never_typed(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("nothing may be typed into a pane that never started")
+
+    monkeypatch.setattr(claude_native_bridge, "inject_slash_command", _never_typed)
+    monkeypatch.setattr(claude_native_bridge, "set_permission_mode", _never_typed)
+    monkeypatch.setattr(claude_native_bridge, "claude_pane_ready", _never_typed)
+
+    async with _runner_client(app) as client:
+        resp = await client.post(f"/v1/sessions/{conv_id}/events", json=event)
+
+    assert resp.status_code == 503, resp.text
+    body = resp.json()
+    assert body["error"] == error_code, body
+    detail = body["detail"]
+    assert detail.startswith(
+        "Native Claude terminal failed to start: tmux cannot start its server because "
+        "/dev/null is a regular file"
+    ), detail
+    assert "mknod -m 666 /dev/null c 1 3" in detail
+    assert "not advertised" not in detail
+    assert "see the runner log" not in detail

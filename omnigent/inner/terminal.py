@@ -28,7 +28,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, TypeAlias, cast
 
-from omnigent._platform import IS_WINDOWS
+from omnigent._platform import IS_LINUX, IS_WINDOWS
 from omnigent.cli_invocation import cli_invocation
 from omnigent.debug_logging import debug_event
 from omnigent.native import owner_claim
@@ -372,6 +372,55 @@ def _tmux_process_start_error(cmd: list[str], exc: OSError) -> RuntimeError:
     if _is_transient_tmux_process_start_error(exc):
         return _TmuxProcessStartError(detail)
     return RuntimeError(detail)
+
+
+class TerminalLaunchPrerequisiteError(RuntimeError):
+    """tmux could not start its server because the host lacks something it needs.
+
+    The message is safe to show to users: it names the broken prerequisite and
+    its repair, never launch paths or tmux output. The raw tmux failure is
+    chained as ``__cause__`` for the runner log.
+    """
+
+
+_NULL_DEVICE_TYPE_NAMES: tuple[tuple[Callable[[int], bool], str], ...] = (
+    (stat.S_ISREG, "regular file"),
+    (stat.S_ISDIR, "directory"),
+    (stat.S_ISFIFO, "named pipe"),
+    (stat.S_ISSOCK, "socket"),
+    (stat.S_ISBLK, "block device"),
+)
+
+
+def _null_device_problem(path: str = os.devnull) -> str | None:
+    """Describe why *path* cannot serve as the null device, or ``None`` if it can.
+
+    glibc's ``daemon()``, which tmux uses to start its server, fails with
+    ``ENODEV`` unless ``/dev/null`` is character device 1,3; tmux then only
+    reports "server exited unexpectedly".
+    """
+    try:
+        st = os.stat(path)
+    except OSError as exc:
+        return f"{path} is missing ({exc.strerror or type(exc).__name__})"
+    if stat.S_ISCHR(st.st_mode):
+        if IS_LINUX:
+            major, minor = os.major(st.st_rdev), os.minor(st.st_rdev)
+            if (major, minor) != (1, 3):
+                return f"{path} is character device {major},{minor} instead of 1,3"
+        return None
+    kind = next(
+        (name for is_kind, name in _NULL_DEVICE_TYPE_NAMES if is_kind(st.st_mode)),
+        "non-device file",
+    )
+    return f"{path} is a {kind} instead of the null character device"
+
+
+def _terminal_launch_prerequisite_error(problem: str) -> TerminalLaunchPrerequisiteError:
+    return TerminalLaunchPrerequisiteError(
+        f"tmux cannot start its server because {problem}. Recreate the device with "
+        "`mknod -m 666 /dev/null c 1 3` (as root) or restart the container, then retry."
+    )
 
 
 # Unrecognized failures leave liveness unknown and are retried.
@@ -1665,9 +1714,13 @@ class TerminalInstance:
             )
             _, stderr = await proc.communicate()
             if proc.returncode != 0:
-                raise RuntimeError(
+                launch_error = RuntimeError(
                     f"tmux launch failed (rc={proc.returncode}): {stderr.decode().strip()}"
                 )
+                problem = _null_device_problem()
+                if problem is not None:
+                    raise _terminal_launch_prerequisite_error(problem) from launch_error
+                raise launch_error
         except BaseException:
             if self._clipboard_bridge is not None:
                 await asyncio.to_thread(self._clipboard_bridge.close)

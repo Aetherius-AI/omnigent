@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import logging
 import mimetypes
 import os
@@ -94,9 +95,21 @@ class _EnsureCommentRelayStartedFn(Protocol):
 class ResourceRoutes:
     """Resource-route helpers the rest of the runner app calls directly."""
 
-    ensure_native_terminal_for_turn: Callable[[str, str | None], Coroutine[Any, Any, None]]
+    ensure_native_terminal_for_turn: Callable[[str, str | None], Coroutine[Any, Any, str | None]]
     require_os_env: Callable[[str], Coroutine[Any, Any, AgentSpec | None]]
     resolve_conversation_id: Callable[[str], Coroutine[Any, Any, str | None]]
+
+
+def _terminal_start_error_message(resp: object) -> str | None:
+    """Return the client-safe ``error.message`` of a failed terminal-ensure response."""
+    body = getattr(resp, "body", b"")
+    try:
+        payload = json.loads(body) if body else None
+    except (TypeError, ValueError):
+        return None
+    error = payload.get("error") if isinstance(payload, dict) else None
+    message = error.get("message") if isinstance(error, dict) else None
+    return message if isinstance(message, str) and message else None
 
 
 def register_resource_routes(
@@ -622,7 +635,9 @@ def register_resource_routes(
             content=session_resource_view_to_dict(resource_view),
         )
 
-    async def _ensure_native_terminal_for_turn(conv_id: str, harness_name: str | None) -> None:
+    async def _ensure_native_terminal_for_turn(
+        conv_id: str, harness_name: str | None
+    ) -> str | None:
         """Re-create a reaped native pane before forwarding a turn (self-heal).
 
         The native-pane idle reaper may reclaim an idle pane while a session sits
@@ -647,17 +662,21 @@ def register_resource_routes(
         poll. Every native short-name this can target has a matching
         ``ensure_native_terminal`` branch in ``create_session_terminal``
         (kept in lockstep with ``harness_aliases.NATIVE_HARNESSES``).
+
+        Returns the client-safe terminal-start error when the ensure reported
+        one, so a UI control can explain why the pane is still missing; ``None``
+        otherwise. Failures are never raised.
         """
         terminal_name = native_terminal_name(harness_name)
         if terminal_name is None:
-            return
+            return None
         terminal_registry = resource_registry.terminal_registry if resource_registry else None
         if terminal_registry is None:
-            return
+            return None
         instance = terminal_registry.get(conv_id, terminal_name, "main")
         if instance is not None:
             if await instance.is_alive():
-                return  # pane is registered and alive — nothing to heal
+                return None  # pane is registered and alive — nothing to heal
             _logger.info(
                 "native pane registered but dead for conv=%s harness=%s; closing stale entry",
                 conv_id,
@@ -713,7 +732,7 @@ def register_resource_routes(
                 conv_id,
                 extra={"session_id": conv_id},
             )
-            return
+            return None
         status = getattr(resp, "status_code", 200)
         if status >= 400:
             _logger.warning(
@@ -723,6 +742,8 @@ def register_resource_routes(
                 terminal_name,
                 extra={"session_id": conv_id},
             )
+            return _terminal_start_error_message(resp)
+        return None
 
     @app.get("/v1/sessions/{session_id}/resources/terminals/{terminal_id}")
     async def get_session_terminal(
