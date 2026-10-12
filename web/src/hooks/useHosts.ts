@@ -172,10 +172,90 @@ export function useHostModelOptions(
   return query;
 }
 
-interface InstallHarnessResult {
+export interface InstallHarnessResult {
   object: "harness_install";
   harness: string;
   configured_harnesses: Record<string, boolean | string>;
+}
+
+export interface StartHarnessLoginResult {
+  login_id: string;
+  auth_url: string | null;
+  user_code: string | null;
+  status: "pending";
+}
+
+export interface HarnessLoginStatusResult {
+  status: "pending" | "succeeded" | "failed";
+  error: string | null;
+  configured_harnesses: Record<string, boolean | string> | null;
+}
+
+async function responseDetail(res: Response): Promise<string> {
+  let detail = `${res.status} ${res.statusText}`;
+  try {
+    const body = (await res.json()) as { detail?: unknown };
+    if (typeof body.detail === "string" && body.detail) detail = body.detail;
+  } catch {
+    // Non-JSON error body — keep the status-line detail.
+  }
+  return detail;
+}
+
+/** Start a browser-based subscription login on a connected host. */
+export async function startHarnessLogin(
+  hostId: string,
+  harness: string,
+): Promise<StartHarnessLoginResult> {
+  const res = await authenticatedFetch(
+    `/v1/hosts/${encodeURIComponent(hostId)}/harnesses/${encodeURIComponent(harness)}/login`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
+  );
+  if (!res.ok) throw new Error(await responseDetail(res));
+  return (await res.json()) as StartHarnessLoginResult;
+}
+
+/** Read the current state of a browser-based subscription login. */
+export async function fetchHarnessLoginStatus(
+  hostId: string,
+  harness: string,
+  loginId: string,
+): Promise<HarnessLoginStatusResult> {
+  const res = await authenticatedFetch(
+    `/v1/hosts/${encodeURIComponent(hostId)}/harnesses/${encodeURIComponent(harness)}/login/${encodeURIComponent(loginId)}`,
+  );
+  if (!res.ok) throw new Error(await responseDetail(res));
+  return (await res.json()) as HarnessLoginStatusResult;
+}
+
+/** Cancel a pending browser-based subscription login. */
+export async function cancelHarnessLogin(
+  hostId: string,
+  harness: string,
+  loginId: string,
+): Promise<void> {
+  const res = await authenticatedFetch(
+    `/v1/hosts/${encodeURIComponent(hostId)}/harnesses/${encodeURIComponent(harness)}/login/${encodeURIComponent(loginId)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok && res.status !== 404) throw new Error(await responseDetail(res));
+}
+
+export async function installHarnessOnHost(
+  hostId: string,
+  harness: string,
+  options: { upgrade?: boolean } = {},
+): Promise<InstallHarnessResult> {
+  const res = await authenticatedFetch(
+    `/v1/hosts/${encodeURIComponent(hostId)}/harnesses/${encodeURIComponent(harness)}/install`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(options.upgrade ? { upgrade: true } : {}),
+    },
+  );
+  if (!res.ok) throw new Error(await responseDetail(res));
+  return (await res.json()) as InstallHarnessResult;
 }
 
 /**
@@ -206,23 +286,7 @@ export function useInstallHarness(hostId: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationKey: installHarnessMutationKey(hostId),
-    mutationFn: async (harness: string): Promise<InstallHarnessResult> => {
-      const res = await authenticatedFetch(
-        `/v1/hosts/${encodeURIComponent(hostId)}/harnesses/${encodeURIComponent(harness)}/install`,
-        { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
-      );
-      if (!res.ok) {
-        let detail = `${res.status} ${res.statusText}`;
-        try {
-          const err = (await res.json()) as { detail?: string };
-          if (typeof err.detail === "string" && err.detail) detail = err.detail;
-        } catch {
-          // Non-JSON error body — keep the status-line detail.
-        }
-        throw new Error(detail);
-      }
-      return (await res.json()) as InstallHarnessResult;
-    },
+    mutationFn: (harness: string) => installHarnessOnHost(hostId, harness),
     onSuccess: (result) => {
       // Patch the refreshed readiness into every ["hosts", …] cache entry
       // (filtered + unfiltered) so the badge updates immediately. This lives at
