@@ -203,6 +203,25 @@ describe("control-mode terminal", () => {
     expect(terminalSessionMock.instances[0].clipboardEnabled).toBe(false);
   });
 
+  it("shows a view-only badge once a read-only attach connects", async () => {
+    render(<TerminalView sessionId="conv_abc" terminalId="terminal_bash_s1" readOnly />);
+    await waitFor(() => expect(terminalSessionMock.instances).toHaveLength(1));
+    expect(screen.queryByTestId("terminal-read-only-badge")).toBeNull();
+    act(() => {
+      terminalSessionMock.instances[0].onState({ kind: "connected" });
+    });
+    expect(screen.getByTestId("terminal-read-only-badge")).toHaveTextContent("View only");
+  });
+
+  it("shows no view-only badge on an interactive attach", async () => {
+    render(<TerminalView sessionId="conv_abc" terminalId="terminal_bash_s1" />);
+    await waitFor(() => expect(terminalSessionMock.instances).toHaveLength(1));
+    act(() => {
+      terminalSessionMock.instances[0].onState({ kind: "connected" });
+    });
+    expect(screen.queryByTestId("terminal-read-only-badge")).toBeNull();
+  });
+
   it("does not render a legacy selection hint", async () => {
     render(<TerminalView sessionId="conv_abc" terminalId="terminal_bash_s1" />);
     await waitFor(() => expect(terminalSessionMock.instances).toHaveLength(1));

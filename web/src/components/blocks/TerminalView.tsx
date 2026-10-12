@@ -8,7 +8,7 @@
 // returned cleanup directly — no `useEffect` + `useRef` dance, no
 // guard against a missing `ref.current`.
 
-import { Loader2Icon } from "lucide-react";
+import { EyeIcon, Loader2Icon } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useResolvedThemeMode } from "@/components/theme/useResolvedThemeMode";
 import { Button } from "@/components/ui/button";
@@ -764,6 +764,17 @@ export function TerminalView({
         style={{ backgroundColor: terminalBackground }}
       >
         <div key={connectAttempt} ref={attachSession} className="h-full w-full overflow-hidden" />
+        {readOnly && state.kind === "connected" && (
+          // A read-only attach streams output but drops every keystroke; say
+          // so, or the terminal looks broken to a non-owner who tries to type.
+          <div
+            data-testid="terminal-read-only-badge"
+            className="pointer-events-none absolute top-2 right-2 z-[10000] flex items-center gap-1 rounded-sm bg-background/80 px-1.5 py-0.5 text-muted-foreground text-xs backdrop-blur-[1px]"
+          >
+            <EyeIcon className="size-3" aria-hidden="true" />
+            View only
+          </div>
+        )}
         {state.kind !== "connected" && (
           <StatusOverlay
             state={state}
