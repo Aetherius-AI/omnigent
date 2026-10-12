@@ -7,15 +7,18 @@ import uuid
 
 import pytest
 from sqlalchemy import event, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from omnigent.db.db_models import SqlHost, workspace_scope
 from omnigent.db.utils import get_or_create_engine, now_epoch
 from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.stores import host_store as host_store_module
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from omnigent.stores.host_store import (
     HOST_LIVENESS_TTL_S,
     Host,
+    HostOwnershipConflict,
     HostStore,
     host_is_live,
 )
@@ -152,6 +155,102 @@ def test_upsert_updates_existing_host_on_reconnect(
 
     assert updated.host_id == "ebfb0eac338c147444dc6dbf3f0503fc"
     assert updated.status == "online"
+
+
+def _record_write_attempts(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Count upsert transactions while still running them for real."""
+    real_run = host_store_module.run_write_transaction
+    attempts: list[str] = []
+
+    def counting(session_maker, operation_name, callback, **kwargs):
+        attempts.append(operation_name)
+        return real_run(session_maker, operation_name, callback, **kwargs)
+
+    monkeypatch.setattr(host_store_module, "run_write_transaction", counting)
+    return attempts
+
+
+def test_upsert_retries_once_after_racing_first_insert(
+    host_store: HostStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A duplicate-key failure from a concurrent first registration is absorbed."""
+    real_run = host_store_module.run_write_transaction
+    attempts: list[str] = []
+
+    def lose_the_first_insert(session_maker, operation_name, callback, **kwargs):
+        attempts.append(operation_name)
+        if len(attempts) == 1:
+            # The other connection commits the same new host_id first; this
+            # transaction then fails on the primary key.
+            real_run(session_maker, operation_name, callback, **kwargs)
+            raise IntegrityError(
+                "INSERT INTO hosts",
+                params={},
+                orig=Exception('duplicate key value violates unique constraint "hosts_pkey"'),
+            )
+        return real_run(session_maker, operation_name, callback, **kwargs)
+
+    monkeypatch.setattr(host_store_module, "run_write_transaction", lose_the_first_insert)
+    host = host_store.upsert_on_connect(
+        host_id="6f1c0d2e3b4a4c5d8e9f0a1b2c3d4e5f",
+        name="laptop",
+        user_id="alice@example.com",
+    )
+
+    assert attempts == ["upsert_host_on_connect", "upsert_host_on_connect"]
+    assert host.name == "laptop"
+    assert host.status == "online"
+    fetched = host_store.get_host("6f1c0d2e3b4a4c5d8e9f0a1b2c3d4e5f")
+    assert fetched is not None
+    assert fetched.user_id == "alice@example.com"
+
+
+def test_upsert_does_not_retry_an_ownership_conflict(
+    host_store: HostStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The deliberate hijack rejection is final on the first attempt."""
+    host_store.upsert_on_connect(
+        host_id="0c9b8a7f6e5d4c3b2a1f0e9d8c7b6a5f",
+        name="laptop",
+        user_id="alice@example.com",
+    )
+    attempts = _record_write_attempts(monkeypatch)
+
+    with pytest.raises(HostOwnershipConflict):
+        host_store.upsert_on_connect(
+            host_id="0c9b8a7f6e5d4c3b2a1f0e9d8c7b6a5f",
+            name="laptop",
+            user_id="mallory@example.com",
+        )
+    assert attempts == ["upsert_host_on_connect"]
+
+
+def test_upsert_name_collision_fails_after_one_retry(
+    host_store: HostStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rename onto another host's name is deterministic: one retry, then it propagates."""
+    host_store.upsert_on_connect(
+        host_id="1a2b3c4d5e6f4a5b8c9d0e1f2a3b4c5d",
+        name="shared",
+        user_id="alice@example.com",
+    )
+    host_store.upsert_on_connect(
+        host_id="5d4c3b2a1f0e4d3c8b7a6f5e4d3c2b1a",
+        name="other",
+        user_id="alice@example.com",
+    )
+    attempts = _record_write_attempts(monkeypatch)
+
+    with pytest.raises(IntegrityError):
+        host_store.upsert_on_connect(
+            host_id="5d4c3b2a1f0e4d3c8b7a6f5e4d3c2b1a",
+            name="shared",
+            user_id="alice@example.com",
+        )
+    assert attempts == ["upsert_host_on_connect", "upsert_host_on_connect"]
+    renamed = host_store.get_host("5d4c3b2a1f0e4d3c8b7a6f5e4d3c2b1a")
+    assert renamed is not None
+    assert renamed.name == "other"
 
 
 def test_upsert_persists_configured_harnesses(host_store: HostStore) -> None:

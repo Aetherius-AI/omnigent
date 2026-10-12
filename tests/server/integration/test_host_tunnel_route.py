@@ -11,7 +11,7 @@ import pytest
 from asgiref.testing import ApplicationCommunicator
 from fastapi import FastAPI
 from sqlalchemy import update
-from sqlalchemy.exc import DataError, IntegrityError, OperationalError
+from sqlalchemy.exc import DataError, OperationalError
 from sqlalchemy.orm import Session
 
 from omnigent.db.db_models import SqlHost
@@ -47,7 +47,7 @@ from omnigent.server.host_registry import HostRegistry
 from omnigent.server.routes.host_tunnel import create_host_tunnel_router
 from omnigent.server.routes.mcp_tools import create_mcp_tools_router
 from omnigent.server.routes.skill_content import create_skill_content_router
-from omnigent.stores.host_store import HostStore
+from omnigent.stores.host_store import HostOwnershipConflict, HostStore
 from tests.budgets import budget
 
 pytestmark = pytest.mark.asyncio
@@ -627,6 +627,7 @@ async def test_renamed_host_colliding_with_registered_name_is_not_retryable(
     # The host that legitimately holds the name is untouched.
     assert registry.get(_HOST_ID) is not None
     await holder.send_input({"type": "websocket.disconnect", "code": 1000})
+    await asyncio.wait_for(_wait_offline(store, _HOST_ID), timeout=budget(2.0))
 
 
 # Messages mirror what upsert_on_connect and require_active_account raise.
@@ -634,7 +635,7 @@ async def test_renamed_host_colliding_with_registered_name_is_not_retryable(
     ("failure", "retryable"),
     [
         pytest.param(
-            IntegrityError(
+            HostOwnershipConflict(
                 "host_id already owned by a different user",
                 params={},
                 orig=Exception("UNIQUE constraint failed: hosts.host_id"),

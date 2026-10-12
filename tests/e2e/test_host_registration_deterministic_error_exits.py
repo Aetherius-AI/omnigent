@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import signal
@@ -134,10 +135,13 @@ def _stop(proc: subprocess.Popen[bytes]) -> None:
         proc.wait(timeout=15)
     except subprocess.TimeoutExpired:
         proc.kill()
-        proc.wait(timeout=10)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=10)
 
 
 @pytest.mark.min_server_version("0.18.0")
+# The host needs the host.connection_error frame to exit on a fatal refusal.
+@pytest.mark.min_runner_version("0.11.0")
 @pytest.mark.timeout(300)
 def test_renamed_host_colliding_with_registered_name_fails_loudly(
     live_server: str,
