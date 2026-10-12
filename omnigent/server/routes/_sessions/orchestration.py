@@ -10797,6 +10797,7 @@ async def _create_session_from_existing_agent(
         host_id=body.host_id,
         host_registry=getattr(request.app.state, "host_registry", None),
         inherited_runner_id=inherited_runner_id,
+        parent_host_id=_parent_for_routing.host_id if _parent_for_routing is not None else None,
         runner_router=runner_router,
     )
 

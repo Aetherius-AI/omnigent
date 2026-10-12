@@ -30,8 +30,9 @@ and steers messages while the agent is busy.
   landing page it arms Plan mode before the first prompt (a "Plan mode" badge
   appears; switching agents clears it) and the created session starts in Plan
   mode; in-session it toggles Plan mode for the running thread. Codex then
-  plans instead of editing. If the runner cannot apply an armed Plan mode, the
-  badge falls back to Default rather than claiming an inactive mode.
+  plans instead of editing. If the runner cannot apply an armed Plan mode, it
+  reports Default so the badge does not claim an inactive mode (best-effort;
+  see the driving notes below).
 - `slash-menu`: typing `/` opens commands and skills with keyboard navigation.
 - `attachments`: attach button, paste, and drop onto the transcript; chips can
   be removed. State: unsupported file type rejected without losing the message.
@@ -144,10 +145,12 @@ Tests under `tests/browser_ui/` stub every backend call and need no instance:
   entry is disabled with the reason.
 - **`codex-plan-mode`, in-session:**
   `tests/e2e_ui/chat/test_codex_plan_mode_respected.py::test_codex_plan_mode_reaches_the_model`.
-  A failed launch-time switch is reconciled back to Default before the first
+  A failed launch-time switch is reported back as Default before the first
   turn (`tests/runner/test_app_sessions_native_terminals_runtime.py`,
-  `test_codex_discover_thread_reports_default_when_plan_mode_is_not_applied`);
-  the badge then shows Default rather than an inactive Plan.
+  `test_codex_discover_thread_reports_default_when_plan_mode_is_not_applied`),
+  so the badge shows Default rather than an inactive Plan. The report is
+  best-effort: if it cannot reach the server, the badge keeps the armed Plan
+  until the next toggle, and the runner log records the failure.
 - **`model-picker`, `effort-picker`, refused change:** the rollback cases in
   `web/src/store/chatStore.test.ts` and the composer case in
   `web/src/pages/ChatPage.composer.test.tsx` (`pnpm --dir web test`). Manually,

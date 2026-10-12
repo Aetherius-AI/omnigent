@@ -4072,23 +4072,34 @@ async def test_plan_armed_create_needs_a_host_that_starts_in_plan_mode(
 
 
 @pytest.mark.parametrize(
-    ("runner_version", "accepted"),
-    [("0.17.3", False), ("0.18.0.dev0", True)],
-    ids=["parent-runner-predates-plan-mode", "parent-runner-supports-plan-mode"],
+    ("runner_version", "outcome"),
+    [
+        ("0.17.3", "refused"),
+        (None, "offline"),
+        ("elsewhere", "wrong_replica"),
+        ("0.18.0.dev0", "accepted"),
+    ],
+    ids=[
+        "parent-runner-predates-plan-mode",
+        "parent-runner-offline",
+        "parent-runner-on-another-replica",
+        "parent-runner-supports-plan-mode",
+    ],
 )
 async def test_plan_armed_child_create_needs_an_inherited_runner_that_starts_in_plan_mode(
     client: httpx.AsyncClient,
     app: FastAPI,
     db_uri: str,
     monkeypatch: pytest.MonkeyPatch,
-    runner_version: str,
-    accepted: bool,
+    runner_version: str | None,
+    outcome: str,
 ) -> None:
     """A child created without ``host_id`` inherits its parent's runner, so the
     Plan label is checked against that runner's announced version before any row
     is written; an older runner would start the thread in Default under a Plan
-    badge."""
-
+    badge. A runner missing here but whose host is live elsewhere is a
+    wrong-replica landing (the client re-addresses); one connected nowhere cannot
+    be checked and is refused."""
     from omnigent.server.routes import sessions as sessions_module
 
     async def _no_runner_client(*_args: object, **_kwargs: object) -> None:
@@ -4103,7 +4114,18 @@ async def test_plan_armed_child_create_needs_an_inherited_runner_that_starts_in_
     runner_id = token_bound_runner_id("parent-binding-token")
     store = SqlAlchemyConversationStore(db_uri)
     store.set_runner_id(parent_id, runner_id)
-    app.state.tunnel_registry.register(runner_id, _NoopRunnerWS(), _runner_hello(runner_version))
+    if outcome == "wrong_replica":
+        # The parent's host is online per the store but has no tunnel on this
+        # replica, which is how the router recognizes a runner living elsewhere.
+        other_host = "0f6b2d7e9a1c4b3d8e5f6a7b8c9d0e1f"
+        app.state.host_store.upsert_on_connect(
+            host_id=other_host, name="elsewhere", user_id="local"
+        )
+        store.set_host_id(parent_id, other_host, workspace=_WORKSPACE)
+    elif runner_version is not None:
+        app.state.tunnel_registry.register(
+            runner_id, _NoopRunnerWS(), _runner_hello(runner_version)
+        )
     rows_before = {conv.id for conv in store.list_conversations(limit=50).data}
 
     resp = await client.post(
@@ -4115,7 +4137,7 @@ async def test_plan_armed_child_create_needs_an_inherited_runner_that_starts_in_
         },
     )
 
-    if accepted:
+    if outcome == "accepted":
         assert resp.status_code == 201, resp.text
         body = resp.json()
         assert body["runner_id"] == runner_id
@@ -4123,8 +4145,50 @@ async def test_plan_armed_child_create_needs_an_inherited_runner_that_starts_in_
         assert conv is not None
         assert conv.labels["omnigent.codex_native.collaboration_mode"] == "plan"
         return
+    error = resp.json()["error"]
+    if outcome == "wrong_replica":
+        assert resp.status_code == 400, resp.text
+        assert error["code"] == "wrong_replica"
+    else:
+        assert resp.status_code == 409, resp.text
+        assert error["code"] == "conflict"
+        assert "parent session's runner" in error["message"]
+        if outcome == "offline":
+            assert "not connected" in error["message"]
+    assert {conv.id for conv in store.list_conversations(limit=50).data} == rows_before
+
+
+async def test_plan_armed_bundled_create_is_refused_on_a_host_predating_plan_mode(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+    db_uri: str,
+) -> None:
+    """The multipart (bundled) create applies the same floor after its own host
+    authorization and workspace probe, before the session row exists."""
+    from tests.server.helpers import build_agent_bundle
+
+    comm = await _connect_host(app, version="0.17.3")
+    store = SqlAlchemyConversationStore(db_uri)
+    rows_before = {conv.id for conv in store.list_conversations(limit=50).data}
+    responder = asyncio.create_task(_serve_one_stat(comm))
+    resp = await client.post(
+        "/v1/sessions",
+        data={
+            "metadata": json.dumps(
+                {
+                    "host_id": _HOST_ID,
+                    "workspace": _WORKSPACE,
+                    "labels": {"omnigent.codex_native.collaboration_mode": "plan"},
+                }
+            )
+        },
+        files={"bundle": ("agent.tar.gz", build_agent_bundle(name="planner"), "application/gzip")},
+    )
+    await responder
+
     assert resp.status_code == 409, resp.text
     error = resp.json()["error"]
     assert error["code"] == "conflict"
-    assert "parent session's runner" in error["message"]
+    assert "Plan mode" in error["message"]
+    assert not await _expect_no_launch(comm, budget_s=0.5)
     assert {conv.id for conv in store.list_conversations(limit=50).data} == rows_before

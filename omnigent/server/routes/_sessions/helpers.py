@@ -10249,6 +10249,7 @@ def _require_codex_prelaunch_plan_target_support(
     host_id: str | None,
     host_registry: HostRegistry | None,
     inherited_runner_id: str | None,
+    parent_host_id: str | None = None,
     runner_router: RunnerRouter | None,
 ) -> None:
     """
@@ -10260,15 +10261,18 @@ def _require_codex_prelaunch_plan_target_support(
     written: the error names the target's version, so it must never run for a
     target the caller may not reach. A host that is offline here, or an
     unparseable version, is left to the launch step like the harness-setup
-    floor; a parent runner that is not connected cannot be checked and is
-    refused.
+    floor; a parent runner that is live on another replica is a
+    ``WRONG_REPLICA`` landing like the other create guards, and one that is
+    not connected anywhere cannot be checked and is refused.
 
     :param labels: Client-supplied create labels, or ``None``.
     :param host_id: Caller-supplied, already authorized host, or ``None``.
     :param host_registry: Live host connections, or ``None`` in minimal wirings.
     :param inherited_runner_id: Runner a child inherits from its parent, or ``None``.
+    :param parent_host_id: The parent session's host, used to tell a runner on
+        another replica from an offline one.
     :param runner_router: Live runner connections, or ``None`` in minimal wirings.
-    :raises OmnigentError: ``CONFLICT`` with an update hint.
+    :raises OmnigentError: ``CONFLICT`` with an update hint, or ``WRONG_REPLICA``.
     """
     if not labels or labels.get(_CODEX_NATIVE_COLLABORATION_MODE_LABEL_KEY) != "plan":
         return
@@ -10282,6 +10286,14 @@ def _require_codex_prelaunch_plan_target_support(
     elif inherited_runner_id is not None:
         version = runner_router.runner_version(inherited_runner_id) if runner_router else None
         if version is None:
+            if (
+                runner_router is not None
+                and runner_router.absent_runner_code(parent_host_id) == ErrorCode.WRONG_REPLICA
+            ):
+                raise OmnigentError(
+                    "the parent session's runner is on another replica",
+                    code=ErrorCode.WRONG_REPLICA,
+                )
             raise OmnigentError(
                 "the parent session's runner is not connected, so it cannot be confirmed to "
                 "start a session in Plan mode — create the session without Plan mode and turn "

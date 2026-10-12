@@ -4584,7 +4584,7 @@ async def apply_codex_thread_collaboration_mode(
                         "mode": mode,
                         "settings": {
                             "model": model,
-                            "reasoning_effort": effort_for_model_switch(effort or None, model),
+                            "reasoning_effort": effort_for_model_switch(effort, model),
                             "developer_instructions": None,
                         },
                     },

@@ -1057,6 +1057,7 @@ def register_core_routes(
             host_id=parsed_metadata.host_id,
             host_registry=getattr(request.app.state, "host_registry", None),
             inherited_runner_id=inherited_runner_id,
+            parent_host_id=parent_conv.host_id if parent_conv is not None else None,
             runner_router=runner_router,
         )
 
