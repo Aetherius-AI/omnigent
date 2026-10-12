@@ -1123,6 +1123,11 @@ def test_classify_codex_error_wire_variants(info: object, message: str, expected
             {"responseStreamDisconnected": {"httpStatusCode": None}},
             ("responseStreamDisconnected", None),
         ),
+        # A null nested status does not erase a flat sibling status.
+        (
+            {"responseStreamDisconnected": {"httpStatusCode": None}, "httpStatusCode": 401},
+            ("responseStreamDisconnected", 401),
+        ),
     ],
 )
 def test_codex_error_info_reads_tagged_shapes(info: object, expected: tuple) -> None:

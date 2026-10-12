@@ -9,7 +9,7 @@ import json
 import logging
 import urllib.error
 import urllib.request
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -6833,7 +6833,7 @@ async def _post_status(
     response_id: str | None = None,
     output: str | None = None,
     reauth_required: bool = False,
-    failure_context: object = None,
+    failure_context: Mapping[str, object] | None = None,
 ) -> None:
     """
     Publish a native Codex status edge.

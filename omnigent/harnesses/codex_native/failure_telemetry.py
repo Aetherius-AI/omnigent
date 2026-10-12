@@ -8,11 +8,10 @@ import re
 from omnigent.native.failure_telemetry import FailureContext, normalize_failure_context
 
 _FLAT_VARIANT_KEYS = ("type", "kind", "variant")
-# codex-cli reports a rejected gateway request as
-# ``unexpected status <code> <reason>: <body>, url: <url>``, where ``<body>`` is
-# the gateway's JSON error envelope when it returned one. Anchored to a line
-# start so quoted text inside another error cannot pose as the rejection.
-_GATEWAY_REJECTION = re.compile(r"(?m)^unexpected status (?P<code>[1-5][0-9]{2})\b[^:\n]*:\s*")
+# codex-cli formats a rejection as ``unexpected status <code> <reason>: <body>, url: <url>``,
+# with ``<body>`` the gateway's JSON envelope; the message starts with it, so anchoring
+# at the start keeps rejections quoted inside other errors from matching.
+_GATEWAY_REJECTION = re.compile(r"\Aunexpected status (?P<code>[1-5][0-9]{2})\b[^:\n]*:\s*")
 _GATEWAY_MESSAGE_MAX_CHARS = 16384
 
 
@@ -45,7 +44,9 @@ def codex_error_info(info: object) -> tuple[str | None, int | None]:
             ]
             for key, value in tagged:
                 if "httpStatusCode" in value:
-                    variant, status = key, value["httpStatusCode"]
+                    variant = key
+                    if value["httpStatusCode"] is not None:
+                        status = value["httpStatusCode"]
                     break
             else:
                 if tagged:
@@ -57,7 +58,7 @@ def codex_error_info(info: object) -> tuple[str | None, int | None]:
 def _gateway_rejection(message: str) -> tuple[int | None, dict[str, object]]:
     """Return the HTTP status and JSON error envelope of a gateway rejection message."""
     text = message[:_GATEWAY_MESSAGE_MAX_CHARS]
-    match = _GATEWAY_REJECTION.search(text)
+    match = _GATEWAY_REJECTION.match(text)
     if match is None:
         return None, {}
     status = int(match["code"])

@@ -147,10 +147,15 @@ _PROVIDER_KEYS = frozenset(
             "unexpected status 502 Bad Gateway: <html>upstream unavailable</html>, url: https://host/x",
             {"http_status": 502},
         ),
-        # A rejection quoted inside another error is not this turn's rejection.
+        # A rejection quoted inside another error is not this turn's rejection,
+        # whether it sits mid-line or on its own line after other text.
         (
             'tool output contained "unexpected status 401 Unauthorized: {"error_code":"X"}" '
             "but the turn failed while writing the patch",
+            {"http_status": None},
+        ),
+        (
+            'command stderr:\nunexpected status 401 Unauthorized: {"error_code":"X"}, url: https://h/x',
             {"http_status": None},
         ),
     ],
