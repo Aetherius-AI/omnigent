@@ -832,6 +832,16 @@ def test_redact_diagnostic_text_handles_long_inputs_in_linear_time() -> None:
             "fake-token-abc",
             "Authorization: ",
         ),
+        (
+            "rejected with Authorization: Basic ZmFrZTpjcmVkZW50aWFs",
+            "ZmFrZTpjcmVkZW50aWFs",
+            "Authorization: ",
+        ),
+        (
+            "rejected with Authorization: Negotiate fake-spnego-blob",
+            "fake-spnego-blob",
+            "Authorization: ",
+        ),
         ("connect failed: api_key=fake-key-xyz is not valid", "fake-key-xyz", "api_key="),
         (
             "handshake failed for wss://mcp.example.com/ws?token=secret123",

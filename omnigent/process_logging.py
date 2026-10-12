@@ -107,7 +107,10 @@ _LEVEL_COLORS = {
 }
 _REDACTED = "[REDACTED]"
 _QUOTED_OR_NONSPACE_VALUE = r'(?:"[^"\r\n]*"|\'[^\'\r\n]*\'|\S+)'
-_AUTHORIZATION_VALUE = r'(?:(?:"[^"\r\n]*"|\'[^\'\r\n]*\')|(?:bearer\s+)?\S+)'
+# Single-token schemes keep their credential in the next token; consume it too.
+_AUTHORIZATION_VALUE = (
+    r'(?:(?:"[^"\r\n]*"|\'[^\'\r\n]*\')|(?:(?:bearer|basic|negotiate|token|hoba|mutual)\s+)?\S+)'
+)
 _AUTHORIZATION_PATTERN = re.compile(
     rf"(?i)(\bauthorization\b[\"']?\s*[:=]\s*)({_AUTHORIZATION_VALUE})"
 )
@@ -189,6 +192,8 @@ def redact_log_text(text: str, *, include_whitespace_credentials: bool = False) 
 def redact_diagnostic_text(text: str) -> str:
     """Redact an error shown to users: drop URL queries and fragments, then secrets."""
     if len(text) > _MAX_DIAGNOSTIC_CHARS:
+        # Cutting mid-secret is safe: every pattern below anchors on a prefix cue
+        # (key, scheme, `?`/`#`), so a truncated value is still redacted.
         text = text[:_MAX_DIAGNOSTIC_CHARS] + "…"
     text = _URL_QUERY_OR_FRAGMENT.sub(rf"\1\2{_REDACTED}", text)
     return redact_log_text(text, include_whitespace_credentials=True)

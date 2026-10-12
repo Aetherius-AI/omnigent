@@ -111,8 +111,12 @@ async def _run_turn(
     finished: asyncio.Event,
     server_client: _ToolsListServerClient,
     agent_id: str = _AGENT_ID,
+    has_mcp_servers: bool = True,
 ) -> int:
-    """Post one user turn, wait for its stream, and return its tools/list count."""
+    """Post one user turn, wait for its stream, and return its tools/list count.
+
+    ``has_mcp_servers`` mirrors the hint the server derives from the resolved spec.
+    """
     before = server_client.tools_list_calls
     finished.clear()
     resp = await client.post(
@@ -124,7 +128,7 @@ async def _run_turn(
             "model": "test-agent",
             "input": [{"type": "input_text", "text": "hi"}],
             "harness": "openai-agents",
-            "has_mcp_servers": True,
+            "has_mcp_servers": has_mcp_servers,
         },
     )
     assert resp.status_code == 202, resp.text
@@ -133,8 +137,8 @@ async def _run_turn(
     deadline = asyncio.get_running_loop().time() + 2.0
     settled = server_client.tools_list_calls
     quiet_checks = 0
-    while quiet_checks < 3 and asyncio.get_running_loop().time() < deadline:
-        await asyncio.sleep(0.02)
+    while quiet_checks < 5 and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.03)
         if server_client.tools_list_calls == settled:
             quiet_checks += 1
         else:
@@ -199,12 +203,12 @@ async def test_removing_the_last_mcp_server_syncs_once_and_drops_its_tools() -> 
         assert seed.status_code == 201, seed.text
 
         # No servers means no eager listing; the one call is the empty-config sync.
-        assert await _run_turn(client, finished, server_client) == 1, (
+        assert await _run_turn(client, finished, server_client, has_mcp_servers=False) == 1, (
             "an emptied config must sync once"
         )
         assert _TOOL_NAME not in _advertised_tools(harness_client.posted_bodies[-1])
 
-        assert await _run_turn(client, finished, server_client) == 0, (
+        assert await _run_turn(client, finished, server_client, has_mcp_servers=False) == 0, (
             "the empty config is not re-synced"
         )
 
@@ -225,17 +229,17 @@ async def test_failed_empty_config_sync_is_retried_until_it_succeeds() -> None:
 
         # The proxy reports its own failure in the result rather than raising.
         server_client.failures = {"proxy": "ConnectError: All connection attempts failed"}
-        assert await _run_turn(client, finished, server_client) == 1
+        assert await _run_turn(client, finished, server_client, has_mcp_servers=False) == 1
         assert _TOOL_NAME not in _advertised_tools(harness_client.posted_bodies[-1]), (
             "tools of removed servers are dropped even when the sync fails"
         )
-        assert await _run_turn(client, finished, server_client) == 1, (
+        assert await _run_turn(client, finished, server_client, has_mcp_servers=False) == 1, (
             "a failed empty-config sync must be retried on the next turn"
         )
 
         server_client.failures = {}
-        assert await _run_turn(client, finished, server_client) == 1
-        assert await _run_turn(client, finished, server_client) == 0
+        assert await _run_turn(client, finished, server_client, has_mcp_servers=False) == 1
+        assert await _run_turn(client, finished, server_client, has_mcp_servers=False) == 0
 
 
 @pytest.mark.asyncio
@@ -251,10 +255,18 @@ async def test_switching_to_an_agent_without_mcp_servers_syncs_once() -> None:
         # knows the removed server, so it reports no failures for it.
         server_client.failures = {}
         assert (
-            await _run_turn(client, finished, server_client, agent_id=_MCP_LESS_AGENT_ID) == 1
+            await _run_turn(
+                client, finished, server_client, agent_id=_MCP_LESS_AGENT_ID, has_mcp_servers=False
+            )
+            == 1
         ), "switching to an MCP-less agent must sync the emptied config once"
         assert _TOOL_NAME not in _advertised_tools(harness_client.posted_bodies[-1])
-        assert await _run_turn(client, finished, server_client, agent_id=_MCP_LESS_AGENT_ID) == 0
+        assert (
+            await _run_turn(
+                client, finished, server_client, agent_id=_MCP_LESS_AGENT_ID, has_mcp_servers=False
+            )
+            == 0
+        )
 
 
 @pytest.mark.asyncio
@@ -270,4 +282,9 @@ async def test_deleting_the_session_drops_its_pending_sync() -> None:
 
         # A same-id session created afresh carries no stale listing state to sync.
         server_client.failures = {}
-        assert await _run_turn(client, finished, server_client, agent_id=_MCP_LESS_AGENT_ID) == 0
+        assert (
+            await _run_turn(
+                client, finished, server_client, agent_id=_MCP_LESS_AGENT_ID, has_mcp_servers=False
+            )
+            == 0
+        )

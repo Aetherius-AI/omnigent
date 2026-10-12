@@ -301,11 +301,15 @@ class ProxyMcpManager:
         if meta is not None:
             raw_failures = _json_object(meta.get("omnigent/mcpFailures"))
             if raw_failures is not None:
-                failures = {
-                    name: message
-                    for name, message in raw_failures.items()
-                    if isinstance(message, str)
-                }
+                for name, message in raw_failures.items():
+                    if isinstance(message, str):
+                        failures[name] = message
+                    else:
+                        _logger.warning(
+                            "Ignoring non-string MCP failure entry %r for session %r",
+                            name,
+                            self._session_id,
+                        )
         return McpSchemasResult(schemas=schemas, tool_names=tool_names, failures=failures)
 
     async def call_tool(

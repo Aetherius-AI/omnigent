@@ -5169,6 +5169,8 @@ def create_runner_app(
             # Tools of removed servers can no longer be routed; drop them regardless.
             _session_tool_schemas[conv] = _without_mcp_tools(_session_tool_schemas.get(conv, []))
             if sync_result.failures:
+                # Retry next turn, and relist if the config comes back unchanged.
+                _session_mcp_spec_hash[conv] = _MCP_SPEC_HASH_STALE
                 _logger.warning(
                     "MCP empty-config sync failed for %s: %s",
                     conv,
