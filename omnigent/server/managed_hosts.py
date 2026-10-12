@@ -3635,10 +3635,9 @@ def _apply_git_clone_options(
     repos: Sequence[RepoWorkspace],
     options: GitCloneOptions | None,
 ) -> Sequence[RepoWorkspace]:
-    """Apply admin clone policy before provisioning or replacing any sandbox.
+    """Apply the admin clone policy, or the default policy where the launcher honors one.
 
-    Without an admin policy, launchers that honor clone options get the default
-    policy; custom materializers keep their own clone behavior.
+    Custom materializers that cannot honor options keep their own clone behavior.
     """
     if options is None:
         if not launcher.capabilities.git_clone_options:

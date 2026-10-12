@@ -173,10 +173,9 @@ class GitCloneOptions:
         return args
 
 
-# Applied when a deployment configures no ``sandbox.git_clone``. A blobless
-# partial clone keeps the full commit graph and the checked-out tree but fetches
-# other revisions' file contents on demand, so spin-up cost follows the checkout
-# rather than the repository's history.
+# Applied when a deployment configures no ``sandbox.git_clone``: a blobless partial
+# clone keeps the full commit graph and the checked-out tree, fetching other
+# revisions' file contents on demand, so spin-up cost follows the checkout.
 DEFAULT_GIT_CLONE_POLICY = GitCloneOptions(filter="blob:none")
 
 

@@ -1,12 +1,9 @@
 """Real product server whose managed sandbox is a bounded process sandbox on this machine.
 
-Only the sandbox provider is local: every command the managed spin-up issues
-(``$HOME`` probe, workspace ``mkdir``, ``git clone``, ``omnigent host``) runs
-here under a fixed per-process file-size cap standing in for a sandbox's
-storage budget, and the host is the real ``omnigent host`` CLI. Session
-creation, the managed launch pipeline, tunnels, persistence and SSE all use
-production code. The launcher overrides none of the spin-up steps, so the
-product's clone command reaches ``git`` unmodified.
+Only the provider is local: each spin-up command (``$HOME`` probe, ``mkdir``, ``git clone``,
+the real ``omnigent host``) runs here under a per-process file-size cap standing in for a
+sandbox's storage budget. The launcher overrides no spin-up step, so the product's clone
+command reaches ``git`` unmodified.
 """
 
 from __future__ import annotations

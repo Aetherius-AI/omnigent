@@ -1,11 +1,8 @@
 """Browser journey: a New Chat on a managed sandbox whose repository has a large history.
 
-A real server, the production managed-launch pipeline and the real ``omnigent
-host`` CLI run against a stand-in sandbox on this machine whose storage is
-bounded (see ``_local_exec_sandbox_server``). The remotes are generated
-repositories reached through ``https://`` URLs the sandbox's git config aliases
-to local bare repositories. Only cloud allocation, the storage limit and the
-model are replaced; no browser, API or SSE traffic is mocked.
+A real server, the production managed-launch pipeline and the real ``omnigent host`` run
+against a storage-bounded local sandbox (see ``_local_exec_sandbox_server``); the remotes
+are generated repositories behind ``https://`` aliases. No browser, API or SSE traffic is mocked.
 """
 
 from __future__ import annotations
