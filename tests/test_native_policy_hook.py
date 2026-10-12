@@ -764,7 +764,7 @@ def test_post_evaluate_with_retry_loopback_callback_ignores_ambient_proxy(
     assert proxy_targets == []
 
 
-def test_post_evaluate_with_retry_remote_callback_honors_ambient_proxy(
+def test_post_evaluate_with_retry_remote_callback_honours_ambient_proxy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
@@ -959,7 +959,7 @@ def test_post_evaluate_with_retry_slow_429_spends_the_budget(
     )
 
     class _Client:
-        def __init__(self, *, headers: dict[str, str], timeout: object) -> None:
+        def __init__(self, *, headers: dict[str, str], timeout: object, **_kwargs: object) -> None:
             del headers, timeout
 
         def __enter__(self) -> _Client:
