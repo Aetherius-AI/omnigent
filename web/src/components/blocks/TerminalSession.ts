@@ -11,7 +11,6 @@
 //     text frames for JSON control messages (currently only resize).
 
 import { FitAddon } from "@xterm/addon-fit";
-import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { type FontWeight, type ITheme, Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
@@ -20,6 +19,7 @@ import { type CodeFont, codeFontFamilyForEditor, readCodeFont } from "@/lib/code
 import { splitWorkspaceFileCitation } from "@/components/ai-elements/streamdown-security";
 import { resolveChatFilePath } from "@/hooks/useWorkspaceChangedFiles";
 import { CodexTerminalPalette, codexTerminalTheme } from "./CodexTerminalPalette";
+import { TerminalLinkProvider } from "./TerminalLinkProvider";
 
 // Card background colors derived from the app's CSS palette.
 // Light: --card: oklch(1.000 0 0) = pure white.
@@ -79,18 +79,18 @@ export function terminalTheme(isDark: boolean): ITheme {
 /**
  * Activation handler for clickable links in terminal output.
  *
- * Wired into {@link WebLinksAddon}. Suppresses the addon's default
+ * Wired into {@link TerminalLinkProvider}. Suppresses the default
  * navigation (which would replace the SPA — and the live terminal
  * session — with the link target) and opens the URL in a new tab
  * instead. ``noopener,noreferrer`` denies the opened page a handle
  * back to this window and strips the ``Referer`` header.
  *
  * Exported for direct unit testing; production code passes it to the
- * addon constructor rather than calling it directly.
+ * link provider rather than calling it directly.
  *
  * :param event: The DOM mouse event from the link click. Its default
- *     action (addon-driven navigation) is prevented.
- * :param uri: The URL the addon detected in the terminal output,
+ *     navigation is prevented.
+ * :param uri: The URL detected in the terminal output,
  *     e.g. ``"https://example.com/foo"``.
  */
 export type TerminalFileLinkListener = (uri: string) => boolean;
@@ -355,8 +355,7 @@ export function loadWebglRenderer(term: Terminal): WebglAddon | null {
  * Linux/Windows this fires via right-click → Copy (and Edit → Copy); on
  * macOS ⌘C also dispatches a browser ``copy`` event.
  *
- * Pure helper — exported for direct unit testing; production code wires it
- * to a container ``copy`` listener rather than calling it directly.
+ * Called only after the terminal view authorizes the copy gesture.
  *
  * :param event: The browser ``copy`` event.
  * :param selection: The current terminal selection text ("" if none).
@@ -429,8 +428,8 @@ export function hadRecentTerminalInput(lastInputAt: number, now: number): boolea
   );
 }
 
-/** Listener for tmux copy-mode text destined for the user's clipboard. */
-export type TerminalClipboardListener = (text: string) => void;
+/** Browser selection gestures carry their native event; program requests do not. */
+export type TerminalClipboardListener = (text: string, copyEvent?: ClipboardEvent) => void;
 
 /**
  * Ceiling on synthesized wheel reports for a single DOM wheel event, so a
@@ -694,7 +693,7 @@ export class TerminalSession {
    *     job-state oracle.
    * :param onInput: Called when user input is sent to the terminal.
    * :param clipboardEnabled: Whether tmux copies may write the local clipboard.
-   * :param onClipboardRequest: Receives validated tmux copy-mode text.
+   * :param onClipboardRequest: Authorizes browser selections and validated tmux copies.
    * :param focusOnConnect: Whether to grab keyboard focus on WS-open.
    * :param onFileLink: Handles OSC 8 local-file links inside the app.
    */
@@ -741,9 +740,9 @@ export class TerminalSession {
     this.osc52Dispose = this.term.parser.registerOscHandler(52, () => true);
     this.fit = new FitAddon();
     this.term.loadAddon(this.fit);
-    // Turn bare URLs in terminal output into clickable links. Without
-    // this addon xterm renders URLs as plain text.
-    this.term.loadAddon(new WebLinksAddon(activateLink));
+    // Turn bare URLs in terminal output into clickable links; xterm alone
+    // renders them as plain text.
+    this.term.registerLinkProvider(new TerminalLinkProvider(this.term, activateLink));
     this.term.open(container);
     // Load the GPU renderer after open() (it needs the mounted canvas).
     // Falls back to the DOM renderer when WebGL is unavailable.
@@ -767,18 +766,17 @@ export class TerminalSession {
     this.listenerCtl = new AbortController();
     const { signal } = this.listenerCtl;
 
-    // Make the browser copy gesture (right-click → Copy and Edit → Copy on
-    // every platform, ⌘C on macOS) yield the terminal selection as text.
-    // Without this, an xterm selection has no working copy path on
-    // Linux/Windows — Ctrl+C is SIGINT, and xterm's selection layer isn't a
-    // DOM range the browser copies on its own. Capture phase + the shared
-    // abort signal so `dispose()` removes it for free. Ctrl+C is never
-    // remapped (see {@link applyTerminalCopy}).
+    // Capture browser copy gestures before xterm's own listener can write.
+    // Selections and program requests share consent; Ctrl+C stays SIGINT.
     container.addEventListener(
       "copy",
-      // getSelection() returns "" when nothing is selected, which
-      // applyTerminalCopy treats as a no-op — no hasSelection() guard needed.
-      (e) => applyTerminalCopy(e, this.term.getSelection()),
+      (event) => {
+        const selection = this.term.getSelection();
+        if (!selection) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        this.onClipboardRequest?.(selection, event);
+      },
       { capture: true, signal },
     );
 

@@ -15,7 +15,7 @@ from fastapi import (
 )
 from fastapi.responses import Response
 
-from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.errors import SESSION_AGENT_MISSING_MESSAGE, ErrorCode, OmnigentError
 from omnigent.host.identity import MANAGED_HOST_TOKEN_HEADER
 from omnigent.native.native_coding_agents import native_coding_agent_for_agent_name
 from omnigent.runner.routing import RunnerRouter
@@ -31,6 +31,7 @@ from omnigent.server._elicitation_registry import (
 )
 from omnigent.server.auth import (
     LEVEL_EDIT,
+    LEVEL_OWNER,
     LEVEL_READ,
     AuthProvider,
     local_single_user_enabled,
@@ -38,10 +39,16 @@ from omnigent.server.auth import (
 from omnigent.server.bundles import bundle_location, validate_agent_bundle
 from omnigent.server.host_registry import HostRegistry
 from omnigent.server.routes._auth_helpers import (
+    can_mutate_session_agent as _can_mutate_session_agent,
+)
+from omnigent.server.routes._auth_helpers import (
     require_access as _require_access,
 )
 from omnigent.server.routes._auth_helpers import (
     require_access_and_level as _require_access_and_level,
+)
+from omnigent.server.routes._auth_helpers import (
+    require_agent_owner as _require_agent_owner,
 )
 from omnigent.server.routes._auth_helpers import (
     require_user as _require_user,
@@ -132,10 +139,16 @@ def register_agent_routes(
             )
         agent = await asyncio.to_thread(agent_store.get, conv.agent_id)
         if agent is None:
-            raise OmnigentError(
-                f"Agent not found: {conv.agent_id!r}",
-                code=ErrorCode.NOT_FOUND,
-            )
+            raise OmnigentError(SESSION_AGENT_MISSING_MESSAGE, code=ErrorCode.NOT_FOUND)
+        mcp_servers_editable = await asyncio.to_thread(
+            _can_mutate_session_agent,
+            user_id,
+            session_id,
+            agent,
+            permission_store,
+            conversation_store,
+            conversation=conv,
+        )
         terminals_override = None
         if (
             conv.host_id is not None
@@ -152,6 +165,7 @@ def register_agent_routes(
             agent,
             agent_cache,
             terminals_override=terminals_override,
+            mcp_servers_editable=mcp_servers_editable,
         )
 
     @router.get(
@@ -212,10 +226,7 @@ def register_agent_routes(
             )
         agent = await asyncio.to_thread(agent_store.get, conv.agent_id)
         if agent is None:
-            raise OmnigentError(
-                f"Agent not found: {conv.agent_id!r}",
-                code=ErrorCode.NOT_FOUND,
-            )
+            raise OmnigentError(SESSION_AGENT_MISSING_MESSAGE, code=ErrorCode.NOT_FOUND)
         if artifact_store is None:
             raise OmnigentError(
                 "Artifact store not configured",
@@ -236,13 +247,11 @@ def register_agent_routes(
                 "X-Agent-Version": str(agent.version),
                 "X-Agent-Name": agent.name,
                 # Provenance for the runner's env-expansion decision:
-                # session-scoped agents are
-                # tenant-uploaded and must NOT have ${VAR} expanded
-                # against the runner process env; template agents
-                # (session_id is None) are operator-authored and may.
-                # The runner fails safe (treats a missing header as
-                # session-scoped → no expansion).
-                "X-Agent-Session-Scoped": "true" if agent.session_id is not None else "false",
+                # user agents are tenant input and must NOT have ${VAR}
+                # expanded against the runner process env; only server
+                # agents may. The runner fails safe (treats a
+                # missing header as session-scoped → no expansion).
+                "X-Agent-Session-Scoped": "false" if agent.operator_authored else "true",
             },
         )
 
@@ -261,6 +270,7 @@ def register_agent_routes(
         the existing agent, stores the bundle under a
         content-addressed key, updates the agent row, and warm-swaps
         the cache. Idempotent when the bundle content is unchanged.
+        Requires session-owner permission because a bundle can replace MCP servers.
 
         :param request: The incoming FastAPI request.
         :param session_id: Session identifier, e.g.
@@ -272,7 +282,7 @@ def register_agent_routes(
         """
         user_id = _require_user(request, auth_provider)
         access = await _require_access_and_level(
-            user_id, session_id, LEVEL_EDIT, permission_store, conversation_store
+            user_id, session_id, LEVEL_OWNER, permission_store, conversation_store
         )
         conv = access.conversation
         if conv is None:
@@ -289,10 +299,7 @@ def register_agent_routes(
             )
         agent = await asyncio.to_thread(agent_store.get, conv.agent_id)
         if agent is None:
-            raise OmnigentError(
-                f"Agent not found: {conv.agent_id!r}",
-                code=ErrorCode.NOT_FOUND,
-            )
+            raise OmnigentError(SESSION_AGENT_MISSING_MESSAGE, code=ErrorCode.NOT_FOUND)
 
         # Shared/template agents are read-only here;
         # mirrors the guard in session_mcp_servers._editable_agent.
@@ -301,6 +308,12 @@ def register_agent_routes(
                 "Built-in agents are read-only through this endpoint.",
                 code=ErrorCode.INVALID_INPUT,
             )
+
+        # Owner-only: a session-scoped agent's bundle runs with runner
+        # authority, so a LEVEL_EDIT grant on the session (shared editors,
+        # reused-agent sessions) is not enough — only the creating user or an
+        # admin may replace it.
+        await asyncio.to_thread(_require_agent_owner, user_id, agent, permission_store)
 
         bundle_bytes = await bundle.read()
         # Run bundle validation (tar extraction + spec parse, both
@@ -329,7 +342,7 @@ def register_agent_routes(
 
         # Idempotency: same bundle content = no-op
         if new_loc == agent.bundle_location:
-            return _to_agent_object(agent, agent_cache)
+            return _to_agent_object(agent, agent_cache, mcp_servers_editable=True)
 
         if artifact_store is None:
             raise OmnigentError(
@@ -337,7 +350,7 @@ def register_agent_routes(
                 code=ErrorCode.INTERNAL_ERROR,
             )
         artifact_store.put(new_loc, bundle_bytes)
-        updated = await asyncio.to_thread(agent_store.update, agent.id, new_loc)
+        updated = await asyncio.to_thread(agent_store.update, agent.id, new_loc, user_id)
         if updated is None:
             raise OmnigentError(
                 f"Agent not found: {agent.id!r}",
@@ -345,14 +358,13 @@ def register_agent_routes(
             )
 
         if agent_cache is not None:
-            # Only operator-authored template agents
-            # (session_id is None) may expand ${VAR} against the server
-            # env; tenant session-scoped bundles must not.
+            # Only server agents may expand ${VAR} against the server env;
+            # user agents are tenant input.
             agent_cache.replace(
-                agent.id, new_loc, bundle_bytes, expand_env=agent.session_id is None
+                agent.id, new_loc, bundle_bytes, expand_env=agent.operator_authored
             )
 
-        return _to_agent_object(updated, agent_cache)
+        return _to_agent_object(updated, agent_cache, mcp_servers_editable=True)
 
     # ── POST /sessions/{session_id}/mcp ──────────────────────────────────
     # MCP Streamable HTTP proxy endpoint. Only registered when a

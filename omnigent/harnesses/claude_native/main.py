@@ -111,6 +111,10 @@ from omnigent.host.daemon_launch import (
     wait_for_host_online,
     wait_for_runner_online,
 )
+from omnigent.inner._subprocess_lifecycle import (
+    await_cleanup_task,
+    terminate_direct_subprocess,
+)
 from omnigent.models import model_catalog
 from omnigent.models.claude_model_vocabulary import (
     ALIAS_MODEL_ENV_VARS,
@@ -222,7 +226,7 @@ _CLAUDE_ALIAS_RESOLUTION_CONCURRENCY = 12
 _CLAUDE_CODE_ENABLE_TOOL_SEARCH_ENV = "ENABLE_TOOL_SEARCH"
 _CLAUDE_CODE_CUSTOM_HEADERS_ENV = "ANTHROPIC_CUSTOM_HEADERS"
 # Claude Code forwards the ANTHROPIC_CUSTOM_HEADERS value verbatim as
-# request headers. The Databricks AI gateway only serves Claude requests
+# request headers. The Databricks Unity Gateway only serves Claude requests
 # in coding-agent mode when this header is present.
 _DATABRICKS_CODING_AGENT_HEADER = "x-databricks-use-coding-agent-mode: true"
 # Claude Code's agent view (the session list opened by `claude agents`, the
@@ -294,6 +298,8 @@ _RESUME_ACTION_LEAVE = "leave"
 _ATTACH_INITIAL_RECONNECT_DELAY_S = 0.5
 _ATTACH_MAX_RECONNECT_DELAY_S = 5.0
 _CLAUDE_ATTACH_WS_CLOSE_TIMEOUT_S = 0.25
+_DIRECT_TMUX_ATTACH_TERMINATE_TIMEOUT_S = 5.0
+_DIRECT_TMUX_ATTACH_KILL_TIMEOUT_S = 1.0
 _CLAUDE_TERMINAL_GONE_WATCH_INTERVAL_S = 0.25
 _CLAUDE_TERMINAL_GONE_WATCH_HTTP_TIMEOUT_S = 1.0
 _CLAUDE_STARTUP_PROFILE_ENV_VAR = "OMNIGENT_CLAUDE_STARTUP_PROFILE"
@@ -447,16 +453,15 @@ def _serves_canonical_anthropic_ids(claude_config: ClaudeNativeUcodeConfig) -> b
 
 
 def _ambient_env_is_non_anthropic_gateway() -> bool:
-    """Whether the ambient process env routes through a non-Anthropic gateway.
+    """Whether managed settings or the process env route through a gateway.
 
     Used as the ``claude_config is None`` counterpart to
     :func:`_serves_canonical_anthropic_ids`: when managed settings (e.g. Isaac)
     set ``ANTHROPIC_BASE_URL`` to a Databricks gateway, the catalog and its
     fingerprint must treat the env as a non-canonical endpoint.
     """
-    from urllib.parse import urlparse
-
-    base_url = os.environ.get(_UCODE_CLAUDE_BASE_URL_ENV, "")
+    managed_base_url, _ = managed_claude_gateway_signal()
+    base_url = managed_base_url or os.environ.get(_UCODE_CLAUDE_BASE_URL_ENV, "")
     if not base_url:
         return False
     host = (urlparse(base_url).hostname or "").lower()
@@ -504,6 +509,8 @@ def claude_catalog_serves_model(
 
     if catalog_contains(rows, model):
         return True
+    if claude_config is None and _ambient_env_is_non_anthropic_gateway():
+        return False
     if claude_config is not None and not _serves_canonical_anthropic_ids(claude_config):
         return False
     if not model.lower().startswith("claude-"):
@@ -1297,13 +1304,17 @@ def claude_catalog_fingerprint(claude_config: ClaudeNativeUcodeConfig | None) ->
     from omnigent.onboarding.ambient import claude_managed_model_picker
 
     command, _ = resolve_claude_launch("claude", [])
-    ambient_gateway = os.environ.get(_UCODE_CLAUDE_BASE_URL_ENV) if claude_config is None else None
+    ambient_gateway = None
+    if claude_config is None:
+        managed_base_url, _ = managed_claude_gateway_signal()
+        ambient_gateway = managed_base_url or os.environ.get(_UCODE_CLAUDE_BASE_URL_ENV)
     return fingerprint_of(
         "claude-native",
-        "control-picker-v2",
+        "control-picker-v3",
         sorted(claude_config.env.items()) if claude_config is not None else None,
         claude_config.api_key_helper if claude_config is not None else None,
         claude_config.model if claude_config is not None else None,
+        sorted(claude_config.routable_models) if claude_config is not None else None,
         binary_identity(command),
         ambient_gateway,
         claude_managed_model_picker() if claude_config is None else None,
@@ -1319,7 +1330,8 @@ async def claude_model_catalog(
     Rows come from the harness's own enumeration alone (no configured/static
     merge). Servability filtering matches the listing composition: on a
     non-canonical endpoint, aliases resolving to bare Anthropic ids are
-    dropped. The default marker is what a Default launch of this config
+    dropped unless the provider explicitly declares them routable. The
+    default marker is what a Default launch of this config
     actually runs: the config's own launch pin when the provider resolves
     one (those launches pass ``--model`` explicitly), else the enumeration
     run's init-event model (a bare subscription launch). It is matched onto
@@ -1335,11 +1347,17 @@ async def claude_model_catalog(
     if probe.empty_picker:
         return []
     rows = list(probe.alias_rows)
+    declared_models = set(claude_config.routable_models) if claude_config is not None else set()
     _non_canonical = (
         claude_config is not None and not _serves_canonical_anthropic_ids(claude_config)
     ) or (claude_config is None and _ambient_env_is_non_anthropic_gateway())
     if _non_canonical:
-        rows = [row for row in rows if not str(row.get("model", "")).startswith("claude-")]
+        rows = [
+            row
+            for row in rows
+            if not str(row.get("model", "")).startswith("claude-")
+            or str(row.get("model", "")) in declared_models
+        ]
 
     configured_pin = claude_config.model if claude_config is not None else None
     default_model = configured_pin or probe.default_model
@@ -1363,7 +1381,11 @@ async def claude_model_catalog(
         _canonical_ids_ok = (
             claude_config is None and not _ambient_env_is_non_anthropic_gateway()
         ) or (claude_config is not None and _serves_canonical_anthropic_ids(claude_config))
-        servable = _canonical_ids_ok or not default_model.startswith("claude-")
+        servable = (
+            _canonical_ids_ok
+            or not default_model.startswith("claude-")
+            or default_model in declared_models
+        )
         if servable:
             # The probe's printed label describes the ENUMERATION run's
             # model; it only names a config-pinned default when the two are
@@ -2846,12 +2868,15 @@ def _ucode_config_for_profile(
             live_catalog = discover_databricks_claude_catalog(creds.host, creds.token)
             live_models = live_catalog.families
             routable_models = live_catalog.model_ids
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            # Recoverable fallback; frames are debug-only so a TTY-mirrored
+            # host console stays concise.
             _logger.warning(
                 "native-claude: live Databricks model discovery failed for profile %r; "
-                "using cached ucode models",
+                "using cached ucode models (%s)",
                 profile,
-                exc_info=True,
+                exc,
+                exc_info=_logger.isEnabledFor(logging.DEBUG),
             )
         if live_models is not None:
             if not workspace_state.fable_enabled:
@@ -3398,6 +3423,12 @@ def resolve_native_claude_config(
     :returns: The launch config, or ``None`` to use Claude's own login.
     """
     from omnigent.host.databricks_credential import api_key_auth_precludes_broker
+    from omnigent.inference_config import (
+        binding_for_harness,
+        load_runtime_inference_config,
+        resolve_bound_model,
+        resolve_bound_provider,
+    )
     from omnigent.onboarding.detected import effective_config_with_detected
     from omnigent.onboarding.provider_config import (
         default_provider_for_harness,
@@ -3406,12 +3437,31 @@ def resolve_native_claude_config(
     from omnigent.runtime.workflow import _load_global_auth, _resolve_provider_for_build
     from omnigent.spec.types import DatabricksAuth
 
+    inference_config = load_runtime_inference_config(load_config())
+    binding = binding_for_harness(inference_config, "claude-native")
+    if binding is not None:
+        bound = resolve_bound_provider(
+            inference_config, "claude-native", spec.executor.auth if spec is not None else None
+        )
+        assert bound is not None
+        resolve_bound_model(
+            inference_config, "claude-native", spec.executor.model if spec is not None else None
+        )
+        resolved = _native_claude_config_from_entry(bound, refresh_models=refresh_models)
+        if resolved is None:
+            raise ValueError(f"Configured provider {bound.name!r} cannot route Claude Code.")
+        if binding.model_allowlist is not None:
+            resolved = replace(resolved, routable_models=binding.model_allowlist)
+        return resolved
+
     # 1. Spec-driven: reuse the harness routing precedence verbatim. A
     #    non-None entry decides the config (including a deliberate None for a
     #    subscription); a None entry means the spec routed to databricks /
     #    global auth → fall back to the spec's own ucode profile.
     if spec is not None:
-        entry = _resolve_provider_for_build(spec, harness_type="claude-sdk")
+        entry = _resolve_provider_for_build(
+            spec, harness_type="claude-sdk", actual_harness="claude-native"
+        )
         if entry is not None:
             return _native_claude_config_from_entry(entry, refresh_models=refresh_models)
         ucode_config = _ucode_config_for_profile(
@@ -3454,7 +3504,7 @@ def resolve_native_claude_config(
         if broker_config is not None:
             log_info_once(
                 _logger,
-                "native-claude routing: managed connect host — Databricks AI gateway via the "
+                "native-claude routing: managed connect host — Databricks Unity Gateway via the "
                 "credential broker (host-only [omnigent] profile + broker sidecar).",
             )
             return broker_config
@@ -3800,49 +3850,62 @@ async def _attach_direct_tmux(
         tmux_target,
         env=env,
     )
-    record_startup_event("terminal_attach_started")
-    startup_profiler.mark("tmux attach subprocess started")
-
-    # Poll for a dead pane in the background. With ``remain-on-exit on``,
-    # the tmux session outlives the inner CLI, so ``tmux attach`` never exits
-    # on its own — the user sees "Pane is dead" and Ctrl-C is silently
-    # dropped because there is no process to receive the signal. Killing the
-    # attach subprocess forces it to exit so the CLI can tear down cleanly.
-    async def _kill_when_pane_dead() -> None:
-        _POLL_INTERVAL_S = 0.5
-        while True:
-            await asyncio.sleep(_POLL_INTERVAL_S)
-            if process.returncode is not None:
-                return  # already exited naturally
-            is_dead = await _check_pane_dead_definitive(str(socket_path), tmux_target)
-            if is_dead is True:
-                _logger.debug("direct-tmux: pane is dead; killing tmux attach child")
-                with contextlib.suppress(ProcessLookupError):
-                    process.kill()
-                return
-
-    watcher = asyncio.create_task(_kill_when_pane_dead(), name="direct-tmux-pane-watcher")
+    watcher: asyncio.Task[None] | None = None
     try:
-        await process.wait()
-    finally:
-        watcher.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await watcher
+        record_startup_event("terminal_attach_started")
+        startup_profiler.mark("tmux attach subprocess started")
 
-    startup_profiler.mark("tmux attach subprocess exited")
-    record_startup_event("terminal_attach_exited", exit_code=process.returncode)
-    # Use the tri-state probe so a dead pane (session alive, pane_dead=1) is
-    # treated as EXITED rather than DETACHED. With remain-on-exit the session
-    # outlives the inner CLI, so _tmux_session_alive alone would wrongly signal
-    # a user detach and the reconnect loop would re-attach to the dead pane.
-    pane_dead = await _check_pane_dead_definitive(str(socket_path), tmux_target)
-    if pane_dead is True:
-        return _AttachOutcome.EXITED
-    if pane_dead is None:
-        # Inconclusive probe — fall back to session-existence check.
-        if not await _tmux_session_alive(str(socket_path), tmux_target):
+        # Poll for a dead pane in the background. With ``remain-on-exit on``,
+        # the tmux session outlives the inner CLI, so attach never exits alone.
+        async def _kill_when_pane_dead() -> None:
+            _POLL_INTERVAL_S = 0.5
+            while True:
+                await asyncio.sleep(_POLL_INTERVAL_S)
+                if process.returncode is not None:
+                    return  # already exited naturally
+                is_dead = await _check_pane_dead_definitive(str(socket_path), tmux_target)
+                if is_dead is True:
+                    _logger.debug("direct-tmux: pane is dead; killing tmux attach child")
+                    with contextlib.suppress(ProcessLookupError):
+                        process.kill()
+                    return
+
+        watcher = asyncio.create_task(_kill_when_pane_dead(), name="direct-tmux-pane-watcher")
+        await process.wait()
+        startup_profiler.mark("tmux attach subprocess exited")
+        record_startup_event("terminal_attach_exited", exit_code=process.returncode)
+        # Use the tri-state probe so a dead pane (session alive, pane_dead=1) is
+        # treated as EXITED rather than DETACHED.
+        pane_dead = await _check_pane_dead_definitive(str(socket_path), tmux_target)
+        if pane_dead is True:
             return _AttachOutcome.EXITED
-    return _AttachOutcome.DETACHED
+        if pane_dead is None:
+            # Inconclusive probe — fall back to session-existence check.
+            if not await _tmux_session_alive(str(socket_path), tmux_target):
+                return _AttachOutcome.EXITED
+        return _AttachOutcome.DETACHED
+    except BaseException:
+        cleanup = asyncio.create_task(
+            terminate_direct_subprocess(
+                process,
+                terminate_timeout=_DIRECT_TMUX_ATTACH_TERMINATE_TIMEOUT_S,
+                kill_timeout=_DIRECT_TMUX_ATTACH_KILL_TIMEOUT_S,
+            ),
+            name="direct-tmux-attach-cleanup",
+        )
+        await await_cleanup_task(cleanup)
+        raise
+    finally:
+        if watcher is not None:
+            watcher.cancel()
+            try:
+                await watcher
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001 - watcher failure is secondary to attach outcome
+                _logger.warning(
+                    "direct-tmux pane watcher failed during attach cleanup", exc_info=True
+                )
 
 
 async def _attach_with_transcript_forwarder(
@@ -5218,7 +5281,7 @@ async def _resolve_cold_resume_args(
         ) from exc
     labels = payload.get("labels") if isinstance(payload, dict) else None
     wrapper = labels.get(_WRAPPER_LABEL_KEY) if isinstance(labels, dict) else None
-    if wrapper != _WRAPPER_LABEL_VALUE:
+    if not isinstance(labels, dict) or wrapper != _WRAPPER_LABEL_VALUE:
         raise click.ClickException(
             f"Conversation {session_id!r} is not a claude-native session "
             f"(wrapper={wrapper!r}). Use `{cli_invocation()} run --resume "
@@ -5241,6 +5304,7 @@ async def _resolve_cold_resume_args(
         session_id=session_id,
         external_session_id=external_session_id,
         workspace=Path.cwd().resolve(),
+        bridge_dir=bridge_dir_for_bridge_id(labels.get(BRIDGE_ID_LABEL_KEY) or session_id),
     )
     if transcript is None:
         # No resumable records: ``claude --resume`` against an empty (or
@@ -5262,6 +5326,7 @@ async def _ensure_local_claude_resume_transcript(
     session_id: str,
     external_session_id: str,
     workspace: Path,
+    bridge_dir: Path | None = None,
 ) -> Path | None:
     """
     Refresh Claude Code's local JSONL transcript for cold resume.
@@ -5286,6 +5351,8 @@ async def _ensure_local_claude_resume_transcript(
         ``OMNIGENT_RUNNER_WORKSPACE``. Pass an already-resolved
         path (symlinks collapsed) so the project-dir encoding matches
         what Claude computes.
+    :param bridge_dir: Launch bridge path identifying the attachment cache.
+        Defaults to the legacy session-id bridge when omitted.
     :returns: Path to the local transcript that was written; ``None`` if
         *external_session_id* is not a safe transcript stem, or if the AP
         history yields no resumable records (an empty transcript would make
@@ -5321,16 +5388,18 @@ async def _ensure_local_claude_resume_transcript(
             )
             return target
         raise
+    from omnigent.inner.native_attachments import resolve_session_item_file_references
+
     # Items are persisted with unresolved file_id attachment blocks;
     # fetch the bytes back so the rebuilt transcript can reference a
     # live local file instead of silently dropping the attachment.
-    items = await _resolve_session_item_file_references(client, session_id=session_id, items=items)
+    items = await resolve_session_item_file_references(client, session_id=session_id, items=items)
     records = _claude_transcript_records_from_session_items(
         items,
         session_id=session_id,
         external_session_id=external_session_id,
         cwd=current,
-        bridge_dir=bridge_dir_for_conversation_id(session_id),
+        bridge_dir=bridge_dir or bridge_dir_for_conversation_id(session_id),
     )
     # Empty transcript → ``claude --resume`` exits fatally ("No conversation
     # found"), killing the terminal-as-agent. Return None so the caller
@@ -5490,60 +5559,6 @@ async def _fetch_all_session_items_for_claude_resume(
         after = last_id
 
 
-async def _resolve_session_item_file_references(
-    client: httpx.AsyncClient,
-    *,
-    session_id: str,
-    items: list[_JsonObject],
-) -> list[_JsonObject]:
-    """
-    Inline ``file_id`` attachment blocks as base64 data URIs.
-
-    Message items come back from the server in pre-resolution form (the
-    upload's raw ``file_id``). The transcript rebuild runs where no
-    file/artifact stores exist, so bytes are fetched back through the
-    session-scoped file resource endpoints — the same fetch the runner's
-    current-message fallback performs. A failed fetch is non-fatal: the
-    block stays unresolved and the converter surfaces a visible marker.
-
-    :param client: HTTP client pointed at the Omnigent server.
-    :param session_id: Omnigent conversation id, e.g. ``"conv_abc123"``.
-    :param items: Flat API item dicts from ``GET /v1/sessions/{id}/items``.
-    :returns: The same items with resolvable attachment blocks rewritten
-        to carry ``image_url`` / ``file_data`` data URIs.
-    """
-    from omnigent.inner.native_attachments import (
-        framework_notice_block,
-        has_unresolved_file_id,
-        resolve_file_id_block,
-    )
-
-    for item in items:
-        content = item.get("content")
-        if item.get("type") != "message" or not isinstance(content, list):
-            continue
-        resolved_content: list[object] = []
-        for block in content:
-            parsed_block = _json_object(block)
-            if parsed_block is not None and has_unresolved_file_id(parsed_block):
-                result = await resolve_file_id_block(
-                    parsed_block,
-                    session_id=session_id,
-                    client=client,
-                )
-                if result is None:
-                    resolved_content.append(parsed_block)
-                else:
-                    new_block, notice = result
-                    resolved_content.append(new_block)
-                    if notice is not None:
-                        resolved_content.append(framework_notice_block(notice))
-            else:
-                resolved_content.append(block)
-        item["content"] = resolved_content
-    return items
-
-
 def _claude_transcript_records_from_session_items(
     items: list[_JsonObject],
     *,
@@ -5564,8 +5579,7 @@ def _claude_transcript_records_from_session_items(
         ``"02857840-6362-408f-b41f-309e396ed7c6"``.
     :param cwd: Working directory to write into each transcript
         record, e.g. ``Path("/home/me/repo")``.
-    :param bridge_dir: Session bridge directory; resolved attachment
-        blocks are re-materialized under its ``uploads/`` subdirectory.
+    :param bridge_dir: Launch bridge path identifying the attachment cache.
     :returns: Claude JSONL record dictionaries.
     """
     records: list[_JsonObject] = []
@@ -5898,8 +5912,8 @@ def _claude_user_content_from_api_blocks(
     Convert Omnigent user message blocks into Claude message content.
 
     Attachment blocks (``input_image`` / ``input_file``) cannot ride the
-    transcript as bytes; resolved ones are re-materialized under the
-    bridge dir and referenced by an ``[Attached: <path>]`` line, and
+    transcript as bytes; resolved ones are re-materialized in the
+    session attachment cache and referenced by an ``[Attached: <path>]`` line, and
     unresolved ones surface as a visible could-not-load marker — never a
     silent drop.
 
@@ -5929,15 +5943,12 @@ def _claude_attachment_text_blocks_from_api_content(
     """
     Re-materialize attachment blocks as transcript text references.
 
-    Mirrors the native executors' turn-time behavior: a resolved data-URI
-    block is decoded to ``<bridge_dir>/uploads/`` and referenced with the
-    ``[Attached: <path>]`` marker so Claude can Read it after a resume; a
-    block whose bytes never arrived yields the could-not-load placeholder
-    instead of vanishing from the rebuilt transcript.
+    Uses the same session attachment cache as live turns. Missing bytes yield
+    a visible could-not-load placeholder instead of disappearing from history.
 
     :param content: Omnigent content array, e.g.
         ``[{"type": "input_image", "image_url": "data:image/png;..."}]``.
-    :param bridge_dir: Session bridge directory to write files under.
+    :param bridge_dir: Session bridge path identifying the attachment cache.
     :returns: Claude ``{"type": "text", "text": ...}`` blocks.
     """
     from omnigent.inner.native_attachments import attachment_reference_line
@@ -5949,7 +5960,8 @@ def _claude_attachment_text_blocks_from_api_content(
         block = _json_object(value)
         if block is None or block.get("type") not in ("input_image", "input_file"):
             continue
-        blocks.append({"type": "text", "text": attachment_reference_line(block, bridge_dir)})
+        line = attachment_reference_line(block, bridge_dir)
+        blocks.append({"type": "text", "text": line})
     return blocks
 
 
@@ -6249,20 +6261,35 @@ async def _launch_claude_terminal(
         append_system_prompt=append_system_prompt,
         allowed_tools=allowed_tools,
     )
-    resp = await client.post(
-        f"/v1/sessions/{url_component(session_id)}/resources/terminals",
-        json=body,
-        timeout=30.0,
-    )
-    if resp.status_code >= 400:
-        raise click.ClickException(
-            f"Claude terminal launch failed ({resp.status_code}): {error_text(resp)}"
+    try:
+        resp = await client.post(
+            f"/v1/sessions/{url_component(session_id)}/resources/terminals",
+            json=body,
+            timeout=30.0,
         )
-    payload = resp.json()
-    terminal_id = payload.get("id")
-    if not isinstance(terminal_id, str) or not terminal_id:
-        raise click.ClickException("Claude terminal launch response did not include terminal id.")
-    return terminal_id
+        if resp.status_code >= 400:
+            raise click.ClickException(
+                f"Claude terminal launch failed ({resp.status_code}): {error_text(resp)}"
+            )
+        payload = resp.json()
+        terminal_id = payload.get("id")
+        if not isinstance(terminal_id, str) or not terminal_id:
+            raise click.ClickException(
+                "Claude terminal launch response did not include terminal id."
+            )
+        return terminal_id
+    except (Exception, asyncio.CancelledError) as launch_error:
+        from omnigent.harnesses.claude_native.diagnostics import ClaudeDebugLogFollower
+
+        if not isinstance(launch_error, asyncio.CancelledError):
+            _logger.exception(
+                "Claude terminal launch failed: session=%s",
+                session_id,
+                extra={"session_id": session_id},
+            )
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(ClaudeDebugLogFollower(bridge_dir).close, session_id)
+        raise
 
 
 async def _find_running_claude_terminal(
@@ -6409,6 +6436,7 @@ def _claude_terminal_request(
     args = augment_claude_args(
         claude_args,
         bridge_dir=bridge_dir,
+        workspace=Path.cwd(),
         ap_server_url=ap_server_url,
         ap_auth_headers=ap_auth_headers,
         api_key_helper=claude_config.api_key_helper if claude_config is not None else None,

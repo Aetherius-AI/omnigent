@@ -295,6 +295,10 @@ def test_templates_load_before_mine_and_discovery_reuses_its_request(
             route.fulfill(json={"data": [], "has_more": False})
 
     def agents(route: Route) -> None:
+        if parse_qs(urlparse(route.request.url).query).get("scope") == ["user"]:
+            # The caller's own agents: a separate list, not the catalog.
+            route.fulfill(json={"data": [], "has_more": False})
+            return
         agent_requests.append(route.request.url)
         route.fulfill(
             json={
@@ -609,9 +613,14 @@ def test_admin_identity_resolves_after_shared_sessions_and_pins(
         )
     ):
         page.goto(base_url, wait_until="domcontentloaded")
-    expect(page.get_by_text("Owned admin session", exact=True)).to_be_visible()
-    expect(page.get_by_text("Owned admin pin", exact=True)).to_be_visible()
-    expect(page.get_by_text("Shared admin session", exact=True)).to_have_count(0)
+    expect(page.get_by_text("Loading sessions…", exact=True)).to_be_visible()
+    for title in [
+        "Owned admin session",
+        "Owned admin pin",
+        "Shared admin session",
+        "Shared admin pin",
+    ]:
+        expect(page.get_by_text(title, exact=True)).to_have_count(0)
     assert len(list_responses) == 4
     assert len(identity_requests) == 1
     before_identity = len(list_requests)
@@ -619,5 +628,6 @@ def test_admin_identity_resolves_after_shared_sessions_and_pins(
     expect(page.get_by_text("Shared admin session", exact=True)).to_be_visible()
     expect(page.get_by_text("Shared admin pin", exact=True)).to_be_visible()
     expect(page.get_by_text("Owned admin session", exact=True)).to_be_visible()
+    expect(page.get_by_text("Owned admin pin", exact=True)).to_be_visible()
     page.wait_for_load_state("networkidle")
     assert len(list_requests) == before_identity
