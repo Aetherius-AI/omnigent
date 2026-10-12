@@ -115,6 +115,17 @@ def _wait_for_host_online(
     )
 
 
+def _wait_for_host_offline(client: httpx.Client, host_id: str) -> None:
+    deadline = time.monotonic() + _ONLINE_TIMEOUT_S
+    while time.monotonic() < deadline:
+        if _host_status(client, host_id) != "online":
+            return
+        time.sleep(POLL_INTERVAL_S)
+    raise AssertionError(
+        f"host {host_id} is still online {_ONLINE_TIMEOUT_S:.0f}s after its process stopped"
+    )
+
+
 def _stop(proc: subprocess.Popen[bytes]) -> None:
     if proc.poll() is not None:
         return
@@ -148,8 +159,12 @@ def test_renamed_host_colliding_with_registered_name_fails_loudly(
             procs.append(proc)
             _wait_for_host_online(http_client, host_id, proc, console_log, process_log)
             _stop(proc)
+            _wait_for_host_offline(http_client, host_id)
 
         _write_identity(host_b, host_id=host_b_id, name=shared_name)
+        # The host appends to its process log; drop the clean first run so the
+        # verdict scan only sees the collision run.
+        (host_b / "host.log").unlink(missing_ok=True)
         proc, console_log, process_log = _spawn_omnigent_host(host_b, live_server)
         procs.append(proc)
 
@@ -183,7 +198,10 @@ def test_renamed_host_colliding_with_registered_name_fails_loudly(
         assert "Could not connect" in console_text, (
             f"omnigent host exited without the loud failure banner:\n{console_text[-2000:]}"
         )
-        assert "registration" in console_text or shared_name in console_text, (
+        assert (
+            "Host connection failed during registration" in console_text
+            and "UNIQUE constraint failed" in console_text
+        ), (
             f"the failure banner does not carry the server's registration error:\n"
             f"{console_text[-2000:]}"
         )

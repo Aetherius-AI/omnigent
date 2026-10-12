@@ -11,7 +11,7 @@ import pytest
 from asgiref.testing import ApplicationCommunicator
 from fastapi import FastAPI
 from sqlalchemy import update
-from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.exc import DataError, IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from omnigent.db.db_models import SqlHost
@@ -626,8 +626,10 @@ async def test_renamed_host_colliding_with_registered_name_is_not_retryable(
     assert renamed_host.status == "offline"
     # The host that legitimately holds the name is untouched.
     assert registry.get(_HOST_ID) is not None
+    await holder.send_input({"type": "websocket.disconnect", "code": 1000})
 
 
+# Messages mirror what upsert_on_connect and require_active_account raise.
 @pytest.mark.parametrize(
     ("failure", "retryable"),
     [
@@ -642,9 +644,13 @@ async def test_renamed_host_colliding_with_registered_name_is_not_retryable(
         ),
         pytest.param(ValueError("host has been deleted"), False, id="deleted-host"),
         pytest.param(
-            ValueError("managed host launch token is no longer valid"),
+            DataError(
+                "UPDATE hosts",
+                params={},
+                orig=Exception("value too long for column name"),
+            ),
             False,
-            id="expired-launch-token",
+            id="column-data-refused",
         ),
         pytest.param(
             OmnigentError("account authority has been revoked", code=ErrorCode.UNAUTHORIZED),
@@ -698,6 +704,29 @@ async def test_binary_hello_frame_is_refused_without_retry(
     assert error.stage == "hello"
     assert error.retryable is False
     assert registry.get(_HOST_ID) is None
+
+
+async def test_fault_after_connect_stays_retryable(
+    host_app: tuple[FastAPI, HostRegistry, HostStore],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once registered, even a normally fatal exception class keeps the backoff."""
+    from omnigent.server.routes import host_tunnel
+
+    app, registry, store = host_app
+
+    async def _explode(*args: object, **kwargs: object) -> None:
+        raise ValueError("receive loop crashed")
+
+    monkeypatch.setattr(host_tunnel, "_receive_loop", _explode)
+    comm = await _connect_route(app, _TUNNEL_PATH)
+    await comm.send_input({"type": "websocket.receive", "text": _make_hello()})
+
+    error = await _expect_connection_error(comm)
+    assert error.stage == "connected"
+    assert error.retryable is True
+    assert registry.get(_HOST_ID) is None
+    await asyncio.wait_for(_wait_offline(store, _HOST_ID), timeout=budget(2.0))
 
 
 async def test_registry_failure_marks_persisted_host_offline(
