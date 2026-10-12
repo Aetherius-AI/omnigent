@@ -409,6 +409,56 @@ describe("KeepBottomOnViewportResize", () => {
     }
   });
 
+  it("drops the viewport-resize follow-up pin once the reader escapes", () => {
+    const { metrics, scrollRoot } = makeScrollRoot();
+    makeContentRoot();
+    lockToBottom();
+    render(<KeepBottomOnViewportResize />);
+
+    metrics.clientHeight = 650;
+    act(() => resize?.());
+    expect(stickContext.scrollToBottom).toHaveBeenCalledOnce();
+    expect(frames.size).toBe(1);
+    // A wheel-up between the immediate pin and its frame; the library escapes.
+    metrics.scrollTop = 800;
+    stickContext.state.isAtBottom = false;
+    stickContext.state.escapedFromLock = true;
+    fireEvent.scroll(scrollRoot);
+    flushFrames();
+
+    expect(stickContext.scrollToBottom).toHaveBeenCalledOnce();
+  });
+
+  it("holds the queued follow-up pin when a selection begins after the immediate pin", () => {
+    const { metrics, scrollRoot } = makeScrollRoot();
+    makeContentRoot();
+    scrollRoot.append("reply text");
+    document.body.append(scrollRoot);
+    lockToBottom();
+    render(<KeepBottomOnViewportResize />);
+
+    try {
+      metrics.scrollHeight = 2900;
+      act(() => resize?.());
+      expect(metrics.scrollTop).toBe(2900 - 700 - 1);
+      expect(stickContext.scrollToBottom).toHaveBeenCalledOnce();
+      expect(frames.size).toBe(1);
+
+      // The reader starts selecting between the immediate pin and its frame.
+      const selection = document.getSelection()!;
+      const range = document.createRange();
+      range.selectNodeContents(scrollRoot);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      flushFrames();
+
+      expect(stickContext.scrollToBottom).toHaveBeenCalledOnce();
+    } finally {
+      document.getSelection()?.removeAllRanges();
+      scrollRoot.remove();
+    }
+  });
+
   it("disconnects the observer and cancels a queued follow-up frame", () => {
     const { metrics } = makeScrollRoot();
     stickContext.isAtBottom = true;
