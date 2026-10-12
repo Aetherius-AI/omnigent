@@ -42,7 +42,7 @@ pytestmark = pytest.mark.skipif(_REAL_TMUX is None, reason="requires tmux on PAT
 _MESSAGE = "hello from the web chat"
 _TMUX_TARGET = "claude"
 # How long the shim holds ``kill-session`` before running the real kill.
-_KILL_DELAY_S = 1.5
+_KILL_DELAY_S = 3.0
 # Longest heartbeat pause a loop that is not blocked by the kill may show: well
 # below _KILL_DELAY_S, with headroom for scheduler jitter on loaded CI hosts.
 _MAX_HEARTBEAT_GAP_S = 1.0

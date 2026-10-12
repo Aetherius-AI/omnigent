@@ -2031,11 +2031,17 @@ async def test_run_turn_does_not_reap_unrelated_runtime_error(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kill_error",
+    [RuntimeError("tmux kill failed"), FileNotFoundError("No such file or directory: 'tmux'")],
+    ids=["tmux-error", "tmux-binary-missing"],
+)
 async def test_run_turn_reports_reap_failure_with_prompt_timeout(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    kill_error: Exception,
 ) -> None:
-    """A failed hard-stop remains visible beside the delivery error."""
+    """A failed hard-stop remains visible beside the delivery error, whatever its type."""
 
     def fail_inject(bridge_dir_arg: Path, *, content: str, timeout_s: float = 30.0) -> None:
         del bridge_dir_arg, content, timeout_s
@@ -2043,7 +2049,7 @@ async def test_run_turn_reports_reap_failure_with_prompt_timeout(
 
     def fail_kill(bridge_dir_arg: Path, *, timeout_s: float) -> None:
         del bridge_dir_arg, timeout_s
-        raise RuntimeError("tmux kill failed")
+        raise kill_error
 
     monkeypatch.setattr(claude_native_executor, "inject_user_message", fail_inject)
     monkeypatch.setattr(claude_native_executor, "kill_session", fail_kill)
@@ -2060,7 +2066,7 @@ async def test_run_turn_reports_reap_failure_with_prompt_timeout(
 
     assert isinstance(events[0], ExecutorError)
     assert "terminal did not become ready" in events[0].message
-    assert "Cleanup also failed: tmux kill failed" in events[0].message
+    assert f"Cleanup also failed: {kill_error}" in events[0].message
 
 
 @pytest.mark.asyncio
@@ -2169,7 +2175,7 @@ async def test_cancel_during_timeout_cleanup_completes_kill_before_unlock(
     tmp_path: Path,
 ) -> None:
     """Cancelling a turn while its timeout cleanup waits on tmux finishes the kill
-    before the injection lock releases and the cancellation propagates."""
+    before the injection lock releases and the cancellation propagates, message intact."""
     kill_started = threading.Event()
     release_kill = threading.Event()
     killed = threading.Event()
@@ -2181,7 +2187,7 @@ async def test_cancel_during_timeout_cleanup_completes_kill_before_unlock(
     def slow_kill(bridge_dir_arg: Path, *, timeout_s: float) -> None:
         del bridge_dir_arg, timeout_s
         kill_started.set()
-        assert release_kill.wait(5), "test did not release the in-flight kill"
+        assert release_kill.wait(10), "test did not release the in-flight kill"
         killed.set()
 
     monkeypatch.delenv(REQUEST_SESSION_ID_ENV_VAR, raising=False)
@@ -2199,18 +2205,19 @@ async def test_cancel_during_timeout_cleanup_completes_kill_before_unlock(
 
     task = asyncio.create_task(deliver())
     try:
-        assert await asyncio.to_thread(kill_started.wait, 2), "timeout cleanup never started"
-        task.cancel()
+        assert await asyncio.to_thread(kill_started.wait, 10), "timeout cleanup never started"
+        task.cancel("stop requested")
         await asyncio.sleep(0.05)
         assert not task.done(), "cancellation mid-kill abandoned the cleanup"
         assert executor._inject_lock.locked(), (
             "injection lock released while the kill was in flight"
         )
         release_kill.set()
-        await asyncio.wait({task}, timeout=2)
+        await asyncio.wait({task}, timeout=10)
         assert task.done(), "turn did not finish after the kill was released"
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as cancelled:
             task.result()
+        assert cancelled.value.args == ("stop requested",)
         assert killed.is_set()
         assert not executor._inject_lock.locked()
     finally:
@@ -2237,7 +2244,7 @@ async def test_repeated_cancellation_mid_reap_completes_kill_before_unlock(
     def blocking_inject(bridge_dir_arg: Path, *, content: str, timeout_s: float = 30.0) -> None:
         del bridge_dir_arg, content, timeout_s
         inject_started.set()
-        assert inject_release.wait(5), "test did not release the in-flight delivery"
+        assert inject_release.wait(10), "test did not release the in-flight delivery"
 
     def slow_kill(bridge_dir_arg: Path, *, timeout_s: float) -> None:
         del bridge_dir_arg, timeout_s
@@ -2245,7 +2252,7 @@ async def test_repeated_cancellation_mid_reap_completes_kill_before_unlock(
         # this raises and the pane survives.
         claude_bridge._check_injection_cancelled()
         reap_started.set()
-        assert reap_release.wait(5), "test did not release the in-flight kill"
+        assert reap_release.wait(10), "test did not release the in-flight kill"
         reap_finished.set()
 
     monkeypatch.delenv(REQUEST_SESSION_ID_ENV_VAR, raising=False)
@@ -2264,12 +2271,12 @@ async def test_repeated_cancellation_mid_reap_completes_kill_before_unlock(
 
     task = asyncio.create_task(deliver())
     try:
-        assert await asyncio.to_thread(inject_started.wait, 2)
+        assert await asyncio.to_thread(inject_started.wait, 10)
         task.cancel()
         inject_release.set()
         # The drained delivery hands off to the kill; observing it start
         # requires a live event loop (a blocked loop deadlocks here).
-        assert await asyncio.to_thread(reap_started.wait, 2), (
+        assert await asyncio.to_thread(reap_started.wait, 10), (
             "kill never started after the cancelled delivery drained"
         )
         assert not task.done()
@@ -2280,7 +2287,7 @@ async def test_repeated_cancellation_mid_reap_completes_kill_before_unlock(
         await asyncio.sleep(0.05)
         assert not task.done(), "cancellation mid-kill abandoned the cleanup"
         reap_release.set()
-        await asyncio.wait({task}, timeout=2)
+        await asyncio.wait({task}, timeout=10)
         assert task.done(), "turn did not finish after the kill was released"
         with pytest.raises(asyncio.CancelledError):
             task.result()

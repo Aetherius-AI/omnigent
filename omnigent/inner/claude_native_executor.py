@@ -231,11 +231,9 @@ class ClaudeNativeExecutor(Executor):
                         context_path = self._bridge_dir / CLAUDE_FRAMEWORK_CONTEXT_FILE
                         context_path.unlink(missing_ok=True)
                         if wanted_model_arg is not None:
-                            # Accepted trade-off: ``/model <id>`` also saves the
-                            # pick as the person's global default for new Claude
-                            # sessions. Runs to completion before the message
-                            # inject below (same lock), so its confirm Enter can't
-                            # race the message.
+                            # ``/model <id>`` also saves the pick as the person's
+                            # global default (accepted trade-off). It runs under the
+                            # same lock, so its confirm Enter can't race the message.
                             await self._inject(
                                 partial(
                                     inject_slash_command,
@@ -351,22 +349,24 @@ class ClaudeNativeExecutor(Executor):
         # Created outside cancellable_injection, so the delivery's cancellation
         # flag cannot reject the kill's own tmux command.
         worker = asyncio.create_task(asyncio.to_thread(self._kill_failed_session))
-        cancelled = False
+        cancelled: asyncio.CancelledError | None = None
         while not worker.done():
             try:
                 # Worker exceptions surface via worker.result() below.
                 with contextlib.suppress(Exception):
                     await asyncio.shield(worker)
-            except asyncio.CancelledError:
-                cancelled = True
-        if cancelled:
+            except asyncio.CancelledError as exc:
+                cancelled = exc
+        if cancelled is not None:
             with contextlib.suppress(Exception):
                 worker.result()
-            raise asyncio.CancelledError
+            raise cancelled
         return worker.result()
 
     def _kill_failed_session(self) -> str | None:
-        """Blocking half of :meth:`_reap_failed_turn`; runs in a worker thread."""
+        """Blocking half of :meth:`_reap_failed_turn`; runs in a worker thread.
+
+        tmux and OS failures come back as text, so cleanup never replaces the turn's own error."""
         try:
             kill_session(self._bridge_dir, timeout_s=1.0)
         except TmuxSessionNotAdvertised:
@@ -374,7 +374,7 @@ class ClaudeNativeExecutor(Executor):
                 "claude-native: timed-out session already disappeared",
                 extra={"session_id": self._request_session_id},
             )
-        except RuntimeError as exc:
+        except (OSError, RuntimeError) as exc:
             _logger.warning(
                 "claude-native: failed to reap timed-out session",
                 exc_info=True,
