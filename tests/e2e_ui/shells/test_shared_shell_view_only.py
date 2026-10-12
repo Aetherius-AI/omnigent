@@ -1,9 +1,5 @@
-"""E2E: a non-owner opening a shared session's shell is told it is view only.
-
-Only the session owner may type into a terminal, so a collaborator's attach is
-read-only; the terminal must say so with a "View only" badge rather than drop
-keystrokes silently. Pinned for Edit and Read grants, since neither owns the session.
-"""
+"""E2E: a non-owner (Edit or Read) attaches to a shared session's shell read-only,
+and the terminal says so with a "View only" badge instead of dropping keystrokes."""
 
 from __future__ import annotations
 
