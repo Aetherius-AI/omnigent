@@ -14,6 +14,7 @@ from urllib.parse import unquote, urlsplit
 import httpx
 from websockets.exceptions import ConnectionClosed
 
+from omnigent.errors import ErrorCode
 from omnigent.runner.transports.ws_tunnel.frames import (
     EventAckFrame,
     EventBatchFrame,
@@ -45,16 +46,26 @@ class RunnerEventDispatcher:
         self._send: Callable[[str], Awaitable[None]] | None = None
         self._pending: dict[str, asyncio.Future[EventAckFrame]] = {}
         self._queue: asyncio.Queue[
-            tuple[str, list[dict[str, Any]], asyncio.Future[EventAckFrame]]
+            tuple[str, list[dict[str, Any]], asyncio.Future[EventAckFrame], asyncio.Lock]
         ] = asyncio.Queue(maxsize=32)
         self._locks: dict[str, asyncio.Lock] = {}
         self._workers: list[asyncio.Task[None]] = []
         self._outstanding = 0
+        self._last_dispatch_at: float | None = None
 
     @property
     def has_pending(self) -> bool:
         """Keep the runner alive while durable source events await an ACK."""
         return self._outstanding > 0
+
+    @property
+    def last_dispatch_at(self) -> float | None:
+        """Loop time of the last server-acknowledged batch, if any.
+
+        The runner idle watchdog reads this so an actively forwarding native
+        sub-agent counts as runner work while its parent session is idle.
+        """
+        return self._last_dispatch_at
 
     def _set_state(self, state: str) -> None:
         self._state = state
@@ -129,44 +140,54 @@ class RunnerEventDispatcher:
             ]
         result: asyncio.Future[EventAckFrame] = asyncio.get_running_loop().create_future()
         self._outstanding += 1
+        lock = self._locks.setdefault(session_id, asyncio.Lock())
+        owns_lock = False
         try:
-            await self._queue.put((session_id, events, result))
+            # Wait before taking a worker so one stalled session cannot occupy
+            # both workers. The queued item owns the lock through delivery cleanup.
+            await lock.acquire()
+            owns_lock = True
+            await self._queue.put((session_id, events, result, lock))
+            owns_lock = False
             return await result
         finally:
             self._outstanding -= 1
             if not result.done():
                 result.cancel()
+            if owns_lock:
+                lock.release()
 
     async def _worker(self) -> None:
         while True:
-            session_id, events, result = await self._queue.get()
+            session_id, events, result, lock = await self._queue.get()
             try:
                 if result.cancelled():
                     continue
-                async with self._locks.setdefault(session_id, asyncio.Lock()):
-                    delivery = asyncio.create_task(self._deliver(session_id, events))
+                delivery = asyncio.create_task(self._deliver(session_id, events))
 
-                    def stop_abandoned(
-                        future: asyncio.Future[EventAckFrame],
-                        delivery_task: asyncio.Task[EventAckFrame] = delivery,
-                    ) -> None:
-                        if future.cancelled():
-                            delivery_task.cancel()
+                def stop_abandoned(
+                    future: asyncio.Future[EventAckFrame],
+                    delivery_task: asyncio.Task[EventAckFrame] = delivery,
+                ) -> None:
+                    if future.cancelled():
+                        delivery_task.cancel()
 
-                    result.add_done_callback(stop_abandoned)
-                    try:
-                        ack = await delivery
-                    finally:
-                        result.remove_done_callback(stop_abandoned)
+                result.add_done_callback(stop_abandoned)
+                try:
+                    ack = await delivery
+                finally:
+                    result.remove_done_callback(stop_abandoned)
                 if not result.done():
                     result.set_result(ack)
             except asyncio.CancelledError:
-                if not result.cancelled():
+                worker = asyncio.current_task()
+                if not result.cancelled() or (worker is not None and worker.cancelling()):
                     raise
             except Exception as exc:  # noqa: BLE001 - propagate to the waiting producer.
                 if not result.done():
                     result.set_exception(exc)
             finally:
+                lock.release()
                 self._queue.task_done()
 
     async def _deliver(self, session_id: str, events: list[dict[str, Any]]) -> EventAckFrame:
@@ -196,6 +217,9 @@ class RunnerEventDispatcher:
                 # A disconnect may fail the future after its waiter stopped; mark it retrieved.
                 if future.done() and not future.cancelled():
                     future.exception()
+            # Only an acknowledged batch counts: a send that never reached the
+            # server must not look like forwarder progress to the watchdog.
+            self._last_dispatch_at = asyncio.get_running_loop().time()
             if ack.applied < 0 or ack.applied > len(remaining):
                 raise ValueError("invalid event acknowledgement")
             remaining = remaining[ack.applied :]
@@ -275,8 +299,15 @@ class TunnelEventClient(httpx.AsyncClient):
             return await self._synthetic_response(503, request=request)
         if ack.applied == len(events):
             return await self._synthetic_response(202, request=request, json={"queued": False})
+        if ack.retryable:
+            status = 503
+        elif ack.error == ErrorCode.FORBIDDEN:
+            # Wrong-runner refusal (session moved to another host), not a malformed event.
+            status = 403
+        else:
+            status = 422
         return await self._synthetic_response(
-            503 if ack.retryable else 422,
+            status,
             json={"detail": ack.error or "event batch was not accepted"},
             request=request,
         )
