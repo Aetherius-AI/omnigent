@@ -6,7 +6,7 @@
 
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -89,7 +89,13 @@ const startupCalls = vi.fn();
 let hosts: Host[] = [];
 vi.mock("@/hooks/useHosts", async (importActual) => ({
   ...(await importActual()),
-  useHosts: () => ({ data: hosts }),
+  useHosts: () => {
+    return useQuery({
+      queryKey: ["hosts", { includeSandbox: false }],
+      queryFn: async () => hosts,
+      initialData: hosts,
+    });
+  },
   useHarnessStartup: (hostId: string, harness: string) => {
     startupCalls(hostId, harness);
     return { data: startupError ? undefined : startupData, error: startupError, isPending: false };
@@ -154,10 +160,10 @@ vi.mock("./HarnessFixDialog", () => ({
     open: boolean;
     mode: "reconfigure" | "update" | "install";
     harness: string;
-    hostId: string;
+    host: Host;
     onFixed: (result: {
       configuredHarnesses: Record<string, boolean | string>;
-      credentialLabel?: string;
+      credentialKind?: "isaac" | "personal";
     }) => void;
   }) => {
     fixDialogProps(props);
@@ -165,7 +171,7 @@ vi.mock("./HarnessFixDialog", () => ({
       <div
         data-testid="fix-dialog"
         data-harness={props.harness}
-        data-host={props.hostId}
+        data-host={props.host.host_id}
         data-mode={props.mode}
       >
         <button
@@ -173,7 +179,7 @@ vi.mock("./HarnessFixDialog", () => ({
           onClick={() =>
             props.onFixed({
               configuredHarnesses: { [props.harness]: true },
-              credentialLabel: "Isaac",
+              credentialKind: "isaac",
             })
           }
         >
@@ -481,6 +487,16 @@ describe("Harness details", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Update" }));
     expect(screen.getByTestId("fix-dialog")).toHaveAttribute("data-mode", "update");
+  });
+
+  it("uses dedicated recovery copy for a readiness error", () => {
+    hosts = [{ ...ONLINE, configured_harnesses: { "codex-native": "readiness-error" } }];
+    renderHarnesses("codex-native");
+
+    expect(
+      screen.getByText("Codex isn’t working on my-laptop. Run setup again to fix it."),
+    ).toBeTruthy();
+    expect(screen.queryByText(/credential is missing/)).toBeNull();
   });
 
   it("applies the fixed readiness immediately and shows the ready notice", () => {

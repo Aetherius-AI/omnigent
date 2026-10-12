@@ -11,6 +11,9 @@ import { HarnessFixDialog, type HarnessFixDialogProps } from "./HarnessFixDialog
 vi.mock("@/lib/identity", () => ({ authenticatedFetch: vi.fn() }));
 vi.mock("@/components/ui/toast", () => ({ showToast: vi.fn() }));
 vi.mock("@/lib/clipboard", () => ({ copyText: vi.fn().mockResolvedValue(undefined) }));
+vi.mock("@/lib/CapabilitiesContext", () => ({
+  useServerInfo: () => ({ features: { harness_install: true } }),
+}));
 
 function json(body: unknown, init: ResponseInit = {}) {
   return new Response(JSON.stringify(body), {
@@ -60,8 +63,7 @@ const baseProps: HarnessFixDialogProps = {
   open: true,
   onOpenChange: vi.fn(),
   mode: "reconfigure",
-  hostId: "host/1",
-  hostName: "Local laptop",
+  host: { host_id: "host/1", name: "Local laptop", owner: "me", status: "online" },
   harness: "codex-native",
   harnessLabel: "Codex",
   onFixed: vi.fn(),
@@ -143,7 +145,7 @@ describe("HarnessFixDialog", () => {
     await waitFor(() =>
       expect(props.onFixed).toHaveBeenCalledWith({
         configuredHarnesses: { "codex-native": true },
-        credentialLabel: "Isaac",
+        credentialKind: "isaac",
       }),
     );
     expect(showToast).toHaveBeenCalledWith("Codex is ready on Local laptop");
@@ -209,7 +211,7 @@ describe("HarnessFixDialog", () => {
     await waitFor(() =>
       expect(props.onFixed).toHaveBeenCalledWith({
         configuredHarnesses: { "claude-native": true },
-        credentialLabel: "Personal subscription",
+        credentialKind: "personal",
       }),
     );
   });
@@ -241,25 +243,51 @@ describe("HarnessFixDialog", () => {
     expect(props.onOpenChange).not.toHaveBeenCalledWith(false);
   });
 
-  it("shows a refresh failure in the error state", async () => {
+  it("falls back to the hosts query when immediate refresh is unsupported", async () => {
     vi.mocked(authenticatedFetch).mockImplementation(async (input) => {
       const url = String(input);
       if (url === "/v1/harnesses") return json(catalog);
       if (url.endsWith("/harnesses/refresh")) {
-        return json({ detail: "The host readiness check timed out." }, { status: 504 });
+        return json(
+          {
+            error: {
+              code: "refresh_unsupported",
+              message: "This host cannot refresh harness readiness immediately.",
+            },
+          },
+          { status: 409 },
+        );
+      }
+      if (url === "/v1/hosts") {
+        return json({
+          hosts: [
+            {
+              host_id: "host/1",
+              name: "Local laptop",
+              owner: "me",
+              status: "online",
+              configured_harnesses: { "codex-native": true },
+              gateway_inference: { "codex-native": false },
+            },
+          ],
+        });
       }
       throw new Error(`Unexpected URL: ${url}`);
     });
     const user = userEvent.setup();
-    renderDialog();
+    const props = renderDialog();
 
     await screen.findByRole("radio", { name: /Personal subscription/ });
     await user.click(screen.getByRole("radio", { name: /Personal subscription/ }));
     await user.click(screen.getByRole("button", { name: "Authenticate" }));
     await user.click(screen.getByRole("button", { name: "Check again" }));
 
-    expect(await screen.findByText("The host readiness check timed out.")).toBeVisible();
-    expect(screen.getByRole("heading", { name: "Couldn’t reconfigure Codex" })).toBeVisible();
+    await waitFor(() =>
+      expect(props.onFixed).toHaveBeenCalledWith({
+        configuredHarnesses: { "codex-native": true },
+        credentialKind: "personal",
+      }),
+    );
   });
 
   it("preserves the selected credential after an error and Try again", async () => {
@@ -305,15 +333,16 @@ describe("HarnessFixDialog", () => {
       mode: "update",
       harness: "opencode-native",
       harnessLabel: "OpenCode",
-      currentVersion: "1.0.0",
     });
 
     expect(screen.getByRole("heading", { name: "Updating OpenCode…" })).toBeVisible();
-    expect(screen.getByText(/Updating OpenCode from 1.0.0/)).toBeVisible();
+    expect(
+      screen.getByText(/Updating OpenCode to the latest version on Local laptop/),
+    ).toBeVisible();
     await waitFor(() =>
       expect(props.onFixed).toHaveBeenCalledWith({
         configuredHarnesses: { "opencode-native": true },
-        credentialLabel: undefined,
+        credentialKind: undefined,
       }),
     );
   });
@@ -351,34 +380,198 @@ describe("HarnessFixDialog", () => {
     await waitFor(() => expect(props.onFixed).toHaveBeenCalled());
     expect(props.onFixed).toHaveBeenCalledWith({
       configuredHarnesses: { "codex-native": true },
-      credentialLabel: "Isaac",
+      credentialKind: "isaac",
     });
   });
 
-  it("uses omni setup when Pi's authenticated catalog command is null", async () => {
+  it("offers Isaac but not Personal for Pi", async () => {
     renderDialog({ harness: "pi-native", harnessLabel: "Pi" });
-    const user = userEvent.setup();
 
     expect(screen.getByRole("radio", { name: /Isaac/ })).toBeVisible();
-    await user.click(screen.getByRole("radio", { name: /Personal subscription/ }));
-    await user.click(screen.getByRole("button", { name: "Authenticate" }));
-
-    expect(screen.getByText("omni setup")).toBeVisible();
+    expect(screen.queryByRole("radio", { name: /Personal subscription/ })).not.toBeInTheDocument();
   });
 
-  it("keeps API key and gateway forms reachable for other harnesses", async () => {
+  it("keeps API key and gateway forms reachable through the secondary link", async () => {
     vi.mocked(authenticatedFetch).mockImplementation(async (input) => {
       const url = String(input);
       if (url === "/v1/harnesses") return json(catalog);
       if (url.endsWith("/credentials/detected")) return json({ credentials: [] });
       throw new Error(`Unexpected URL: ${url}`);
     });
-    renderDialog({ harness: "opencode-native", harnessLabel: "OpenCode" });
+    renderDialog();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Use an API key or gateway URL instead" }));
 
     expect(screen.getByText("Use an API key")).toBeVisible();
     expect(screen.getByText("Connect a gateway")).toBeVisible();
     expect(screen.getByPlaceholderText("Paste an API key")).toBeVisible();
     expect(screen.getByPlaceholderText(/Gateway base URL/)).toBeVisible();
     expect(screen.queryByText("Sign in with your subscription")).not.toBeInTheDocument();
+  });
+
+  it("installs a cardless harness before showing the omni setup fallback", async () => {
+    vi.mocked(authenticatedFetch).mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/v1/harnesses") return json(catalog);
+      if (url.endsWith("/install")) {
+        expect(init).toEqual({ method: "POST" });
+        return json({
+          object: "harness_install",
+          harness: "opencode-native",
+          configured_harnesses: { "opencode-native": "needs-auth" },
+          version: "1.2.3",
+        });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    renderDialog({ mode: "install", harness: "opencode-native", harnessLabel: "OpenCode" });
+    const user = userEvent.setup();
+
+    expect(screen.getByRole("heading", { name: "Install OpenCode" })).toBeVisible();
+    expect(screen.getByText("Install OpenCode on Local laptop.")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Install" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Set up OpenCode on Local laptop" }),
+    ).toBeVisible();
+    expect(screen.getAllByText("omni setup")).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "Check again" })).toBeVisible();
+    expect(
+      vi
+        .mocked(authenticatedFetch)
+        .mock.calls.some(([input]) => String(input).endsWith("/install")),
+    ).toBe(true);
+  });
+
+  it("never shows credential forms for a cardless harness", () => {
+    renderDialog({ harness: "qwen-native", harnessLabel: "Qwen" });
+
+    expect(screen.getByRole("heading", { name: "Set up Qwen on Local laptop" })).toBeVisible();
+    expect(screen.getAllByText("omni setup")).toHaveLength(2);
+    expect(screen.queryByText("Use an API key")).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("Paste an API key")).not.toBeInTheDocument();
+  });
+
+  it("routes an updated but unready harness back to credential choice", async () => {
+    vi.mocked(authenticatedFetch).mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "/v1/harnesses") return json(catalog);
+      if (url.endsWith("/install")) {
+        return json({
+          object: "harness_install",
+          harness: "codex-native",
+          configured_harnesses: { "codex-native": "needs-auth" },
+          version: "2.0.0",
+        });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const props = renderDialog({ mode: "update" });
+
+    expect(
+      await screen.findByText("Codex was updated but still needs to be set up on Local laptop."),
+    ).toBeVisible();
+    expect(screen.getByRole("radio", { name: /Isaac/ })).toBeVisible();
+    expect(props.onFixed).not.toHaveBeenCalled();
+  });
+
+  it("passes the installed version to the ready notice", async () => {
+    vi.mocked(authenticatedFetch).mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "/v1/harnesses") return json(catalog);
+      if (url.endsWith("/install")) {
+        return json({
+          object: "harness_install",
+          harness: "opencode-native",
+          configured_harnesses: { "opencode-native": true },
+          version: "2.4.0",
+        });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const props = renderDialog({
+      mode: "update",
+      harness: "opencode-native",
+      harnessLabel: "OpenCode",
+    });
+
+    await waitFor(() =>
+      expect(props.onFixed).toHaveBeenCalledWith({
+        configuredHarnesses: { "opencode-native": true },
+        credentialKind: undefined,
+        version: "2.4.0",
+      }),
+    );
+  });
+
+  it("uses the credential response directly without refreshing readiness", async () => {
+    vi.mocked(authenticatedFetch).mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/v1/harnesses") return json(catalog);
+      if (url.endsWith("/credentials/detected")) return json({ credentials: [] });
+      if (url.endsWith("/credential")) {
+        expect(init?.method).toBe("POST");
+        return json({
+          object: "harness_credential",
+          harness: "codex-native",
+          configured_harnesses: { "codex-native": true },
+        });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const props = renderDialog();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Use an API key or gateway URL instead" }));
+    await user.type(screen.getByPlaceholderText("Paste an API key"), "secret");
+    await user.click(screen.getAllByRole("button", { name: "Save" })[0]);
+
+    await waitFor(() =>
+      expect(props.onFixed).toHaveBeenCalledWith({
+        configuredHarnesses: { "codex-native": true },
+        credentialKind: undefined,
+      }),
+    );
+    expect(
+      vi
+        .mocked(authenticatedFetch)
+        .mock.calls.every(([input]) => !String(input).endsWith("/refresh")),
+    ).toBe(true);
+  });
+
+  it("disables Check again while the readiness request is in flight", async () => {
+    let resolveRefresh: ((response: Response) => void) | undefined;
+    const refresh = new Promise<Response>((resolve) => {
+      resolveRefresh = resolve;
+    });
+    vi.mocked(authenticatedFetch).mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "/v1/harnesses") return json(catalog);
+      if (url.endsWith("/harnesses/refresh")) return refresh;
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    renderDialog();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Authenticate" }));
+    await user.click(screen.getByRole("button", { name: "Check again" }));
+
+    expect(screen.getByRole("button", { name: "Checking…" })).toBeDisabled();
+    expect(
+      vi
+        .mocked(authenticatedFetch)
+        .mock.calls.filter(([input]) => String(input).endsWith("/harnesses/refresh")),
+    ).toHaveLength(1);
+    resolveRefresh?.(
+      json({
+        configured_harnesses: { "codex-native": "needs-auth" },
+        gateway_inference: null,
+      }),
+    );
+    expect(await screen.findByRole("button", { name: "Check again" })).toBeEnabled();
+  });
+
+  it("includes reversed native aliases in credential families", async () => {
+    renderDialog({ harness: "native-codex", harnessLabel: "Codex" });
+    expect(screen.getByRole("radio", { name: /Isaac/ })).toBeVisible();
+    expect(screen.getByRole("radio", { name: /Personal subscription/ })).toBeVisible();
   });
 });

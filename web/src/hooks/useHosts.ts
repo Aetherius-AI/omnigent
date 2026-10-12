@@ -7,7 +7,7 @@ import {
 } from "@tanstack/react-query";
 import { useEffect, useLayoutEffect, useRef } from "react";
 import { authenticatedFetch } from "@/lib/identity";
-import { ApiError } from "@/lib/sessionsApi";
+import { ApiError, apiErrorFromResponse } from "@/lib/sessionsApi";
 import type { NativeModelOption } from "@/lib/types";
 
 export interface Host {
@@ -201,7 +201,7 @@ export async function refreshHarnessesOnHost(hostId: string): Promise<RefreshHar
     `/v1/hosts/${encodeURIComponent(hostId)}/harnesses/refresh`,
     { method: "POST" },
   );
-  if (!res.ok) throw new Error(await responseDetail(res));
+  if (!res.ok) throw await apiErrorFromResponse(res);
   return (await res.json()) as RefreshHarnessesResult;
 }
 
@@ -300,7 +300,7 @@ export interface StoreCredentialInput {
   env_var?: string;
 }
 
-interface StoreCredentialResult {
+export interface StoreCredentialResult {
   object: "harness_credential";
   harness: string;
   configured_harnesses: Record<string, boolean | string>;

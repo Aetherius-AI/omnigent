@@ -38,6 +38,7 @@ from omnigent.entities import Conversation
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.harness_aliases import canonicalize_harness
 from omnigent.host.frames import (
+    CAP_REFRESH_HARNESSES,
     HARNESS_NOT_CONFIGURED_ERROR_CODE,
     WORKSPACE_MISSING_ERROR_CODE,
     HostCreateDirFrame,
@@ -1503,6 +1504,14 @@ def create_hosts_router(
         if conn is None:
             raise _host_absent_error(host)
         _require_harness_setup_support(conn, "refreshing harness readiness")
+        if CAP_REFRESH_HARNESSES not in conn.hello.capabilities:
+            raise OmnigentError(
+                (
+                    f"host '{conn.hello.name}' does not support immediate harness refresh; "
+                    "use the latest readiness reported by the host"
+                ),
+                code=ErrorCode.REFRESH_UNSUPPORTED,
+            )
 
         result = await _proxy_refresh_harnesses(
             host_registry=host_registry,

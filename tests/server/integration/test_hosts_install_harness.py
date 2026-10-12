@@ -30,6 +30,7 @@ from httpx import ASGITransport, AsyncClient
 
 from omnigent.errors import OmnigentError
 from omnigent.host.frames import (
+    CAP_REFRESH_HARNESSES,
     HostHelloFrame,
     HostInstallHarnessFrame,
     HostInstallHarnessResultFrame,
@@ -81,6 +82,7 @@ def _hello_text(name: str = _HOST_NAME) -> str:
             version="0.1.0-test",
             frame_protocol_version=1,
             name=name,
+            capabilities=[CAP_REFRESH_HARNESSES],
         )
     )
 
@@ -538,6 +540,27 @@ async def test_refresh_harnesses_route_hidden_when_flag_off(
         resp = await client.post(f"/v1/hosts/{_HOST_ID}/harnesses/refresh")
 
     assert resp.status_code == 404
+
+
+async def test_refresh_harnesses_old_host_returns_unsupported_without_waiting(
+    install_setup: tuple[
+        FastAPI,
+        HostRegistry,
+        ApplicationCommunicator,
+        dict[str, dict[str, Any]],
+        asyncio.Task[None],
+    ],
+) -> None:
+    app, registry, _comm, _replies, _drain = install_setup
+    conn = registry.get(_HOST_ID)
+    assert conn is not None
+    conn.hello.capabilities = []
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(f"/v1/hosts/{_HOST_ID}/harnesses/refresh")
+
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "refresh_unsupported"
 
 
 async def test_refresh_harnesses_offline_host_returns_409(

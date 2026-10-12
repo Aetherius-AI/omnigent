@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { CheckIcon, CircleIcon, CopyIcon, KeyRoundIcon, Loader2Icon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -12,92 +13,101 @@ import {
 } from "@/components/ui/dialog";
 import { showToast } from "@/components/ui/toast";
 import {
+  fetchHosts,
   installHarnessOnHost,
   refreshHarnessesOnHost,
-  useInstallHarness,
   type Host,
+  type StoreCredentialResult,
 } from "@/hooks/useHosts";
 import { useHarnessSetupSteps } from "@/lib/agentLabels";
+import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { copyText } from "@/lib/clipboard";
+import { harnessAuthableOnHost, harnessCredentialFamily, isCodexHarness } from "@/lib/harnessSetup";
+import { ApiError } from "@/lib/sessionsApi";
 import { cn } from "@/lib/utils";
 import { HarnessCredentialForm } from "@/shell/HarnessCredentialForm";
 
 export type HarnessFixMode = "reconfigure" | "update" | "install";
+export type HarnessCredentialKind = "isaac" | "personal";
 
 export interface HarnessFixResult {
   configuredHarnesses: Record<string, boolean | string>;
-  credentialLabel?: string;
+  credentialKind?: HarnessCredentialKind;
+  version?: string;
 }
 
 export interface HarnessFixDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   mode: HarnessFixMode;
-  hostId: string;
-  hostName: string;
+  host: Host;
   harness: string;
   harnessLabel: string;
-  currentVersion?: string;
   onFixed: (result: HarnessFixResult) => void;
 }
 
 type CredentialChoice = "isaac" | "personal";
-type Phase = "choose" | "progress" | "isaac" | "personal" | "credentials" | "error";
+type Phase =
+  "install" | "choose" | "progress" | "isaac" | "personal" | "credentials" | "setup" | "error";
 
-const ISAAC_HARNESSES = new Set([
-  "claude",
-  "claude-native",
-  "codex",
-  "codex-native",
-  "pi",
-  "pi-native",
-]);
-const PERSONAL_HARNESSES = new Set([
-  "claude",
-  "claude-native",
-  "codex",
-  "codex-native",
-  "pi",
-  "pi-native",
-]);
+function canonicalCredentialHarness(harness: string): string {
+  if (harness === "native-claude") return "claude-native";
+  if (harness === "native-codex") return "codex-native";
+  if (harness === "native-pi") return "pi-native";
+  return harness;
+}
+
 export function HarnessFixDialog(props: HarnessFixDialogProps) {
-  const {
-    open,
-    onOpenChange,
-    mode,
-    hostId,
-    hostName,
-    harness,
-    harnessLabel,
-    currentVersion,
-    onFixed,
-  } = props;
+  const { open, onOpenChange, mode, host, harness, harnessLabel, onFixed } = props;
+  const hostId = host.host_id;
+  const hostName = host.name;
+  const queryClient = useQueryClient();
+  const info = useServerInfo();
   const setupSteps = useHarnessSetupSteps();
+  const canonicalHarness = canonicalCredentialHarness(harness);
+  const credentialFamily = harnessCredentialFamily(harness);
   const loginCommand = useMemo(() => {
-    const command = setupSteps[harness]?.find((step) => step.kind === "auth")?.command ?? null;
-    if (harness === "codex" || harness === "codex-native") {
-      return command ? "codex login --device-auth" : null;
-    }
-    if (harness === "pi" || harness === "pi-native") return command ?? "omni setup";
-    return command;
-  }, [harness, setupSteps]);
-  const isaacSupported = ISAAC_HARNESSES.has(harness);
-  const personalSupported = PERSONAL_HARNESSES.has(harness) && loginCommand !== null;
+    if (isCodexHarness(harness)) return "codex login --device-auth";
+    if (canonicalHarness === "pi" || canonicalHarness === "pi-native") return null;
+    return setupSteps[canonicalHarness]?.find((step) => step.kind === "auth")?.command ?? null;
+  }, [canonicalHarness, harness, setupSteps]);
+  const isaacSupported = credentialFamily !== null;
+  const personalSupported =
+    loginCommand !== null &&
+    (isCodexHarness(harness) ||
+      canonicalHarness === "claude" ||
+      canonicalHarness === "claude-native");
   const hasCredentialCards = isaacSupported || personalSupported;
+  const canUseCredentialForm = harnessAuthableOnHost(info, harness, host);
   const initialPhase: Phase =
-    mode === "update" ? "progress" : hasCredentialCards ? "choose" : "credentials";
+    mode === "update"
+      ? "progress"
+      : mode === "install" && !hasCredentialCards
+        ? "install"
+        : hasCredentialCards
+          ? "choose"
+          : "setup";
 
   const [phase, setPhase] = useState<Phase>(initialPhase);
   const [choice, setChoice] = useState<CredentialChoice>(isaacSupported ? "isaac" : "personal");
   const [error, setError] = useState("");
   const [stillNotSignedIn, setStillNotSignedIn] = useState(false);
+  const [updatedNeedsSetup, setUpdatedNeedsSetup] = useState(false);
+  const [checking, setChecking] = useState(false);
   const runId = useRef(0);
-  const install = useInstallHarness(hostId);
 
   const finish = useCallback(
-    (configuredHarnesses: Record<string, boolean | string>, credentialLabel?: string) => {
-      onFixed({ configuredHarnesses, credentialLabel });
-      showToast(`${harnessLabel} is ready on ${hostName}`);
+    (
+      configuredHarnesses: Record<string, boolean | string>,
+      credentialKind?: HarnessCredentialKind,
+      version?: string | null,
+    ) => {
+      onFixed({
+        configuredHarnesses,
+        credentialKind,
+        ...(version ? { version } : {}),
+      });
+      showToast(`${harnessLabel}${version ? ` ${version}` : ""} is ready on ${hostName}`);
       onOpenChange(false);
     },
     [harnessLabel, hostName, onFixed, onOpenChange],
@@ -114,35 +124,31 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
     setPhase(selected);
   }, []);
 
+  const needsSetup = useCallback(() => {
+    setUpdatedNeedsSetup(mode === "update");
+    setPhase(hasCredentialCards ? "choose" : "setup");
+  }, [hasCredentialCards, mode]);
+
   const start = useCallback(async () => {
     const id = ++runId.current;
     setError("");
     setStillNotSignedIn(false);
+    setUpdatedNeedsSetup(false);
+    setPhase("progress");
     try {
-      if (mode === "update") {
-        setPhase("progress");
-        const result = await installHarnessOnHost(hostId, harness);
-        if (runId.current === id) finish(result.configured_harnesses);
+      const result = await installHarnessOnHost(hostId, harness);
+      if (runId.current !== id) return;
+      if (result.configured_harnesses[harness] === true) {
+        finish(result.configured_harnesses, undefined, result.version);
         return;
       }
-      if (mode === "install") {
-        setPhase("progress");
-        const result = await install.mutateAsync(harness);
-        if (runId.current !== id) return;
-        if (result.configured_harnesses[harness] === true) {
-          finish(result.configured_harnesses);
-          return;
-        }
-        if (!hasCredentialCards) {
-          setPhase("credentials");
-          return;
-        }
-      }
-      authenticate(choice);
+      if (mode === "update") needsSetup();
+      else if (hasCredentialCards) authenticate(choice);
+      else setPhase("setup");
     } catch (reason) {
       fail(reason, id);
     }
-  }, [authenticate, choice, fail, finish, harness, hasCredentialCards, hostId, install, mode]);
+  }, [authenticate, choice, fail, finish, harness, hasCredentialCards, hostId, mode, needsSetup]);
   const startRef = useRef(start);
   startRef.current = start;
 
@@ -152,6 +158,8 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
     setChoice(isaacSupported ? "isaac" : "personal");
     setError("");
     setStillNotSignedIn(false);
+    setUpdatedNeedsSetup(false);
+    setChecking(false);
     setPhase(initialPhase);
     if (mode === "update") void startRef.current();
     return () => {
@@ -168,41 +176,66 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
     runId.current += 1;
     setError("");
     setStillNotSignedIn(false);
-    setPhase(mode === "update" ? "progress" : hasCredentialCards ? "choose" : "credentials");
+    setUpdatedNeedsSetup(false);
+    setPhase(initialPhase);
     if (mode === "update") void start();
   };
 
+  const refetchReadinessFromHosts = useCallback(async () => {
+    await queryClient.invalidateQueries({ queryKey: ["hosts"] });
+    const hosts = await queryClient.fetchQuery({
+      queryKey: ["hosts", { includeSandbox: false }],
+      queryFn: () => fetchHosts(false),
+      staleTime: 0,
+    });
+    const refreshed = hosts.find((candidate) => candidate.host_id === hostId);
+    if (!refreshed) throw new Error(`${hostName} is no longer connected.`);
+    return {
+      configured_harnesses: refreshed.configured_harnesses ?? {},
+      gateway_inference: refreshed.gateway_inference ?? null,
+    };
+  }, [hostId, hostName, queryClient]);
+
   const checkAgain = async () => {
+    if (checking) return;
     const id = ++runId.current;
+    setChecking(true);
     setStillNotSignedIn(false);
     try {
-      const result = await refreshHarnessesOnHost(hostId);
+      let result;
+      try {
+        result = await refreshHarnessesOnHost(hostId);
+      } catch (reason) {
+        if (
+          reason instanceof ApiError &&
+          (reason.code === "refresh_unsupported" || reason.status === 504)
+        ) {
+          result = await refetchReadinessFromHosts();
+        } else {
+          throw reason;
+        }
+      }
       if (runId.current !== id) return;
       if (result.configured_harnesses[harness] === true) {
-        const credentialLabel =
+        const credentialKind: HarnessCredentialKind | undefined =
           phase === "isaac" && result.gateway_inference?.[harness]
-            ? "Isaac"
+            ? "isaac"
             : phase === "personal"
-              ? "Personal subscription"
+              ? "personal"
               : undefined;
-        finish(result.configured_harnesses, credentialLabel);
+        finish(result.configured_harnesses, credentialKind);
       } else {
         setStillNotSignedIn(true);
       }
     } catch (reason) {
       fail(reason, id);
+    } finally {
+      if (runId.current === id) setChecking(false);
     }
   };
 
-  const credentialHost: Host = {
-    host_id: hostId,
-    name: hostName,
-    owner: "",
-    status: "online",
-  };
-
-  const onCredentialStored = () => {
-    void checkAgain();
+  const onCredentialStored = (result: StoreCredentialResult) => {
+    finish(result.configured_harnesses);
   };
 
   return (
@@ -213,15 +246,25 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
         </DialogHeader>
 
         <div className="flex flex-col gap-5 px-6 pb-2">
-          {phase === "choose" ? (
+          {updatedNeedsSetup && phase !== "progress" && (
+            <p role="status" className="text-sm text-amber-700 dark:text-amber-300">
+              {harnessLabel} was updated but still needs to be set up on {hostName}.
+            </p>
+          )}
+          {phase === "install" ? (
+            <DialogDescription>
+              Install {harnessLabel} on {hostName}.
+            </DialogDescription>
+          ) : phase === "choose" ? (
             <ChooseCredential
-              mode={mode}
               choice={choice}
               onChoice={setChoice}
               hostName={hostName}
               harnessLabel={harnessLabel}
               isaacSupported={isaacSupported}
               personalSupported={personalSupported}
+              canUseCredentialForm={canUseCredentialForm}
+              onUseCredentialForm={() => setPhase("credentials")}
             />
           ) : phase === "error" ? (
             <ErrorState error={error} hostName={hostName} />
@@ -243,26 +286,34 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
               harnessLabel={harnessLabel}
               hostName={hostName}
               harness={harness}
-              host={credentialHost}
+              host={host}
               onDone={onCredentialStored}
             />
-          ) : (
-            <ProgressState
-              mode={mode}
-              hostName={hostName}
+          ) : phase === "setup" ? (
+            <SetupCommand
               harnessLabel={harnessLabel}
-              currentVersion={currentVersion}
+              hostName={hostName}
+              stillNotSignedIn={stillNotSignedIn}
             />
+          ) : (
+            <ProgressState mode={mode} hostName={hostName} harnessLabel={harnessLabel} />
           )}
         </div>
 
         <DialogFooter className="mx-0 -mb-0 mt-4 rounded-none border-t border-border px-6 py-4">
-          {phase === "choose" ? (
+          {phase === "install" ? (
             <>
               <Button variant="outline" onClick={() => setOpen(false)}>
                 Cancel
               </Button>
-              <Button onClick={() => void start()}>
+              <Button onClick={() => void start()}>Install</Button>
+            </>
+          ) : phase === "choose" ? (
+            <>
+              <Button variant="outline" onClick={() => setOpen(false)}>
+                Cancel
+              </Button>
+              <Button onClick={() => (mode === "install" ? void start() : authenticate(choice))}>
                 {mode === "install" ? "Install" : "Authenticate"}
               </Button>
             </>
@@ -273,12 +324,21 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
               </Button>
               <Button onClick={retry}>Try again</Button>
             </>
-          ) : phase === "personal" || phase === "isaac" ? (
+          ) : phase === "personal" || phase === "isaac" || phase === "setup" ? (
             <>
               <Button variant="outline" onClick={() => setOpen(false)}>
                 Close
               </Button>
-              <Button onClick={() => void checkAgain()}>Check again</Button>
+              <Button disabled={checking} onClick={() => void checkAgain()}>
+                {checking ? (
+                  <>
+                    <Loader2Icon className="size-4 animate-spin" />
+                    Checking…
+                  </>
+                ) : (
+                  "Check again"
+                )}
+              </Button>
             </>
           ) : phase === "credentials" ? (
             <Button variant="outline" onClick={() => setOpen(false)}>
@@ -296,28 +356,28 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
 }
 
 function ChooseCredential({
-  mode,
   choice,
   onChoice,
   hostName,
   harnessLabel,
   isaacSupported,
   personalSupported,
+  canUseCredentialForm,
+  onUseCredentialForm,
 }: {
-  mode: HarnessFixMode;
   choice: CredentialChoice;
   onChoice: (choice: CredentialChoice) => void;
   hostName: string;
   harnessLabel: string;
   isaacSupported: boolean;
   personalSupported: boolean;
+  canUseCredentialForm: boolean;
+  onUseCredentialForm: () => void;
 }) {
   return (
     <>
       <DialogDescription>
-        {mode === "install"
-          ? `Choose the credential ${harnessLabel} will use to authenticate.`
-          : `Choose the credential ${harnessLabel} will use to authenticate on ${hostName}.`}
+        Choose the credential {harnessLabel} will use to authenticate on {hostName}.
       </DialogDescription>
       <div role="radiogroup" aria-label="Credential" className="flex flex-col gap-2">
         {isaacSupported && (
@@ -337,6 +397,15 @@ function ChooseCredential({
           />
         )}
       </div>
+      {canUseCredentialForm && (
+        <button
+          type="button"
+          className="self-start text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+          onClick={onUseCredentialForm}
+        >
+          Use an API key or gateway URL instead
+        </button>
+      )}
     </>
   );
 }
@@ -386,40 +455,26 @@ function ProgressState({
   mode,
   hostName,
   harnessLabel,
-  currentVersion,
 }: {
   mode: HarnessFixMode;
   hostName: string;
   harnessLabel: string;
-  currentVersion?: string;
 }) {
-  if (mode === "update") {
-    return (
-      <>
-        <DialogDescription>
-          Updating {harnessLabel} from {currentVersion ?? "the current version"} to the latest
-          version on {hostName}.
-        </DialogDescription>
-        <Steps
-          rows={[
-            ["Downloaded the latest version", "done"],
-            [`Installing on ${hostName}`, "active"],
-            [`Checking ${harnessLabel}`, "pending"],
-          ]}
-        />
-      </>
-    );
-  }
-
+  const installing =
+    mode === "update"
+      ? `Installing the latest version on ${hostName}`
+      : `Installing ${harnessLabel} on ${hostName}`;
   return (
     <>
       <DialogDescription>
-        Setting up {harnessLabel} on {hostName}. This usually takes a few seconds.
+        {mode === "update"
+          ? `Updating ${harnessLabel} to the latest version on ${hostName}.`
+          : `Installing ${harnessLabel} on ${hostName}.`}{" "}
+        This can take a few minutes.
       </DialogDescription>
       <Steps
         rows={[
-          ["Connected to the Databricks Unity Gateway", "done"],
-          [`Saving the credential on ${hostName}`, "active"],
+          [installing, "active"],
           [`Checking ${harnessLabel}`, "pending"],
         ]}
       />
@@ -443,7 +498,7 @@ function PersonalCommand({
       <DialogDescription>Run this in a terminal on {hostName}, then come back.</DialogDescription>
       <CommandRow command={command} label="Copy login command" />
       <p className="text-sm text-muted-foreground">
-        {harness.startsWith("claude")
+        {harness.includes("claude")
           ? "Open the link it prints, then paste the code from your browser back into the terminal."
           : "Open the link it prints and enter the one-time code."}
       </p>
@@ -481,6 +536,31 @@ function IsaacCommand({
   );
 }
 
+function SetupCommand({
+  harnessLabel,
+  hostName,
+  stillNotSignedIn,
+}: {
+  harnessLabel: string;
+  hostName: string;
+  stillNotSignedIn: boolean;
+}) {
+  return (
+    <>
+      <DialogDescription>
+        Run <code className="font-mono text-foreground">omni setup</code> on {hostName} to finish
+        setting up {harnessLabel}.
+      </DialogDescription>
+      <CommandRow command="omni setup" label="Copy omni setup" />
+      {stillNotSignedIn && (
+        <p role="status" className="text-sm text-destructive">
+          {harnessLabel} still isn’t ready on {hostName}.
+        </p>
+      )}
+    </>
+  );
+}
+
 function CredentialForms({
   harnessLabel,
   hostName,
@@ -492,7 +572,7 @@ function CredentialForms({
   hostName: string;
   harness: string;
   host: Host;
-  onDone: () => void;
+  onDone: (result: StoreCredentialResult) => void;
 }) {
   return (
     <>
@@ -569,6 +649,7 @@ function dialogTitle(
 ): string {
   if (phase === "personal") return `Sign in to ${harnessLabel} on ${hostName}`;
   if (phase === "isaac") return `Set up Isaac for ${harnessLabel} on ${hostName}`;
+  if (phase === "setup") return `Set up ${harnessLabel} on ${hostName}`;
   if (phase === "error") {
     if (mode === "update") return `Couldn’t update ${harnessLabel}`;
     if (mode === "install") return `Couldn’t install ${harnessLabel}`;
