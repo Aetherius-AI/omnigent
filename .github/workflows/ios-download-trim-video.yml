@@ -1,0 +1,41 @@
+name: Temporary trim iOS download demo
+
+on:
+  push:
+    branches: [test/ios-download-native-video]
+
+jobs:
+  trim:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ffmpeg
+
+      - name: Download successful native recordings
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p raw trimmed
+          gh run download 38189470190 \
+            --repo omnigent-ai/omnigent \
+            --name ios-download-native-before-after \
+            --dir raw
+
+      - name: Trim relevant interactions
+        run: |
+          ffmpeg -y -v error -ss 235 -t 45 -i raw/before.mp4 \
+            -vf "scale=720:-2,drawtext=text='BEFORE — download exits Omnigent':fontcolor=white:fontsize=28:box=1:boxcolor=black@0.75:boxborderw=14:x=(w-text_w)/2:y=70" \
+            -c:v libx264 -preset medium -crf 22 -movflags +faststart -an \
+            trimmed/before-ios-download-bug.mp4
+          ffmpeg -y -v error -ss 75 -t 10 -i raw/after.mp4 \
+            -vf "scale=720:-2,drawtext=text='AFTER — native share panel, app stays open':fontcolor=white:fontsize=25:box=1:boxcolor=black@0.75:boxborderw=14:x=(w-text_w)/2:y=70" \
+            -c:v libx264 -preset medium -crf 22 -movflags +faststart -an \
+            trimmed/after-ios-download-fixed.mp4
+
+      - name: Upload concise demo
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ios-download-native-trimmed-demo
+          path: trimmed/*.mp4
