@@ -1,13 +1,7 @@
-"""E2E: Omnigent's injected Cursor plumbing must not show as session changes.
+"""E2E: runner-injected Cursor config stays out of session changes.
 
-Binding a cursor-native session makes the runner write ``.cursor/mcp.json`` and
-``.cursor/hooks.json`` into the workspace before the Cursor TUI launches. In a
-git workspace those untracked files reached the Workspace rail's Changes tab as
-Added although the user changed nothing. This drives the real journey (clean
-git project, runner-bound cursor-native session, Changes tab) and asserts the
-correct behavior, so it fails on a build with the bug. Needs ``cursor-agent``
-and ``tmux`` on PATH; the plumbing is written before Cursor authenticates, so
-no Cursor login is required.
+Needs ``cursor-agent`` and ``tmux`` on PATH; the plumbing is written before
+Cursor authenticates, so no Cursor login is required.
 """
 
 from __future__ import annotations
@@ -128,13 +122,19 @@ def test_cursor_plumbing_hidden_from_session_changes(
     # Open the browser only now, so a recording starts at the user's journey
     # rather than at the runner bind that precedes it.
     page: Page = request.getfixturevalue("page")
-    page.goto(f"{base_url}/c/{session_id}")
-
-    open_right_rail(page)
-    rail = page.get_by_role("complementary", name="Workspace")
-    changes_tab = rail.get_by_role("tab", name=re.compile("^Changes"))
-    expect(changes_tab).to_be_visible(timeout=_RAIL_READY_TIMEOUT_MS)
-    changes_tab.click()
+    changes_path = f"/v1/sessions/{session_id}/resources/environments/default/changes"
+    # The rail shows the same empty state while the runner is unreachable, so
+    # trust it only after the browser's own changes request has succeeded.
+    with page.expect_response(
+        lambda response: changes_path in response.url and response.status == 200,
+        timeout=_RAIL_READY_TIMEOUT_MS,
+    ):
+        page.goto(f"{base_url}/c/{session_id}")
+        open_right_rail(page)
+        rail = page.get_by_role("complementary", name="Workspace")
+        changes_tab = rail.get_by_role("tab", name=re.compile("^Changes"))
+        expect(changes_tab).to_be_visible(timeout=_RAIL_READY_TIMEOUT_MS)
+        changes_tab.click()
     expect(changes_tab).to_have_attribute("aria-selected", "true")
 
     # Correct behavior. On a build with the bug the rail instead lists the two
@@ -145,10 +145,7 @@ def test_cursor_plumbing_hidden_from_session_changes(
         expect(rail.get_by_text(n, exact=True)).to_have_count(0)
 
     # The changed-files endpoint the panel reads must also omit the plumbing.
-    resp = httpx.get(
-        f"{base_url}/v1/sessions/{session_id}/resources/environments/default/changes",
-        timeout=30.0,
-    )
+    resp = httpx.get(f"{base_url}{changes_path}", timeout=30.0)
     resp.raise_for_status()
     paths = [entry["path"] for entry in resp.json().get("data", [])]
     injected = [p for p in paths if p.endswith((".cursor/mcp.json", ".cursor/hooks.json"))]
