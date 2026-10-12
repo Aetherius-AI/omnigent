@@ -112,20 +112,25 @@ class _StubRunnerRouter:
         )
 
 
-@pytest.mark.asyncio
-async def test_mcp_tools_list_failure_publishes_startup_event(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    published: list[dict[str, object]] = []
+@pytest.fixture
+def published(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+    """Capture ``session.mcp_startup`` publishes against an empty startup cache."""
+    events: list[dict[str, object]] = []
 
     class _RecordingStream:
         @staticmethod
         def publish(conversation_id: str, event: dict[str, object]) -> None:
-            published.append({"_conversation_id": conversation_id, **event})
+            events.append({"_conversation_id": conversation_id, **event})
 
     monkeypatch.setattr(_helpers_mod, "session_stream", _RecordingStream)
     monkeypatch.setattr(_helpers_mod, "_session_mcp_startup_cache", {})
+    return events
 
+
+@pytest.mark.asyncio
+async def test_mcp_tools_list_failure_publishes_startup_event(
+    published: list[dict[str, object]],
+) -> None:
     session_id = "conv_sdk_bad_token"
     response = await _handle_mcp_tools_list(
         rpc_id=1,
@@ -148,18 +153,8 @@ async def test_mcp_tools_list_failure_publishes_startup_event(
 
 @pytest.mark.asyncio
 async def test_mcp_tools_list_recovery_clears_startup_event(
-    monkeypatch: pytest.MonkeyPatch,
+    published: list[dict[str, object]],
 ) -> None:
-    published: list[dict[str, object]] = []
-
-    class _RecordingStream:
-        @staticmethod
-        def publish(conversation_id: str, event: dict[str, object]) -> None:
-            published.append({"_conversation_id": conversation_id, **event})
-
-    monkeypatch.setattr(_helpers_mod, "session_stream", _RecordingStream)
-    monkeypatch.setattr(_helpers_mod, "_session_mcp_startup_cache", {})
-
     session_id = "conv_sdk_recovers"
     await _handle_mcp_tools_list(
         rpc_id=1,
@@ -181,18 +176,8 @@ async def test_mcp_tools_list_recovery_clears_startup_event(
 
 @pytest.mark.asyncio
 async def test_mcp_tools_list_all_healthy_publishes_nothing(
-    monkeypatch: pytest.MonkeyPatch,
+    published: list[dict[str, object]],
 ) -> None:
-    published: list[dict[str, object]] = []
-
-    class _RecordingStream:
-        @staticmethod
-        def publish(conversation_id: str, event: dict[str, object]) -> None:
-            published.append({"_conversation_id": conversation_id, **event})
-
-    monkeypatch.setattr(_helpers_mod, "session_stream", _RecordingStream)
-    monkeypatch.setattr(_helpers_mod, "_session_mcp_startup_cache", {})
-
     response = await _handle_mcp_tools_list(
         rpc_id=1,
         session_id="conv_sdk_healthy",
@@ -207,17 +192,8 @@ async def test_mcp_tools_list_all_healthy_publishes_nothing(
 @pytest.mark.asyncio
 async def test_mcp_tools_list_native_session_skips_publish(
     monkeypatch: pytest.MonkeyPatch,
+    published: list[dict[str, object]],
 ) -> None:
-    published: list[dict[str, object]] = []
-
-    class _RecordingStream:
-        @staticmethod
-        def publish(conversation_id: str, event: dict[str, object]) -> None:
-            published.append({"_conversation_id": conversation_id, **event})
-
-    monkeypatch.setattr(_helpers_mod, "session_stream", _RecordingStream)
-    monkeypatch.setattr(_helpers_mod, "_session_mcp_startup_cache", {})
-
     from omnigent.server.routes import sessions as sessions_facade
 
     monkeypatch.setattr(sessions_facade, "_resolve_harness", lambda conv, **_kw: "codex-native")
@@ -239,3 +215,50 @@ async def test_mcp_tools_list_native_session_skips_publish(
     assert payload["result"]["_meta"]["omnigent/mcpFailures"] == {"pipeshub": "401 Unauthorized"}
     assert published == []
     assert "conv_native_mcp" not in _helpers_mod._session_mcp_startup_cache
+
+
+@pytest.mark.asyncio
+async def test_mcp_tools_list_unresolvable_session_skips_publish(
+    published: list[dict[str, object]],
+) -> None:
+    """A store error must not let runner failures overwrite a possibly native startup map."""
+
+    class _FailingConversationStore:
+        def get_conversation(self, conversation_id: str) -> object:
+            raise RuntimeError(f"store unavailable for {conversation_id}")
+
+    response = await _handle_mcp_tools_list(
+        rpc_id=1,
+        session_id="conv_store_down",
+        runner_router=_StubRunnerRouter({"pipeshub": "401 Unauthorized"}),  # type: ignore[arg-type]
+        conversation_store=_FailingConversationStore(),  # type: ignore[arg-type]
+    )
+
+    payload = json.loads(bytes(response.body))
+    assert payload["result"]["_meta"]["omnigent/mcpFailures"] == {"pipeshub": "401 Unauthorized"}
+    assert published == []
+    assert "conv_store_down" not in _helpers_mod._session_mcp_startup_cache
+
+
+@pytest.mark.asyncio
+async def test_mcp_tools_list_healthy_listing_skips_ownership_lookup(
+    published: list[dict[str, object]],
+) -> None:
+    """The per-turn healthy path must not pay for a conversation lookup."""
+    lookups = 0
+
+    class _CountingConversationStore:
+        def get_conversation(self, conversation_id: str) -> object:
+            nonlocal lookups
+            lookups += 1
+            return object()
+
+    response = await _handle_mcp_tools_list(
+        rpc_id=1,
+        session_id="conv_sdk_quiet",
+        runner_router=_StubRunnerRouter({}),  # type: ignore[arg-type]
+        conversation_store=_CountingConversationStore(),  # type: ignore[arg-type]
+    )
+
+    assert json.loads(bytes(response.body))["result"]["tools"] == []
+    assert lookups == 0

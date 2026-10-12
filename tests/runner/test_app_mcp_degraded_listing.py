@@ -32,6 +32,7 @@ from tests.runner.helpers import NullServerClient
 
 _SESSION_ID = "5f1e6b0d5c8a4c2e9b7a3d1f0e2c4b6a"
 _AGENT_ID = "0e36e3219954d2deaef06b8e2a936f38"
+_MCP_LESS_AGENT_ID = "7c0a5e9d2b4f4e1a8d3c6b5a9f0e1d2c"
 _TOOL_NAME = "jira__search_issues"
 _FAILURE = "ConnectError: All connection attempts failed"
 # tools/list calls per turn: the eager routing listing alone, or plus the
@@ -81,7 +82,7 @@ class _ToolsListServerClient(NullServerClient):
 def _build_app(
     specs: dict[str, AgentSpec],
 ) -> tuple[FastAPI, _ScriptedHarnessClient, _ToolsListServerClient, asyncio.Event]:
-    """Wire a runner app whose spec resolver reads ``specs["current"]``."""
+    """Wire a runner app whose resolver reads ``specs[agent_id]``, else ``specs["current"]``."""
     finished = asyncio.Event()
     harness_client = _ScriptedHarnessClient(
         [
@@ -93,8 +94,8 @@ def _build_app(
     server_client = _ToolsListServerClient()
 
     async def _resolver(agent_id: str, session_id: str | None = None) -> AgentSpec:
-        del agent_id, session_id
-        return specs["current"]
+        del session_id
+        return specs.get(agent_id) or specs["current"]
 
     app = create_runner_app(
         process_manager=_FakeProcessManager(harness_client),  # type: ignore[arg-type]
@@ -109,6 +110,7 @@ async def _run_turn(
     client: httpx.AsyncClient,
     finished: asyncio.Event,
     server_client: _ToolsListServerClient,
+    agent_id: str = _AGENT_ID,
 ) -> int:
     """Post one user turn, wait for its stream, and return its tools/list count."""
     before = server_client.tools_list_calls
@@ -118,7 +120,7 @@ async def _run_turn(
         json={
             "type": "message",
             "role": "user",
-            "agent_id": _AGENT_ID,
+            "agent_id": agent_id,
             "model": "test-agent",
             "input": [{"type": "input_text", "text": "hi"}],
             "harness": "openai-agents",
@@ -178,8 +180,10 @@ async def test_removing_the_last_mcp_server_syncs_once_and_drops_its_tools() -> 
         assert await _run_turn(client, finished, server_client) == _EAGER_AND_SETUP
         assert _TOOL_NAME in _advertised_tools(harness_client.posted_bodies[-1])
 
-        # Re-seeding the session re-resolves the (now server-less) spec.
+        # Re-seeding the session re-resolves the (now server-less) spec, and the
+        # proxy reports no per-server failures for servers that are no longer configured.
         specs["current"] = _spec(with_mcp=False)
+        server_client.failures = {}
         seed = await client.post(
             "/v1/sessions", json={"session_id": _SESSION_ID, "agent_id": _AGENT_ID}
         )
@@ -194,3 +198,52 @@ async def test_removing_the_last_mcp_server_syncs_once_and_drops_its_tools() -> 
         assert await _run_turn(client, finished, server_client) == 0, (
             "the empty config is not re-synced"
         )
+
+
+@pytest.mark.asyncio
+async def test_failed_empty_config_sync_is_retried_until_it_succeeds() -> None:
+    specs = {"current": _spec(with_mcp=True)}
+    app, harness_client, server_client, finished = _build_app(specs)
+    server_client.failures = {"jira": _FAILURE}
+    async with _runner_client(app) as client:
+        assert await _run_turn(client, finished, server_client) == _EAGER_AND_SETUP
+
+        specs["current"] = _spec(with_mcp=False)
+        seed = await client.post(
+            "/v1/sessions", json={"session_id": _SESSION_ID, "agent_id": _AGENT_ID}
+        )
+        assert seed.status_code == 201, seed.text
+
+        # The proxy reports its own failure in the result rather than raising.
+        server_client.failures = {"proxy": "ConnectError: All connection attempts failed"}
+        assert await _run_turn(client, finished, server_client) == 1
+        assert await _run_turn(client, finished, server_client) == 1, (
+            "a failed empty-config sync must be retried on the next turn"
+        )
+        assert _TOOL_NAME in _advertised_tools(harness_client.posted_bodies[-1]), (
+            "stale tools stay advertised until the sync succeeds"
+        )
+
+        server_client.failures = {}
+        assert await _run_turn(client, finished, server_client) == 1
+        assert _TOOL_NAME not in _advertised_tools(harness_client.posted_bodies[-1])
+        assert await _run_turn(client, finished, server_client) == 0
+
+
+@pytest.mark.asyncio
+async def test_switching_to_an_agent_without_mcp_servers_syncs_once() -> None:
+    specs = {"current": _spec(with_mcp=True), _MCP_LESS_AGENT_ID: _spec(with_mcp=False)}
+    app, harness_client, server_client, finished = _build_app(specs)
+    server_client.failures = {"jira": _FAILURE}
+    async with _runner_client(app) as client:
+        assert await _run_turn(client, finished, server_client) == _EAGER_AND_SETUP
+        assert _TOOL_NAME in _advertised_tools(harness_client.posted_bodies[-1])
+
+        # The switch invalidates the session's agent caches; the proxy no longer
+        # knows the removed server, so it reports no failures for it.
+        server_client.failures = {}
+        assert (
+            await _run_turn(client, finished, server_client, agent_id=_MCP_LESS_AGENT_ID) == 1
+        ), "switching to an MCP-less agent must sync the emptied config once"
+        assert _TOOL_NAME not in _advertised_tools(harness_client.posted_bodies[-1])
+        assert await _run_turn(client, finished, server_client, agent_id=_MCP_LESS_AGENT_ID) == 0

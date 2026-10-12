@@ -5334,18 +5334,19 @@ async def _runner_owns_mcp_startup_publish(
 ) -> bool:
     """Return whether the runner owns startup publishing for this session.
 
-    Unresolvable sessions default to runner ownership because this endpoint
-    primarily serves SDK harnesses.
+    When the harness cannot be resolved, skip publishing: a missed publish is
+    retried on the next ``tools/list``, while folding a native forwarder's
+    ``starting`` servers to ``ready`` would falsely clear its startup band.
     """
     if conversation_store is None:
         return True
     try:
         conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
     except Exception:  # noqa: BLE001 — an unresolvable session must not break tools/list
-        return True
+        return False
     harness = _resolve_harness(conv, agent_store=agent_store)
     if harness is None:
-        return True
+        return False
     from omnigent.harness_aliases import is_native_harness
 
     return not is_native_harness(harness)
@@ -11301,7 +11302,10 @@ async def _handle_mcp_tools_list(
     failures: dict[str, str] = result.get("failures", {})
     for srv, msg in failures.items():
         _logger.warning("runner MCP server %r unavailable: %s", srv, msg)
-    if await _runner_owns_mcp_startup_publish(session_id, conversation_store, agent_store):
+    # Resolve ownership only when there is something to publish or clear.
+    if (failures or _session_mcp_startup_cache.get(session_id)) and (
+        await _runner_owns_mcp_startup_publish(session_id, conversation_store, agent_store)
+    ):
         _publish_runner_mcp_startup_failures(session_id, failures)
 
     _logger.debug(

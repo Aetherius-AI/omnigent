@@ -207,7 +207,7 @@ class TestDescribeConnectError:
         exc = RuntimeError("see https://mcp.example.com/sse#token=secret123 for details")
         described = _describe_connect_error(exc)
         assert "secret123" not in described
-        assert "https://mcp.example.com/sse?<redacted>" in described
+        assert "https://mcp.example.com/sse#<redacted>" in described
 
     def test_leaves_plain_message_unchanged(self) -> None:
         from omnigent.runner.mcp_manager import _describe_connect_error
@@ -229,7 +229,7 @@ class TestDescribeConnectError:
         exc = RuntimeError("unreachable: https://alice:hunter2@mcp.example.com/sse")
         described = _describe_connect_error(exc)
         assert "hunter2" not in described
-        assert "https://<redacted>@mcp.example.com/sse" in described
+        assert "https://[REDACTED]@mcp.example.com/sse" in described
 
     def test_strips_query_on_non_http_scheme(self) -> None:
         from omnigent.runner.mcp_manager import _describe_connect_error
@@ -245,7 +245,7 @@ class TestDescribeConnectError:
         exc = RuntimeError("rejected request with Authorization: Bearer fake-token-abc123")
         described = _describe_connect_error(exc)
         assert "fake-token-abc123" not in described
-        assert "Authorization: Bearer <redacted>" in described
+        assert "Authorization: [REDACTED]" in described
 
     def test_strips_api_key_pair_outside_url(self) -> None:
         from omnigent.runner.mcp_manager import _describe_connect_error
@@ -253,12 +253,30 @@ class TestDescribeConnectError:
         exc = RuntimeError("connect failed: api_key=fake-key-xyz is not valid")
         described = _describe_connect_error(exc)
         assert "fake-key-xyz" not in described
-        assert "api_key=<redacted>" in described
+        assert "api_key=[REDACTED]" in described
+
+    @pytest.mark.parametrize(
+        ("message", "secret"),
+        [
+            ("auth failed: token=tok-fake-123 rejected", "tok-fake-123"),
+            ("login failed for user alice password=hunter2-fake", "hunter2-fake"),
+            ("handshake failed: secret=s3cr3t-fake expired", "s3cr3t-fake"),
+            ('request headers: Authorization="Bearer fake-quoted-token"', "fake-quoted-token"),
+            ("headers={'Authorization': 'Bearer fake-header-token'}", "fake-header-token"),
+            ("export API_KEY fake-whitespace-key failed", "fake-whitespace-key"),
+        ],
+    )
+    def test_strips_named_secrets_in_any_shape(self, message: str, secret: str) -> None:
+        from omnigent.runner.mcp_manager import _describe_connect_error
+
+        described = _describe_connect_error(RuntimeError(message))
+        assert secret not in described
+        assert "[REDACTED]" in described
 
     def test_unwraps_exception_groups_to_their_causes(self) -> None:
         from omnigent.runner.mcp_manager import _describe_connect_error
 
-        inner = ExceptionGroup(  # noqa: F821 — Python >=3.12
+        inner = ExceptionGroup(  # noqa: F821 — builtin since 3.11; ruff targets py310
             "unhandled errors in a TaskGroup",
             [ConnectionRefusedError("All connection attempts failed")],
         )
@@ -270,7 +288,7 @@ class TestDescribeConnectError:
     def test_lists_every_error_in_a_group_and_redacts_each(self) -> None:
         from omnigent.runner.mcp_manager import _describe_connect_error
 
-        exc = ExceptionGroup(  # noqa: F821 — Python >=3.12
+        exc = ExceptionGroup(  # noqa: F821 — builtin since 3.11; ruff targets py310
             "unhandled errors in a TaskGroup",
             [
                 RuntimeError("401 for url 'https://mcp.example.com/sse?token=secret123'"),

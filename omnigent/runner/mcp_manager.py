@@ -17,6 +17,7 @@ from mcp.types import ElicitRequestParams, ElicitResult
 from mcp.types import Tool as McpToolDef
 
 from omnigent.debug_logging import runner_primary_session_id
+from omnigent.process_logging import redact_log_text
 from omnigent.spec.types import AgentSpec, MCPServerConfig, RetryPolicy
 from omnigent.tools.base import is_valid_tool_name
 from omnigent.tools.mcp import McpServerConnection
@@ -25,36 +26,29 @@ from omnigent.util.json_types import JsonObject as _JsonObject
 _logger = logging.getLogger(__name__)
 
 
-_URL_USERINFO = re.compile(r"([a-z][a-z0-9+.-]*://)[^/\s'\"@]+@", re.IGNORECASE)
-
 _URL_QUERY_OR_FRAGMENT = re.compile(
-    r"([a-z][a-z0-9+.-]*://[^\s'\"]+?)[?#][^\s'\"]*", re.IGNORECASE
-)
-
-_CREDENTIAL_PAIR = re.compile(
-    r"((?:authorization|proxy-authorization|x-api-key|api[-_]?key|access[-_]?token"
-    r"|client[-_]?secret)\s*[:=]\s*(?:(?:bearer|basic|token)\s+)?)[^\s'\"]+",
-    re.IGNORECASE,
+    r"([a-z][a-z0-9+.-]*://[^\s'\"]+?)([?#])[^\s'\"]*", re.IGNORECASE
 )
 
 
 def _leaf_exceptions(exc: BaseException) -> list[BaseException]:
     """Flatten nested exception groups down to the errors that occurred."""
-    if isinstance(exc, BaseExceptionGroup):  # noqa: F821 — Python >=3.12
+    if isinstance(exc, BaseExceptionGroup):  # noqa: F821 — builtin since 3.11; ruff targets py310
         return [leaf for sub in exc.exceptions for leaf in _leaf_exceptions(sub)]
     return [exc]
 
 
 def _describe_connect_error(exc: Exception) -> str:
-    """Scrub common credential carriers from a connection error.
+    """Describe a connection error for the UI without its credentials.
 
-    This is best-effort: credentials embedded in a URL path are not removed.
+    URL queries and fragments are dropped whole; the shared log redaction then
+    scrubs userinfo, authorization values and named secrets. Credentials embedded
+    in a URL path are not removed.
     """
     # The MCP client raises TaskGroup ExceptionGroups whose own text hides the cause.
     message = "; ".join(f"{type(leaf).__name__}: {leaf}" for leaf in _leaf_exceptions(exc))
-    message = _URL_USERINFO.sub(r"\1<redacted>@", message)
-    message = _URL_QUERY_OR_FRAGMENT.sub(r"\1?<redacted>", message)
-    return _CREDENTIAL_PAIR.sub(r"\1<redacted>", message)
+    message = _URL_QUERY_OR_FRAGMENT.sub(r"\1\2<redacted>", message)
+    return redact_log_text(message, include_whitespace_credentials=True)
 
 
 def _schema_requires_fields(params: ElicitRequestParams) -> bool:
