@@ -745,6 +745,70 @@ def test_new_send_clears_drained_optimistic_cancellation() -> None:
         subagent_work._session_inboxes_ref.pop(parent_id, None)
 
 
+def test_corrected_completion_redelivers_when_inbox_returns() -> None:
+    """A correction blocked by a missing parent inbox is redelivered on retry.
+
+    The parent drains an optimistic cancellation (retaining the provisional
+    record), then its inbox is briefly unavailable when the surviving child's
+    confirmed completion arrives. The correction re-registers the dispatch but
+    cannot deliver yet. Once the inbox returns, retrying the confirmed completion
+    delivers the real result exactly once -- still carrying the superseding
+    ``corrected_status`` -- and a further retry acknowledges it as already
+    delivered rather than resending.
+    """
+    parent_id = uuid.uuid4().hex
+    child_id = uuid.uuid4().hex
+    inbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    subagent_work._session_inboxes_ref[parent_id] = inbox
+    subagent_work.register_subagent_work(
+        parent_session_id=parent_id,
+        child_session_id=child_id,
+        agent="researcher",
+        title="cite-check",
+    )
+    try:
+        # The optimistic cancellation is delivered, then drained by the parent.
+        subagent_work.mark_subagent_work_terminal(child_id, status="cancelled", output="partial")
+        subagent_work.unregister_subagent_work(child_id, remember_drained_delivery=True)
+        assert child_id in subagent_work._provisional_cancelled_subagent_work
+        while not inbox.empty():
+            inbox.get_nowait()
+
+        # The parent inbox is unavailable when the confirmed completion arrives.
+        subagent_work._session_inboxes_ref.pop(parent_id, None)
+        ack = subagent_work.mark_subagent_work_terminal(
+            child_id, status="completed", output="the verdict", confirmed_completion=True
+        )
+        assert not ack.delivered
+        assert ack.reason == subagent_work._SUBAGENT_DELIVERY_MISSING_PARENT_INBOX
+        assert inbox.empty()
+
+        # The inbox returns and the retried completion delivers the real result once.
+        subagent_work._session_inboxes_ref[parent_id] = inbox
+        redelivered = subagent_work.mark_subagent_work_terminal(
+            child_id, status="completed", output="the verdict", confirmed_completion=True
+        )
+        assert redelivered.delivered and redelivered.delivered_now
+        items = []
+        while not inbox.empty():
+            items.append(inbox.get_nowait())
+        assert [(i["status"], i["output"], i.get("corrected_status")) for i in items] == [
+            ("completed", "the verdict", "cancelled")
+        ]
+
+        # A further retry is acknowledged as already delivered, not resent.
+        again = subagent_work.mark_subagent_work_terminal(
+            child_id, status="completed", output="the verdict", confirmed_completion=True
+        )
+        assert again.delivered and not again.delivered_now
+        assert inbox.empty()
+    finally:
+        subagent_work.unregister_subagent_work_for_session(parent_id)
+        subagent_work._drained_delivered_subagent_children.discard(child_id)
+        subagent_work._provisional_cancelled_subagent_work.pop(child_id, None)
+        subagent_work._session_inboxes_ref.pop(parent_id, None)
+
+
 def test_cancelled_inbox_line_surfaces_output_before_cancellation() -> None:
     """The parent-readable line keeps a cancelled dispatch's real output."""
     from omnigent.runner.tool_dispatch import _format_async_task_item

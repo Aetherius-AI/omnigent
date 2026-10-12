@@ -664,6 +664,9 @@ def mark_subagent_work_terminal(
     :returns: Delivery acknowledgement for this terminal report.
     :raises ValueError: If ``status`` is not terminal.
     """
+    # A confirmed completion is the only edge that corrects an optimistic
+    # cancellation: a surviving child that genuinely fails keeps the cancelled
+    # outcome, and a confirmed kill makes the abort final.
     corrects_cancellation = confirmed_completion and status == "completed"
     confirms_cancellation = confirmed_cancellation and status == "cancelled"
     if status not in _SUBAGENT_TERMINAL_STATUSES:
@@ -674,12 +677,17 @@ def mark_subagent_work_terminal(
     entry = _subagent_work_by_child.get(child_session_id)
     if entry is None:
         provisional = _provisional_cancelled_subagent_work.get(child_session_id)
-        if provisional is not None and confirms_cancellation:
-            # A confirmed kill finalizes the abort; the drained-delivery tombstone
-            # alone blocks a late survivor correction, so drop the retained entry.
-            _provisional_cancelled_subagent_work.pop(child_session_id, None)
-        elif corrects_cancellation and provisional is not None:
-            return _deliver_corrected_completion(provisional, output)
+        # Only act on a retained record that belongs to the reporting dispatch,
+        # matching the dispatch-binding guard on the live-entry path below.
+        if provisional is not None and (
+            only_if_work_id is None or provisional.work_id == only_if_work_id
+        ):
+            if confirms_cancellation:
+                # A confirmed kill finalizes the abort; the drained-delivery tombstone
+                # alone blocks a late survivor correction, so drop the retained entry.
+                _provisional_cancelled_subagent_work.pop(child_session_id, None)
+            elif corrects_cancellation:
+                return _deliver_corrected_completion(provisional, output)
         if child_session_id in _drained_delivered_subagent_children:
             return _SubagentDeliveryAck(
                 entry=None,
