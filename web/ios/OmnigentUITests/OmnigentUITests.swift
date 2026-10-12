@@ -28,7 +28,7 @@ final class OmnigentUITests: XCTestCase {
     app.launch()
     sleep(5)
     let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
-    springboard.coordinate(withNormalizedOffset: CGVector(dx: 0.26, dy: 0.79)).tap()
+    springboard.coordinate(withNormalizedOffset: CGVector(dx: 0.26, dy: 0.60)).tap()
     app.activate()
     let webView = app.webViews.firstMatch
     XCTAssertTrue(webView.waitForExistence(timeout: 90), "Expected the real Omnigent web app.")
