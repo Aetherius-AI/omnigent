@@ -105,6 +105,8 @@ def _wait_for(page: Page, predicate: Callable[[], bool], timeout_s: float, what:
         if predicate():
             return
         page.wait_for_timeout(500)
+    if predicate():
+        return
     raise AssertionError(f"timed out after {timeout_s}s waiting for {what}")
 
 

@@ -124,23 +124,23 @@ def test_web_message_reaches_claude_beneath_a_truncated_title(
     )
     page.screenshot(path=str(proof / "delivered.png"), full_page=True)
     deadline = time.monotonic() + 30
-    while True:
+    items: list[dict[str, object]] = []
+    persisted = False
+    while not persisted and time.monotonic() < deadline:
         response = httpx.get(
             f"{base_url}/v1/sessions/{session_id}/items", params={"limit": 100}, timeout=10
         )
         response.raise_for_status()
         items = response.json()["data"]
-        if (
-            any(
-                item.get("role") == "assistant"
-                and "TRUNCATED_TITLE_DELIVERED" in json.dumps(item.get("content", []))
-                for item in items
-            )
-            or time.monotonic() >= deadline
-        ):
-            break
-        time.sleep(0.1)
+        persisted = any(
+            item.get("role") == "assistant"
+            and "TRUNCATED_TITLE_DELIVERED" in json.dumps(item.get("content", []))
+            for item in items
+        )
+        if not persisted:
+            time.sleep(0.1)
     (proof / "transcript.json").write_text(json.dumps(items, indent=2))
+    assert persisted, "the assistant reply was not persisted to the transcript within 30 s"
     assert not [item for item in items if item.get("type") == "error"]
     assert (
         sum(

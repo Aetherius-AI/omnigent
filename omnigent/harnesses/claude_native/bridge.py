@@ -5905,14 +5905,16 @@ def _is_rule_tail(line: str) -> bool:
     Return whether a row ends the way a wrapped labelled rule's last row does.
 
     That row is the rule's trailing run of edge glyphs, alone or spaced off
-    from the tail of the title, with no other rule glyph on the row.
+    from the tail of the title, with no other rule glyph on the row. Like the
+    rule it belongs to it starts at the pane edge or one space in; draft and
+    transcript rows are indented further.
 
     :param line: A single pane line, e.g. ``"─"`` or ``"lease-freeze ─"``.
     :returns: ``True`` when the row can close a wrapped labelled rule.
     """
     stripped = line.strip()
     trail = len(stripped) - len(stripped.rstrip(_TITLED_RULE_EDGE_GLYPHS))
-    if trail < 1:
+    if trail < 1 or line.startswith("  "):
         return False
     label = stripped[:-trail]
     if any(ch in _BOX_RULE_CHARS for ch in label):

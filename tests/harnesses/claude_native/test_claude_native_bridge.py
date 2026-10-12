@@ -8695,8 +8695,8 @@ def test_claude_prompt_rendered_sees_prompt_under_truncated_label() -> None:
     assert _claude_prompt_rendered(pane) is True
 
 
-def test_claude_prompt_rendered_ignores_draft_line_trailing_off_in_a_glyph() -> None:
-    """Indented draft content cannot replace the composer's opening rule."""
+def test_claude_prompt_rendered_sees_prompt_over_a_draft_line_trailing_off_in_a_glyph() -> None:
+    """A draft line ending in a rule glyph does not hide the input box."""
     rule = "─" * 40
     pane = "\n".join(
         [
@@ -8743,8 +8743,7 @@ def test_claude_prompt_rendered_sees_prompt_under_title_wider_than_pane(
     of shortening it, so the label wraps and the row directly above ``❯``
     is the title's tail plus the trailing glyph; the closing rule wraps to
     the same width. Captured from Claude Code 2.1.268 in a 57-column
-    browser terminal, where the bridge timed the turn out with ``❯`` on
-    screen.
+    browser terminal.
     """
     pane = "\n".join(
         [
@@ -8876,6 +8875,27 @@ def test_claude_prompt_rendered_ignores_a_menu_row_above_a_rule() -> None:
             "Detected a custom API key in your environment",
             "Do you want to use this API key?",
             "  1. Yes",
+            "❯ 2. No (recommended)",
+            "─" * 57,
+            "  Enter to confirm · Esc to cancel",
+        ]
+    )
+    assert _claude_prompt_rendered(pane) is False
+
+
+def test_claude_prompt_rendered_ignores_a_menu_row_under_an_indented_row_ending_in_a_glyph() -> (
+    None
+):
+    """
+    An indented transcript row trailing off in ``─`` is not a wrapped rule's tail.
+
+    A wrapped opening rule starts at the pane edge or one space in, while
+    transcript and draft rows are indented further, so a menu's selected row
+    under such a row does not become the composer even with a rule below it.
+    """
+    pane = "\n".join(
+        [
+            "  ⎿  the build output trails off here ─",
             "❯ 2. No (recommended)",
             "─" * 57,
             "  Enter to confirm · Esc to cancel",
