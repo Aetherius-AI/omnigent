@@ -305,17 +305,11 @@ class _DeniedTool:
     args: ToolArgs
 
 
-def _is_denial_report(text: str, denied: _DeniedTool) -> bool:
-    """Whether *text* is the harness reporting the refused *denied* call, e.g.
+def _is_denial_report(text: str) -> bool:
+    """Whether *text* is the harness reporting a policy refusal, e.g.
     ``Denied by user (confirm_run_command). ("denied by pre-tool hook: ...")``."""
     lowered = text.lower()
-    if "denied" not in lowered:
-        return False
-    return (
-        "pre-tool hook" in lowered
-        or "confirm_run_command" in lowered
-        or denied.name.lower() in lowered
-    )
+    return "denied" in lowered and ("pre-tool hook" in lowered or "confirm_run_command" in lowered)
 
 
 @dataclass
@@ -705,6 +699,8 @@ class AntigravityExecutor(Executor):
                     )
                     queue.put_nowait(ExecutorError(message=message, retryable=(status == "ERROR")))
                     return
+            # A refusal the harness never reported as an ERROR step is still surfaced once.
+            self._flush_denied_tools(state)
         except asyncio.CancelledError:
             # Consumer teardown; conversation.cancel() already requested by
             # interrupt_session, nothing to emit.
@@ -809,14 +805,25 @@ class AntigravityExecutor(Executor):
         queue = state.active_queue
         if queue is None or not state.denied_tools:
             return False
-        denied = state.denied_tools[0]
-        reported = getattr(step, "error", "") or ""
-        if not _is_denial_report(reported or getattr(step, "content_delta", "") or "", denied):
+        reported = getattr(step, "error", "") or getattr(step, "content_delta", "") or ""
+        if not _is_denial_report(reported):
             return False
-        state.denied_tools.popleft()
         raw_id = getattr(step, "id", None)
         call_id = raw_id if isinstance(raw_id, str) and raw_id else uuid.uuid4().hex
-        error = reported or f"{denied.name} was not approved"
+        self._emit_denied_tool(queue, state.denied_tools.popleft(), call_id, reported)
+        return True
+
+    def _flush_denied_tools(self, state: _AntigravitySessionState) -> None:
+        """Surface refusals the harness never reported, so each is shown exactly once."""
+        queue = state.active_queue
+        while queue is not None and state.denied_tools:
+            self._emit_denied_tool(queue, state.denied_tools.popleft(), uuid.uuid4().hex, "")
+
+    @staticmethod
+    def _emit_denied_tool(
+        queue: _EventQueue, denied: _DeniedTool, call_id: str, error: str
+    ) -> None:
+        """Enqueue a refused call as a request paired with a failed completion."""
         queue.put_nowait(
             ToolCallRequest(name=denied.name, args=denied.args, metadata={"call_id": call_id})
         )
@@ -825,12 +832,11 @@ class AntigravityExecutor(Executor):
                 name=denied.name,
                 status=ToolCallStatus.ERROR,
                 result=None,
-                error=error,
+                error=error or f"{denied.name} was not approved",
                 duration_ms=0.0,
                 metadata={"call_id": call_id},
             )
         )
-        return True
 
     @staticmethod
     def _cancelled_error_type() -> type[BaseException]:
@@ -1036,7 +1042,7 @@ class AntigravityExecutor(Executor):
         policies: SDKPolicies = confirm_run_command(
             handler=self._make_run_command_confirmer(state)
         )
-        return list(policies)
+        return list(policies) if isinstance(policies, (list, tuple)) else [policies]
 
     def _make_run_command_confirmer(
         self, state: _AntigravitySessionState

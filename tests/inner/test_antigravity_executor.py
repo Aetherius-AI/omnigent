@@ -1673,15 +1673,20 @@ async def test_error_step_after_approved_run_command_still_fails_turn(
     assert not any(isinstance(e, TurnComplete) for e in events)
 
 
+@pytest.mark.parametrize(
+    "unrelated_error",
+    ["model exploded", "run_command failed: permission denied"],
+    ids=["plain", "mentions-denied-and-tool"],
+)
 @pytest.mark.asyncio
 async def test_unrelated_error_after_denied_run_command_still_fails_turn(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, unrelated_error: str
 ) -> None:
     """A queued refusal absorbs only the harness's denial report, not any ERROR step."""
     script: list[_TurnAction] = [
         _ConfirmRunCommand(_RUN_COMMAND),
         _YieldStep(
-            _FakeStep(step_type=_StepType.FINISH, status=_StepStatus.ERROR, error="model exploded")
+            _FakeStep(step_type=_StepType.FINISH, status=_StepStatus.ERROR, error=unrelated_error)
         ),
     ]
     _install_fake_sdk(monkeypatch, scripts=[script])
@@ -1695,10 +1700,41 @@ async def test_unrelated_error_after_denied_run_command_still_fails_turn(
     events = await _drain(executor, [{"role": "user", "content": "run ls", "session_id": "s1"}])
 
     errors = [e for e in events if isinstance(e, ExecutorError)]
-    assert len(errors) == 1 and errors[0].message == "model exploded"
+    assert len(errors) == 1 and errors[0].message == unrelated_error
     # The unrelated error is not rewritten into a run_command failure.
     assert not any(isinstance(e, (ToolCallRequest, ToolCallComplete)) for e in events)
     assert not any(isinstance(e, TurnComplete) for e in events)
+
+
+@pytest.mark.asyncio
+async def test_unreported_run_command_refusal_is_flushed_at_turn_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refusal the harness never reports as an ERROR step still surfaces once, at turn end."""
+    script: list[_TurnAction] = [
+        _ConfirmRunCommand(_RUN_COMMAND),
+        _text_step("ok"),
+        _YieldStep(_FakeStep(step_type=_StepType.FINISH, status=_StepStatus.DONE)),
+    ]
+    _install_fake_sdk(monkeypatch, scripts=[script])
+    executor = AntigravityExecutor()
+
+    async def _decline(tool_name: str, tool_input: dict[str, Any]) -> bool:
+        return False
+
+    executor._elicitation_handler = _decline
+
+    events = await _drain(executor, [{"role": "user", "content": "run ls", "session_id": "s1"}])
+
+    requests = [e for e in events if isinstance(e, ToolCallRequest)]
+    completes = [e for e in events if isinstance(e, ToolCallComplete)]
+    assert len(requests) == 1 and len(completes) == 1
+    assert requests[0].name == completes[0].name == "run_command"
+    assert completes[0].status == ToolCallStatus.ERROR
+    assert completes[0].error == "run_command was not approved"
+    assert completes[0].metadata == requests[0].metadata
+    assert any(isinstance(e, TurnComplete) for e in events)
+    assert not any(isinstance(e, ExecutorError) for e in events)
 
 
 @pytest.mark.asyncio
