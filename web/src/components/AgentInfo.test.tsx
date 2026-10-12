@@ -1067,6 +1067,8 @@ describe("MCP startup failure diagnostics", () => {
     renderContent("conv_mcp_failed");
     const pill = screen.getByRole("button", { name: "slack" });
     expect(pill.className).toContain("text-yellow-700");
+    expect(pill.className).toContain("hover:bg-yellow-500/20");
+    expect(pill.className).not.toContain("hover:bg-muted/80");
   });
 
   it("clears the warning once the store reports recovery", () => {

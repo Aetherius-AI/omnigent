@@ -7164,6 +7164,61 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
         pipeshub: "handshake failed",
       });
     });
+
+    it("keeps a live failure map that arrives while the bind snapshot is still loading", async () => {
+      let resolveSnapshot!: (response: Response) => void;
+      const snapshot = new Promise<Response>((resolve) => {
+        resolveSnapshot = resolve;
+      });
+      fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (
+          url.split("?")[0] === "/v1/sessions/conv_mcp_race" &&
+          (init?.method ?? "GET") === "GET"
+        ) {
+          return snapshot;
+        }
+        return defaultFetchHandler(input, init);
+      });
+
+      const switching = useChatStore.getState().switchTo("conv_mcp_race");
+      await tick();
+      handleSessionEvent({
+        type: "session_mcp_startup",
+        conversationId: "conv_mcp_race",
+        servers: { pipeshub: { status: "failed", error: "fresh" } },
+      });
+      // The snapshot was built before the live event and carries no failures.
+      resolveSnapshot(
+        mockResponse({
+          id: "conv_mcp_race",
+          agent_id: "agent_xyz",
+          status: "idle",
+          created_at: 0,
+          items: [],
+          mcp_startup: null,
+        }),
+      );
+      await switching;
+
+      expect(useChatStore.getState().mcpStartupFailures).toEqual({ pipeshub: "fresh" });
+    });
+
+    it("does not confuse user-chosen server names with Object.prototype members", () => {
+      useChatStore.setState({ mcpStartupFailures: null });
+      handleSessionEvent({
+        type: "session_mcp_startup",
+        conversationId: "conv_abc",
+        servers: JSON.parse(
+          '{"toString": {"status": "ready", "error": null}, "__proto__": {"status": "failed", "error": "boom"}}',
+        ),
+      });
+      const failures = useChatStore.getState().mcpStartupFailures;
+      expect(failures).not.toBeNull();
+      expect(failures?.["toString"]).toBeUndefined();
+      expect(Object.keys(failures ?? {})).toEqual(["__proto__"]);
+      expect(failures?.["__proto__"]).toBe("boom");
+    });
   });
 
   describe("refreshSessionState", () => {

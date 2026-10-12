@@ -113,8 +113,10 @@ export function McpServerList({
             <PopoverTrigger asChild>
               <button
                 type="button"
-                className={`flex cursor-pointer items-center gap-0.5 rounded-full border px-1.5 py-0.5 font-mono text-[10px] hover:bg-muted/80 ${
-                  failure ? MCP_PILL_FAILED_CLASSES : MCP_PILL_DEFAULT_CLASSES
+                className={`flex cursor-pointer items-center gap-0.5 rounded-full border px-1.5 py-0.5 font-mono text-[10px] ${
+                  failure
+                    ? `${MCP_PILL_FAILED_CLASSES} hover:bg-yellow-500/20`
+                    : `${MCP_PILL_DEFAULT_CLASSES} hover:bg-muted/80`
                 }`}
                 onClick={(e) => e.stopPropagation()}
               >
