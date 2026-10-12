@@ -3706,10 +3706,11 @@ def _build_host_daemon_env(
     return env
 
 
-# Keep never-forwarded credentials out of the on-disk manifest: the DB URI may
-# embed a password, and the host token authenticates the daemon itself.
+# Keep never-forwarded values out of the on-disk manifest: the DB URI may embed a
+# password, the host token authenticates the daemon, and the config signature is
+# daemon-internal (listed so exclusion never depends on publish ordering).
 _RUNNER_ENV_MANIFEST_EXCLUDED: frozenset[str] = frozenset(
-    {"OMNIGENT_DATABASE_URI", _HOST_TOKEN_ENV_VAR}
+    {"OMNIGENT_DATABASE_URI", _HOST_TOKEN_ENV_VAR, DAEMON_CONFIG_SIG_ENV_VAR}
 )
 
 

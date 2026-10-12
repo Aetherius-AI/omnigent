@@ -160,16 +160,20 @@ def write_runner_env_manifest(
     if not hasattr(os, "getuid"):
         return None
     path = runner_env_manifest_path(target, base_dir=base_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     payload = json.dumps(
         {"version": RUNNER_ENV_MANIFEST_VERSION, "env": dict(env)}, sort_keys=True
     )
     fd, temp_name = tempfile.mkstemp(prefix=".env-", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = -1
             handle.write(payload + "\n")
         os.replace(temp_name, path)
     except BaseException:
+        if fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(fd)
         with contextlib.suppress(OSError):
             os.unlink(temp_name)
         raise
@@ -196,7 +200,11 @@ def read_runner_env_manifest(
     the result feeds every runner launch."""
     path = runner_env_manifest_path(target, base_dir=base_dir)
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        # O_NONBLOCK so a FIFO planted at this path is rejected by the fstat check
+        # below rather than blocking the runner launch until a writer appears.
+        fd = os.open(
+            path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+        )
     except FileNotFoundError:
         return None
     except OSError:
