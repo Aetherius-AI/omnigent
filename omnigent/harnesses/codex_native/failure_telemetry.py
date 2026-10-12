@@ -73,7 +73,15 @@ def _gateway_rejection(message: str) -> tuple[int | None, dict[str, object]]:
 
 
 def _first_present(*values: object) -> object:
-    return next((value for value in values if value is not None), None)
+    """First candidate that is neither missing nor blank; later candidates are fallbacks."""
+    return next(
+        (
+            value
+            for value in values
+            if value is not None and not (isinstance(value, str) and not value.strip())
+        ),
+        None,
+    )
 
 
 def codex_failure_context(payload: dict[str, object], *, message: str) -> FailureContext:

@@ -182,3 +182,27 @@ def test_gateway_rejection_message_supplies_status_and_error_code(
         key: expected[key] for key in _PROVIDER_KEYS & set(expected)
     }
     assert context["native_error_message"].endswith("Connection failed: error sending request")
+
+
+def test_blank_direct_fields_fall_back_to_gateway_evidence() -> None:
+    """A blank or malformed direct field does not shadow the value parsed from the gateway body."""
+    error = forwarder._terminal_error_from_notification(
+        {
+            "error": {
+                "message": (
+                    'unexpected status 403 Forbidden: {"error_code":"PERMISSION_DENIED",'
+                    '"request_id":"req-gateway-1"}, url: https://host/x'
+                ),
+                "codexErrorInfo": {"httpConnectionFailed": {"httpStatusCode": 403}},
+                "request_id": "   ",
+                "provider_error_code": "",
+                "gateway_request_id": "direct-gateway-id",
+            }
+        }
+    )
+    assert error is not None
+    context = error.failure_context
+    assert context is not None
+    assert context["native_error_request_id"] == "req-gateway-1"
+    assert context["provider_error_code"] == "PERMISSION_DENIED"
+    assert context["gateway_request_id"] == "direct-gateway-id"
