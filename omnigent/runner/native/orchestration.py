@@ -5857,10 +5857,10 @@ async def _report_codex_collaboration_mode(session_id: str, mode: str) -> None:
     from omnigent.cli_auth import open_server_client
     from omnigent.runner._entry import _make_auth_token_factory, _RunnerDatabricksAuth
 
-    auth_factory = _make_auth_token_factory()
-    auth_token = auth_factory() if auth_factory is not None else None
-    headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
     try:
+        auth_factory = _make_auth_token_factory()
+        auth_token = auth_factory() if auth_factory is not None else None
+        headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
         async with open_server_client(
             _required_runner_env("RUNNER_SERVER_URL"),
             headers=headers,
@@ -5874,7 +5874,7 @@ async def _report_codex_collaboration_mode(session_id: str, mode: str) -> None:
                     "data": {"mode": mode},
                 },
             )
-    except httpx.HTTPError:
+    except Exception:  # noqa: BLE001 — a failed best-effort report must not sink the launch
         _logger.warning(
             "codex-native: could not report collaboration mode %r for session %s; the "
             "session label may still claim a mode the thread does not run",

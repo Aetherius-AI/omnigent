@@ -1,16 +1,16 @@
-"""E2E (live Codex + mock model): engaging Plan mode must reach the model.
+"""E2E (live Codex + mock model): engaging Plan mode reaches the model.
 
 In a bound codex-native session, engaging Plan mode from the composer shows the
-"Plan mode" badge (the toggle works once a session exists), but the next turn's
-request to the model omits Codex's built-in Plan Mode preset: the
-collaboration-mode developer message carries only the wrapper's own note, so
-the model receives no planning instruction and codes immediately.
+"Plan mode" badge and the next turn's request to the model carries Codex's
+built-in Plan Mode preset. Guards against the regression where the
+collaboration-mode developer message carried only the wrapper's own note, so
+the model received no planning instruction and coded immediately.
 
 A real ``codex`` CLI runs in the session terminal against the in-process mock
 Responses server (``native_codex_mock_session``); the mock captures the model
-request so the stripped preset is observable. The scripted reply cannot show
-the model's plan-vs-code reaction, which is the downstream effect, not
-re-exercised here.
+request so the preset is observable. The scripted reply cannot show the
+model's plan-vs-code reaction, which is the downstream effect, not exercised
+here.
 """
 
 from __future__ import annotations

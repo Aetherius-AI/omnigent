@@ -5140,13 +5140,17 @@ class _ClosableStub:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("model_source", ["launch", "config"])
 async def test_codex_discover_thread_applies_plan_mode_before_bridge_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    model_source: str,
 ) -> None:
     """A create-time Plan pick reaches the fresh thread BEFORE turns can: discovery
     applies the seeded label as a ``thread/settings/update`` with
-    ``developer_instructions: null`` (else it replaces Codex's Plan Mode prompt)."""
+    ``developer_instructions: null`` (else it replaces Codex's Plan Mode prompt). The
+    model comes from the launch, or from the private config's pin when Codex's own
+    default won the launch."""
     from omnigent.harnesses.codex_native import app_server as codex_native_app_server
     from omnigent.harnesses.codex_native import forwarder as codex_native_forwarder
     from omnigent.runner.native import orchestration as native
@@ -5191,6 +5195,11 @@ async def test_codex_discover_thread_applies_plan_mode_before_bridge_state(
     monkeypatch.setenv("RUNNER_SERVER_URL", "http://ap.example")
     monkeypatch.setattr("omnigent.runner._entry._make_auth_token_factory", lambda: None)
 
+    codex_home = tmp_path / "codex-home"
+    if model_source == "config":
+        codex_home.mkdir()
+        (codex_home / "config.toml").write_text('model = "gpt-test"\n')
+
     session_id = "7d2e6f0a1b2c3d4e5f60718293a4b5c6"
     native._AUTO_CODEX_APP_SERVERS[session_id] = _ClosableStub()  # type: ignore[assignment]
     try:
@@ -5198,12 +5207,12 @@ async def test_codex_discover_thread_applies_plan_mode_before_bridge_state(
             session_id=session_id,
             bridge_dir=tmp_path,
             codex_ws_url="ws://127.0.0.1:1",
-            codex_home=tmp_path / "codex-home",
+            codex_home=codex_home,
             workspace=str(tmp_path / "workspace"),
             event_client=_ClosableStub(),  # type: ignore[arg-type]
             routing_summary="provider 'test' (model=gpt-test)",
             plan_mode=True,
-            launch_model="gpt-test",
+            launch_model="gpt-test" if model_source == "launch" else None,
             launch_effort="high",
         )
     finally:
@@ -5234,20 +5243,22 @@ async def test_codex_discover_thread_applies_plan_mode_before_bridge_state(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["update_rejected", "model_unknown"])
+@pytest.mark.parametrize("failure", ["update_rejected", "update_hangs", "model_unknown"])
 async def test_codex_discover_thread_reports_default_when_plan_mode_is_not_applied(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     failure: str,
 ) -> None:
-    """A Plan pick the runner cannot apply is reported back as Default before the
-    bridge state goes live, so the session label (and the UI's Plan badge) never
-    claim a mode the thread does not run. The session still launches: the bridge
-    state is written and the forwarder runs, so chat keeps working in Default."""
+    """A Plan pick the runner cannot apply (rejected, unanswered, or without a known
+    model) is reported back as Default before the bridge state goes live, so the
+    session label (and the UI's Plan badge) never claim a mode the thread does not
+    run. The session still launches: the bridge state is written and the forwarder
+    runs, so chat keeps working in Default."""
     from omnigent.harnesses.codex_native import app_server as codex_native_app_server
     from omnigent.harnesses.codex_native import forwarder as codex_native_forwarder
     from omnigent.runner.native import orchestration as native
 
+    monkeypatch.setattr(codex_native_app_server, "_EFFORT_SETTINGS_UPDATE_TIMEOUT_SECONDS", 0.05)
     thread_id = "019e96aa-abcd-7343-8d3b-6f914d60936d"
     events: list[str] = []
     settings_requests: list[tuple[str, dict[str, Any]]] = []
@@ -5268,6 +5279,8 @@ async def test_codex_discover_thread_reports_default_when_plan_mode_is_not_appli
                 raise RuntimeError("app-server unreachable")
 
         async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            if failure == "update_hangs":
+                await asyncio.Event().wait()
             settings_requests.append((method, params))
             return {"result": {}}
 
@@ -5301,7 +5314,7 @@ async def test_codex_discover_thread_reports_default_when_plan_mode_is_not_appli
             event_client=_ClosableStub(),  # type: ignore[arg-type]
             routing_summary="provider 'test' (model=gpt-test)",
             plan_mode=True,
-            launch_model="gpt-test" if failure == "update_rejected" else None,
+            launch_model=None if failure == "model_unknown" else "gpt-test",
         )
     finally:
         native._AUTO_CODEX_APP_SERVERS.pop(session_id, None)
@@ -5319,3 +5332,21 @@ async def test_codex_discover_thread_reports_default_when_plan_mode_is_not_appli
     assert state is not None, "bridge state must be written despite a failed plan switch"
     assert state.thread_id == thread_id
     assert supervised == ["forwarder"]
+
+
+@pytest.mark.asyncio
+async def test_report_codex_collaboration_mode_is_best_effort(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A reporter failure (here: no server URL to report to) logs and returns; it
+    runs before the bridge state is published and must never abort the launch."""
+    from omnigent.runner.native import orchestration as native
+
+    monkeypatch.delenv("RUNNER_SERVER_URL", raising=False)
+    monkeypatch.setattr("omnigent.runner._entry._make_auth_token_factory", lambda: None)
+    caplog.set_level(logging.WARNING, logger="omnigent.runner.native.orchestration")
+
+    await native._report_codex_collaboration_mode("9f1e2d3c4b5a69788796a5b4c3d2e1f0", "default")
+
+    assert any("could not report collaboration mode" in r.getMessage() for r in caplog.records)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
@@ -53,16 +54,51 @@ async def test_collaboration_mode_switch_keeps_developer_instructions_null(
     client.close.assert_awaited_once()
 
 
+@pytest.mark.parametrize("failing_step", ["connect", "request"])
 async def test_collaboration_mode_switch_closes_the_client_on_failure(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, failing_step: str
 ) -> None:
+    """A rejected initialization or update still closes the client, and a close that
+    itself fails does not mask the original error."""
     client = AsyncMock(spec=app_server.CodexAppServerClient)
-    client.request.side_effect = RuntimeError("thread not loaded")
+    getattr(client, failing_step).side_effect = RuntimeError(f"{failing_step} failed")
+    client.close.side_effect = RuntimeError("close hung")
     monkeypatch.setattr(app_server, "client_for_transport", lambda *_a, **_k: client)
 
-    with pytest.raises(RuntimeError, match="thread not loaded"):
+    with pytest.raises(RuntimeError, match=f"{failing_step} failed"):
         await app_server.apply_codex_thread_collaboration_mode(
             "ws://127.0.0.1:1", "thread_fresh", "plan", model="gpt-5.4"
         )
 
+    client.close.assert_awaited_once()
+    if failing_step == "connect":
+        client.request.assert_not_awaited()
+
+
+@pytest.mark.parametrize("stalled_step", ["connect", "request", "close"])
+async def test_collaboration_mode_switch_bounds_an_unanswered_app_server(
+    monkeypatch: pytest.MonkeyPatch, stalled_step: str
+) -> None:
+    """An app-server that never answers cannot hold session startup: initialization
+    and the settings update time out, and a stalled close is abandoned silently."""
+    monkeypatch.setattr(app_server, "_EFFORT_CONNECT_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(app_server, "_EFFORT_SETTINGS_UPDATE_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(app_server, "_EFFORT_CLOSE_TIMEOUT_SECONDS", 0.05)
+
+    async def _never(*_args: object, **_kwargs: object) -> None:
+        await asyncio.Event().wait()
+
+    client = AsyncMock(spec=app_server.CodexAppServerClient)
+    client.request.return_value = {"result": {}}
+    getattr(client, stalled_step).side_effect = _never
+    monkeypatch.setattr(app_server, "client_for_transport", lambda *_a, **_k: client)
+
+    switch = app_server.apply_codex_thread_collaboration_mode(
+        "ws://127.0.0.1:1", "thread_fresh", "plan", model="gpt-5.4"
+    )
+    if stalled_step == "close":
+        await asyncio.wait_for(switch, timeout=2)
+    else:
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(switch, timeout=2)
     client.close.assert_awaited_once()

@@ -26,6 +26,12 @@ and steers messages while the agent is busy.
   in the composer, and a composer pick is not reverted by later terminal turns.
 - `permission-mode`: the harness's native approval modes; the current mode is
   marked and the choice persists.
+- `codex-plan-mode`: **+ → Plan** for a Codex (codex-native) agent. On the
+  landing page it arms Plan mode before the first prompt (a "Plan mode" badge
+  appears; switching agents clears it) and the created session starts in Plan
+  mode; in-session it toggles Plan mode for the running thread. Codex then
+  plans instead of editing. If the runner cannot apply an armed Plan mode, the
+  badge falls back to Default rather than claiming an inactive mode.
 - `slash-menu`: typing `/` opens commands and skills with keyboard navigation.
 - `attachments`: attach button, paste, and drop onto the transcript; chips can
   be removed. State: unsupported file type rejected without losing the message.
@@ -58,6 +64,8 @@ and steers messages while the agent is busy.
   mode menu.
 - For a Codex session, open the Terminal view and change effort there, then
   return to Chat.
+- For a Codex session, choose **+ → Plan** ("Enter Plan mode"); the "Plan mode"
+  badge appears and the next request is planned rather than implemented.
 - Type `/` in the message box; attach files with the button, by paste, or by
   dropping them on the transcript.
 - Send while the agent is working to queue a message, then steer it.
@@ -77,6 +85,9 @@ and steers messages while the agent is busy.
 - Hover the model/effort pill to see the tooltip.
 - Pick a harness, then open its configuration for model, effort (Codex, Claude,
   Pi), and permission mode before the session exists.
+- Pick a Codex agent, then choose **+ → Plan** to arm Plan mode before the
+  first send; the "Plan mode" badge shows it is armed and the session opens in
+  Plan mode.
 - Attach files or type `/` before the first send.
 - Open the agent picker's custom agents, then Create custom agent → Import
   bundle: pick a `.tar.gz` agent bundle. It installs, closes the dialog, and

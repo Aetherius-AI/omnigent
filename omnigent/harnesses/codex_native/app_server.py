@@ -4573,26 +4573,31 @@ async def apply_codex_thread_collaboration_mode(
     from omnigent.util.reasoning_effort import clamp_effort_for_model
 
     client = client_for_transport(transport, client_name="omnigent-codex-native-runner")
-    await client.connect()
     try:
-        await client.request(
-            "thread/settings/update",
-            {
-                "threadId": thread_id,
-                "collaborationMode": {
-                    "mode": mode,
-                    "settings": {
-                        "model": model,
-                        "reasoning_effort": (
-                            clamp_effort_for_model(effort, model) if effort else None
-                        ),
-                        "developer_instructions": None,
+        await asyncio.wait_for(client.connect(), timeout=_EFFORT_CONNECT_TIMEOUT_SECONDS)
+        await asyncio.wait_for(
+            client.request(
+                "thread/settings/update",
+                {
+                    "threadId": thread_id,
+                    "collaborationMode": {
+                        "mode": mode,
+                        "settings": {
+                            "model": model,
+                            "reasoning_effort": (
+                                clamp_effort_for_model(effort, model) if effort else None
+                            ),
+                            "developer_instructions": None,
+                        },
                     },
                 },
-            },
+            ),
+            timeout=_EFFORT_SETTINGS_UPDATE_TIMEOUT_SECONDS,
         )
     finally:
-        await client.close()
+        # A wedged server can stall the closing handshake; it must not mask the result.
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(client.close(), timeout=_EFFORT_CLOSE_TIMEOUT_SECONDS)
 
 
 def codex_terminal_env(app_server: CodexNativeAppServer) -> dict[str, str]:

@@ -17,6 +17,10 @@ import pytest
 from playwright.sync_api import Page, expect
 
 from tests._helpers.native_session import create_native_session
+from tests.e2e_ui.chat.test_codex_plan_mode_respected import (
+    _PLAN_MODE_PRESET,
+    _developer_instruction_texts,
+)
 from tests.e2e_ui.conftest import (
     _REPO_ROOT,
     _bind_session_runner,
@@ -38,8 +42,6 @@ from tests.e2e_ui.messages.test_native_codex_render_parity import (
 )
 
 _COLLABORATION_MODE_LABEL_KEY = "omnigent.codex_native.collaboration_mode"
-# Opening rule of Codex's built-in "plan" collaboration-mode preset.
-_PLAN_MODE_PRESET = "You are in **Plan Mode**"
 _CODING_PROMPT = "Add a hello.txt file with a greeting."
 
 
@@ -79,21 +81,6 @@ def native_codex_plan_session(
                     respawned.wait(timeout=5)
 
 
-def _developer_texts(request: dict) -> list[str]:
-    """System/developer instruction strings of one captured model request."""
-    texts: list[str] = []
-    instructions = request.get("instructions")
-    if isinstance(instructions, str):
-        texts.append(instructions)
-    for item in request.get("input") or []:
-        if not isinstance(item, dict) or item.get("role") not in ("developer", "system"):
-            continue
-        for block in item.get("content") or []:
-            if isinstance(block, dict) and isinstance(block.get("text"), str):
-                texts.append(block["text"])
-    return texts
-
-
 @pytest.mark.timeout(300)
 def test_prelaunch_plan_mode_governs_the_first_turn(
     page: Page,
@@ -122,7 +109,7 @@ def test_prelaunch_plan_mode_governs_the_first_turn(
         if isinstance(request, dict) and _CODING_PROMPT in json.dumps(request)
     ]
     assert coding_turns, "no model request carried the first coding prompt"
-    developer_texts = _developer_texts(coding_turns[0])
+    developer_texts = _developer_instruction_texts(coding_turns[:1])
     assert any(_PLAN_MODE_PRESET in text for text in developer_texts), (
         "the first turn of a Plan-armed session reached the model without Codex's "
         f"Plan Mode preset; developer instructions seen: {json.dumps(developer_texts)[:1500]}"
