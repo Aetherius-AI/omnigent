@@ -1,15 +1,6 @@
-"""E2E: relative links in a Markdown file open the linked workspace file.
-
-A relative link such as ``[plan](plan.md)`` must open ``notes/plan.md`` in the
-file viewer, the way a chat file link does. Left to the browser, the href
-resolves against the session URL ``/c/<id>`` and a click leaves the session
-for ``/c/plan.md`` — a "session" named after the file, whose every request
-fails. Covers the read-only Preview (plain click) and the rich-text Edit mode
-(Ctrl/Cmd-click, which follows links in a new tab).
-
-Seeded via the filesystem PUT endpoint (no agent run). The recorded page is
-requested after seeding so a video starts at the first user action.
-"""
+"""E2E: relative links in a Markdown file open the linked workspace file in the viewer,
+instead of the browser resolving ``[plan](plan.md)`` against ``/c/<session id>`` into a
+bogus session. Covers Preview clicks and Edit-mode Ctrl/Cmd-clicks."""
 
 from __future__ import annotations
 
@@ -25,18 +16,14 @@ from tests.e2e_ui.conftest import open_right_rail, switch_markdown_view_mode
 _README_PATH = "notes/README.md"
 _PLAN_BODY = "PLAN-MARKER body of the linked plan."
 _FILES = {
-    _README_PATH: """\
-# Notes
-
-See the [plan](plan.md), the [refs](references/) folder and the
-[diagram](../docs/architecture.mmd).
-
-External: [Omnigent docs](https://omnigent.ai/docs). In-page: [Jump to details](#details).
-
-## Details
-
-Body text.
-""",
+    _README_PATH: (
+        "# Notes\n\n"
+        "See the [plan](plan.md), the [refs](references/) folder and the\n"
+        "[diagram](../docs/architecture.mmd).\n\n"
+        "External: [Omnigent docs](https://omnigent.ai/docs). "
+        "In-page: [Jump to details](#details).\n\n"
+        "## Details\n\nBody text.\n"
+    ),
     "notes/plan.md": f"# Plan\n\n{_PLAN_BODY}\n",
     "notes/references/index.md": "# References\n",
     "docs/architecture.mmd": "flowchart LR\n  A --> B\n",
@@ -47,11 +34,7 @@ Body text.
 def seeded_relative_links_session(
     seeded_session: tuple[str, str],
 ) -> Iterator[tuple[str, str]]:
-    """Seed a Markdown file with relative links and the files it links to.
-
-    :param seeded_session: Runner-bound ``(base_url, session_id)`` pair.
-    :returns: The same ``(base_url, session_id)`` pair once the files exist.
-    """
+    """Seed ``notes/README.md`` with relative links and the files it links to."""
     base_url, session_id = seeded_session
     filesystem = f"{base_url}/v1/sessions/{session_id}/resources/environments/default/filesystem"
     for path, content in _FILES.items():
@@ -67,14 +50,7 @@ def _session_url(session_id: str) -> re.Pattern[str]:
 
 
 def _open_readme(page: Page, base_url: str, session_id: str, mode: str) -> Locator:
-    """Open ``notes/README.md`` from the Files tree in the given view mode.
-
-    :param page: Page to drive.
-    :param base_url: Server base URL.
-    :param session_id: Session whose workspace holds the seeded files.
-    :param mode: ``"Preview"`` or ``"Edit"``.
-    :returns: The visible desktop ``file-viewer`` locator.
-    """
+    """Open ``notes/README.md`` from the Files tree in ``mode`` and return the viewer locator."""
     page.goto(f"{base_url}/c/{session_id}")
     open_right_rail(page)
     rail = page.get_by_role("complementary", name="Workspace")

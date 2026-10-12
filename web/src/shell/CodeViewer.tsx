@@ -169,21 +169,12 @@ const MARKDOWN_REHYPE_PLUGINS: Options["rehypePlugins"] = [
   MATH_PLUGIN.rehypePlugin,
 ];
 
-// Tailwind Preflight applies `img { height: auto }`, which overrides the HTML
-// `width`/`height` *attributes* (presentational hints lose to any author CSS).
-// GitHub honors explicit dimensions, so mirror them onto an inline style —
-// which does win the cascade — for the one image being rendered. This runs
-// after sanitize (React components render the already-sanitized tree), so it
-// adds no attack surface. Only literal integer pixel values are forwarded.
 // Path of the previewed file, so a relative link resolves against its directory.
 const MarkdownPreviewPathContext = createContext<string | null>(null);
 
-/**
- * Anchor for the Markdown preview. A link to another workspace file (`notes.md`,
- * `../docs/`) opens in the FileViewer: as a plain anchor the browser resolves it
- * against the app URL (`/c/<id>` → `/c/notes.md`) and loads a session that
- * doesn't exist. URLs, `mailto:` and in-page `#` links keep their href.
- */
+// Preview anchor: a link to another workspace file opens in the FileViewer, since a
+// plain anchor would resolve against `/c/<id>` and load a session that doesn't
+// exist. URLs, `mailto:` and in-page `#` links keep their href.
 function MarkdownPreviewLink({
   href,
   children,
@@ -228,6 +219,12 @@ function MarkdownPreviewLink({
   );
 }
 
+// Tailwind Preflight applies `img { height: auto }`, which overrides the HTML
+// `width`/`height` *attributes* (presentational hints lose to any author CSS).
+// GitHub honors explicit dimensions, so mirror them onto an inline style —
+// which does win the cascade — for the one image being rendered. This runs
+// after sanitize (React components render the already-sanitized tree), so it
+// adds no attack surface. Only literal integer pixel values are forwarded.
 const MARKDOWN_COMPONENTS: Components = {
   a: MarkdownPreviewLink,
   pre({ children, ...props }) {

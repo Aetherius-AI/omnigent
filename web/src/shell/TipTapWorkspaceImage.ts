@@ -63,14 +63,7 @@ export function isWorkspaceRelativeSrc(src: string): boolean {
 }
 
 /**
- * Whether a Markdown link href names a workspace file: anything that is not a
- * URL (see {@link isWorkspaceRelativeSrc}) or an in-page ``#`` anchor. The
- * viewers open such links in the FileViewer; left to the browser they resolve
- * against the app URL (``/c/<id>`` → ``/c/notes.md``) and load a session that
- * doesn't exist.
- *
- * :param href: The raw href from the markdown, e.g. ``"../docs/notes.md"``.
- * :returns: True when the link should open as a workspace file.
+ * Whether a link href names a workspace file: not a URL (isWorkspaceRelativeSrc) or `#` anchor.
  */
 export function isWorkspaceLinkHref(href: string): boolean {
   return href !== "" && !href.startsWith("#") && isWorkspaceRelativeSrc(href);
