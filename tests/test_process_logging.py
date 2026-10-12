@@ -786,3 +786,18 @@ def test_redact_log_text_handles_large_url_without_userinfo_in_linear_time() -> 
     output = redact_log_text(text)
     assert time.perf_counter() - started < 0.5
     assert output == text
+
+
+def test_redact_diagnostic_text_drops_url_queries_and_named_secrets() -> None:
+    from omnigent.process_logging import redact_diagnostic_text
+
+    text = (
+        "403 for url 'https://blob.example.com/mcp?sig=fake-sig-123' "
+        "with token=fake-token-456 and Authorization: Bearer fake-bearer-789"
+    )
+    redacted = redact_diagnostic_text(text)
+    for secret in ("fake-sig-123", "fake-token-456", "fake-bearer-789"):
+        assert secret not in redacted
+    assert "https://blob.example.com/mcp?[REDACTED]" in redacted
+    assert "token=[REDACTED]" in redacted
+    assert "Authorization: [REDACTED]" in redacted

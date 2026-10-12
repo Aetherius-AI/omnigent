@@ -86,6 +86,7 @@ from omnigent.native.native_coding_agents import (
 )
 from omnigent.native.session_todos import validate_session_todos
 from omnigent.policies.types import EvaluationContext
+from omnigent.process_logging import redact_diagnostic_text
 from omnigent.runner.identity import (
     token_bound_runner_id,
 )
@@ -11299,7 +11300,11 @@ async def _handle_mcp_tools_list(
             }
         )
 
-    failures: dict[str, str] = result.get("failures", {})
+    # Older runners return raw exception text; redact at this boundary as well.
+    failures: dict[str, str] = {
+        str(srv): redact_diagnostic_text(str(msg))
+        for srv, msg in (result.get("failures") or {}).items()
+    }
     for srv, msg in failures.items():
         _logger.warning("runner MCP server %r unavailable: %s", srv, msg)
     # Resolve ownership only when there is something to publish or clear.

@@ -159,18 +159,38 @@ async def test_mcp_tools_list_recovery_clears_startup_event(
     await _handle_mcp_tools_list(
         rpc_id=1,
         session_id=session_id,
-        runner_router=_StubRunnerRouter({"pipeshub": "401 Unauthorized"}),  # type: ignore[arg-type]
+        runner_router=_StubRunnerRouter(  # type: ignore[arg-type]
+            {"pipeshub": "401 Unauthorized", "jira": "ConnectError: timed out"}
+        ),
     )
     await _handle_mcp_tools_list(
         rpc_id=2,
         session_id=session_id,
+        runner_router=_StubRunnerRouter({"jira": "ConnectError: timed out"}),  # type: ignore[arg-type]
+    )
+
+    # Partial recovery: the recovered server reads ready while the other stays failed
+    # and the map stays cached for reloads until every server is ready.
+    assert len(published) == 2
+    partial = published[1]["servers"]
+    assert partial["pipeshub"] == {"status": "ready", "error": None}
+    assert partial["jira"] == {"status": "failed", "error": "ConnectError: timed out"}
+    cached = _helpers_mod._session_mcp_startup_cache[session_id]
+    assert cached["jira"].status == "failed"
+    assert cached["pipeshub"].status == "ready"
+
+    await _handle_mcp_tools_list(
+        rpc_id=3,
+        session_id=session_id,
         runner_router=_StubRunnerRouter({}),  # type: ignore[arg-type]
     )
 
-    assert len(published) == 2
-    recovered = published[1]
-    assert recovered["servers"]["pipeshub"]["status"] == "ready"
-    assert recovered["servers"]["pipeshub"]["error"] is None
+    assert len(published) == 3
+    recovered = published[2]["servers"]
+    assert {name: record["status"] for name, record in recovered.items()} == {
+        "jira": "ready",
+        "pipeshub": "ready",
+    }
     assert session_id not in _helpers_mod._session_mcp_startup_cache
 
 
@@ -178,15 +198,27 @@ async def test_mcp_tools_list_recovery_clears_startup_event(
 async def test_mcp_tools_list_all_healthy_publishes_nothing(
     published: list[dict[str, object]],
 ) -> None:
+    """A healthy listing publishes no event, returns no failure metadata and skips the lookup."""
+    lookups = 0
+
+    class _CountingConversationStore:
+        def get_conversation(self, conversation_id: str) -> object:
+            nonlocal lookups
+            lookups += 1
+            return object()
+
     response = await _handle_mcp_tools_list(
         rpc_id=1,
         session_id="conv_sdk_healthy",
         runner_router=_StubRunnerRouter({}),  # type: ignore[arg-type]
+        conversation_store=_CountingConversationStore(),  # type: ignore[arg-type]
     )
 
     assert published == []
     payload = json.loads(bytes(response.body))
+    assert payload["result"]["tools"] == []
     assert "_meta" not in payload["result"]
+    assert lookups == 0
 
 
 @pytest.mark.asyncio
@@ -241,24 +273,29 @@ async def test_mcp_tools_list_unresolvable_session_skips_publish(
 
 
 @pytest.mark.asyncio
-async def test_mcp_tools_list_healthy_listing_skips_ownership_lookup(
+async def test_mcp_tools_list_sanitizes_old_runner_failure_text(
     published: list[dict[str, object]],
 ) -> None:
-    """The per-turn healthy path must not pay for a conversation lookup."""
-    lookups = 0
-
-    class _CountingConversationStore:
-        def get_conversation(self, conversation_id: str) -> object:
-            nonlocal lookups
-            lookups += 1
-            return object()
-
+    """A runner that predates redaction can return raw exception text with a signed URL."""
+    raw = (
+        "HTTPStatusError: Client error '403 Forbidden' for url "
+        "'https://blob.example.com/mcp?sig=signed-token-xyz' "
+        "after Authorization: Bearer fake-bearer-abc"
+    )
+    session_id = "conv_old_runner"
     response = await _handle_mcp_tools_list(
         rpc_id=1,
-        session_id="conv_sdk_quiet",
-        runner_router=_StubRunnerRouter({}),  # type: ignore[arg-type]
-        conversation_store=_CountingConversationStore(),  # type: ignore[arg-type]
+        session_id=session_id,
+        runner_router=_StubRunnerRouter({"pipeshub": raw}),  # type: ignore[arg-type]
     )
 
-    assert json.loads(bytes(response.body))["result"]["tools"] == []
-    assert lookups == 0
+    payload = json.loads(bytes(response.body))
+    surfaced = [
+        payload["result"]["_meta"]["omnigent/mcpFailures"]["pipeshub"],
+        published[0]["servers"]["pipeshub"]["error"],
+        _helpers_mod._session_mcp_startup_cache[session_id]["pipeshub"].error,
+    ]
+    for text in surfaced:
+        assert "signed-token-xyz" not in text
+        assert "fake-bearer-abc" not in text
+        assert "https://blob.example.com/mcp?[REDACTED]" in text

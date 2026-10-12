@@ -189,7 +189,7 @@ async def test_connect_failure_strips_url_credentials_from_failures(
         await manager.shutdown()
 
     assert "sk-live-abc123" not in result.failures["bad"]
-    assert "https://mcp.example.com/sse?<redacted>" in result.failures["bad"]
+    assert "https://mcp.example.com/sse?[REDACTED]" in result.failures["bad"]
 
 
 class TestDescribeConnectError:
@@ -199,7 +199,7 @@ class TestDescribeConnectError:
         exc = RuntimeError("failed for url 'https://mcp.example.com/sse?token=secret123'")
         described = _describe_connect_error(exc)
         assert "secret123" not in described
-        assert "https://mcp.example.com/sse?<redacted>" in described
+        assert "https://mcp.example.com/sse?[REDACTED]" in described
 
     def test_strips_fragment_from_url(self) -> None:
         from omnigent.runner.mcp_manager import _describe_connect_error
@@ -207,7 +207,7 @@ class TestDescribeConnectError:
         exc = RuntimeError("see https://mcp.example.com/sse#token=secret123 for details")
         described = _describe_connect_error(exc)
         assert "secret123" not in described
-        assert "https://mcp.example.com/sse#<redacted>" in described
+        assert "https://mcp.example.com/sse#[REDACTED]" in described
 
     def test_leaves_plain_message_unchanged(self) -> None:
         from omnigent.runner.mcp_manager import _describe_connect_error
@@ -237,7 +237,7 @@ class TestDescribeConnectError:
         exc = RuntimeError("handshake failed for wss://mcp.example.com/ws?token=secret123")
         described = _describe_connect_error(exc)
         assert "secret123" not in described
-        assert "wss://mcp.example.com/ws?<redacted>" in described
+        assert "wss://mcp.example.com/ws?[REDACTED]" in described
 
     def test_strips_authorization_header_value(self) -> None:
         from omnigent.runner.mcp_manager import _describe_connect_error
@@ -298,7 +298,7 @@ class TestDescribeConnectError:
         described = _describe_connect_error(exc)
         assert "secret123" not in described
         assert described == (
-            "RuntimeError: 401 for url 'https://mcp.example.com/sse?<redacted>'; "
+            "RuntimeError: 401 for url 'https://mcp.example.com/sse?[REDACTED]'; "
             "TimeoutError: handshake timed out"
         )
 

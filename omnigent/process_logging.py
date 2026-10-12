@@ -116,6 +116,10 @@ _NAMED_SECRET_PATTERN = re.compile(
     rf"(?i)((?<![\w.-])[\w.-]*(?:token|api(?:[_-]|[ \t]+)?key|secret|password|credential)"
     rf"\b[\"']?\s*[:=]\s*)({_AUTHORIZATION_VALUE})"
 )
+# Any scheme's query or fragment: signed URLs carry their token there.
+_URL_QUERY_OR_FRAGMENT = re.compile(
+    r"([a-z][a-z0-9+.-]*://[^\s'\"]+?)([?#])[^\s'\"]*", re.IGNORECASE
+)
 _WHITESPACE_SECRET_PATTERN = re.compile(
     # Scan prefixes only from each key's start, as for assignment keys above.
     # Generic token/secret/credential labels require a prefix to distinguish them from prose.
@@ -177,6 +181,12 @@ def redact_log_text(text: str, *, include_whitespace_credentials: bool = False) 
             text,
         )
     return text
+
+
+def redact_diagnostic_text(text: str) -> str:
+    """Redact an error shown to users: drop URL queries and fragments, then secrets."""
+    text = _URL_QUERY_OR_FRAGMENT.sub(rf"\1\2{_REDACTED}", text)
+    return redact_log_text(text, include_whitespace_credentials=True)
 
 
 def format_log_level_name(levelno: int, levelname: str, *, use_colors: bool) -> str:

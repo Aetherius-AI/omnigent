@@ -7,7 +7,6 @@ import contextlib
 import hashlib
 import json
 import logging
-import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,18 +16,13 @@ from mcp.types import ElicitRequestParams, ElicitResult
 from mcp.types import Tool as McpToolDef
 
 from omnigent.debug_logging import runner_primary_session_id
-from omnigent.process_logging import redact_log_text
+from omnigent.process_logging import redact_diagnostic_text
 from omnigent.spec.types import AgentSpec, MCPServerConfig, RetryPolicy
 from omnigent.tools.base import is_valid_tool_name
 from omnigent.tools.mcp import McpServerConnection
 from omnigent.util.json_types import JsonObject as _JsonObject
 
 _logger = logging.getLogger(__name__)
-
-
-_URL_QUERY_OR_FRAGMENT = re.compile(
-    r"([a-z][a-z0-9+.-]*://[^\s'\"]+?)([?#])[^\s'\"]*", re.IGNORECASE
-)
 
 
 def _leaf_exceptions(exc: BaseException) -> list[BaseException]:
@@ -41,14 +35,13 @@ def _leaf_exceptions(exc: BaseException) -> list[BaseException]:
 def _describe_connect_error(exc: Exception) -> str:
     """Describe a connection error for the UI without its credentials.
 
-    URL queries and fragments are dropped whole; the shared log redaction then
-    scrubs userinfo, authorization values and named secrets. Credentials embedded
-    in a URL path are not removed.
+    The shared diagnostic redaction drops URL queries and fragments and scrubs
+    userinfo, authorization values and named secrets. Credentials embedded in a
+    URL path are not removed.
     """
     # The MCP client raises TaskGroup ExceptionGroups whose own text hides the cause.
     message = "; ".join(f"{type(leaf).__name__}: {leaf}" for leaf in _leaf_exceptions(exc))
-    message = _URL_QUERY_OR_FRAGMENT.sub(r"\1\2<redacted>", message)
-    return redact_log_text(message, include_whitespace_credentials=True)
+    return redact_diagnostic_text(message)
 
 
 def _schema_requires_fields(params: ElicitRequestParams) -> bool:
