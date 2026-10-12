@@ -5734,12 +5734,10 @@ def _composer_row(pane: str) -> str | None:
     terminal), the lowest rule is the opening one and the row under it is
     the composer.
 
-    Rules are read as bands (:func:`_rule_bands`) because a box wider than
-    the pane wraps them. When a title wraps the opening rule beyond
-    recognition, the composer is found by scanning upward from the closing
-    rule band (:func:`_composer_row_above_closing_rule`), tried before the
-    row under the lowest rule: with a complete box that row is the ``?``
-    panel's "! for shell mode" row.
+    Wrapped rules are read as bands (:func:`_rule_bands`), and the box is
+    searched upward from the closing band
+    (:func:`_composer_row_above_closing_rule`) before the row below it is
+    considered.
 
     :param pane: Captured pane text from :func:`_capture_pane`.
     :returns: The row's text, e.g. ``"❯ fix the bug"`` or ``"!"`` in shell
@@ -5888,13 +5886,9 @@ def _is_box_rule(line: str) -> bool:
     are otherwise the same shape. The length of the leading run cannot draw
     it: Claude Code right-aligns the label, so that run shrinks to a single
     glyph once the title nears the pane width, and the pane is only as wide
-    as the person's browser terminal. A title wider than the pane is cut
-    with ``…`` and leaves no leading run at all
-    (``" a very long title… ─"``), so a rule without one is accepted only
-    when its label ends in that mark plus one space and starts one space
-    into the row, where the rule's own edge would be. Draft and transcript
-    rows are indented further, so a line that merely trails off in ``… ─``
-    stays content.
+    as the person's browser terminal. A clipped title without a leading
+    run (``" a very long title… ─"``) is accepted only when it starts one
+    space in and its label ends in ``… ``.
 
     :param line: A single pane line, e.g. ``"──────────"`` or
         ``"──────── my session ─"``.
