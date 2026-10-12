@@ -46,7 +46,9 @@ class ManagedReplicas:
 
 
 @pytest.fixture
-def managed_replicas(tmp_path: Path, mock_llm_server_url: str) -> Iterator[ManagedReplicas]:
+def managed_replicas(
+    tmp_path: Path, mock_llm_server_url: str, request: pytest.FixtureRequest
+) -> Iterator[ManagedReplicas]:
     """Start isolated product replicas, the real host launcher and a keyed ingress."""
     ports = {role: _find_free_port() for role in ("a", "b", "ingress", "ui")}
     urls = {role: f"http://127.0.0.1:{port}" for role, port in ports.items()}
@@ -111,6 +113,8 @@ def managed_replicas(tmp_path: Path, mock_llm_server_url: str) -> Iterator[Manag
                     urls["a"],
                     "--replica-b",
                     urls["b"],
+                    "--runner-replica",
+                    getattr(request, "param", "b"),
                 ]
                 cwd, process_env = _REPO_ROOT, env
             with log_path.open("w") as log:
