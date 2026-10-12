@@ -7087,24 +7087,15 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
       });
     });
 
-    it("falls back to a generic detail for a failed server without an error", () => {
+    it.each([
+      ["without an error", null],
+      ["with an empty-string error", ""],
+    ])("falls back to a generic detail for a failed server %s", (_label, error) => {
       useChatStore.setState({ mcpStartupFailures: null });
       handleSessionEvent({
         type: "session_mcp_startup",
         conversationId: "conv_abc",
-        servers: { pipeshub: { status: "failed", error: null } },
-      });
-      expect(useChatStore.getState().mcpStartupFailures).toEqual({
-        pipeshub: "startup failed",
-      });
-    });
-
-    it("falls back to a generic detail for an empty-string error", () => {
-      useChatStore.setState({ mcpStartupFailures: null });
-      handleSessionEvent({
-        type: "session_mcp_startup",
-        conversationId: "conv_abc",
-        servers: { pipeshub: { status: "failed", error: "" } },
+        servers: { pipeshub: { status: "failed", error } },
       });
       expect(useChatStore.getState().mcpStartupFailures).toEqual({
         pipeshub: "startup failed",
@@ -7246,6 +7237,47 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
         }),
       );
       await Promise.all([sibling, switching]);
+
+      expect(useChatStore.getState().mcpStartupFailures).toEqual({ pipeshub: "fresh" });
+    });
+
+    it("keeps a live failure map when a runner-online refresh joins the bind snapshot", async () => {
+      let resolveSnapshot!: (response: Response) => void;
+      const snapshot = new Promise<Response>((resolve) => {
+        resolveSnapshot = resolve;
+      });
+      fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (
+          url.split("?")[0] === "/v1/sessions/conv_mcp_joined" &&
+          (init?.method ?? "GET") === "GET"
+        ) {
+          return snapshot;
+        }
+        return defaultFetchHandler(input, init);
+      });
+
+      const switching = useChatStore.getState().switchTo("conv_mcp_joined");
+      await tick();
+      // The runner-online hook refreshes while the bind snapshot is still in flight.
+      const refreshing = useChatStore.getState().refreshSessionState("conv_mcp_joined");
+      await tick();
+      handleSessionEvent({
+        type: "session_mcp_startup",
+        conversationId: "conv_mcp_joined",
+        servers: { pipeshub: { status: "failed", error: "fresh" } },
+      });
+      resolveSnapshot(
+        mockResponse({
+          id: "conv_mcp_joined",
+          agent_id: "agent_xyz",
+          status: "idle",
+          created_at: 0,
+          items: [],
+          mcp_startup: null,
+        }),
+      );
+      await Promise.all([switching, refreshing]);
 
       expect(useChatStore.getState().mcpStartupFailures).toEqual({ pipeshub: "fresh" });
     });
