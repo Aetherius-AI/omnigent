@@ -98,6 +98,8 @@ from omnigent.host.frames import (
     HostModelOptionsResultFrame,
     HostPluginsFrame,
     HostPluginsResultFrame,
+    HostRefreshHarnessesFrame,
+    HostRefreshHarnessesResultFrame,
     HostRemoveWorktreeFrame,
     HostRemoveWorktreeResultFrame,
     HostRunnerExitedFrame,
@@ -138,6 +140,7 @@ from omnigent.onboarding.harness_install import (
     harness_cli_installed,
     harness_cli_version,
     harness_setup_hint,
+    invalidate_harness_login_probe_cache,
     try_install_harness_cli,
     ui_install_key,
 )
@@ -2985,6 +2988,28 @@ class HostProcess:
             gateway_inference=gateway_inference_map(),
         )
 
+    def _handle_refresh_harnesses(
+        self, frame: HostRefreshHarnessesFrame
+    ) -> HostRefreshHarnessesResultFrame:
+        """Force a full readiness probe, bypassing periodic and login caches."""
+        try:
+            invalidate_harness_login_probe_cache()
+            configured = configured_harness_map()
+            gateway = gateway_inference_map()
+        except Exception as exc:
+            _logger.exception("Forced harness readiness refresh failed")
+            return HostRefreshHarnessesResultFrame(
+                request_id=frame.request_id,
+                status="failed",
+                error=f"readiness refresh failed: {exc}",
+            )
+        return HostRefreshHarnessesResultFrame(
+            request_id=frame.request_id,
+            status="ok",
+            configured_harnesses=configured,
+            gateway_inference=gateway,
+        )
+
     def _handle_store_secret(self, frame: HostStoreSecretFrame) -> HostStoreSecretResultFrame:
         """Handle a ``host.store_secret`` request from the server.
 
@@ -4841,6 +4866,14 @@ class HostProcess:
                     install_result.gateway_inference,
                 )
             await ws.send(encode_host_frame(install_result))
+        elif isinstance(frame, HostRefreshHarnessesFrame):
+            refresh_result = await asyncio.to_thread(self._handle_refresh_harnesses, frame)
+            if refresh_result.status == "ok":
+                self._replace_capabilities(
+                    refresh_result.configured_harnesses,
+                    refresh_result.gateway_inference,
+                )
+            await ws.send(encode_host_frame(refresh_result))
         elif isinstance(frame, HostStoreSecretFrame):
             # The credential write touches the OS keychain / config file, so run
             # it off the event loop and reply when it completes.
