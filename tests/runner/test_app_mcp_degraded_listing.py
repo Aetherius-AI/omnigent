@@ -217,16 +217,15 @@ async def test_failed_empty_config_sync_is_retried_until_it_succeeds() -> None:
         # The proxy reports its own failure in the result rather than raising.
         server_client.failures = {"proxy": "ConnectError: All connection attempts failed"}
         assert await _run_turn(client, finished, server_client) == 1
+        assert _TOOL_NAME not in _advertised_tools(harness_client.posted_bodies[-1]), (
+            "tools of removed servers are dropped even when the sync fails"
+        )
         assert await _run_turn(client, finished, server_client) == 1, (
             "a failed empty-config sync must be retried on the next turn"
-        )
-        assert _TOOL_NAME in _advertised_tools(harness_client.posted_bodies[-1]), (
-            "stale tools stay advertised until the sync succeeds"
         )
 
         server_client.failures = {}
         assert await _run_turn(client, finished, server_client) == 1
-        assert _TOOL_NAME not in _advertised_tools(harness_client.posted_bodies[-1])
         assert await _run_turn(client, finished, server_client) == 0
 
 

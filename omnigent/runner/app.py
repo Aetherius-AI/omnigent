@@ -5164,6 +5164,8 @@ def create_runner_app(
                 server_client,
                 execution_registry=mcp_execution_registry,
             ).schemas_for(cached_spec, sync_when_empty=True)
+            # Tools of removed servers can no longer be routed; drop them regardless.
+            _session_tool_schemas[conv] = _without_mcp_tools(_session_tool_schemas.get(conv, []))
             if sync_result.failures:
                 _logger.warning(
                     "MCP empty-config sync failed for %s: %s",
@@ -5173,9 +5175,6 @@ def create_runner_app(
                 )
             else:
                 _session_mcp_spec_hash.pop(conv, None)
-                _session_tool_schemas[conv] = _without_mcp_tools(
-                    _session_tool_schemas.get(conv, [])
-                )
 
         _spec_tools = _session_tool_schemas.get(conv) or []
         # Request-driven harnesses should not advertise browser tools when no
