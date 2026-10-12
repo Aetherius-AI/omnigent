@@ -410,6 +410,143 @@ async def test_confirmed_completion_corrects_drained_grace_cancel(
         rig.close()
 
 
+@pytest.mark.asyncio
+async def test_confirmed_stop_blocks_late_completion_after_drain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A confirmed hard stop makes a drained cancellation final against a late idle.
+
+    The grace timer delivers an optimistic ``cancelled`` and the parent drains
+    it (recording the drained-delivery tombstone). The runner then confirms the
+    kill via ``stop_session``. A late ``turn_completed`` idle -- a straggler edge
+    from the torn-down pane -- must not resurrect the dispatch as a completion;
+    the confirmed abort stands.
+    """
+    import omnigent.harnesses.claude_native.bridge as claude_bridge
+    from omnigent.runner.tool_dispatch import _cleanup_drained_subagent_work
+
+    _patch_claude_interrupt(monkeypatch, grace_s=0.05)
+    monkeypatch.setattr(claude_bridge, "kill_session", lambda bridge_dir, *, timeout_s: None)
+
+    rig = _Rig("claude-native")
+    try:
+        async with _runner_client(rig.app) as client:
+            await rig.create_child_session(client)
+            resp = await client.post(
+                f"/v1/sessions/{rig.child_id}/events", json={"type": "interrupt"}
+            )
+            assert resp.status_code == 204, resp.text
+
+            await asyncio.sleep(0.2)
+            cancelled = rig.drained()
+            assert [(item["status"], item["output"]) for item in cancelled] == [("cancelled", "")]
+
+            # The parent drains the cancellation, recording the drained tombstone.
+            for payload in cancelled:
+                await _cleanup_drained_subagent_work(payload, server_client=None)
+            assert rig.child_id in subagent_work._drained_delivered_subagent_children
+
+            # The runner confirms the kill, making the cancellation final.
+            resp = await client.post(
+                f"/v1/sessions/{rig.child_id}/events", json={"type": "stop_session"}
+            )
+            assert resp.status_code == 204, resp.text
+            provisional = subagent_work._provisional_cancelled_subagent_work.get(rig.child_id)
+            assert provisional is not None and provisional.cancellation_confirmed
+
+            # A late straggler completion edge must not overturn the confirmed abort.
+            resp = await rig.post_status(
+                client, {"status": "idle", "turn_completed": True, "output": "the verdict"}
+            )
+            assert resp.status_code == 204, resp.text
+        assert rig.drained() == [], (
+            "a confirmed cancellation must not be corrected by a late completion"
+        )
+        provisional = subagent_work._provisional_cancelled_subagent_work.get(rig.child_id)
+        assert provisional is not None and provisional.status == "cancelled"
+    finally:
+        rig.close()
+        subagent_work._drained_delivered_subagent_children.discard(rig.child_id)
+        subagent_work._provisional_cancelled_subagent_work.pop(rig.child_id, None)
+
+
+@pytest.mark.asyncio
+async def test_legacy_bare_idle_does_not_overturn_optimistic_cancellation() -> None:
+    """A legacy harness's bare idle must not launder an optimistic cancellation.
+
+    A legacy harness has no ``turn_completed`` edge, so its bare idle reaches the
+    completion branch unconfirmed. When an optimistic grace-timer ``cancelled``
+    was already delivered for the dispatch, that idle proves nothing and must not
+    correct it into a success.
+    """
+    rig = _Rig("cursor-native")
+    try:
+        async with _runner_client(rig.app) as client:
+            await rig.create_child_session(client)
+
+            # An optimistic (unconfirmed) cancellation is delivered to the parent.
+            ack = subagent_work.mark_subagent_work_terminal(
+                rig.child_id, status="cancelled", output="partial work"
+            )
+            assert ack.delivered_now
+            assert [(item["status"], item["output"]) for item in rig.drained()] == [
+                ("cancelled", "partial work")
+            ]
+
+            # The legacy harness then goes idle without any confirming edge.
+            resp = await rig.post_status(client, {"status": "idle", "output": "done"})
+            assert resp.status_code == 204, resp.text
+        assert rig.drained() == [], "an unconfirmed legacy idle must not correct a cancellation"
+        entry = subagent_work.get_subagent_work(rig.child_id)
+        assert entry is not None and entry.status == "cancelled"
+    finally:
+        rig.close()
+
+
+def test_undelivered_confirmed_cancellation_survives_late_completion() -> None:
+    """A confirmed cancellation blocks a late completion even if it never delivered.
+
+    The confirmed kill lands while the parent inbox is briefly missing, so the
+    ``cancelled`` is recorded but undelivered. A later ``completed`` for the same
+    dispatch must not launder the confirmed abort into a success; it re-delivers
+    the cancellation once the inbox returns.
+    """
+    parent_id = uuid.uuid4().hex
+    child_id = uuid.uuid4().hex
+    inbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    subagent_work.register_subagent_work(
+        parent_session_id=parent_id,
+        child_session_id=child_id,
+        agent="researcher",
+        title="cite-check",
+    )
+    try:
+        # The confirmed kill lands while the parent inbox is unavailable.
+        ack = subagent_work.mark_subagent_work_terminal(
+            child_id, status="cancelled", output="", confirmed_cancellation=True
+        )
+        assert not ack.delivered
+        entry = subagent_work.get_subagent_work(child_id)
+        assert entry is not None and entry.cancellation_confirmed and not entry.delivered
+
+        # The inbox returns and a late completion arrives for the same dispatch.
+        subagent_work._session_inboxes_ref[parent_id] = inbox
+        done = subagent_work.mark_subagent_work_terminal(
+            child_id, status="completed", output="the verdict", confirmed_completion=True
+        )
+        assert done.delivered_now
+        statuses = []
+        while not inbox.empty():
+            item = inbox.get_nowait()
+            statuses.append((item["status"], item["output"]))
+        assert statuses == [("cancelled", "")], (
+            "a confirmed cancellation must re-deliver as cancelled, not be corrected"
+        )
+    finally:
+        subagent_work.unregister_subagent_work(child_id)
+        subagent_work._session_inboxes_ref.pop(parent_id, None)
+
+
 def test_cancelled_inbox_line_surfaces_output_before_cancellation() -> None:
     """The parent-readable line keeps a cancelled dispatch's real output."""
     from omnigent.runner.tool_dispatch import _format_async_task_item

@@ -623,6 +623,7 @@ def mark_subagent_work_terminal(
     output: str | None,
     only_if_work_id: str | None = None,
     confirmed_completion: bool = False,
+    confirmed_cancellation: bool = False,
 ) -> _SubagentDeliveryAck:
     """
     Mark a sub-agent dispatch terminal and notify the parent inbox.
@@ -650,10 +651,15 @@ def mark_subagent_work_terminal(
         completion corrects an optimistic cancellation that was already
         delivered or drained for the same dispatch, so a child that survived
         an interrupt still reaches the parent with its real result.
+    :param confirmed_cancellation: Whether this ``cancelled`` report is a
+        confirmed kill. It marks the dispatch's cancellation final (including
+        a delivered or drained provisional entry) so a late survivor
+        completion can no longer correct it.
     :returns: Delivery acknowledgement for this terminal report.
     :raises ValueError: If ``status`` is not terminal.
     """
     corrects_cancellation = confirmed_completion and status == "completed"
+    confirms_cancellation = confirmed_cancellation and status == "cancelled"
     if status not in _SUBAGENT_TERMINAL_STATUSES:
         raise ValueError(
             f"sub-agent terminal status must be one of "
@@ -662,7 +668,15 @@ def mark_subagent_work_terminal(
     entry = _subagent_work_by_child.get(child_session_id)
     if entry is None:
         provisional = _provisional_cancelled_subagent_work.get(child_session_id)
-        if corrects_cancellation and provisional is not None:
+        if provisional is not None and confirms_cancellation:
+            # A confirmed kill makes the retained optimistic cancellation final,
+            # so a late survivor completion can no longer correct it.
+            provisional.cancellation_confirmed = True
+        elif (
+            corrects_cancellation
+            and provisional is not None
+            and not provisional.cancellation_confirmed
+        ):
             return _deliver_corrected_completion(provisional, output)
         if child_session_id in _drained_delivered_subagent_children:
             return _SubagentDeliveryAck(
@@ -688,6 +702,10 @@ def mark_subagent_work_terminal(
             reason=_SUBAGENT_DELIVERY_SUPERSEDED_DISPATCH,
         )
     if entry.status in _SUBAGENT_TERMINAL_STATUSES:
+        if confirms_cancellation and entry.status == "cancelled":
+            # A confirmed kill makes the delivered optimistic cancellation
+            # final; a late survivor completion can no longer correct it.
+            entry.cancellation_confirmed = True
         if (
             corrects_cancellation
             and entry.status == "cancelled"
@@ -728,8 +746,14 @@ def mark_subagent_work_terminal(
         # A late stop_session-driven "cancelled" must not downgrade an
         # already-recorded "completed"/"failed" still awaiting delivery, and a
         # trailing quiescence "completed" must not launder a recorded "failed".
-        keep_recorded = (status == "cancelled" and entry.status != "cancelled") or (
-            status == "completed" and entry.status == "failed"
+        keep_recorded = (
+            (status == "cancelled" and entry.status != "cancelled")
+            or (status == "completed" and entry.status == "failed")
+            or (
+                status == "completed"
+                and entry.status == "cancelled"
+                and entry.cancellation_confirmed
+            )
         )
         if not keep_recorded:
             entry.status = status
@@ -739,6 +763,8 @@ def mark_subagent_work_terminal(
     entry.status = status
     entry.output = output
     entry.completed_at = time.time()
+    if confirms_cancellation:
+        entry.cancellation_confirmed = True
     return _deliver_subagent_completion(entry)
 
 
@@ -770,7 +796,6 @@ def _deliver_corrected_completion(
     entry.output = output
     entry.completed_at = time.time()
     entry.corrected_status = cancelled_entry.status
-    entry.delivered = False
     return _deliver_subagent_completion(entry)
 
 

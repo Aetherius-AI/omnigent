@@ -56,13 +56,6 @@ if TYPE_CHECKING:
     from omnigent.harnesses.codex_native.bridge import CodexNativeBridgeState
 
 
-class SubagentWorkEntryRef(Protocol):
-    """The sub-agent work entry a delivery acted on, mutable where a confirmed
-    kill must mark the abort so a late survivor completion cannot overturn it."""
-
-    cancellation_confirmed: bool
-
-
 class SubagentDeliveryAck(Protocol):
     """Result of attempting to deliver a terminal sub-agent payload."""
 
@@ -71,7 +64,7 @@ class SubagentDeliveryAck(Protocol):
         raise NotImplementedError
 
     @property
-    def entry(self) -> SubagentWorkEntryRef | None:
+    def entry(self) -> object | None:
         raise NotImplementedError
 
     @property
@@ -89,6 +82,7 @@ class MarkSubagentTerminalAndWake(Protocol):
         status: str,
         output: str | None,
         only_if_work_id: str | None = None,
+        confirmed_cancellation: bool = False,
     ) -> SubagentDeliveryAck:
         raise NotImplementedError
 
@@ -626,11 +620,8 @@ class NativeInterruptRunner:
             conv_id,
             status="cancelled",
             output=None,
+            confirmed_cancellation=True,
         )
-        if delivery_ack.entry is not None:
-            # The kill confirms the abort, so a late survivor completion must
-            # not overturn this cancellation.
-            delivery_ack.entry.cancellation_confirmed = True
         if not delivery_ack.delivered and (
             delivery_ack.entry is not None or conv_id in self._session_sub_agent_names
         ):
@@ -702,11 +693,8 @@ class NativeInterruptRunner:
             conv_id,
             status="cancelled",
             output=None,
+            confirmed_cancellation=True,
         )
-        if delivery_ack.entry is not None:
-            # The kill confirms the abort, so a late survivor completion must
-            # not overturn this cancellation.
-            delivery_ack.entry.cancellation_confirmed = True
         if not delivery_ack.delivered and (
             delivery_ack.entry is not None or conv_id in self._session_sub_agent_names
         ):
