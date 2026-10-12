@@ -632,6 +632,67 @@ def test_fork_session_start_hook_forks_before_printing_conversation_url(
     assert rotation_timeout.read == claude_native_hook._SESSION_ROTATION_TIMEOUT_S
 
 
+@pytest.mark.parametrize("mode", ["clear", "fork"])
+def test_session_rotation_honours_ambient_proxy_for_a_remote_server(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    """A remote-server rotation callback keeps honouring the ambient proxy.
+
+    The loopback branch is covered by the clear/fork rotation tests above; this
+    guards the other branch so an unconditional ``trust_env=False`` at either
+    rotation call site would fail.
+    """
+    captured_trust_env: list[object] = []
+
+    class _Client:
+        def __init__(self, *, headers: dict[str, str], timeout: object, trust_env: object) -> None:
+            del headers, timeout
+            captured_trust_env.append(trust_env)
+
+        def __enter__(self) -> _Client:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def get(self, url: str) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "id": "conv_old",
+                    "agent_id": "ag_claude",
+                    "runner_id": "runner_one",
+                    "labels": {},
+                },
+                request=httpx.Request("GET", url),
+            )
+
+        def post(self, url: str, *, json: dict[str, object]) -> httpx.Response:
+            return httpx.Response(200, json={"id": "conv_new"}, request=httpx.Request("POST", url))
+
+        def patch(self, url: str, *, json: dict[str, object]) -> httpx.Response:
+            return httpx.Response(200, json={"id": "patched"}, request=httpx.Request("PATCH", url))
+
+    monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._BRIDGE_ROOT", tmp_path / "root")
+    monkeypatch.setattr(native_policy_hook.httpx, "Client", _Client)
+    bridge_dir = prepare_bridge_dir("conv_old", bridge_id="bridge_shared", workspace=tmp_path)
+    build_hook_settings(
+        bridge_dir,
+        ap_server_url="https://omnigent.example.com",
+        ap_auth_headers={"Authorization": "Bearer xyz"},
+    )
+    write_active_session_id(bridge_dir, "conv_old")
+
+    rotate = {
+        "clear": claude_native_hook._rotate_session_on_clear,
+        "fork": claude_native_hook._rotate_session_on_fork,
+    }[mode]
+    assert rotate(bridge_dir) == "conv_new"
+    assert captured_trust_env == [True]
+
+
 def test_resume_session_start_without_branch_marker_does_not_fork(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

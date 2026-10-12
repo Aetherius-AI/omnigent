@@ -1,29 +1,15 @@
-r"""UI journey: a Claude Code prompt on a proxied host must not be fail-closed by its policy hook.
+"""UI journey: a native Claude prompt completes behind an ambient proxy.
 
-A runner on a host with an ambient HTTP proxy (``HTTP_PROXY`` / ``HTTPS_PROXY``
-exported, no loopback ``NO_PROXY`` exemption) launches Claude Code. A prompt
-typed into the terminal fires the ``UserPromptSubmit`` policy hook, whose
-``POST .../policies/evaluate`` targets the runner-local relay on ``127.0.0.1``.
-The hook's ``httpx.Client`` honours the proxy environment, so that loopback
-callback is sent to the proxy instead of the runner. A remote proxy cannot reach
-the runner's loopback, the callback fails, and the hook fails closed: Claude Code
-drops the prompt with "UserPromptSubmit operation blocked by hook: Omnigent
-policy evaluation unavailable ...".
+The runner inherits an ambient HTTP proxy (``HTTP_PROXY`` / ``HTTPS_PROXY``, no
+loopback ``NO_PROXY`` exemption). A prompt fires the ``UserPromptSubmit`` policy
+hook, whose ``POST .../policies/evaluate`` targets the runner-local relay on
+``127.0.0.1``. The hook must reach that loopback relay directly; routing it
+through the proxy fails closed and drops the prompt.
 
-Stand-in for the reported environment: an in-process forward proxy that answers
-loopback destinations with ``502`` (a remote proxy's ``127.0.0.1`` is itself) and
-forwards the model endpoint, which is addressed by a non-loopback name only the
-proxy can reach -- the shape of a corporate egress proxy. The mock LLM serves the
-model traffic, so the journey completes once the hook connects to loopback
-directly.
-
-The test asserts the desired behaviour: the reply lands in the session. It fails
-on a build whose hook routes loopback callbacks through the proxy.
-
-Run::
-
-    pytest tests/e2e_ui/approvals/test_policy_hook_ambient_proxy.py \
-        --ui-skip-build --video on
+Stand-in topology: an in-process forward proxy answers loopback destinations with
+``502`` (a remote proxy's ``127.0.0.1`` is its own host) and forwards the model
+endpoint, which is addressed by a non-loopback name only the proxy can reach --
+the shape of a corporate egress proxy. The mock LLM serves the model traffic.
 """
 
 from __future__ import annotations
@@ -33,9 +19,7 @@ import ipaddress
 import json
 import os
 import secrets
-import select
 import shutil
-import socket
 import subprocess
 import sys
 import textwrap
@@ -117,19 +101,6 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 
-def _pump(client: socket.socket, remote: socket.socket) -> None:
-    peers = {client: remote, remote: client}
-    while True:
-        readable, _, _ = select.select(list(peers), [], [], 60.0)
-        if not readable:
-            return
-        for src in readable:
-            data = src.recv(65536)
-            if not data:
-                return
-            peers[src].sendall(data)
-
-
 class _CorporateProxy:
     """Forward proxy standing in for a remote egress proxy.
 
@@ -173,17 +144,6 @@ class _CorporateProxy:
                 proxy.model_forwards.append(what)
                 return proxy.model_upstream
 
-            def do_CONNECT(self) -> None:
-                host, _, port = self.path.rpartition(":")
-                target = self._route(host, int(port or 443), f"CONNECT {self.path}")
-                if target is None:
-                    return
-                with socket.create_connection(target, timeout=10.0) as remote:
-                    self.send_response(HTTPStatus.OK, "Connection Established")
-                    self.end_headers()
-                    self.close_connection = True
-                    _pump(self.connection, remote)
-
             def _forward(self) -> None:
                 url = urlsplit(self.path)
                 if not url.scheme:
@@ -200,10 +160,14 @@ class _CorporateProxy:
                 fwd = f"http://{target[0]}:{target[1]}{url.path or '/'}"
                 if url.query:
                     fwd += f"?{url.query}"
-                with httpx.Client(trust_env=False, timeout=120.0) as client:
-                    upstream_resp = client.request(
-                        self.command, fwd, content=body, headers=headers
-                    )
+                try:
+                    with httpx.Client(trust_env=False, timeout=120.0) as client:
+                        upstream_resp = client.request(
+                            self.command, fwd, content=body, headers=headers
+                        )
+                except httpx.HTTPError as exc:
+                    self._refuse(f"proxy: upstream request to {fwd} failed: {exc!r}")
+                    return
                 self.send_response(upstream_resp.status_code)
                 for key, value in upstream_resp.headers.items():
                     if key.lower() not in _RESPONSE_DROP_HEADERS:
