@@ -749,16 +749,16 @@ def mark_subagent_work_terminal(
                 delivered_now=False,
                 reason=_SUBAGENT_DELIVERY_ALREADY_DELIVERED,
             )
-        # A late stop_session-driven "cancelled" must not downgrade an
-        # already-recorded "completed"/"failed" still awaiting delivery, and a
-        # trailing quiescence "completed" must not launder a recorded "failed".
+        # Only undelivered entries reach here. A late "cancelled" must not
+        # downgrade a recorded "completed"/"failed", a trailing "completed" must
+        # not launder a "failed", and only a confirmed kill outranks a completion.
         keep_recorded = (
             (status == "cancelled" and entry.status != "cancelled")
             or (status == "completed" and entry.status == "failed")
             or (
                 status == "completed"
                 and entry.status == "cancelled"
-                and (entry.cancellation_confirmed or not corrects_cancellation)
+                and entry.cancellation_confirmed
             )
         )
         if not keep_recorded:

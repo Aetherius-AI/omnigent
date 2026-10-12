@@ -323,16 +323,25 @@ def _patch_claude_interrupt(monkeypatch: pytest.MonkeyPatch, *, grace_s: float) 
     monkeypatch.setattr(interrupt_mod, "_NATIVE_INTERRUPT_CANCEL_GRACE_S", grace_s)
 
 
+@pytest.mark.parametrize(
+    "completion_edge",
+    [
+        pytest.param({"status": "idle", "turn_completed": True}, id="turn_completed-idle"),
+        pytest.param({"status": "idle", "turn_outcome": "completed"}, id="turn_outcome-completed"),
+    ],
+)
 @pytest.mark.asyncio
 async def test_confirmed_completion_corrects_grace_cancelled_dispatch(
+    completion_edge: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A survivor's confirmed turn-end overturns the grace timer's cancellation.
 
     The interrupt's grace timer fires first and delivers ``cancelled`` to the
-    parent, but the child survived the Escape and finishes the turn. Its
-    confirmed turn-end edge must correct the provisional cancellation and reach
-    the parent with the real result, not be dropped as already delivered.
+    parent, but the child survived the Escape and finishes the turn. Both
+    confirmed-completion edges -- a ``turn_completed`` idle and a
+    ``turn_outcome: completed`` idle -- must correct the provisional cancellation
+    and reach the parent with the real result, not be dropped as already delivered.
     """
     _patch_claude_interrupt(monkeypatch, grace_s=0.05)
 
@@ -354,9 +363,7 @@ async def test_confirmed_completion_corrects_grace_cancelled_dispatch(
 
             # The child actually survived; its forwarder posts the confirmed
             # turn-end completion carrying the real result.
-            resp = await rig.post_status(
-                client, {"status": "idle", "turn_completed": True, "output": "the verdict"}
-            )
+            resp = await rig.post_status(client, {**completion_edge, "output": "the verdict"})
             assert resp.status_code == 204, resp.text
         delivered = rig.drained()
         assert [(item["status"], item["output"]) for item in delivered] == [
@@ -553,13 +560,14 @@ def test_undelivered_confirmed_cancellation_survives_late_completion() -> None:
         subagent_work._session_inboxes_ref.pop(parent_id, None)
 
 
-def test_undelivered_optimistic_cancel_not_overturned_by_unconfirmed_completion() -> None:
-    """An unconfirmed completion cannot launder an undelivered optimistic cancel.
+def test_undelivered_optimistic_cancel_replaced_by_later_unconfirmed_completion() -> None:
+    """A later report replaces an undelivered optimistic cancellation.
 
     The optimistic ``cancelled`` is recorded while the parent inbox is missing, so
-    it never delivered. A later unconfirmed ``completed`` (a legacy bare idle) must
-    not rewrite that abort into a success merely because delivery had not happened
-    yet; only a confirmed completion may correct it.
+    it never delivered. Because nothing was shown to the parent, the later report --
+    even an unconfirmed ``completed`` (a legacy bare idle) -- replaces it, keeping the
+    existing latest-undelivered-wins contract. Only a confirmed kill makes an
+    undelivered cancellation final, which is covered separately.
     """
     parent_id = uuid.uuid4().hex
     child_id = uuid.uuid4().hex
@@ -587,8 +595,8 @@ def test_undelivered_optimistic_cancel_not_overturned_by_unconfirmed_completion(
         while not inbox.empty():
             item = inbox.get_nowait()
             statuses.append((item["status"], item["output"]))
-        assert statuses == [("cancelled", "partial work")], (
-            "an unconfirmed completion must not launder an undelivered cancellation"
+        assert statuses == [("completed", "done")], (
+            "a later report must replace an undelivered, unconfirmed cancellation"
         )
     finally:
         subagent_work.unregister_subagent_work(child_id)
