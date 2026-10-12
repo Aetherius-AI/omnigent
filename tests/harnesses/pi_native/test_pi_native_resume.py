@@ -197,6 +197,64 @@ def test_function_output_becomes_toolresult() -> None:
     assert msg["isError"] is False
 
 
+def test_dedup_duplicate_function_output_replays_first_result_once() -> None:
+    """Two outputs for one call_id rebuild as one toolResult, keeping the first:
+    Anthropic rejects a history with two tool_result blocks for one tool_use id.
+    """
+    items = [
+        _user_item("what time is it", item_id="u1"),
+        _function_call_item(name="get_time", call_id="c1", arguments="{}", item_id="fc1"),
+        _function_output_item(call_id="c1", output="12:00 (first mirror)", item_id="fo1"),
+        _function_output_item(call_id="c1", output="12:00 (second mirror)", item_id="fo2"),
+        _assistant_item("It is 12:00.", item_id="a1"),
+    ]
+    records = pi_session_records_from_session_items(
+        items,
+        session_id="conv_abc",
+        external_session_id=_EXTERNAL_ID,
+        cwd=Path("/repo"),
+    )
+    entries = records[1:]
+    assert [e["message"]["role"] for e in entries] == [
+        "user",
+        "assistant",
+        "toolResult",
+        "assistant",
+    ]
+    results = [e["message"] for e in entries if e["message"]["role"] == "toolResult"]
+    assert [r["toolCallId"] for r in results] == ["c1"]
+    assert results[0]["content"] == [{"type": "text", "text": "12:00 (first mirror)"}]
+    # Skipping the duplicate must not leave a hole in the parent chain.
+    assert entries[0]["parentId"] is None
+    for prev, cur in itertools.pairwise(entries):
+        assert cur["parentId"] == prev["id"]
+
+
+def test_dedup_is_scoped_per_call_id() -> None:
+    """Parallel calls keep one result each; only a repeat of the same id is dropped."""
+    items = [
+        _user_item("read both files", item_id="u1"),
+        _function_call_item(name="read", call_id="c1", arguments='{"path":"a"}', item_id="fc1"),
+        _function_call_item(name="read", call_id="c2", arguments='{"path":"b"}', item_id="fc2"),
+        _function_output_item(call_id="c1", output="A", item_id="fo1"),
+        _function_output_item(call_id="c2", output="B", item_id="fo2"),
+        _function_output_item(call_id="c2", output="B (again)", item_id="fo3"),
+        _assistant_item("Read both.", item_id="a1"),
+    ]
+    records = pi_session_records_from_session_items(
+        items,
+        session_id="conv_abc",
+        external_session_id=_EXTERNAL_ID,
+        cwd=Path("/repo"),
+    )
+    results = [
+        (e["message"]["toolCallId"], e["message"]["content"][0]["text"])
+        for e in records[1:]
+        if e["message"]["role"] == "toolResult"
+    ]
+    assert results == [("c1", "A"), ("c2", "B")]
+
+
 def test_full_tool_roundtrip_chains_correctly() -> None:
     items = [
         _user_item("run ls", item_id="u1"),
@@ -221,6 +279,73 @@ def test_full_tool_roundtrip_chains_correctly() -> None:
     assert entries[0]["parentId"] is None
     for prev, cur in itertools.pairwise(entries):
         assert cur["parentId"] == prev["id"]
+
+
+@pytest.mark.parametrize(
+    "call_count,text_index,reasoning",
+    [(2, 0, False), (2, 2, False), (2, 1, True), (1, 1, False)],
+    ids=["text-first", "text-last", "interleaved-reasoning", "single-call"],
+)
+def test_response_keeps_tool_calls_and_results_adjacent(
+    call_count: int, text_index: int, reasoning: bool
+) -> None:
+    call_ids = [f"c{i}" for i in range(call_count)]
+    response = [
+        _function_call_item(name="read", call_id=cid, arguments="{}", item_id=cid)
+        for cid in call_ids
+    ]
+    response.insert(text_index, _assistant_item("Reading files."))
+    if reasoning:
+        response.insert(1, {"type": "reasoning", "id": "thinking", "response_id": "r1"})
+    items = [
+        _user_item("read files"),
+        *response,
+        *[
+            _function_output_item(call_id=cid, output=cid, item_id=f"out-{cid}")
+            for cid in call_ids
+        ],
+        _assistant_item("Done.", item_id="final", response_id="r2"),
+    ]
+    records = pi_session_records_from_session_items(
+        items, session_id="conv_abc", external_session_id=_EXTERNAL_ID, cwd=Path("/repo")
+    )
+    entries = records[1:]
+    messages = [entry["message"] for entry in entries]
+    assert [msg["role"] for msg in messages] == [
+        "user",
+        "assistant",
+        *["toolResult"] * call_count,
+        "assistant",
+    ]
+    content = messages[1]["content"]
+    assert [b["type"] for b in content] == (
+        ["toolCall"] * text_index + ["text"] + ["toolCall"] * (call_count - text_index)
+    )
+    assert [b["id"] for b in content if b["type"] == "toolCall"] == call_ids
+    assert content[text_index] == {"type": "text", "text": "Reading files."}
+    assert messages[1]["model"] == "claude-opus-4-8"
+    assert [msg["toolCallId"] for msg in messages[2:-1]] == call_ids
+    assert entries[0]["parentId"] is None
+    for prev, cur in itertools.pairwise(entries):
+        assert cur["parentId"] == prev["id"]
+    again = pi_session_records_from_session_items(
+        items, session_id="conv_abc", external_session_id=_EXTERNAL_ID, cwd=Path("/repo")
+    )
+    assert [r["id"] for r in records] == [r["id"] for r in again]
+
+
+@pytest.mark.parametrize("response_ids", [("r1", "r2"), ("", ""), (None, None)])
+def test_distinct_or_missing_response_ids_stay_separate(response_ids: tuple) -> None:
+    items = [_assistant_item("first"), _assistant_item("second", item_id="a2")]
+    for item, response_id in zip(items, response_ids, strict=True):
+        item["response_id"] = response_id
+    records = pi_session_records_from_session_items(
+        items, session_id="conv_abc", external_session_id=_EXTERNAL_ID, cwd=Path("/repo")
+    )
+    assert [r["message"]["content"] for r in records[1:]] == [
+        [{"type": "text", "text": "first"}],
+        [{"type": "text", "text": "second"}],
+    ]
 
 
 def test_empty_text_items_are_dropped() -> None:
