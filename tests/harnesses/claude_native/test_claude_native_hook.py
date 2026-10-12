@@ -418,8 +418,7 @@ def test_clear_session_start_hook_rotates_before_printing_conversation_url(
     ]
     recorded = (bridge_dir / "hooks.jsonl").read_text(encoding="utf-8")
     assert '"omnigent_clear_rotated_to":"conv_new"' in recorded
-    # The loopback relay must be reached directly, never through an ambient
-    # proxy that would fail the banner-gating rotation closed.
+    # Loopback rotations must bypass ambient proxies, or they fail closed.
     assert _FakeHttpxClient.captured_trust_env == [False]
     # The /clear rotation gates Claude's welcome banner and must fail
     # fast — it uses _SESSION_ROTATION_TIMEOUT_S, NOT the day-long
@@ -618,8 +617,7 @@ def test_fork_session_start_hook_forks_before_printing_conversation_url(
     assert '"omnigent_claude_session_was_seen":false' in recorded
     assert '"omnigent_fork_detected":true' in recorded
     assert '"omnigent_fork_rotated_to":"conv_fork"' in recorded
-    # The loopback relay must be reached directly, never through an ambient
-    # proxy that would fail the banner-gating rotation closed.
+    # Loopback rotations must bypass ambient proxies, or they fail closed.
     assert _FakeHttpxClient.captured_trust_env == [False]
     # The /fork rotation gates Claude's welcome banner and must fail
     # fast — it uses _SESSION_ROTATION_TIMEOUT_S, NOT the day-long

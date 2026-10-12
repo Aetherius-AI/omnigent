@@ -214,12 +214,13 @@ def _mirror_permission_request(
     reauth = policy_hook_reauth(server_url, headers)
     # Identify the requesting harness and retain one id across an auth retry.
     body = {**payload, "_omnigent_elicitation_id": f"elicit_devin_{secrets.token_hex(16)}"}
+    trust_env = not is_loopback_url(url)
     try:
         for attempt in range(2):
             with httpx.Client(
                 headers=headers,
                 timeout=timeout,
-                trust_env=not is_loopback_url(url),
+                trust_env=trust_env,
             ) as client:
                 response = client.post(url, json=body)
                 if attempt == 0 and _is_login_redirect_or_unauthorized(response):

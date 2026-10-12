@@ -307,6 +307,7 @@ def _request_web_approval(
     """
     if deadline is None:
         deadline = time.monotonic() + _PERMISSION_RETRY_WINDOW_S
+    trust_env = not is_loopback_url(url)
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= _PERMISSION_DEADLINE_MARGIN_S:
@@ -328,7 +329,7 @@ def _request_web_approval(
             with httpx.Client(
                 headers=headers,
                 timeout=timeout,
-                trust_env=not is_loopback_url(url),
+                trust_env=trust_env,
             ) as client:
                 resp = client.post(url, json=body)
                 resp.raise_for_status()

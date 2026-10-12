@@ -370,6 +370,7 @@ def test_native_claude_prompt_survives_ambient_proxy(
         token = f"ast-{uuid.uuid4().hex[:8]}"
         set_fallback_mock_llm(mock_llm_server_url, "default", token)
         set_fallback_mock_llm(mock_llm_server_url, _CLAUDE_MOCK_MODEL, token)
+        model_forwards_before = len(proxy.model_forwards)
         _type_into_tui(page, _turn_prompt(1, f"usr-{uuid.uuid4().hex[:8]}", token))
 
         outcome, pane = _wait_turn_outcome(page, live_server, session_id, token)
@@ -390,6 +391,14 @@ def test_native_claude_prompt_survives_ambient_proxy(
         )
         _ensure_chat_view(page)
         expect(page.locator(_ASSISTANT, has_text=token).first).to_be_visible(timeout=30_000)
+        assert not proxy.loopback_refusals, (
+            "loopback policy callbacks must bypass the ambient proxy, but it "
+            f"refused: {proxy.loopback_refusals!r}"
+        )
+        assert len(proxy.model_forwards) > model_forwards_before, (
+            "model traffic must still traverse the ambient proxy; forwards did "
+            f"not grow from {model_forwards_before} (now {proxy.model_forwards!r})"
+        )
     finally:
         if session_id is not None:
             # A failed session delete must not skip tearing down the runner

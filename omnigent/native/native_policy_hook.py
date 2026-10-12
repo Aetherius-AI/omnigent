@@ -684,16 +684,17 @@ def post_evaluate_with_retry(
     timeout = httpx.Timeout(read_timeout, connect=_EVALUATE_POLICY_CONNECT_TIMEOUT_S)
     reauthed = False
     last_error: str = "unknown error"
+    # Loopback callbacks cannot traverse an environment-configured proxy.
+    trust_env = not is_loopback_url(url)
     while True:
         retry_delay_s = backoff_s
         attempt_started = time.monotonic()
         held_poll_severed = False
         try:
-            # Loopback callbacks cannot traverse an environment-configured proxy.
             with httpx.Client(
                 headers=headers,
                 timeout=timeout,
-                trust_env=not is_loopback_url(url),
+                trust_env=trust_env,
             ) as client:
                 resp = client.post(url, json=request_body)
                 if (

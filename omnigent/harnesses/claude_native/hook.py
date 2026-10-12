@@ -796,13 +796,14 @@ def _post_hook_with_reattach(
         else contextlib.nullcontext()
     )
     with marker_scope:
+        trust_env = not is_loopback_url(url)
         while True:
             attempt_started = time.monotonic()
             try:
                 with httpx.Client(
                     headers=headers,
                     timeout=timeout,
-                    trust_env=not is_loopback_url(url),
+                    trust_env=trust_env,
                 ) as client:
                     resp = client.post(url, json=body)
                     if (
