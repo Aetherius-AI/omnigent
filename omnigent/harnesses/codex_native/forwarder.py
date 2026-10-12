@@ -6833,7 +6833,7 @@ async def _post_status(
     response_id: str | None = None,
     output: str | None = None,
     reauth_required: bool = False,
-    failure_context: FailureContext | None = None,
+    failure_context: object = None,
 ) -> None:
     """
     Publish a native Codex status edge.
@@ -6849,9 +6849,9 @@ async def _post_status(
     :param reauth_required: When ``True``, mark a ``failed`` edge as caused by
         an authentication error so the surface can prompt a re-auth.
         Surface-only: no automatic ``codex login`` is triggered.
-    :param failure_context: Optional bounded failure evidence attached to a
-        ``failed`` edge for server-side telemetry; display text stays in
-        ``output``.
+    :param failure_context: Optional failure evidence for a ``failed`` edge,
+        normalized to the bounded server-side telemetry shape here; display
+        text stays in ``output``.
     :returns: None.
     """
     data: _JsonObject = {"status": status}
@@ -6861,8 +6861,8 @@ async def _post_status(
         data["output"] = output
     if reauth_required:
         data["reauth_required"] = True
-    if failure_context:
-        data["failure_context"] = normalize_failure_context(failure_context)
+    if status == "failed" and (context := normalize_failure_context(failure_context)):
+        data["failure_context"] = context
     response = await _post_session_event(
         client,
         session_id,
@@ -6902,23 +6902,28 @@ async def _post_turn_status_edge(
     response_id = _response_id(_params_with_turn_id({}, edge.turn_id)) if edge.turn_id else None
     output: str | None = None
     reauth_required = False
-    failure_context: FailureContext = {}
+    failure_context: dict[str, object] = {}
     if edge.status == "failed":
-        failure_context = normalize_failure_context(
-            {
-                **(edge.error.failure_context or {} if edge.error is not None else {}),
-                "failure_source": "codex_terminal_turn",
-                "native_harness": "codex-native",
-                "failure_decision": "session_failed",
-                "detail_source": "codex_error_payload"
-                if edge.error is not None
-                else "codex_turn_status",
-                "runner_version": VERSION,
-                "failure_id": native_failure_id("codex_terminal_turn", session_id, edge.turn_id)
-                if edge.turn_id
-                else None,
-            }
-        )
+        base_context = (edge.error.failure_context or {}) if edge.error is not None else {}
+        if edge.error is None:
+            detail_source = "codex_turn_status"
+        elif edge.error.failure_context is None:
+            # Errors the forwarder synthesizes (e.g. a launcher certificate
+            # failure) carry no Codex payload to draw evidence from.
+            detail_source = "forwarder_synthesized"
+        else:
+            detail_source = "codex_error_payload"
+        failure_context = {
+            **base_context,
+            "failure_source": "codex_terminal_turn",
+            "native_harness": "codex-native",
+            "failure_decision": "session_failed",
+            "detail_source": detail_source,
+            "runner_version": VERSION,
+            "failure_id": native_failure_id("codex_terminal_turn", session_id, edge.turn_id)
+            if edge.turn_id
+            else None,
+        }
     if edge.error is not None:
         output = edge.error.message
         if edge.error.is_auth:

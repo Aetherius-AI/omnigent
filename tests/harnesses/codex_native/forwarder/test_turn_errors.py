@@ -729,6 +729,12 @@ async def test_handle_event_fails_retrying_turn_on_launcher_certificate_failure(
     )
     assert "SSLV3_ALERT_CERTIFICATE_EXPIRED" in output
     assert "run dbcert" in output
+    # The forwarder built this error itself, so the evidence names no Codex payload.
+    context = body["data"]["failure_context"]
+    assert context["failure_source"] == "codex_terminal_turn"
+    assert context["detail_source"] == "forwarder_synthesized"
+    assert "http_status" not in context
+    assert "native_error_category" not in context
     state = read_bridge_state(tmp_path)
     assert state is not None and state.active_turn_id is None
 
@@ -942,7 +948,7 @@ def _assert_failed_edge_keeps_provider_evidence(data: dict, *, variant: str) -> 
     assert _NEUTRAL_MESSAGE in data["output"]
     context = data["failure_context"]
     assert context["http_status"] == 401
-    assert variant in {value for value in context.values() if isinstance(value, str)}
+    assert context["native_error_category"] == variant
 
 
 @pytest.mark.asyncio
@@ -1029,3 +1035,35 @@ async def test_resume_terminal_turn_error_posts_provider_evidence(tmp_path: Path
     assert len(client.posts) == 1
     _url, body = client.posts[0]
     _assert_failed_edge_keeps_provider_evidence(body["data"], variant=variant)
+
+
+@pytest.mark.parametrize(
+    ("info", "message", "expected"),
+    [
+        # Sibling metadata beside the tagged variant must not hide a typed 401.
+        (
+            {"httpConnectionFailed": {"httpStatusCode": 401}, "retryAfterMs": 250},
+            _NEUTRAL_MESSAGE,
+            fwd._CODEX_ERROR_KIND_AUTH,
+        ),
+        # A blank flat tag does not shadow the variant under a later key.
+        ({"type": "", "kind": "unauthorized"}, "nope", fwd._CODEX_ERROR_KIND_AUTH),
+        # A valid status beside a malformed flat tag still counts.
+        ({"type": 123, "httpStatusCode": 401}, "Denied", fwd._CODEX_ERROR_KIND_AUTH),
+        ({"type": ["unauthorized"]}, "Denied", fwd._CODEX_ERROR_KIND_GENERIC),
+        # Budget exhaustion stays generic through the tagged form too.
+        (
+            {"httpConnectionFailed": {"httpStatusCode": 403}},
+            'Budget "test" has reached its limit',
+            fwd._CODEX_ERROR_KIND_GENERIC,
+        ),
+    ],
+)
+def test_classify_codex_error_wire_variants(info: object, message: str, expected: str) -> None:
+    """Edge shapes of ``codexErrorInfo`` keep the auth verdict without raising."""
+    assert fwd._classify_codex_error({"codexErrorInfo": info}, message) == expected
+
+
+def test_codex_error_info_ignores_nested_flat_tag() -> None:
+    """A dict under a flat tag key is malformed metadata, not an externally tagged variant."""
+    assert fwd.codex_error_info({"type": {"nested": True}}) == (None, None)

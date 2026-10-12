@@ -110,25 +110,64 @@ async def test_evidence_is_bounded_and_does_not_override_lifecycle_fields() -> N
     assert "native_error_request_id" not in context
 
 
+_PROVIDER_KEYS = frozenset(
+    {
+        "provider_error_type",
+        "provider_error_code",
+        "provider_error_param",
+        "native_error_request_id",
+    }
+)
+
+
 @pytest.mark.parametrize(
-    ("info", "message", "auth"),
+    ("message", "expected"),
     [
-        ({"httpConnectionFailed": {"httpStatusCode": 401}}, "Denied", True),
-        ({"responseStreamDisconnected": {"httpStatusCode": 403}}, "Denied", True),
         (
-            {"httpConnectionFailed": {"httpStatusCode": 403}},
-            'Budget "test" has reached its limit',
-            False,
+            'unexpected status 403 Forbidden: {"error_code":"PERMISSION_DENIED","message":'
+            '"Budget \\"test\\" has reached its limit","request_id":"req-gateway-1"}, '
+            "url: https://host/ai-gateway/codex/v1/responses",
+            {
+                "http_status": 403,
+                "provider_error_code": "PERMISSION_DENIED",
+                "native_error_request_id": "req-gateway-1",
+            },
         ),
-        ({"type": 123, "httpStatusCode": 401}, "Denied", True),
-        ({"type": ["unauthorized"]}, "Denied", False),
+        (
+            'unexpected status 401 Unauthorized: {"error": {"type": "invalid_request_error", '
+            '"code": "invalid_api_key", "param": null, "message": "Incorrect API key"}}, '
+            "url: https://host/v1/responses",
+            {
+                "http_status": 401,
+                "provider_error_type": "invalid_request_error",
+                "provider_error_code": "invalid_api_key",
+            },
+        ),
+        (
+            "unexpected status 502 Bad Gateway: <html>upstream unavailable</html>, url: https://host/x",
+            {"http_status": 502},
+        ),
     ],
 )
-def test_wire_error_variants_do_not_lose_auth_or_crash(
-    info: object, message: str, auth: bool
+def test_gateway_rejection_message_supplies_status_and_error_code(
+    message: str, expected: dict[str, object]
 ) -> None:
+    """The gateway envelope codex embeds in the message becomes bounded evidence."""
     error = forwarder._terminal_error_from_notification(
-        {"error": {"message": message, "codexErrorInfo": info}}
+        {
+            "error": {
+                "message": message,
+                "codexErrorInfo": {"responseStreamConnectionFailed": {"httpStatusCode": None}},
+                "additionalDetails": "Connection failed: error sending request",
+            }
+        }
     )
     assert error is not None
-    assert error.is_auth is auth
+    context = error.failure_context
+    assert context is not None
+    assert context["native_error_category"] == "responseStreamConnectionFailed"
+    assert context["http_status"] == expected["http_status"]
+    assert {key: context[key] for key in _PROVIDER_KEYS & set(context)} == {
+        key: expected[key] for key in _PROVIDER_KEYS & set(expected)
+    }
+    assert context["native_error_message"].endswith("Connection failed: error sending request")
