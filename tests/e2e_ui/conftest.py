@@ -252,7 +252,7 @@ def _build_hello_world_bundle() -> bytes:
 # spawn. ``serve`` does YAML parse + bundle materialization +
 # DBOS init + uvicorn boot, all of which take a few seconds on a cold
 # venv.
-_HEALTH_TIMEOUT_S = 30.0
+_HEALTH_TIMEOUT_S = float(os.environ.get("OMNIGENT_E2E_HEALTH_TIMEOUT_S", "30"))
 _HEALTH_POLL_INTERVAL_S = 0.5
 
 # Fork-into-another-agent target built-ins (test_fork_switch_agent.py).

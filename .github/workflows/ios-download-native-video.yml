@@ -55,6 +55,7 @@ jobs:
           OMNIGENT_IOS_DEVICE_ID: ${{ steps.simulator.outputs.id }}
           OMNIGENT_IOS_DERIVED_DATA: /tmp/before-derived
           OMNIGENT_IOS_TEST_METHOD: testNativeDownloadBeforeVideo
+          OMNIGENT_E2E_HEALTH_TIMEOUT_S: "120"
         run: |
           set -euo pipefail
           xcodebuild build-for-testing \
@@ -79,6 +80,7 @@ jobs:
       - name: Record after fix
         env:
           DEVICE_ID: ${{ steps.simulator.outputs.id }}
+          OMNIGENT_E2E_HEALTH_TIMEOUT_S: "120"
         run: |
           set -euo pipefail
           cp /tmp/OmnigentWebView.fixed.swift web/ios/Omnigent/OmnigentWebView.swift
