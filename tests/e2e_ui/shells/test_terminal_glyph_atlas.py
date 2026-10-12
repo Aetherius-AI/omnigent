@@ -1,275 +1,158 @@
-"""E2E: the Terminal view must keep drawing static rows correctly while the
-pane churns through thousands of unique CJK glyphs.
+"""E2E: the Terminal view must keep drawing already-correct cells correctly
+while the WebGL glyph atlas repacks under heavy CJK churn.
 
-A shell opened in the workspace rail draws two styled status rows once, then
-keeps redrawing its body region with unique CJK glyphs in cycling colors and
-weights (a long Japanese-heavy TUI session, compressed). The pane bytes for
-the status rows never change, so their pixels must stay identical for the
-whole run.
+A long CJK-heavy pane pushes thousands of unique glyphs through xterm's WebGL
+texture atlas. Once the atlas reaches its page cap, ``min(32,
+MAX_TEXTURE_IMAGE_UNITS)``, it repacks — merging and deleting pages and
+recycling slot indices. ``@xterm/addon-webgl`` 0.19.0 re-uploads a texture
+slot only when ``pages[i].version !== _atlasTextures[i].version``, so a page
+swapped into a slot whose version counter coincidentally matches is never
+re-uploaded. The slot then keeps a stale texture, and the forced full repaint
+draws already-correct cells — a status footer, a sidebar — with the wrong
+glyphs even though the pane bytes underneath are correct.
 
-The WebGL glyph atlas repacks (merges/deletes) pages once it hits its page
-cap, ``min(32, MAX_TEXTURE_IMAGE_UNITS)``. A repack moves pages between
-texture slots; if the renderer fails to re-upload a swapped slot, the forced
-full repaint draws already-correct cells — including the untouched status
-rows — with the wrong glyphs. The test clamps ``MAX_TEXTURE_IMAGE_UNITS`` to
-8 (a real low-end-GPU value) so repacks happen every few waves instead of
-after minutes of churn.
+``test_atlas_page_repack_rebinds_swapped_textures`` drives the app's bundled
+renderer directly and detects that stale-slot condition deterministically.
+``test_static_rows_survive_cjk_glyph_churn`` drives the same renderer through
+the real app terminal; its visible corruption depends on which glyph lands on
+a stale slot, so it is a user-journey/recording driver rather than a
+deterministic check.
+``test_shared_atlas_invalidates_each_renderer_once`` covers the pooled-atlas
+side: clearing or repacking an atlas shared by several terminals must refresh
+every renderer once and then return to incremental redraws.
 """
 
 from __future__ import annotations
 
 import io
-import re
+import sys
 import time
+import uuid
 from pathlib import Path
+from typing import Any
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageChops
 from playwright.sync_api import Page, expect
 
-from tests.e2e_ui.conftest import open_right_rail
+from tests.e2e_ui.shells.test_new_shell import _open_new_shell
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-_XTERM_LIB = _REPO_ROOT / "web" / "node_modules" / "@xterm" / "xterm"
-_WEBGL_LIB = _REPO_ROOT / "web" / "node_modules" / "@xterm" / "addon-webgl"
+_ROOT = Path(__file__).resolve().parents[3]
+_XTERM_LIB = _ROOT / "web" / "node_modules" / "@xterm" / "xterm"
+_WEBGL_LIB = _ROOT / "web" / "node_modules" / "@xterm" / "addon-webgl"
+# /tmp is private per sandbox, so the shell and the test share the worktree.
+_SCRATCH_ROOT = _ROOT / ".omnigent" / "e2e-scratch"
 
-# Presents a GPU with 8 texture units to the page, so the glyph atlas page cap
-# is 8 and CJK churn forces page repacks within seconds.
-_CLAMP_TEXTURE_UNITS_SCRIPT = """
+_ROW1 = "Build · Claude Fable 5.1 (thinking/xhigh)  JSON parsing failed: Text:  227 231 tokens"
+_ROW2 = "How remove the facilitator-only open-items section from the participant handbook"
+
+_FLOOD_WINDOW_S = 150.0
+_SAMPLE_S = 1.0
+_PIXEL_TOLERANCE = 16
+_MIN_CHANGED_PIXELS = 25
+
+# Present a GPU with 8 texture units so the atlas page cap is 8 and CJK churn
+# forces page merges within seconds, matching the reported sub-32-unit GPU.
+_CLAMP_TEXTURE_UNITS = """
 (() => {
   const MAX_TEXTURE_IMAGE_UNITS = 0x8872;
-  const orig = WebGL2RenderingContext.prototype.getParameter;
-  WebGL2RenderingContext.prototype.getParameter = function (pname) {
-    const value = orig.call(this, pname);
-    if (pname === MAX_TEXTURE_IMAGE_UNITS) {
-      return Math.min(8, value);
-    }
-    return value;
-  };
+  for (const proto of [WebGLRenderingContext.prototype, WebGL2RenderingContext.prototype]) {
+    const orig = proto.getParameter;
+    proto.getParameter = function (pname) {
+      const value = orig.call(this, pname);
+      return pname === MAX_TEXTURE_IMAGE_UNITS ? Math.min(8, value) : value;
+    };
+  }
 })();
 """
 
-# Runs inside the rail shell. Draws two static styled status rows, then keeps
-# redrawing the body region (rows 4+) forever with unique CJK glyphs in cycling
-# colors and weights — cursor-addressed only, autowrap off, cursor hidden, so
-# nothing scrolls or repaints the status rows on its own. The cycling colors
-# and ever-fresh codepoints churn the glyph atlas so it repacks pages
-# repeatedly; each repack forces a full-terminal repaint, which is when the
-# static rows can flip to the wrong glyph. Writes a heartbeat file so the test
-# can confirm the flood is running independent of what the browser draws.
-_FLOOD_SCRIPT = r"""
-import os
-import sys
-import time
+_FLOOD_SCRIPT = f"""\
+import os, subprocess, sys, time
 
-hb = __file__ + ".hb"
+ROW1 = {_ROW1!r}
+ROW2 = {_ROW2!r}
+state, max_s = sys.argv[1], float(sys.argv[2])
+os.makedirs(state, exist_ok=True)
+out = sys.stdout
+size = os.get_terminal_size()
+cols, rows = size.columns, size.lines
+with open(os.path.join(state, "size"), "w") as f:
+    f.write(f"{{cols}} {{rows}}\\n")
 
+# Autowrap off and cursor hidden so nothing scrolls or repaints rows 1-2.
+out.write("\\x1b[?25l\\x1b[?7l\\x1b[2J\\x1b[H")
+out.write("\\x1b[1;1H\\x1b[2K\\x1b[1;36m" + ROW1[:5] + "\\x1b[22;39m" + ROW1[5:41]
+          + "  \\x1b[2;31m" + ROW1[43:69] + "\\x1b[22;39m  \\x1b[38;5;214m"
+          + ROW1[71:] + "\\x1b[0m")
+out.write("\\x1b[2;1H\\x1b[2K\\x1b[2;38;5;250m" + ROW2 + "\\x1b[0m")
+out.flush()
 
-def beat(text):
-    with open(hb, "w", encoding="utf-8") as f:
-        f.write(text)
+pane = os.environ.get("TMUX_PANE")
 
+def capture(wave):
+    if pane:
+        try:
+            txt = subprocess.run(["tmux", "capture-pane", "-p", "-t", pane],
+                                 capture_output=True, text=True, timeout=5).stdout
+        except Exception as exc:
+            txt = f"CAPTURE_ERROR {{exc!r}}\\n"
+    else:
+        txt = "NO_TMUX\\n"
+    tmp = os.path.join(state, "capture.txt.tmp")
+    with open(tmp, "w") as f:
+        f.write(f"# wave {{wave}}\\n" + txt)
+    os.replace(tmp, os.path.join(state, "capture.txt"))
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-    cols, rows = os.get_terminal_size()
-except Exception as exc:  # size probe / non-tty
-    beat("ERROR:" + repr(exc))
-    raise
-
-w = sys.stdout.write
-CSI = "\x1b["
-
-w(CSI + "2J" + CSI + "H" + CSI + "?25l" + CSI + "?7l")
-probe1 = (
-    "Build · Claude Fable 5.1 (thinking/xhigh)  "
-    "JSON parsing failed: Text:  227 231 tokens トークン数"
-)
-probe2 = (
-    "How remove the facilitator-only open-items section from the participant "
-    "handbook 進捗状況 差分表示"
-)
-w(CSI + "1;1H" + CSI + "1;38;5;39m" + probe1[: cols - 2])
-w(CSI + "2;1H" + CSI + "0;2;38;5;250m" + probe2[: cols - 2] + CSI + "0m")
-sys.stdout.flush()
-beat(f"PROBE_DRAWN {cols}x{rows}")
-time.sleep(2.5)
-
-cp = 0
+per_row = max(1, (cols - 2) // 2)
+body_rows = range(4, rows)
+cp, cp_end = 0x4E00, 0x9FFF
 wave = 0
-while True:
-    color = 22 + (wave * 7) % 200
-    weight = "1" if wave % 3 == 0 else ("2" if wave % 3 == 1 else "0")
-    parts = []
-    for row in range(4, rows):
-        parts.append(f"{CSI}{row};1H{CSI}0;{weight};38;5;{color}m")
-        budget = cols - 2
-        cells = []
-        while budget >= 2:
-            cells.append(chr(0x4E00 + cp % 20000))
-            cp += 1
-            budget -= 2
-            if cp % 13 == 0 and budget >= 1:
-                cells.append(chr(0x21 + cp % 90))
-                budget -= 1
-        parts.append("".join(cells))
-    parts.append(f"{CSI}{rows - 1};1H")
-    w("".join(parts))
-    sys.stdout.flush()
+start = time.time()
+capture(0)
+while time.time() - start < max_s and not os.path.exists(os.path.join(state, "stop")):
+    buf = []
+    for r in body_rows:
+        color = 16 + (wave * 7 + r * 13) % 216
+        weight = ("\\x1b[1m", "\\x1b[2m", "")[(wave + r) % 3]
+        chars = []
+        for _ in range(per_row):
+            chars.append(chr(cp))
+            cp = 0x4E00 if cp >= cp_end else cp + 1
+        sgr = f"\\x1b[{{r}};1H\\x1b[2K\\x1b[0m{{weight}}\\x1b[38;5;{{color}}m"
+        buf.append(sgr + "".join(chars) + "\\x1b[0m")
+    out.write("".join(buf))
+    out.flush()
     wave += 1
-    beat(str(wave))
+    with open(os.path.join(state, "wave"), "w") as f:
+        f.write(f"{{wave}}\\n")
+    if wave % 50 == 0:
+        capture(wave)
     time.sleep(0.05)
+capture(wave)
+out.write("\\x1b[?25h\\x1b[?7h")
+out.flush()
 """
 
-
-def _open_new_shell(page: Page) -> None:
-    """Create a shell via the tab strip's "+" → Shell menu (mirrors test_new_shell)."""
-    open_right_rail(page)
-    rail = page.get_by_role("complementary", name="Workspace")
-    rail.get_by_role("button", name="Open new").click()
-    page.get_by_role("menuitem", name=re.compile("Shell")).click()
-
-
-def _rgb(png: bytes) -> Image.Image:
-    return Image.open(io.BytesIO(png)).convert("RGB")
-
-
-def _diff_pixels(a: bytes, b: bytes) -> int:
-    if a == b:
-        return 0
-    ia, ib = _rgb(a), _rgb(b)
-    if ia.size != ib.size:
-        return ia.size[0] * ia.size[1]
-    ba, bb = ia.tobytes(), ib.tobytes()
-    return sum(1 for i in range(0, len(ba), 3) if ba[i : i + 3] != bb[i : i + 3])
-
-
-def _dominant_color(png: bytes) -> tuple[int, int, int]:
-    img = _rgb(png)
-    colors = img.getcolors(img.size[0] * img.size[1])
-    assert colors is not None
-    return max(colors)[1]
-
-
-def _ink_pixels(png: bytes, bg: tuple[int, int, int]) -> int:
-    """Count non-background pixels (drawn glyph ink) in the capture."""
-    data = _rgb(png).tobytes()
-    bg_bytes = bytes(bg)
-    return sum(1 for i in range(0, len(data), 3) if data[i : i + 3] != bg_bytes)
-
-
-def _read_heartbeat(path: Path) -> str | None:
-    try:
-        return path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-
-
-def test_static_rows_survive_cjk_glyph_churn(
-    page: Page,
-    terminal_session: tuple[str, str],
-    tmp_path: Path,
-) -> None:
-    """Static styled rows keep their exact pixels through heavy CJK churn."""
-    base_url, session_id = terminal_session
-
-    script_path = tmp_path / "cjk_flood.py"
-    heartbeat = Path(str(script_path) + ".hb")
-    script_path.write_text(_FLOOD_SCRIPT, encoding="utf-8")
-
-    page.add_init_script(_CLAMP_TEXTURE_UNITS_SCRIPT)
-    page.goto(f"{base_url}/c/{session_id}")
-    _open_new_shell(page)
-
-    rail = page.get_by_role("complementary", name="Workspace")
-    expect(rail.get_by_role("button", name=re.compile(r"^Close zsh · u-"))).to_be_visible(
-        timeout=60_000
-    )
-    term = rail.get_by_test_id("terminal-view").last
-    expect(term).to_be_visible(timeout=60_000)
-    expect(term).to_have_attribute("data-state", "connected", timeout=20_000)
-
-    # The defect lives in the WebGL renderer; without a GPU context xterm
-    # stays on the DOM renderer and this journey exercises nothing.
-    canvas = term.locator(".xterm-screen canvas").first
-    expect(canvas).to_be_visible(timeout=20_000)
-    box = canvas.bounding_box()
-    assert box is not None, "terminal canvas has no layout box"
-    # The two status rows; the flood only ever touches rows 4+.
-    probe_clip = {
-        "x": box["x"],
-        "y": box["y"],
-        "width": box["width"],
-        "height": 42.0,
+_WEBGL_INFO_JS = """
+(screen) => {
+  const canvases = Array.from(screen.querySelectorAll("canvas"));
+  for (const c of canvases) {
+    const gl = c.getContext("webgl2") || c.getContext("webgl");
+    if (gl) {
+      const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+      return {
+        webgl: true,
+        canvases: canvases.length,
+        maxTextureImageUnits: gl.getParameter(gl.MAX_TEXTURE_IMAGE_UNITS),
+        renderer: dbg
+          ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)
+          : gl.getParameter(gl.RENDERER),
+      };
     }
-
-    blank = page.screenshot(clip=probe_clip)
-    bg = _dominant_color(blank)
-
-    # Focus xterm's hidden input (a canvas click doesn't reliably focus the
-    # WebGL surface in headless Chromium) before typing, per test_new_shell.
-    textarea = term.locator("textarea.xterm-helper-textarea")
-    textarea.focus()
-    page.keyboard.type(f"python3 {script_path}", delay=15)
-    page.keyboard.press("Enter")
-
-    # Confirm the flood actually started (independent of rendering): the
-    # heartbeat reaches PROBE_DRAWN, then advances into numbered waves.
-    beat = None
-    deadline = time.monotonic() + 60.0
-    while time.monotonic() < deadline:
-        beat = _read_heartbeat(heartbeat)
-        if beat is not None and (beat.startswith("PROBE_DRAWN") or beat.isdigit()):
-            break
-        if beat is not None and beat.startswith("ERROR:"):
-            raise AssertionError(f"flood script failed to start: {beat}")
-        page.wait_for_timeout(250)
-    else:
-        raise AssertionError(f"flood script never started; heartbeat={beat!r}")
-
-    # Baseline: the drawn status rows once the probe row ink is present. The
-    # flood never touches this region, so its bytes are fixed for the run.
-    baseline = None
-    deadline = time.monotonic() + 30.0
-    while time.monotonic() < deadline:
-        shot = page.screenshot(clip=probe_clip)
-        if _ink_pixels(shot, bg) > 200:
-            baseline = shot
-            break
-        page.wait_for_timeout(250)
-    assert baseline is not None, "terminal status rows never drew for a baseline"
-    baseline_path = tmp_path / "probe_baseline.png"
-    baseline_path.write_bytes(baseline)
-
-    # Poll the static rows while the atlas churns. With the 8-page cap a
-    # repack happens every few waves, forcing a full repaint each time; a
-    # stale texture bind redraws the untouched rows with the wrong glyphs and
-    # they stay wrong. A repack may glitch a single frame while glyphs
-    # re-rasterize, so only corruption that survives a second sample counts.
-    corrupted_path = tmp_path / "probe_corrupted.png"
-    started = time.monotonic()
-    corrupted_after: float | None = None
-    diff_count = 0
-    while time.monotonic() - started < 120.0:
-        page.wait_for_timeout(250)
-        shot = page.screenshot(clip=probe_clip)
-        if _diff_pixels(baseline, shot) > 25:
-            page.wait_for_timeout(350)
-            shot = page.screenshot(clip=probe_clip)
-            diff_count = _diff_pixels(baseline, shot)
-            if diff_count > 25:
-                corrupted_after = time.monotonic() - started
-                corrupted_path.write_bytes(shot)
-                break
-
-    last_wave = _read_heartbeat(heartbeat)
-    assert corrupted_after is None, (
-        f"terminal drew wrong glyphs in static status rows after CJK glyph "
-        f"churn: {diff_count} pixels changed ~{corrupted_after:.0f}s into the "
-        f"flood (flood wave {last_wave}; baseline {baseline_path}, "
-        f"corrupted {corrupted_path})"
-    )
-
+  }
+  return { webgl: false, canvases: canvases.length };
+}
+"""
 
 _HARNESS_HTML = """<!DOCTYPE html><html><head>
 <link rel="stylesheet" href="file://{xterm_css}">
@@ -335,7 +218,7 @@ _HARNESS_INSTRUMENT = """
 }
 """
 
-_HARNESS_CHURN = """
+_HARNESS_CHURN = r"""
 () => {
   let cp = 0, wave = 0;
   window.__churn = setInterval(() => {
@@ -343,7 +226,7 @@ _HARNESS_CHURN = """
     for (let row = 4; row < 30; row++) {
       const color = 22 + (wave * 7) % 200;
       const weight = wave % 3 === 0 ? '1' : (wave % 3 === 1 ? '2' : '0');
-      let line = `\\x1b[${row};1H\\x1b[0;${weight};38;5;${color}m`;
+      let line = `\x1b[${row};1H\x1b[0;${weight};38;5;${color}m`;
       for (let c = 0; c < 49; c++) {
         line += String.fromCharCode(0x4e00 + (cp % 20000));
         cp++;
@@ -356,6 +239,12 @@ _HARNESS_CHURN = """
   return true;
 }
 """
+
+
+@pytest.fixture
+def browser_context_args(browser_context_args: dict[str, Any]) -> dict[str, Any]:
+    size = {"width": 1800, "height": 1000}
+    return {**browser_context_args, "viewport": size, "record_video_size": size}
 
 
 def test_atlas_page_repack_rebinds_swapped_textures(page: Page, tmp_path: Path) -> None:
@@ -415,6 +304,160 @@ def test_atlas_page_repack_rebinds_swapped_textures(page: Page, tmp_path: Path) 
     assert merges >= 5, (
         f"atlas churn produced only {merges} page merges; the repack path was not exercised"
     )
+
+
+def _changed_pixels(a: Image.Image, b: Image.Image) -> int:
+    if a.size != b.size:
+        return a.size[0] * a.size[1]
+    diff = ImageChops.difference(a, b).convert("L")
+    return sum(diff.histogram()[_PIXEL_TOLERANCE + 1 :])
+
+
+def _read_pane_rows(state: Path) -> tuple[str, list[str]]:
+    capture = state / "capture.txt"
+    if not capture.exists():
+        return "missing", []
+    lines = capture.read_text().splitlines()
+    if len(lines) < 3 or lines[1].startswith(("NO_TMUX", "CAPTURE_ERROR")):
+        return "unavailable", lines[:2]
+    return "ok", lines[1:3]
+
+
+@pytest.mark.timeout(360)
+def test_static_rows_survive_cjk_glyph_churn(
+    request: pytest.FixtureRequest,
+    terminal_session: tuple[str, str],
+) -> None:
+    """Two never-rewritten status rows stay pixel-identical during a CJK flood.
+
+    The rail shell runs a script that draws two styled status rows, then
+    rewrites every other row ~20 times a second with unique CJK glyphs in
+    cycling colors and weights. The top strip is sampled once a second and
+    compared with its settled baseline; a difference that persists on the next
+    sample is a renderer defect, since the pane bytes for those rows are
+    checked against the exact strings the script drew. Visible corruption here
+    depends on which glyph lands on a stale slot, so this is the user-journey
+    and recording driver; the harness test above is the deterministic check.
+    """
+    base_url, session_id = terminal_session
+    scratch = _SCRATCH_ROOT / f"glyph-atlas-{uuid.uuid4().hex[:8]}"
+    scratch.mkdir(parents=True)
+    script = scratch / "cjk_flood.py"
+    script.write_text(_FLOOD_SCRIPT)
+    state = scratch / "state"
+
+    page: Page = request.getfixturevalue("page")
+    try:
+        page.add_init_script(_CLAMP_TEXTURE_UNITS)
+        page.goto(f"{base_url}/c/{session_id}")
+        _open_new_shell(page)
+
+        rail = page.get_by_role("complementary", name="Workspace")
+        terminal_view = rail.get_by_test_id("terminal-view").last
+        expect(terminal_view).to_be_visible(timeout=60_000)
+        expect(terminal_view).to_have_attribute("data-state", "connected", timeout=20_000)
+        # Full screen widens the pane so each wave covers more cells; the
+        # shell refits before the script reads its size.
+        full_screen = rail.get_by_role("button", name="Full screen", exact=True)
+        if full_screen.count():
+            full_screen.first.click()
+            expect(rail.get_by_role("button", name="Exit full screen")).to_be_visible()
+            page.wait_for_timeout(1_000)
+            expect(terminal_view).to_have_attribute("data-state", "connected")
+
+        screen = terminal_view.locator(".xterm-screen")
+        expect(screen).to_be_visible()
+        renderer = page.evaluate(_WEBGL_INFO_JS, screen.element_handle())
+        print(f"terminal renderer: {renderer}")
+        assert renderer["webgl"], f"terminal is not using the WebGL renderer: {renderer}"
+
+        terminal_view.locator("textarea.xterm-helper-textarea").focus()
+        page.wait_for_timeout(1_000)
+        page.keyboard.type(f"{sys.executable} {script} {state} {_FLOOD_WINDOW_S + 60:.0f}")
+        page.keyboard.press("Enter")
+
+        deadline = time.monotonic() + 30
+        while not (state / "size").exists():
+            assert time.monotonic() < deadline, "flood script did not start in the shell"
+            page.wait_for_timeout(250)
+        cols, rows = (int(v) for v in (state / "size").read_text().split())
+        print(f"pane size: {cols}x{rows}")
+
+        box = screen.bounding_box()
+        assert box is not None
+        cell_h = box["height"] / rows
+        # Rows 1-3 (row 3 stays blank); trim the right edge to skip the scrollbar.
+        clip = {
+            "x": box["x"],
+            "y": box["y"],
+            "width": max(1.0, box["width"] - 24),
+            "height": cell_h * 3,
+        }
+
+        def sample() -> Image.Image:
+            return Image.open(io.BytesIO(page.screenshot(clip=clip))).convert("RGB")
+
+        def wave() -> int:
+            try:
+                return int((state / "wave").read_text())
+            except (OSError, ValueError):
+                return 0
+
+        page.wait_for_timeout(2_000)
+        baseline = sample()
+        settled = 0
+        for _ in range(20):
+            page.wait_for_timeout(int(_SAMPLE_S * 1000))
+            candidate = sample()
+            if _changed_pixels(baseline, candidate) == 0:
+                settled += 1
+                if settled >= 2:
+                    break
+            else:
+                settled = 0
+                baseline = candidate
+        assert settled >= 2, "status rows never settled to a stable baseline"
+        baseline.save(scratch / "baseline.png")
+        baseline_wave = wave()
+
+        first_change: tuple[float, int, int] | None = None
+        start = time.monotonic()
+        while time.monotonic() - start < _FLOOD_WINDOW_S:
+            page.wait_for_timeout(int(_SAMPLE_S * 1000))
+            current = sample()
+            changed = _changed_pixels(baseline, current)
+            if changed < _MIN_CHANGED_PIXELS:
+                continue
+            page.wait_for_timeout(int(_SAMPLE_S * 1000))
+            confirm = sample()
+            confirmed = _changed_pixels(baseline, confirm)
+            if confirmed < _MIN_CHANGED_PIXELS:
+                continue
+            first_change = (time.monotonic() - start, wave(), confirmed)
+            current.save(scratch / "first-change.png")
+            confirm.save(scratch / "confirmed-change.png")
+            page.screenshot(path=str(scratch / "pane-at-change.png"), clip=box)
+            page.wait_for_timeout(3_000)
+            break
+
+        (state / "stop").touch()
+        page.wait_for_timeout(1_500)
+        pane_status, pane_rows = _read_pane_rows(state)
+        print(f"pane bytes: {pane_status} {pane_rows!r}")
+        if pane_status == "ok":
+            assert pane_rows[0].rstrip() == _ROW1, pane_rows
+            assert pane_rows[1].rstrip() == _ROW2, pane_rows
+        expect(terminal_view).to_have_attribute("data-state", "connected")
+
+        assert first_change is None, (
+            f"never-rewritten status rows redrew with different pixels "
+            f"{first_change[0]:.1f}s into the flood (wave {first_change[1]}, baseline wave "
+            f"{baseline_wave}, {first_change[2]} px changed) while the pane bytes stayed "
+            f"{pane_status}; images in {scratch}"
+        )
+    finally:
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "stop").touch()
 
 
 @pytest.mark.parametrize("bundle", ["js", "mjs"])
