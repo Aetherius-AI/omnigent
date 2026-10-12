@@ -3071,10 +3071,15 @@ class _DaemonReuseDecision:
         Distinct from a transparent tunnel-health heal — only a config
         change forces the caller to ask the user to re-run, because the
         server was restarted into a different auth posture mid-command.
+    :param background: ``True`` when the reused daemon is one this CLI spawned
+        in the background (it carries a ``log_path`` and launches runners from
+        the published manifest). A foreground host runs runners from its own
+        environment, so the caller must not republish the manifest for it.
     """
 
     reuse: bool
     config_changed: bool
+    background: bool = False
 
 
 def _daemon_owner_is_live(record: _HostDaemonRecord) -> bool:
@@ -3143,7 +3148,7 @@ def _reuse_existing_daemon_record(target: str) -> _DaemonReuseDecision:
         # concern; its own reconnect loop covers transient tunnel drops). Keep
         # the original PID-liveness reuse so a live daemon for the URL is
         # reused as-is.
-        return _DaemonReuseDecision(reuse=True, config_changed=False)
+        return _DaemonReuseDecision(reuse=True, config_changed=False, background=background)
 
     if not background:
         # Foreground host / legacy host.pid: keep prior behavior — a
@@ -3164,7 +3169,7 @@ def _reuse_existing_daemon_record(target: str) -> _DaemonReuseDecision:
     if age_s >= _DAEMON_REUSE_MIN_AGE_S and not _daemon_tunnel_recovers(existing):
         _terminate_host_unit(existing, reason="host tunnel is offline")
         return _DaemonReuseDecision(reuse=False, config_changed=False)
-    return _DaemonReuseDecision(reuse=True, config_changed=False)
+    return _DaemonReuseDecision(reuse=True, config_changed=False, background=True)
 
 
 def _local_daemon_serves_target(target: str, server_url: str | None) -> bool:
@@ -3543,7 +3548,10 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
 
     decision = _reuse_existing_daemon_record(target)
     if decision.reuse:
-        _refresh_reused_daemon_env(target, server_url=server_url)
+        if decision.background:
+            # The reused background daemon keeps serving; hand it this
+            # invocation's environment for the runners it launches next.
+            _publish_runner_env_manifest(target, _build_host_daemon_env(server_url=server_url))
         _record_host_state("reused")
         return False
     if not decision.config_changed and _local_daemon_serves_target(target, server_url):
