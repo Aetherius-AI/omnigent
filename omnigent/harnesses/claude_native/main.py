@@ -3442,10 +3442,10 @@ def claude_config_with_1m_window(
     """Spell the config's natively-1M Claude models with Claude Code's ``[1m]`` marker.
 
     Returns *claude_config* itself when nothing changes."""
-    # Claude Code recognizes Anthropic and Bedrock ids and sizes them itself; only
-    # a custom endpoint's unknown ids fall back to its 200K default.
     if claude_config is None or claude_config.env.get(_ANTHROPIC_BEDROCK_BASE_URL_ENV):
         return claude_config
+    # Claude Code recognizes Anthropic and Bedrock ids and sizes them itself; only
+    # a custom endpoint's unknown ids fall back to its 200K default.
     if _serves_canonical_anthropic_ids(claude_config):
         return claude_config
     # The marker is Claude Code's only 1M opt-in for an unknown id and never reaches
