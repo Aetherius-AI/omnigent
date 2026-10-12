@@ -92,7 +92,6 @@ _RESPONSE_DROP_HEADERS = frozenset(
 
 
 def _is_loopback_host(host: str) -> bool:
-    host = host.strip("[]")
     if host == "localhost" or host.endswith(".localhost"):
         return True
     try:
@@ -148,13 +147,13 @@ class _CorporateProxy:
                 if not url.scheme:
                     self.send_error(HTTPStatus.BAD_REQUEST, "not a proxy request")
                     return
+                length = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(length) if length else b""
                 target = self._route(
                     url.hostname or "", url.port or 80, f"{self.command} {self.path}"
                 )
                 if target is None:
                     return
-                length = int(self.headers.get("Content-Length") or 0)
-                body = self.rfile.read(length) if length else b""
                 headers = {k: v for k, v in self.headers.items() if k.lower() not in _HOP_HEADERS}
                 fwd = f"http://{target[0]}:{target[1]}{url.path or '/'}"
                 if url.query:
