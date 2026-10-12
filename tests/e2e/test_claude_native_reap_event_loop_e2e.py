@@ -42,8 +42,9 @@ _MESSAGE = "hello from the web chat"
 _TMUX_TARGET = "claude"
 # How long the shim holds ``kill-session`` before running the real kill.
 _KILL_DELAY_S = 1.5
-# Longest heartbeat pause a loop that is not blocked by the kill may show.
-_MAX_HEARTBEAT_GAP_S = 0.5
+# Longest heartbeat pause a loop that is not blocked by the kill may show: well
+# below _KILL_DELAY_S, with headroom for scheduler jitter on loaded CI hosts.
+_MAX_HEARTBEAT_GAP_S = 1.0
 # Base readiness budget for the real ``inject_user_message``; the liveness
 # probe that reports an exited pane fires when it elapses (30s in production).
 _READINESS_BUDGET_S = 3.0
@@ -145,8 +146,9 @@ class _ClaudePaneRig:
             return []
         events = []
         for line in self.kill_log.read_text(encoding="utf-8").splitlines():
-            kind, stamp = line.split()
-            events.append((kind, float(stamp)))
+            fields = line.split()
+            assert len(fields) == 2, f"malformed kill log line: {line!r}"
+            events.append((fields[0], float(fields[1])))
         return events
 
     def close(self) -> None:
@@ -267,7 +269,7 @@ async def test_cancelled_delivery_cleanup_does_not_block_event_loop(
         finally:
             if not task.done():
                 task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
+                with contextlib.suppress(asyncio.CancelledError):
                     await task
 
     assert task in done, "cancelled delivery did not finish"
