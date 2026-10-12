@@ -191,11 +191,12 @@ def test_blank_direct_fields_fall_back_to_gateway_evidence() -> None:
             "error": {
                 "message": (
                     'unexpected status 403 Forbidden: {"error_code":"PERMISSION_DENIED",'
-                    '"request_id":"req-gateway-1"}, url: https://host/x'
+                    '"request_id":"req-gateway-1","param":"model"}, url: https://host/x'
                 ),
                 "codexErrorInfo": {"httpConnectionFailed": {"httpStatusCode": 403}},
                 "request_id": "   ",
                 "provider_error_code": "",
+                "provider_error_param": {"nested": True},
                 "gateway_request_id": "direct-gateway-id",
             }
         }
@@ -205,4 +206,5 @@ def test_blank_direct_fields_fall_back_to_gateway_evidence() -> None:
     assert context is not None
     assert context["native_error_request_id"] == "req-gateway-1"
     assert context["provider_error_code"] == "PERMISSION_DENIED"
+    assert context["provider_error_param"] == "model"
     assert context["gateway_request_id"] == "direct-gateway-id"

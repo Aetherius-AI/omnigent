@@ -33,8 +33,8 @@ def codex_error_info(info: object) -> tuple[str | None, int | None]:
         status = info.get("httpStatusCode")
         if variant is None:
             # Externally tagged: ``{"<variant>": {"httpStatusCode": N}}``, tolerating
-            # sibling metadata keys beside the tag. The nested dict that carries the
-            # status is the tag; otherwise the first dict is, and a flat status stays.
+            # sibling metadata keys beside the tag. Prefer the nested dict carrying a
+            # valid status, then one naming the key; a flat status stays otherwise.
             tagged = [
                 (key, value)
                 for key, value in info.items()
@@ -42,15 +42,17 @@ def codex_error_info(info: object) -> tuple[str | None, int | None]:
                 and key not in _FLAT_VARIANT_KEYS
                 and isinstance(value, dict)
             ]
-            for key, value in tagged:
-                if "httpStatusCode" in value:
-                    variant = key
-                    if value["httpStatusCode"] is not None:
-                        status = value["httpStatusCode"]
-                    break
-            else:
-                if tagged:
-                    variant = tagged[0][0]
+            if tagged:
+                key, value = min(
+                    tagged,
+                    key=lambda item: (
+                        type(item[1].get("httpStatusCode")) is not int,
+                        "httpStatusCode" not in item[1],
+                    ),
+                )
+                variant = key
+                if type(value.get("httpStatusCode")) is int:
+                    status = value["httpStatusCode"]
     valid_status = status if type(status) is int and 100 <= status <= 599 else None
     return variant, valid_status
 
@@ -73,15 +75,11 @@ def _gateway_rejection(message: str) -> tuple[int | None, dict[str, object]]:
 
 
 def _first_present(*values: object) -> object:
-    """First candidate that is neither missing nor blank; later candidates are fallbacks."""
-    return next(
-        (
-            value
-            for value in values
-            if value is not None and not (isinstance(value, str) and not value.strip())
-        ),
-        None,
-    )
+    """First candidate usable as evidence: non-blank text or an int; the rest are fallbacks."""
+    for value in values:
+        if (isinstance(value, str) and value.strip()) or type(value) is int:
+            return value
+    return None
 
 
 def codex_failure_context(payload: dict[str, object], *, message: str) -> FailureContext:

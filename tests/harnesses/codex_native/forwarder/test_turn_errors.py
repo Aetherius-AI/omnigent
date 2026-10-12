@@ -1123,10 +1123,19 @@ def test_classify_codex_error_wire_variants(info: object, message: str, expected
             {"responseStreamDisconnected": {"httpStatusCode": None}},
             ("responseStreamDisconnected", None),
         ),
-        # A null nested status does not erase a flat sibling status.
+        # A null or malformed nested status does not erase a flat sibling status.
         (
             {"responseStreamDisconnected": {"httpStatusCode": None}, "httpStatusCode": 401},
             ("responseStreamDisconnected", 401),
+        ),
+        (
+            {"httpConnectionFailed": {"httpStatusCode": "401"}, "httpStatusCode": 401},
+            ("httpConnectionFailed", 401),
+        ),
+        # Among several nested dicts, the one carrying a valid status is the tag.
+        (
+            {"details": {"httpStatusCode": None}, "unauthorized": {"httpStatusCode": 401}},
+            ("unauthorized", 401),
         ),
     ],
 )
