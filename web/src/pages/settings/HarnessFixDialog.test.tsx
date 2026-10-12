@@ -28,6 +28,42 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+const catalog = {
+  data: [],
+  setup_steps: {
+    "codex-native": [
+      {
+        kind: "auth",
+        title: "Sign in",
+        detail: "",
+        action: "command",
+        command: "codex login",
+        status_key: "authed",
+      },
+    ],
+    "claude-native": [
+      {
+        kind: "auth",
+        title: "Sign in",
+        detail: "",
+        action: "command",
+        command: "claude auth login --claudeai",
+        status_key: "authed",
+      },
+    ],
+    "pi-native": [
+      {
+        kind: "auth",
+        title: "Sign in",
+        detail: "",
+        action: "command",
+        command: null,
+        status_key: "authed",
+      },
+    ],
+  },
+};
+
 const baseProps: HarnessFixDialogProps = {
   open: true,
   onOpenChange: vi.fn(),
@@ -55,12 +91,21 @@ function renderDialog(overrides: Partial<HarnessFixDialogProps> = {}) {
 beforeEach(() => {
   vi.clearAllMocks();
   vi.spyOn(window, "open").mockImplementation(() => null);
+  vi.mocked(authenticatedFetch).mockImplementation(async (input) => {
+    if (String(input) === "/v1/harnesses") return json(catalog);
+    throw new Error(`Unexpected URL: ${String(input)}`);
+  });
 });
 
 describe("HarnessFixDialog", () => {
-  it("chooses Isaac, shows progress, then reports success", async () => {
+  it("configures Isaac with the Databricks broker and reports success", async () => {
     const response = deferred<Response>();
-    vi.mocked(authenticatedFetch).mockReturnValue(response.promise);
+    vi.mocked(authenticatedFetch).mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/v1/harnesses") return json(catalog);
+      if (url.endsWith("/credential")) return response.promise;
+      throw new Error(`Unexpected URL: ${url} ${init?.method}`);
+    });
     const props = renderDialog();
     const user = userEvent.setup();
 
@@ -70,10 +115,9 @@ describe("HarnessFixDialog", () => {
 
     expect(screen.getByRole("heading", { name: "Reconfiguring Codex…" })).toBeVisible();
     expect(screen.getByText("Connected to the Databricks Unity Gateway")).toBeVisible();
-    expect(screen.getByText("Saving the credential on Local laptop")).toBeVisible();
     expect(authenticatedFetch).toHaveBeenCalledWith(
       "/v1/hosts/host%2F1/harnesses/codex-native/credential",
-      expect.objectContaining({ body: JSON.stringify({ kind: "gateway" }) }),
+      expect.objectContaining({ body: JSON.stringify({ kind: "databricks" }) }),
     );
 
     response.resolve(
@@ -93,89 +137,191 @@ describe("HarnessFixDialog", () => {
     expect(props.onOpenChange).toHaveBeenCalledWith(false);
   });
 
-  it("opens personal sign-in and polls until it succeeds", async () => {
+  it("opens Databricks sign-in after a 409, polls status, and retries Isaac", async () => {
     const status = deferred<Response>();
+    let credentialCalls = 0;
     vi.mocked(authenticatedFetch).mockImplementation(async (input) => {
       const url = String(input);
-      if (url.endsWith("/login")) {
+      if (url === "/v1/harnesses") return json(catalog);
+      if (url === "/v1/connections/databricks/status") return status.promise;
+      if (url.endsWith("/credential")) {
+        credentialCalls += 1;
+        if (credentialCalls === 1) {
+          return json(
+            {
+              detail: {
+                code: "databricks_not_connected",
+                message: "Connect Databricks first.",
+                connect_url: "/v1/connections/databricks/connect?workspace=acme",
+              },
+            },
+            { status: 409 },
+          );
+        }
         return json({
-          login_id: "login 1",
-          auth_url: "https://auth.example/device",
-          user_code: "ABCD-EFGH",
-          status: "pending",
+          object: "harness_credential",
+          harness: "codex-native",
+          configured_harnesses: { "codex-native": true },
         });
       }
-      if (url.endsWith("/login/login%201")) return status.promise;
       throw new Error(`Unexpected URL: ${url}`);
     });
     const props = renderDialog();
     const user = userEvent.setup();
 
-    await user.click(screen.getByRole("radio", { name: /Personal subscription/ }));
     await user.click(screen.getByRole("button", { name: "Authenticate" }));
-
-    expect(await screen.findByRole("link", { name: "Open the sign-in page" })).toHaveAttribute(
-      "href",
-      "https://auth.example/device",
-    );
-    expect(screen.getByText("ABCD-EFGH")).toBeVisible();
-    expect(screen.getByText("ABCD-EFGH")).toHaveClass("text-base", "font-semibold");
-    await user.click(screen.getByRole("button", { name: "Copy sign-in code" }));
-    expect(copyText).toHaveBeenCalledWith("ABCD-EFGH");
+    expect(await screen.findByText("Waiting for Databricks sign-in")).toBeVisible();
     expect(window.open).toHaveBeenCalledWith(
-      "https://auth.example/device",
+      "/v1/connections/databricks/connect?workspace=acme",
       "_blank",
       "noopener,noreferrer",
     );
+    await user.click(screen.getByRole("button", { name: "Open the Databricks sign-in tab again" }));
+    expect(window.open).toHaveBeenCalledTimes(2);
 
-    status.resolve(
-      json({
-        status: "succeeded",
-        error: null,
-        configured_harnesses: { "codex-native": true },
-      }),
+    await act(async () =>
+      status.resolve(
+        json({
+          enabled: true,
+          connected: true,
+          workspace_host: "https://acme.cloud.databricks.com",
+          databricks_user: "user@example.com",
+          connected_at: 1,
+        }),
+      ),
     );
+    await waitFor(() => expect(credentialCalls).toBe(2));
+    await waitFor(() => expect(props.onFixed).toHaveBeenCalled());
+  });
+
+  it("shows Claude's server command and succeeds after Check again", async () => {
+    vi.mocked(authenticatedFetch).mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/v1/harnesses") return json(catalog);
+      if (url.endsWith("/harnesses/refresh")) {
+        expect(init).toEqual({ method: "POST" });
+        return json({
+          configured_harnesses: { "claude-native": true },
+          gateway_inference: null,
+        });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const props = renderDialog({ harness: "claude-native", harnessLabel: "Claude Code" });
+    const user = userEvent.setup();
+
+    await screen.findByRole("radio", { name: /Personal subscription/ });
+    await user.click(screen.getByRole("radio", { name: /Personal subscription/ }));
+    await user.click(screen.getByRole("button", { name: "Authenticate" }));
+
+    expect(
+      screen.getByRole("heading", { name: "Sign in to Claude Code on Local laptop" }),
+    ).toBeVisible();
+    expect(screen.getByText("claude auth login --claudeai")).toBeVisible();
+    expect(
+      screen.getByText("Sign in with your Claude plan when it opens the browser."),
+    ).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Copy login command" }));
+    expect(copyText).toHaveBeenCalledWith("claude auth login --claudeai");
+    await user.click(screen.getByRole("button", { name: "Check again" }));
+
     await waitFor(() =>
       expect(props.onFixed).toHaveBeenCalledWith({
-        configuredHarnesses: { "codex-native": true },
+        configuredHarnesses: { "claude-native": true },
         credentialLabel: "Personal subscription",
       }),
     );
   });
 
-  it("shows the server reason and Try again preserves the credential choice", async () => {
-    vi.mocked(authenticatedFetch).mockResolvedValue(
-      json(
-        { detail: "Local laptop couldn’t reach the Databricks Unity Gateway." },
-        { status: 502 },
-      ),
-    );
-    renderDialog();
+  it("keeps Codex open with an inline message when Check again is not ready", async () => {
+    vi.mocked(authenticatedFetch).mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "/v1/harnesses") return json(catalog);
+      if (url.endsWith("/harnesses/refresh")) {
+        return json({
+          configured_harnesses: { "codex-native": "needs-auth" },
+          gateway_inference: { "codex-native": false },
+        });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const props = renderDialog();
     const user = userEvent.setup();
 
+    await screen.findByRole("radio", { name: /Personal subscription/ });
     await user.click(screen.getByRole("radio", { name: /Personal subscription/ }));
     await user.click(screen.getByRole("button", { name: "Authenticate" }));
 
+    expect(screen.getByText("codex login --device-auth")).toBeVisible();
     expect(
-      await screen.findByText("Local laptop couldn’t reach the Databricks Unity Gateway."),
+      screen.getByText("Sign in with your ChatGPT plan when it opens the browser."),
     ).toBeVisible();
-    expect(screen.getByText("omni setup")).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "Try again" }));
+    await user.click(screen.getByRole("button", { name: "Check again" }));
+    expect(await screen.findByText("Still not signed in on Local laptop.")).toBeVisible();
+    expect(props.onFixed).not.toHaveBeenCalled();
+    expect(props.onOpenChange).not.toHaveBeenCalledWith(false);
+  });
+
+  it("shows a refresh failure in the error state", async () => {
+    vi.mocked(authenticatedFetch).mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "/v1/harnesses") return json(catalog);
+      if (url.endsWith("/harnesses/refresh")) {
+        return json({ detail: "The host readiness check timed out." }, { status: 504 });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const user = userEvent.setup();
+    renderDialog();
+
+    await screen.findByRole("radio", { name: /Personal subscription/ });
+    await user.click(screen.getByRole("radio", { name: /Personal subscription/ }));
+    await user.click(screen.getByRole("button", { name: "Authenticate" }));
+    await user.click(screen.getByRole("button", { name: "Check again" }));
+
+    expect(await screen.findByText("The host readiness check timed out.")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Couldn’t reconfigure Codex" })).toBeVisible();
+  });
+
+  it("preserves the selected credential after an error and Try again", async () => {
+    vi.mocked(authenticatedFetch).mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "/v1/harnesses") return json(catalog);
+      if (url.endsWith("/harnesses/refresh")) {
+        return json({ detail: "Refresh failed." }, { status: 500 });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    renderDialog();
+    const user = userEvent.setup();
+
+    await screen.findByRole("radio", { name: /Personal subscription/ });
+    await user.click(screen.getByRole("radio", { name: /Personal subscription/ }));
+    await user.click(screen.getByRole("button", { name: "Authenticate" }));
+    await user.click(screen.getByRole("button", { name: "Check again" }));
+    await user.click(await screen.findByRole("button", { name: "Try again" }));
+
     expect(screen.getByRole("radio", { name: /Personal subscription/ })).toHaveAttribute(
       "aria-checked",
       "true",
     );
   });
 
-  it("starts the update path immediately and requests an upgrade", async () => {
-    vi.mocked(authenticatedFetch).mockResolvedValue(
-      json({
-        object: "harness_install",
-        harness: "opencode-native",
-        configured_harnesses: { "opencode-native": true },
-        version: "2.0.0",
-      }),
-    );
+  it("updates with a bodyless install request and accepts a null version", async () => {
+    vi.mocked(authenticatedFetch).mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/v1/harnesses") return json(catalog);
+      if (url.endsWith("/install")) {
+        expect(init).toEqual({ method: "POST" });
+        return json({
+          object: "harness_install",
+          harness: "opencode-native",
+          configured_harnesses: { "opencode-native": true },
+          version: null,
+        });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
     const props = renderDialog({
       mode: "update",
       harness: "opencode-native",
@@ -186,12 +332,6 @@ describe("HarnessFixDialog", () => {
     expect(screen.getByRole("heading", { name: "Updating OpenCode…" })).toBeVisible();
     expect(screen.getByText(/Updating OpenCode from 1.0.0/)).toBeVisible();
     await waitFor(() =>
-      expect(authenticatedFetch).toHaveBeenCalledWith(
-        "/v1/hosts/host%2F1/harnesses/opencode-native/install",
-        expect.objectContaining({ body: JSON.stringify({ upgrade: true }) }),
-      ),
-    );
-    await waitFor(() =>
       expect(props.onFixed).toHaveBeenCalledWith({
         configuredHarnesses: { "opencode-native": true },
         credentialLabel: undefined,
@@ -199,10 +339,12 @@ describe("HarnessFixDialog", () => {
     );
   });
 
-  it("installs first and then applies the selected credential", async () => {
-    vi.mocked(authenticatedFetch).mockImplementation(async (input) => {
+  it("installs without a body and then applies the selected credential", async () => {
+    vi.mocked(authenticatedFetch).mockImplementation(async (input, init) => {
       const url = String(input);
+      if (url === "/v1/harnesses") return json(catalog);
       if (url.endsWith("/install")) {
+        expect(init).toEqual({ method: "POST" });
         return json({
           object: "harness_install",
           harness: "codex-native",
@@ -222,51 +364,38 @@ describe("HarnessFixDialog", () => {
     const props = renderDialog({ mode: "install" });
     const user = userEvent.setup();
 
-    expect(screen.getByRole("heading", { name: "Install Codex" })).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Install" }));
-
-    await waitFor(() => expect(authenticatedFetch).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(props.onFixed).toHaveBeenCalled());
     expect(props.onFixed).toHaveBeenCalledWith({
       configuredHarnesses: { "codex-native": true },
       credentialLabel: "Isaac",
     });
   });
 
-  it("uses the omni setup fallback for Pi while its login flow is unsupported", () => {
+  it("uses omni setup when Pi's authenticated catalog command is null", async () => {
     renderDialog({ harness: "pi-native", harnessLabel: "Pi" });
-
-    expect(screen.getByText(/Run/)).toHaveTextContent(
-      "Run omni setup on Local laptop to finish setting up Pi.",
-    );
-    expect(screen.queryByRole("radio")).not.toBeInTheDocument();
-    expect(screen.getAllByRole("button", { name: "Close" })[0]).toBeVisible();
-  });
-
-  it("cancels a pending browser login when closed", async () => {
-    const status = deferred<Response>();
-    vi.mocked(authenticatedFetch).mockImplementation(async (input, init) => {
-      const url = String(input);
-      if (url.endsWith("/login")) {
-        return json({ login_id: "pending", auth_url: null, user_code: null, status: "pending" });
-      }
-      if (init?.method === "DELETE") return json({});
-      return status.promise;
-    });
-    const props = renderDialog();
     const user = userEvent.setup();
 
+    expect(screen.getByRole("radio", { name: /Isaac/ })).toBeVisible();
     await user.click(screen.getByRole("radio", { name: /Personal subscription/ }));
     await user.click(screen.getByRole("button", { name: "Authenticate" }));
-    await screen.findByText("Waiting for you to finish in the browser");
-    await user.click(screen.getByRole("button", { name: "Cancel" }));
 
-    await waitFor(() =>
-      expect(authenticatedFetch).toHaveBeenCalledWith(
-        "/v1/hosts/host%2F1/harnesses/codex-native/login/pending",
-        { method: "DELETE" },
-      ),
-    );
-    expect(props.onOpenChange).toHaveBeenCalledWith(false);
-    await act(async () => status.resolve(json({ status: "pending" })));
+    expect(screen.getByText("omni setup")).toBeVisible();
+  });
+
+  it("keeps API key and gateway forms reachable for other harnesses", async () => {
+    vi.mocked(authenticatedFetch).mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "/v1/harnesses") return json(catalog);
+      if (url.endsWith("/credentials/detected")) return json({ credentials: [] });
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    renderDialog({ harness: "opencode-native", harnessLabel: "OpenCode" });
+
+    expect(screen.getByText("Use an API key")).toBeVisible();
+    expect(screen.getByText("Connect a gateway")).toBeVisible();
+    expect(screen.getByPlaceholderText("Paste an API key")).toBeVisible();
+    expect(screen.getByPlaceholderText(/Gateway base URL/)).toBeVisible();
+    expect(screen.queryByText("Sign in with your subscription")).not.toBeInTheDocument();
   });
 });

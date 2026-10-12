@@ -179,19 +179,6 @@ export interface InstallHarnessResult {
   version: string | null;
 }
 
-export interface StartHarnessLoginResult {
-  login_id: string;
-  auth_url: string | null;
-  user_code: string | null;
-  status: "pending";
-}
-
-export interface HarnessLoginStatusResult {
-  status: "pending" | "succeeded" | "failed";
-  error: string | null;
-  configured_harnesses: Record<string, boolean | string> | null;
-}
-
 async function responseDetail(res: Response): Promise<string> {
   let detail = `${res.status} ${res.statusText}`;
   try {
@@ -203,57 +190,28 @@ async function responseDetail(res: Response): Promise<string> {
   return detail;
 }
 
-/** Start a browser-based subscription login on a connected host. */
-export async function startHarnessLogin(
-  hostId: string,
-  harness: string,
-): Promise<StartHarnessLoginResult> {
-  const res = await authenticatedFetch(
-    `/v1/hosts/${encodeURIComponent(hostId)}/harnesses/${encodeURIComponent(harness)}/login`,
-    { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
-  );
-  if (!res.ok) throw new Error(await responseDetail(res));
-  return (await res.json()) as StartHarnessLoginResult;
+export interface RefreshHarnessesResult {
+  configured_harnesses: Record<string, boolean | string>;
+  gateway_inference: Record<string, boolean> | null;
 }
 
-/** Read the current state of a browser-based subscription login. */
-export async function fetchHarnessLoginStatus(
-  hostId: string,
-  harness: string,
-  loginId: string,
-): Promise<HarnessLoginStatusResult> {
+/** Force the selected host to refresh harness readiness. */
+export async function refreshHarnessesOnHost(hostId: string): Promise<RefreshHarnessesResult> {
   const res = await authenticatedFetch(
-    `/v1/hosts/${encodeURIComponent(hostId)}/harnesses/${encodeURIComponent(harness)}/login/${encodeURIComponent(loginId)}`,
+    `/v1/hosts/${encodeURIComponent(hostId)}/harnesses/refresh`,
+    { method: "POST" },
   );
   if (!res.ok) throw new Error(await responseDetail(res));
-  return (await res.json()) as HarnessLoginStatusResult;
-}
-
-/** Cancel a pending browser-based subscription login. */
-export async function cancelHarnessLogin(
-  hostId: string,
-  harness: string,
-  loginId: string,
-): Promise<void> {
-  const res = await authenticatedFetch(
-    `/v1/hosts/${encodeURIComponent(hostId)}/harnesses/${encodeURIComponent(harness)}/login/${encodeURIComponent(loginId)}`,
-    { method: "DELETE" },
-  );
-  if (!res.ok && res.status !== 404) throw new Error(await responseDetail(res));
+  return (await res.json()) as RefreshHarnessesResult;
 }
 
 export async function installHarnessOnHost(
   hostId: string,
   harness: string,
-  options: { upgrade?: boolean } = {},
 ): Promise<InstallHarnessResult> {
   const res = await authenticatedFetch(
     `/v1/hosts/${encodeURIComponent(hostId)}/harnesses/${encodeURIComponent(harness)}/install`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(options.upgrade ? { upgrade: true } : {}),
-    },
+    { method: "POST" },
   );
   if (!res.ok) throw new Error(await responseDetail(res));
   return (await res.json()) as InstallHarnessResult;
@@ -324,10 +282,10 @@ export function useInstallingHarnesses(hostId: string): ReadonlySet<string> {
   return new Set(pending.filter((h): h is string => typeof h === "string"));
 }
 
-/** Payload for {@link useStoreCredential}: an API key, a gateway, or adopt. */
+/** Payload for {@link useStoreCredential}: an API key, gateway, broker, or adopt. */
 export interface StoreCredentialInput {
   harness: string;
-  kind: "key" | "gateway" | "adopt";
+  kind: "key" | "gateway" | "databricks" | "adopt";
   /** The API key / gateway token for `key` / `gateway`; omitted for `adopt`. */
   secret?: string;
   /** Gateway base URL (required for `kind: "gateway"`). */
@@ -348,8 +306,48 @@ export interface StoreCredentialResult {
   configured_harnesses: Record<string, boolean | string>;
 }
 
+export class StoreCredentialError extends Error {
+  readonly status: number;
+  readonly code: string | undefined;
+  readonly connectUrl: string | undefined;
+
+  constructor(message: string, status: number, code?: string, connectUrl?: string) {
+    super(message);
+    this.name = "StoreCredentialError";
+    this.status = status;
+    this.code = code;
+    this.connectUrl = connectUrl;
+  }
+}
+
+async function storeCredentialError(res: Response): Promise<StoreCredentialError> {
+  let message = `${res.status} ${res.statusText}`;
+  let code: string | undefined;
+  let connectUrl: string | undefined;
+  try {
+    const body = (await res.json()) as {
+      code?: unknown;
+      connect_url?: unknown;
+      detail?: unknown;
+    };
+    const detail =
+      body.detail && typeof body.detail === "object"
+        ? (body.detail as { code?: unknown; message?: unknown; connect_url?: unknown })
+        : undefined;
+    code = typeof body.code === "string" ? body.code : undefined;
+    code ??= typeof detail?.code === "string" ? detail.code : undefined;
+    connectUrl = typeof body.connect_url === "string" ? body.connect_url : undefined;
+    connectUrl ??= typeof detail?.connect_url === "string" ? detail.connect_url : undefined;
+    if (typeof body.detail === "string" && body.detail) message = body.detail;
+    else if (typeof detail?.message === "string" && detail.message) message = detail.message;
+  } catch {
+    // Non-JSON error body — keep the status-line detail.
+  }
+  return new StoreCredentialError(message, res.status, code, connectUrl);
+}
+
 export function buildIsaacCredentialRequest(harness: string): StoreCredentialInput {
-  return { harness, kind: "gateway" };
+  return { harness, kind: "databricks" };
 }
 
 export async function storeHarnessCredentialOnHost(
@@ -365,7 +363,7 @@ export async function storeHarnessCredentialOnHost(
       body: JSON.stringify(body),
     },
   );
-  if (!res.ok) throw new Error(await responseDetail(res));
+  if (!res.ok) throw await storeCredentialError(res);
   return (await res.json()) as StoreCredentialResult;
 }
 
