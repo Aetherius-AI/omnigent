@@ -12,6 +12,7 @@ no Cursor login is required.
 
 from __future__ import annotations
 
+import contextlib
 import re
 import shutil
 import subprocess
@@ -24,17 +25,17 @@ import httpx
 import pytest
 from playwright.sync_api import Page, expect
 
-from tests._helpers.native_session import create_native_session
 from tests.e2e_ui.conftest import (
     _REPO_ROOT,
-    _bind_session_runner,
+    _create_native_cursor_session,
     _ensure_runner_online,
     _server_state,
     open_right_rail,
 )
 
 # Plumbing the runner injects under <workspace>/.cursor/ when it auto-creates
-# the Cursor TUI on bind.
+# the Cursor TUI on bind. The SDK harness's omnigent-hook.sh is not written on
+# this path; the registry unit tests cover it.
 _INJECTED = ("mcp.json", "hooks.json")
 
 # cursor auto-launch + rail hydration.
@@ -50,25 +51,6 @@ def _cursor_terminal_unavailable() -> str | None:
     if shutil.which("tmux") is None:
         return "needs `tmux` on PATH (runner-owned Cursor TUI pane)."
     return None
-
-
-def _create_cursor_session_in_workspace(base_url: str, runner_id: str, workspace: Path) -> str:
-    """Register and bind a cursor-native session pinned to *workspace*.
-
-    Like conftest's ``_create_native_cursor_session``, but with a caller-owned
-    workspace so the injected ``.cursor`` plumbing is the only possible change.
-    """
-    created = create_native_session(
-        httpx,
-        base_url,
-        harness="cursor",
-        # ``-f`` trusts the dir + auto-approves tools so the unattended pane
-        # never hangs on Cursor's workspace-trust / per-tool prompts.
-        metadata={"workspace": str(workspace), "terminal_launch_args": ["-f"]},
-    )
-    session_id = str(created["session_id"])
-    _bind_session_runner(base_url, session_id, runner_id)
-    return session_id
 
 
 @pytest.fixture
@@ -95,20 +77,24 @@ def cursor_git_workspace_session(
     def _git(*args: str) -> None:
         subprocess.run(["git", *args], cwd=str(workspace), check=True, capture_output=True)
 
-    _git("init", "-q")
-    _git("config", "user.email", "e2e@example.com")
-    _git("config", "user.name", "e2e")
-    (workspace / "README.md").write_text("# project\n", encoding="utf-8")
-    _git("add", "-A")
-    _git("commit", "-qm", "init")
-
-    respawned = _ensure_runner_online(live_server, tmp_path_factory)
-    runner_id = str(_server_state["runner_id"])
-    session_id = _create_cursor_session_in_workspace(live_server, runner_id, workspace)
+    respawned: subprocess.Popen[bytes] | None = None
+    session_id: str | None = None
     try:
+        _git("init", "-q")
+        _git("config", "user.email", "e2e@example.com")
+        _git("config", "user.name", "e2e")
+        (workspace / "README.md").write_text("# project\n", encoding="utf-8")
+        _git("add", "-A")
+        _git("commit", "-qm", "init")
+
+        respawned = _ensure_runner_online(live_server, tmp_path_factory)
+        runner_id = str(_server_state["runner_id"])
+        session_id = _create_native_cursor_session(live_server, runner_id, workspace=workspace)
         yield (live_server, session_id, workspace)
     finally:
-        httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
+        if session_id is not None:
+            with contextlib.suppress(httpx.HTTPError):
+                httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
         shutil.rmtree(workspace, ignore_errors=True)
         if respawned is not None:
             respawned.terminate()
@@ -129,9 +115,7 @@ def test_cursor_plumbing_hidden_from_session_changes(
     base_url, session_id, workspace = cursor_git_workspace_session
     cursor_dir = workspace / ".cursor"
 
-    # Sync point: the runner writes the plumbing on bind. Wait until BOTH files
-    # exist on disk so the changed-files view has had the chance to (wrongly)
-    # list them -- otherwise the "absent" assertions below would pass vacuously.
+    # Wait for both injected files before checking that Changes hides them.
     deadline = time.monotonic() + _INJECT_TIMEOUT_S
     while not all((cursor_dir / n).exists() for n in _INJECTED) and time.monotonic() < deadline:
         time.sleep(1)
