@@ -379,6 +379,36 @@ describe("KeepBottomOnViewportResize", () => {
     }
   });
 
+  it("holds the pin on a viewport resize while the reader is selecting text", () => {
+    const { metrics, scrollRoot } = makeScrollRoot();
+    makeContentRoot();
+    scrollRoot.append("reply text");
+    document.body.append(scrollRoot);
+    lockToBottom();
+    render(<KeepBottomOnViewportResize />);
+    const selection = document.getSelection()!;
+    const range = document.createRange();
+    range.selectNodeContents(scrollRoot);
+    selection.removeAllRanges();
+    selection.addRange(range);
+
+    try {
+      metrics.clientHeight = 650;
+      act(() => resize?.());
+      expect(metrics.scrollTop).toBe(1300);
+      expect(stickContext.scrollToBottom).not.toHaveBeenCalled();
+      expect(frames.size).toBe(0);
+
+      selection.removeAllRanges();
+      metrics.clientHeight = 600;
+      act(() => resize?.());
+      expect(stickContext.scrollToBottom).toHaveBeenCalledOnce();
+    } finally {
+      selection.removeAllRanges();
+      scrollRoot.remove();
+    }
+  });
+
   it("disconnects the observer and cancels a queued follow-up frame", () => {
     const { metrics } = makeScrollRoot();
     stickContext.isAtBottom = true;

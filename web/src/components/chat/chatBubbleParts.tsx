@@ -1258,6 +1258,10 @@ export function KeepBottomOnViewportResize({
       if (!viewportChanged && !contentGrew) return;
       if (!wasBottomLocked) return;
       if (!viewportChanged && !lockLive()) return;
+      // A viewport resize (composer growth, mobile keyboard) reaches here past
+      // the growth path's lockLive guard; hold the pin so it never collapses a
+      // selection the reader is dragging.
+      if (isSelecting()) return;
       // The library corrects a frame later (a rAF promise), so the change would
       // paint off the bottom first, and a long task after that paint holds the
       // correction back as long as it runs. Pin now; the rAF pin stays as a net.

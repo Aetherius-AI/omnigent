@@ -31,10 +31,9 @@ _WORKING = '[data-testid="working-indicator"]'
 # Same budget and off-bottom threshold as the stock bottom-pin test, so the two agree.
 _BUDGET_MS = 100
 _OFF_BOTTOM_PX = 8
-# A distinct superset of the stock bottom-pin test's prompt. Both tests share the
-# session-scoped mock server with no reset between them, so matching on the same
-# token would let one test's exhausted queue capture the other's request. The
-# superset still routes correctly in both directions under longest-match.
+# A superset of the stock bottom-pin prompt: the two tests share the
+# session-scoped mock with no reset, and longest-match routing keeps each
+# request on its own queue even once the other's is exhausted.
 _LANDING_PROMPT = f"{_STREAM_PROMPT} (landing)"
 _CPU_THROTTLE = float(os.environ.get("OMNIGENT_E2E_CPU_THROTTLE", "1"))
 _LANDINGS = int(os.environ.get("OMNIGENT_E2E_REPLY_LANDINGS", "6"))
