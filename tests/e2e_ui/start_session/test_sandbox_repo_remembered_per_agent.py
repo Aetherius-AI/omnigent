@@ -1,15 +1,6 @@
-"""E2E: a sandbox repository picked for one agent stays with that agent.
-
-The New Chat landing remembers the last sandbox repositories per agent: a
-repository picked for agent A must not pre-fill agent B's Repository chip or
-ride into B's managed create, and a session whose managed launch failed before
-a workspace was bound must still name the repository it was asked to clone.
-
-The server is this checkout's ``omnigent server`` with ``sandbox.provider:
-modal`` and no Modal SDK installed, so every managed launch fails right after
-create. The create requests, ``omnigent.sandbox.repo`` labels and failed
-sandbox status are the real server's.
-"""
+"""E2E: a sandbox repo picked on New Chat stays with its agent, and a session whose managed
+launch failed still names the repo it was asked to clone. The server runs the ``modal``
+provider without its SDK, so every managed launch fails right after create."""
 
 from __future__ import annotations
 
