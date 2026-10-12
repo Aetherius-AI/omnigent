@@ -1119,7 +1119,7 @@ _SESSION_SKILLS_CACHE_TTL_SECONDS = 60.0
 _SESSION_INIT_ENVELOPE_TTL_SECONDS = 60.0
 
 
-def _without_mcp_tools(tools: list[Any]) -> list[Any]:
+def _without_mcp_tools(tools: list[_JsonObject]) -> list[_JsonObject]:
     """Drop proxied MCP tools (``server__tool`` names) from an advertised tool list."""
     return [
         t
@@ -3334,6 +3334,8 @@ def create_runner_app(
         await mcp_execution_registry.cancel_session(session_id)
         _session_message_buffers.pop(session_id, None)
         _live_response_id.pop(session_id, None)
+        # The MCP listing marker only matters for a live session's next turn.
+        _session_mcp_spec_hash.pop(session_id, None)
         # Clear all desync/turn state so a recreated same-id session starts clean.
         _turn_bind_epoch.pop(session_id, None)
         _recovery_turn_ids.pop(session_id, None)

@@ -129,8 +129,17 @@ async def _run_turn(
     )
     assert resp.status_code == 202, resp.text
     await asyncio.wait_for(finished.wait(), timeout=5.0)
-    # Stream-end bookkeeping runs after the last frame; let it settle.
-    await asyncio.sleep(0.05)
+    # Stream-end bookkeeping runs after the last frame; wait until the count settles.
+    deadline = asyncio.get_running_loop().time() + 2.0
+    settled = server_client.tools_list_calls
+    quiet_checks = 0
+    while quiet_checks < 3 and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.02)
+        if server_client.tools_list_calls == settled:
+            quiet_checks += 1
+        else:
+            settled = server_client.tools_list_calls
+            quiet_checks = 0
     return server_client.tools_list_calls - before
 
 
@@ -245,4 +254,20 @@ async def test_switching_to_an_agent_without_mcp_servers_syncs_once() -> None:
             await _run_turn(client, finished, server_client, agent_id=_MCP_LESS_AGENT_ID) == 1
         ), "switching to an MCP-less agent must sync the emptied config once"
         assert _TOOL_NAME not in _advertised_tools(harness_client.posted_bodies[-1])
+        assert await _run_turn(client, finished, server_client, agent_id=_MCP_LESS_AGENT_ID) == 0
+
+
+@pytest.mark.asyncio
+async def test_deleting_the_session_drops_its_pending_sync() -> None:
+    specs = {"current": _spec(with_mcp=True), _MCP_LESS_AGENT_ID: _spec(with_mcp=False)}
+    app, _harness_client, server_client, finished = _build_app(specs)
+    server_client.failures = {"jira": _FAILURE}
+    async with _runner_client(app) as client:
+        assert await _run_turn(client, finished, server_client) == _EAGER_AND_SETUP
+
+        deleted = await client.delete(f"/v1/sessions/{_SESSION_ID}")
+        assert deleted.status_code == 200, deleted.text
+
+        # A same-id session created afresh carries no stale listing state to sync.
+        server_client.failures = {}
         assert await _run_turn(client, finished, server_client, agent_id=_MCP_LESS_AGENT_ID) == 0

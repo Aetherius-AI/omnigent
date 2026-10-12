@@ -5344,9 +5344,20 @@ async def _runner_owns_mcp_startup_publish(
     try:
         conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
     except Exception:  # noqa: BLE001 — an unresolvable session must not break tools/list
+        _logger.warning(
+            "MCP startup publish skipped: could not resolve session %r",
+            session_id,
+            exc_info=True,
+            extra={"session_id": session_id},
+        )
         return False
     harness = _resolve_harness(conv, agent_store=agent_store)
     if harness is None:
+        _logger.warning(
+            "MCP startup publish skipped: no harness resolved for session %r",
+            session_id,
+            extra={"session_id": session_id},
+        )
         return False
     from omnigent.harness_aliases import is_native_harness
 
