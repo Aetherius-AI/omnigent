@@ -1245,9 +1245,9 @@ class HostProcess:
         # Live tunnel connection, set by _serve_frames for the watcher
         # tasks (which outlive any single connection) to report on.
         self._ws: websockets.asyncio.client.ClientConnection | None = None
-        # runner_id → composed error for exits that could not be sent
+        # runner_id → exit report for exits that could not be sent
         # (tunnel down at the time). Flushed after the next hello.
-        self._unreported_exits: dict[str, str] = {}
+        self._unreported_exits: dict[str, HostRunnerExitedFrame] = {}
         # Strong refs to per-runner watcher tasks; asyncio only keeps
         # weak refs, so an unreferenced task can be GC'd mid-flight.
         self._watcher_tasks: set[asyncio.Task[None]] = set()
@@ -1881,6 +1881,27 @@ class HostProcess:
                 harness_is_configured, frame.harness
             )
         if not harness_ready:
+            if frame.harness in {"pi", "pi-native"}:
+                from omnigent.harnesses.pi_native.main import (
+                    PiNativeCliOutdatedError,
+                    check_pi_cli_version_floor,
+                    pi_version,
+                    resolve_pi_executable,
+                )
+
+                try:
+                    executable = resolve_pi_executable()
+                except click.ClickException:
+                    version = None
+                else:
+                    version = await asyncio.to_thread(pi_version, executable)
+                if version is not None:
+                    try:
+                        check_pi_cli_version_floor(version)
+                    except PiNativeCliOutdatedError as exc:
+                        return self._launch_failed(
+                            frame, str(exc), error_code=HARNESS_NOT_CONFIGURED_ERROR_CODE
+                        )
             return self._launch_failed(
                 frame,
                 (
@@ -2415,11 +2436,14 @@ class HostProcess:
             return
         self._runners.pop(runner_id)
         self._trigger_maintenance("runner_exited")
+        had_connected = None
+        if handle.connect_marker is not None:
+            try:
+                had_connected = await asyncio.to_thread(handle.connect_marker.exists)
+            except OSError:
+                _logger.warning("Could not read connect marker for %s", runner_id, exc_info=True)
         if handle.proc.returncode == 0:
-            never_connected = handle.connect_marker is not None and not await asyncio.to_thread(
-                handle.connect_marker.exists
-            )
-            if not never_connected:
+            if had_connected is not False:
                 # Post-connect code 0 includes graceful idle-reaper exits.
                 _logger.info("Runner %s exited cleanly (code 0); no crash report", runner_id)
                 return
@@ -2429,7 +2453,7 @@ class HostProcess:
                 "Runner %s exited cleanly (code 0) before connecting; reporting exit",
                 runner_id,
             )
-            await self._report_runner_exit(runner_id, error)
+            await self._report_runner_exit(runner_id, error, had_connected=had_connected)
             return
         error = _runner_exit_error(handle.proc.returncode, handle.log_path)
         # A non-zero runner exit is a runner-process fault that blocks the
@@ -2449,7 +2473,7 @@ class HostProcess:
                 error_phase=ErrorPhase.UNKNOWN.value,
             ),
         )
-        await self._report_runner_exit(runner_id, error)
+        await self._report_runner_exit(runner_id, error, had_connected=had_connected)
 
     async def _watch_runner_connect(
         self, runner_id: str, *, exit_watcher: asyncio.Task[None]
@@ -2495,21 +2519,26 @@ class HostProcess:
         if janitor is not None:
             janitor.trigger(reason)
 
-    async def _report_runner_exit(self, runner_id: str, error: str) -> None:
+    async def _report_runner_exit(
+        self, runner_id: str, error: str, *, had_connected: bool | None = None
+    ) -> None:
         """Send a ``host.runner_exited`` report, queueing on failure.
 
         :param runner_id: The dead runner, e.g. ``"runner_abc123..."``.
         :param error: Composed exit error from
             :func:`_runner_exit_error`.
+        :param had_connected: First-connect marker evidence, or ``None`` when unknown.
         :returns: None. A report that cannot be sent (tunnel down or
             mid-reconnect) is parked in ``self._unreported_exits`` and
             flushed by :meth:`_serve_frames` after the next hello.
         """
-        frame = encode_host_frame(HostRunnerExitedFrame(runner_id=runner_id, error=error))
+        report = HostRunnerExitedFrame(
+            runner_id=runner_id, error=error, had_connected=had_connected
+        )
         ws = self._ws
         if ws is not None:
             try:
-                await ws.send(frame)
+                await ws.send(encode_host_frame(report))
                 return
             except Exception:  # noqa: BLE001 — any send failure parks the report
                 _logger.debug(
@@ -2517,7 +2546,7 @@ class HostProcess:
                     runner_id,
                     exc_info=True,
                 )
-        self._unreported_exits[runner_id] = error
+        self._unreported_exits[runner_id] = report
 
     def _handle_stat(self, frame: HostStatFrame) -> HostStatResultFrame:
         """Handle a ``host.stat`` request from the server.
@@ -3924,7 +3953,11 @@ class HostProcess:
         while True:
             await asyncio.sleep(_LIFECYCLE_POLL_INTERVAL_S)
             if await asyncio.to_thread(lock.still_owner):
-                confirmed = True
+                if not confirmed:
+                    confirmed = True
+                    # Marks when the startup-grace latch above opens: any
+                    # record mutation from this point on retires the daemon.
+                    _logger.debug("Host daemon confirmed registry ownership of %s.", lock.target)
                 continue
             if not confirmed:
                 continue
@@ -4562,9 +4595,11 @@ class HostProcess:
         try:
             # Reports raised while disconnected must wait until registration;
             # the server cannot route them before this connection owns the host.
-            for runner_id, error in list(self._unreported_exits.items()):
+            for runner_id, report in list(self._unreported_exits.items()):
                 del self._unreported_exits[runner_id]
-                await self._report_runner_exit(runner_id, error)
+                await self._report_runner_exit(
+                    runner_id, report.error, had_connected=report.had_connected
+                )
             print(
                 f"✓ Connected as {self._identity.name!r} "
                 f"({self._identity.host_id}), {len(hello.runners)} live runner(s). "
