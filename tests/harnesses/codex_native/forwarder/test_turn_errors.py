@@ -230,6 +230,11 @@ async def test_handle_event_surfaces_non_retrying_error_notification(tmp_path: P
         expected_thread_id="thread_123",
     )
 
+    context = client.posts[0][1]["data"].pop("failure_context")
+    assert context["failure_source"] == "codex_terminal_turn"
+    assert context["failure_decision"] == "session_failed"
+    assert context["failure_id"]
+
     assert client.posts == [
         (
             "/v1/sessions/conv_x/events",
@@ -336,6 +341,11 @@ async def test_handle_event_deduplicates_error_then_terminal_boundary(tmp_path: 
             expected_thread_id="thread_123",
             forwarder_state=forwarder_state,
         )
+
+    context = client.posts[0][1]["data"].pop("failure_context")
+    assert context["failure_source"] == "codex_terminal_turn"
+    assert context["failure_decision"] == "session_failed"
+    assert context["failure_id"]
 
     assert client.posts == [
         (

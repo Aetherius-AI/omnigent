@@ -61,6 +61,10 @@ from omnigent.harnesses.codex_native.elicitation import (
 from omnigent.harnesses.codex_native.elicitation import (
     is_codex_request_id as _is_codex_request_id,
 )
+from omnigent.harnesses.codex_native.failure_telemetry import (
+    codex_error_info,
+    codex_failure_context,
+)
 from omnigent.native._native_forwarder_health import (
     note_post_success as note_native_post_success,
 )
@@ -73,9 +77,15 @@ from omnigent.native._native_post_delivery import (
     post_may_have_been_delivered,
     replay_dead_letters,
 )
+from omnigent.native.failure_telemetry import (
+    FailureContext,
+    native_failure_id,
+    normalize_failure_context,
+)
 from omnigent.runtime.tool_output import cap_tool_output
 from omnigent.session_event_batch import MAX_SESSION_EVENT_REQUEST_BYTES
 from omnigent.util.json_types import JsonObject as _JsonObject
+from omnigent.version import VERSION
 
 _logger = logging.getLogger(__name__)
 
@@ -966,6 +976,7 @@ class _CodexTerminalError:
 
     message: str
     kind: str
+    failure_context: FailureContext | None = None
 
     @property
     def is_auth(self) -> bool:
@@ -993,14 +1004,7 @@ def _classify_codex_error(error: _JsonObject, message: str) -> str:
     lowered = message.lower()
     if any(fragment in lowered for fragment in _CODEX_BUDGET_EXHAUSTED_FRAGMENTS):
         return _CODEX_ERROR_KIND_GENERIC
-    info = error.get("codexErrorInfo")
-    variant: str | None = None
-    http_status: object = None
-    if isinstance(info, str):
-        variant = info
-    elif isinstance(info, dict):
-        variant = info.get("type") or info.get("kind") or info.get("variant")
-        http_status = info.get("httpStatusCode")
+    variant, http_status = codex_error_info(error.get("codexErrorInfo"))
     variant_is_auth = variant is not None and variant.lower() in _CODEX_AUTH_ERROR_INFO
     if variant_is_auth or http_status in _CODEX_AUTH_HTTP_STATUS:
         return _CODEX_ERROR_KIND_AUTH
@@ -1109,7 +1113,11 @@ def _terminal_error_from_turn(params: _JsonObject) -> _CodexTerminalError | None
     if payload is None:
         return None
     message = _error_payload_message(payload)
-    return _CodexTerminalError(message=message, kind=_classify_codex_error(payload, message))
+    return _CodexTerminalError(
+        message=message,
+        kind=_classify_codex_error(payload, message),
+        failure_context=codex_failure_context(payload, message=message),
+    )
 
 
 def _terminal_error_from_notification(params: _JsonObject) -> _CodexTerminalError | None:
@@ -1118,7 +1126,11 @@ def _terminal_error_from_notification(params: _JsonObject) -> _CodexTerminalErro
     if not isinstance(payload, dict):
         return None
     message = _error_payload_message(payload)
-    return _CodexTerminalError(message=message, kind=_classify_codex_error(payload, message))
+    return _CodexTerminalError(
+        message=message,
+        kind=_classify_codex_error(payload, message),
+        failure_context=codex_failure_context(payload, message=message),
+    )
 
 
 @dataclass(frozen=True)
@@ -6818,6 +6830,7 @@ async def _post_status(
     response_id: str | None = None,
     output: str | None = None,
     reauth_required: bool = False,
+    failure_context: FailureContext | None = None,
 ) -> None:
     """
     Publish a native Codex status edge.
@@ -6842,6 +6855,8 @@ async def _post_status(
         data["output"] = output
     if reauth_required:
         data["reauth_required"] = True
+    if failure_context:
+        data["failure_context"] = normalize_failure_context(failure_context)
     response = await _post_session_event(
         client,
         session_id,
@@ -6881,6 +6896,23 @@ async def _post_turn_status_edge(
     response_id = _response_id(_params_with_turn_id({}, edge.turn_id)) if edge.turn_id else None
     output: str | None = None
     reauth_required = False
+    failure_context: FailureContext = {}
+    if edge.status == "failed":
+        failure_context = normalize_failure_context(
+            {
+                **(edge.error.failure_context or {} if edge.error is not None else {}),
+                "failure_source": "codex_terminal_turn",
+                "native_harness": "codex-native",
+                "failure_decision": "session_failed",
+                "detail_source": "codex_error_payload"
+                if edge.error is not None
+                else "codex_turn_status",
+                "runner_version": VERSION,
+                "failure_id": native_failure_id("codex_terminal_turn", session_id, edge.turn_id)
+                if edge.turn_id
+                else None,
+            }
+        )
     if edge.error is not None:
         output = edge.error.message
         if edge.error.is_auth:
@@ -6893,6 +6925,7 @@ async def _post_turn_status_edge(
         response_id=response_id,
         output=output,
         reauth_required=reauth_required,
+        failure_context=failure_context,
     )
 
 
