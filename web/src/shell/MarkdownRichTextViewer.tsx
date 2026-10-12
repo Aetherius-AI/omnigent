@@ -26,6 +26,7 @@ import { ListItem, TaskItem, TaskList } from "@tiptap/extension-list";
 import { Markdown } from "@tiptap/markdown";
 import type { Comment } from "@/hooks/useComments";
 import type { ActiveSelection } from "./codeViewerHelpers";
+import { useFileViewer } from "./FileViewerContext";
 import { useCanEdit } from "@/hooks/usePermissions";
 import { useSessionActive } from "@/hooks/useWorkspaceChangedFiles";
 import { ToolbarPlugin } from "./MarkdownEditorToolbar";
@@ -44,7 +45,12 @@ import {
   createSearchDecorationExtension,
   type SearchDecorationState,
 } from "./TipTapSearchExtension";
-import { createWorkspaceImageExtension, ImageAwareLink } from "./TipTapWorkspaceImage";
+import {
+  createWorkspaceImageExtension,
+  ImageAwareLink,
+  isWorkspaceLinkHref,
+  resolveWorkspacePath,
+} from "./TipTapWorkspaceImage";
 import { CodeBlockWithLanguage } from "./TipTapCodeBlockExtension";
 import { isUserEditUpdate } from "./codeBlockLanguageEdit";
 import { GitHubAlertBlockquote } from "./TipTapGitHubAlert";
@@ -256,6 +262,7 @@ function MarkdownRichTextViewerInner({
     [],
   );
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const openFile = useFileViewer();
   // Persist/restore the editor's scroll position across unmount/remount and
   // session switches. Content is present at mount (the parent gates on the
   // file query), so the restore is ready immediately.
@@ -512,13 +519,20 @@ function MarkdownRichTextViewerInner({
         // Read-only: any click on a link opens it. Edit mode: only a
         // modifier-click (⌘/Ctrl) opens it, so plain-click-to-edit is preserved
         // while still giving an escape hatch to follow links (incl. in tables).
+        // A link to another workspace file opens in the FileViewer: as a URL it
+        // would resolve against the app URL (`/c/<id>` → `/c/notes.md`).
         onClick={(e) => {
           if (canEdit && !e.metaKey && !e.ctrlKey) return;
           const anchor = (e.target as Element).closest("a[href]");
-          if (anchor) {
-            e.preventDefault();
-            window.open(anchor.getAttribute("href")!, "_blank", "noopener,noreferrer");
+          if (!anchor) return;
+          e.preventDefault();
+          const href = anchor.getAttribute("href")!;
+          if (!isWorkspaceLinkHref(href)) {
+            window.open(href, "_blank", "noopener,noreferrer");
+            return;
           }
+          const target = resolveWorkspacePath(path, href);
+          if (openFile && target) openFile(target);
         }}
       >
         {!canEdit && (

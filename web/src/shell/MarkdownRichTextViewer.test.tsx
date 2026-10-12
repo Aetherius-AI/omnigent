@@ -13,6 +13,8 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MarkdownRichTextViewer } from "./MarkdownRichTextViewer";
+import { FileViewerContext } from "./FileViewerContext";
+import type * as TipTapWorkspaceImageModule from "./TipTapWorkspaceImage";
 
 // ── Module mocks ──────────────────────────────────────────────────────────
 
@@ -42,7 +44,9 @@ vi.mock("./tiptapMarkdownPatches", () => ({
   installMarkdownSerializerPatch: vi.fn(),
   installMarkdownParserPatch: vi.fn(),
 }));
-vi.mock("./TipTapWorkspaceImage", () => ({
+// Keep the real path helpers (the link handler resolves workspace links with them).
+vi.mock("./TipTapWorkspaceImage", async (importOriginal) => ({
+  ...(await importOriginal<typeof TipTapWorkspaceImageModule>()),
   createWorkspaceImageExtension: vi.fn().mockReturnValue({}),
   ImageAwareLink: { configure: vi.fn().mockReturnValue({}) },
 }));
@@ -355,11 +359,12 @@ describe("MarkdownRichTextViewer link following", () => {
   function clickLink(
     container: HTMLElement,
     eventInit: Parameters<typeof fireEvent.click>[1] = {},
+    href = HREF,
   ) {
     const scroll = container.querySelector(".overflow-auto");
     if (!scroll) throw new Error("scroll container not found");
     const anchor = document.createElement("a");
-    anchor.setAttribute("href", HREF);
+    anchor.setAttribute("href", href);
     scroll.appendChild(anchor);
     fireEvent.click(anchor, eventInit);
   }
@@ -400,6 +405,79 @@ describe("MarkdownRichTextViewer link following", () => {
     open.mockClear();
     clickLink(container, { ctrlKey: true });
     expect(open).toHaveBeenCalledWith(HREF, "_blank", "noopener,noreferrer");
+  });
+
+  // Links to other workspace files open in the FileViewer: as a URL, a relative
+  // href would resolve against `/c/<id>` and load a session named after the file.
+  const openFile = vi.fn();
+  const FILE_VIEWER = {
+    openFile,
+    openGithubTab: () => {},
+    isChangedPath: () => false,
+    conversationId: "conv_1",
+    workspaceRoot: "/ws",
+    workspaceHome: null,
+  };
+  function renderViewerInFileViewer(content: string, path: string) {
+    openFile.mockClear();
+    const { container } = render(
+      <FileViewerContext.Provider value={FILE_VIEWER}>
+        <MarkdownRichTextViewer
+          content={content}
+          conversationId="conv_1"
+          path={path}
+          isSettled={true}
+          comments={[]}
+          activeSelection={null}
+          onSetActiveSelection={() => {}}
+        />
+      </FileViewerContext.Provider>,
+    );
+    return { container, openFile };
+  }
+
+  it("opens a workspace-relative link in the FileViewer on ⌘/Ctrl+click in edit mode", () => {
+    const open = vi.fn();
+    vi.stubGlobal("open", open);
+    setupEditHooks();
+    const { container, openFile } = renderViewerInFileViewer(
+      "[plan](../notes/plan.md#steps)",
+      "docs/guide.md",
+    );
+
+    clickLink(container, { ctrlKey: true }, "../notes/plan.md#steps");
+
+    expect(openFile).toHaveBeenCalledWith("notes/plan.md");
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it("opens a workspace-relative link in the FileViewer on a plain click in read-only mode", () => {
+    const open = vi.fn();
+    vi.stubGlobal("open", open);
+    setupReadOnlyHooks();
+    const { container, openFile } = renderViewerInFileViewer("[plan](plan.md)", "docs/guide.md");
+
+    clickLink(container, {}, "plan.md");
+
+    expect(openFile).toHaveBeenCalledWith("docs/plan.md");
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it("keeps URLs and in-page anchors on the new-tab path", () => {
+    const open = vi.fn();
+    vi.stubGlobal("open", open);
+    setupReadOnlyHooks();
+    const { container, openFile } = renderViewerInFileViewer(
+      "[docs](" + HREF + ") [below](#usage)",
+      "docs/guide.md",
+    );
+
+    clickLink(container);
+    clickLink(container, {}, "#usage");
+
+    expect(open).toHaveBeenNthCalledWith(1, HREF, "_blank", "noopener,noreferrer");
+    expect(open).toHaveBeenNthCalledWith(2, "#usage", "_blank", "noopener,noreferrer");
+    expect(openFile).not.toHaveBeenCalled();
   });
 });
 

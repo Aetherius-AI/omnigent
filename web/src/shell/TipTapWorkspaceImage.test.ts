@@ -20,6 +20,7 @@ import { StarterKit } from "@tiptap/starter-kit";
 import {
   createWorkspaceImageExtension,
   ImageAwareLink,
+  isWorkspaceLinkHref,
   isWorkspaceRelativeSrc,
   resolveWorkspacePath,
 } from "./TipTapWorkspaceImage";
@@ -102,6 +103,21 @@ describe("isWorkspaceRelativeSrc", () => {
     expect(isWorkspaceRelativeSrc("http://example.com/x.png")).toBe(false);
     expect(isWorkspaceRelativeSrc("data:image/png;base64,AAAA")).toBe(false);
     expect(isWorkspaceRelativeSrc("//cdn.example.com/x.png")).toBe(false);
+  });
+});
+
+describe("isWorkspaceLinkHref", () => {
+  it("treats file paths as workspace links and URLs/anchors as not", () => {
+    expect(isWorkspaceLinkHref("notes.md")).toBe(true);
+    expect(isWorkspaceLinkHref("../docs/architecture.mmd")).toBe(true);
+    expect(isWorkspaceLinkHref("references/")).toBe(true);
+    expect(isWorkspaceLinkHref("/docs/x.md")).toBe(true);
+    expect(isWorkspaceLinkHref("notes.md#steps")).toBe(true);
+    expect(isWorkspaceLinkHref("#details")).toBe(false);
+    expect(isWorkspaceLinkHref("")).toBe(false);
+    expect(isWorkspaceLinkHref("https://omnigent.ai/docs")).toBe(false);
+    expect(isWorkspaceLinkHref("mailto:team@example.com")).toBe(false);
+    expect(isWorkspaceLinkHref("//cdn.example.com/x")).toBe(false);
   });
 });
 

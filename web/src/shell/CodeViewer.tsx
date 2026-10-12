@@ -61,7 +61,7 @@ import {
 import { useCanEdit } from "@/hooks/usePermissions";
 import { cn } from "@/lib/utils";
 import { MarkdownRichTextViewer } from "./MarkdownRichTextViewer";
-import { isWorkspaceRelativeSrc, resolveWorkspacePath } from "./TipTapWorkspaceImage";
+import { isWorkspaceLinkHref, resolveWorkspacePath } from "./TipTapWorkspaceImage";
 import {
   type ActiveSelection,
   type SaveStatus,
@@ -192,7 +192,7 @@ function MarkdownPreviewLink({
 }: ComponentPropsWithoutRef<"a"> & { node?: unknown }) {
   const openFile = useFileViewer();
   const filePath = useContext(MarkdownPreviewPathContext);
-  if (!href || href.startsWith("#") || !isWorkspaceRelativeSrc(href)) {
+  if (!href || !isWorkspaceLinkHref(href)) {
     return (
       <a href={href} {...props}>
         {children}
