@@ -151,8 +151,8 @@ def test_broken_null_device_surfaces_its_repair_instead_of_the_log_pointer() -> 
     """
     exc = TerminalLaunchPrerequisiteError(
         "tmux cannot start its server because /dev/null is a regular file instead of the "
-        "null character device. Recreate the device with `mknod -m 666 /dev/null c 1 3` "
-        "(as root) or restart the container, then retry."
+        "null character device. Recreate the device with `rm -f /dev/null && mknod -m 666 "
+        "/dev/null c 1 3` (as root) or restart the container, then retry."
     )
     exc.__cause__ = RuntimeError("tmux launch failed (rc=1): server exited unexpectedly")
 
@@ -164,7 +164,7 @@ def test_broken_null_device_surfaces_its_repair_instead_of_the_log_pointer() -> 
         "Native Claude terminal failed to start: tmux cannot start its server because "
         "/dev/null is a regular file instead of the null character device."
     )
-    assert "mknod -m 666 /dev/null c 1 3" in message
+    assert "rm -f /dev/null && mknod -m 666 /dev/null c 1 3" in message
     assert "see the runner log" not in message
     assert "(RuntimeError)" not in message
     assert "server exited unexpectedly" not in message

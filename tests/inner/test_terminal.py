@@ -3557,25 +3557,39 @@ def test_null_device_problem_names_what_replaced_the_device(tmp_path: Path) -> N
     regular.write_text("runner-host\n")
 
     assert terminal_mod._null_device_problem(str(regular)) == (
-        f"{regular} is a regular file instead of the null character device"
+        f"{regular} is a regular file instead of the null character device",
+        f"rm -f {regular} && mknod -m 666 {regular} c 1 3",
     )
+    # A directory is removed with rmdir, never recursively.
     assert terminal_mod._null_device_problem(str(tmp_path)) == (
-        f"{tmp_path} is a directory instead of the null character device"
+        f"{tmp_path} is a directory instead of the null character device",
+        f"rmdir {tmp_path} && mknod -m 666 {tmp_path} c 1 3",
     )
-    assert terminal_mod._null_device_problem(str(tmp_path / "gone")) == (
-        f"{tmp_path / 'gone'} is missing (No such file or directory)"
+    missing = tmp_path / "gone"
+    assert terminal_mod._null_device_problem(str(missing)) == (
+        f"{missing} is missing (No such file or directory)",
+        f"mknod -m 666 {missing} c 1 3",
     )
 
 
-@pytest.mark.parametrize("null_device_broken", [False, True])
+@pytest.mark.parametrize(
+    ("null_device_broken", "stderr"),
+    [
+        (False, b"server exited unexpectedly"),
+        (True, b"server exited unexpectedly"),
+        (True, b"unknown option: -Z"),
+    ],
+    ids=["healthy-device", "broken-device", "broken-device-unrelated-tmux-error"],
+)
 async def test_launch_failure_explains_a_broken_null_device(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, null_device_broken: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, null_device_broken: bool, stderr: bytes
 ) -> None:
     """tmux's bare "server exited unexpectedly" is explained when /dev/null is broken.
 
     glibc's ``daemon()`` refuses to start the tmux server unless /dev/null is the
-    null device, and tmux reports nothing about why. A healthy device keeps the
-    plain launch error, so unrelated tmux failures are not blamed on it.
+    null device, and tmux reports nothing about why. A healthy device, or a tmux
+    error other than the dying server, keeps the plain launch error so the real
+    diagnostic is never replaced by a /dev/null repair hint.
     """
     instance = TerminalInstance(
         name="claude",
@@ -3585,7 +3599,7 @@ async def test_launch_failure_explains_a_broken_null_device(
     )
 
     async def spawn(*_args: object, **_kwargs: object) -> _ProcessWithStdout:
-        return _ProcessWithStdout(returncode=1, stderr=b"server exited unexpectedly")
+        return _ProcessWithStdout(returncode=1, stderr=stderr)
 
     monkeypatch.setattr(
         terminal_mod,
@@ -3593,7 +3607,10 @@ async def test_launch_failure_explains_a_broken_null_device(
         SimpleNamespace(create_subprocess_exec=spawn, subprocess=asyncio.subprocess),
     )
     problem = (
-        "/dev/null is a regular file instead of the null character device"
+        terminal_mod._NullDeviceProblem(
+            "/dev/null is a regular file instead of the null character device",
+            "rm -f /dev/null && mknod -m 666 /dev/null c 1 3",
+        )
         if null_device_broken
         else None
     )
@@ -3603,8 +3620,8 @@ async def test_launch_failure_explains_a_broken_null_device(
         await instance.launch(cwd=tmp_path)
 
     assert not instance.running
-    launch_error = "tmux launch failed (rc=1): server exited unexpectedly"
-    if not null_device_broken:
+    launch_error = f"tmux launch failed (rc=1): {stderr.decode()}"
+    if not null_device_broken or stderr != b"server exited unexpectedly":
         assert not isinstance(info.value, terminal_mod.TerminalLaunchPrerequisiteError)
         assert str(info.value) == launch_error
         return
@@ -3612,8 +3629,8 @@ async def test_launch_failure_explains_a_broken_null_device(
     message = str(info.value)
     assert message == (
         "tmux cannot start its server because /dev/null is a regular file instead of the "
-        "null character device. Recreate the device with `mknod -m 666 /dev/null c 1 3` "
-        "(as root) or restart the container, then retry."
+        "null character device. Recreate the device with `rm -f /dev/null && mknod -m 666 "
+        "/dev/null c 1 3` (as root) or restart the container, then retry."
     )
     assert str(tmp_path) not in message
     assert isinstance(info.value.__cause__, RuntimeError)

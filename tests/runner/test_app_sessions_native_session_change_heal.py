@@ -683,8 +683,8 @@ async def test_failed_recreate_does_not_wait(
 
 _BROKEN_NULL_DEVICE = (
     "tmux cannot start its server because /dev/null is a regular file instead of the null "
-    "character device. Recreate the device with `mknod -m 666 /dev/null c 1 3` (as root) or "
-    "restart the container, then retry."
+    "character device. Recreate the device with `rm -f /dev/null && mknod -m 666 /dev/null "
+    "c 1 3` (as root) or restart the container, then retry."
 )
 
 
@@ -739,12 +739,10 @@ async def test_failed_recreate_reports_the_terminal_start_error(
     event: dict[str, Any],
     error_code: str,
 ) -> None:
-    """A control on a pane that cannot be re-created explains the start failure.
+    """A failed re-create returns the terminal-start error in the 503.
 
-    The heal used to swallow the ensure's error, so the injection timed out with
-    "tmux target is not advertised yet; wait for the terminal to launch" — a wait
-    hint for a terminal that can never start — and the client got the generic
-    log pointer. The 503 must carry the terminal-start error instead.
+    Waiting for the unregistered pane would only end in "tmux target is not
+    advertised yet" and the generic log pointer; nothing is typed into it.
     """
     auto_create_calls: list[str] = []
     app, registry = await _open_claude_native_session(
@@ -772,6 +770,53 @@ async def test_failed_recreate_reports_the_terminal_start_error(
         "Native Claude terminal failed to start: tmux cannot start its server because "
         "/dev/null is a regular file"
     ), detail
-    assert "mknod -m 666 /dev/null c 1 3" in detail
+    assert "rm -f /dev/null && mknod -m 666 /dev/null c 1 3" in detail
     assert "not advertised" not in detail
     assert "see the runner log" not in detail
+
+
+@pytest.mark.asyncio
+async def test_failed_recreate_with_stale_entry_reports_the_start_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A dead entry whose close failed must not hide the start error behind the poll.
+
+    ``_ensure_native_terminal_for_turn`` swallows a failed close of the stale
+    pane and still re-creates. When that re-create fails too, the dead instance
+    is still registered, so the heal must return the start error instead of
+    polling ``claude_pane_ready`` for the whole budget and failing generically.
+    """
+    conv_id = "0718293a4b5c6d7e8f901a2b3c4d5e6f"
+    auto_create_calls: list[str] = []
+    app, registry = await _open_claude_native_session(
+        monkeypatch, conv_id=conv_id, auto_create_calls=auto_create_calls
+    )
+    bridge_dir = bridge_dir_for_conversation_id(conv_id)
+    _plant_dead_claude_pane(registry, conv_id, tmp_path, bridge_dir)
+    _break_claude_terminal_start(monkeypatch)
+    # Budget the shipped value: a regression shows up as a 30s test.
+    monkeypatch.setattr(native_controls, "_CLAUDE_PANE_READY_TIMEOUT_S", 30.0)
+
+    async def _close_fails(*_args: object, **_kwargs: object) -> bool:
+        raise RuntimeError("tmux kill-server failed")
+
+    monkeypatch.setattr(registry, "close", _close_fails)
+
+    def _never_polled(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("a failed re-create must not be polled or typed into")
+
+    monkeypatch.setattr(claude_native_bridge, "claude_pane_ready", _never_polled)
+    monkeypatch.setattr(claude_native_bridge, "set_permission_mode", _never_polled)
+
+    started = time.monotonic()
+    async with _runner_client(app) as client:
+        resp = await client.post(
+            f"/v1/sessions/{conv_id}/events",
+            json={"type": "permission_mode_change", "permission_mode": "acceptEdits"},
+        )
+    elapsed = time.monotonic() - started
+
+    assert resp.status_code == 503, resp.text
+    assert "/dev/null is a regular file" in resp.json()["detail"]
+    assert registry.get(conv_id, "claude", "main") is not None, "the stale entry stays registered"
+    assert elapsed < 5.0, f"stale entry stalled the control {elapsed:.1f}s"

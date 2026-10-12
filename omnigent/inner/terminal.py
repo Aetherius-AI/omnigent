@@ -26,7 +26,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, TypeAlias, cast
+from typing import Any, NamedTuple, TypeAlias, cast
 
 from omnigent._platform import IS_LINUX, IS_WINDOWS
 from omnigent.cli_invocation import cli_invocation
@@ -374,6 +374,10 @@ def _tmux_process_start_error(cmd: list[str], exc: OSError) -> RuntimeError:
     return RuntimeError(detail)
 
 
+# What the tmux client prints when the new server dies before it is reachable.
+_TMUX_SERVER_EXITED_UNEXPECTEDLY = b"server exited unexpectedly"
+
+
 class TerminalLaunchPrerequisiteError(RuntimeError):
     """tmux could not start its server because the host lacks something it needs.
 
@@ -385,41 +389,60 @@ class TerminalLaunchPrerequisiteError(RuntimeError):
 
 _NULL_DEVICE_TYPE_NAMES: tuple[tuple[Callable[[int], bool], str], ...] = (
     (stat.S_ISREG, "regular file"),
-    (stat.S_ISDIR, "directory"),
     (stat.S_ISFIFO, "named pipe"),
     (stat.S_ISSOCK, "socket"),
     (stat.S_ISBLK, "block device"),
 )
 
 
-def _null_device_problem(path: str = os.devnull) -> str | None:
-    """Describe why *path* cannot serve as the null device, or ``None`` if it can.
+class _NullDeviceProblem(NamedTuple):
+    description: str
+    repair: str
+
+
+def _null_device_problem(path: str = os.devnull) -> _NullDeviceProblem | None:
+    """Describe why *path* cannot serve as the null device and how to recreate it.
 
     glibc's ``daemon()``, which tmux uses to start its server, fails with
     ``ENODEV`` unless ``/dev/null`` is character device 1,3; tmux then only
-    reports "server exited unexpectedly".
+    reports "server exited unexpectedly". Returns ``None`` for a healthy device.
     """
+    mknod = f"mknod -m 666 {path} c 1 3"
     try:
         st = os.stat(path)
     except OSError as exc:
-        return f"{path} is missing ({exc.strerror or type(exc).__name__})"
+        return _NullDeviceProblem(
+            f"{path} is missing ({exc.strerror or type(exc).__name__})", mknod
+        )
     if stat.S_ISCHR(st.st_mode):
         if IS_LINUX:
             major, minor = os.major(st.st_rdev), os.minor(st.st_rdev)
             if (major, minor) != (1, 3):
-                return f"{path} is character device {major},{minor} instead of 1,3"
+                return _NullDeviceProblem(
+                    f"{path} is character device {major},{minor} instead of 1,3",
+                    f"rm -f {path} && {mknod}",
+                )
         return None
+    if stat.S_ISDIR(st.st_mode):
+        return _NullDeviceProblem(
+            f"{path} is a directory instead of the null character device",
+            f"rmdir {path} && {mknod}",
+        )
     kind = next(
         (name for is_kind, name in _NULL_DEVICE_TYPE_NAMES if is_kind(st.st_mode)),
         "non-device file",
     )
-    return f"{path} is a {kind} instead of the null character device"
+    return _NullDeviceProblem(
+        f"{path} is a {kind} instead of the null character device", f"rm -f {path} && {mknod}"
+    )
 
 
-def _terminal_launch_prerequisite_error(problem: str) -> TerminalLaunchPrerequisiteError:
+def _terminal_launch_prerequisite_error(
+    problem: _NullDeviceProblem,
+) -> TerminalLaunchPrerequisiteError:
     return TerminalLaunchPrerequisiteError(
-        f"tmux cannot start its server because {problem}. Recreate the device with "
-        "`mknod -m 666 /dev/null c 1 3` (as root) or restart the container, then retry."
+        f"tmux cannot start its server because {problem.description}. Recreate the device "
+        f"with `{problem.repair}` (as root) or restart the container, then retry."
     )
 
 
@@ -1717,9 +1740,12 @@ class TerminalInstance:
                 launch_error = RuntimeError(
                     f"tmux launch failed (rc={proc.returncode}): {stderr.decode().strip()}"
                 )
-                problem = _null_device_problem()
-                if problem is not None:
-                    raise _terminal_launch_prerequisite_error(problem) from launch_error
+                # Only a server that died while daemonizing can be blamed on
+                # /dev/null; other tmux errors keep their own diagnostic.
+                if _TMUX_SERVER_EXITED_UNEXPECTEDLY in stderr:
+                    problem = _null_device_problem()
+                    if problem is not None:
+                        raise _terminal_launch_prerequisite_error(problem) from launch_error
                 raise launch_error
         except BaseException:
             if self._clipboard_bridge is not None:

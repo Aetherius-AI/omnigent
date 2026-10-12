@@ -980,11 +980,14 @@ def build_native_controls(
         if instance is not None and await instance.is_alive():
             return None
         start_failure = await _ensure_native_terminal_for_turn(conv_id, "claude-native")
-        if terminal_registry.get(conv_id, terminal_name, "main") is None:
-            # Nothing was created and nothing is booting, so waiting cannot help.
-            # The ensure's start error, when it reported one, is why the control
-            # cannot be applied; otherwise the injection fails fast as before.
+        if start_failure is not None:
+            # No pane was created, even if a dead entry whose close failed is
+            # still registered; polling for readiness cannot help.
             return start_failure
+        if terminal_registry.get(conv_id, terminal_name, "main") is None:
+            # Nothing was created and nothing is booting; the injection fails
+            # fast as it did before this heal existed.
+            return None
         deadline = time.monotonic() + _CLAUDE_PANE_READY_TIMEOUT_S
         while True:
             if await asyncio.to_thread(claude_pane_ready, bridge_dir):

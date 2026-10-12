@@ -101,7 +101,11 @@ class ResourceRoutes:
 
 
 def _terminal_start_error_message(resp: object) -> str | None:
-    """Return the client-safe ``error.message`` of a failed terminal-ensure response."""
+    """Return the client-safe ``error.message`` of a failed terminal-ensure response.
+
+    The response carries the runner's ``{"error": {"code", "error_id", "message"}}``
+    envelope that ``_native_terminal_start_error_response`` builds for clients.
+    """
     body = getattr(resp, "body", b"")
     try:
         payload = json.loads(body) if body else None
@@ -735,14 +739,16 @@ def register_resource_routes(
             return None
         status = getattr(resp, "status_code", 200)
         if status >= 400:
+            message = _terminal_start_error_message(resp)
             _logger.warning(
-                "native pane self-heal returned status %s for conv=%s (%s)",
+                "native pane self-heal returned status %s for conv=%s (%s)%s",
                 status,
                 conv_id,
                 terminal_name,
+                "" if message else "; its body carried no error message to relay",
                 extra={"session_id": conv_id},
             )
-            return _terminal_start_error_message(resp)
+            return message
         return None
 
     @app.get("/v1/sessions/{session_id}/resources/terminals/{terminal_id}")

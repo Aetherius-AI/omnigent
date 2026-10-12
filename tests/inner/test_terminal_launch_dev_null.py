@@ -97,7 +97,9 @@ def test_launch_failure_names_regular_file_dev_null(tmp_path: Path) -> None:
     result = json.loads(completed.stdout.strip().splitlines()[-1])
     assert result["dev_null"] == "regular file"
     if result["launched"]:
-        return
+        pytest.skip(
+            "tmux launched despite the regular-file /dev/null; diagnosis path not exercised"
+        )
     assert "/dev/null" in result["user_message"], (
         f"launch raised {result['error_type']}: {result['error']!r}; "
         f"user-facing message: {result['user_message']!r}"
