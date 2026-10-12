@@ -45,6 +45,7 @@ from omnigent.host.frames import (
     HostInstallHarnessFrame,
     HostLaunchRunnerFrame,
     HostListDirFrame,
+    HostRefreshHarnessesFrame,
     HostStoreSecretFrame,
     classify_launch_refusal,
     encode_host_frame,
@@ -124,6 +125,8 @@ _MODEL_OPTIONS_TIMEOUT_S = 15.0
 # headroom) keeps a genuine slow install from timing out at the server while
 # the host is still succeeding — a "504 but actually installed" outcome.
 _INSTALL_HARNESS_TIMEOUT_S = 420.0
+# A refresh only probes local CLI state; keep the UI responsive if a host stalls.
+_REFRESH_HARNESSES_TIMEOUT_S = 30.0
 
 
 # ``/v1/hosts/{id}/*`` routes share the wrong-replica-vs-offline classification
@@ -407,6 +410,41 @@ async def _proxy_install_harness(
         # Cleanup runs on every path so a cancelled caller doesn't
         # leave an orphan in the pending dict.
         host_conn.pending_installs.pop(request_id, None)
+
+
+async def _proxy_refresh_harnesses(
+    *,
+    host_registry: HostRegistry,
+    host_conn: HostConnection,
+) -> dict[str, Any]:
+    """Forward a forced harness-readiness probe and await its result."""
+    request_id = secrets.token_hex(8)
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[dict[str, Any]] = loop.create_future()
+    host_conn.pending_harness_refreshes[request_id] = future
+    try:
+        try:
+            host_registry.send_text(
+                host_conn,
+                encode_host_frame(HostRefreshHarnessesFrame(request_id=request_id)),
+            )
+        except ConnectionError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"host '{host_conn.host_id}' connection lost",
+            ) from exc
+        try:
+            return await asyncio.wait_for(future, timeout=_REFRESH_HARNESSES_TIMEOUT_S)
+        except asyncio.TimeoutError as exc:
+            raise HTTPException(
+                status_code=504,
+                detail=(
+                    f"host '{host_conn.host_id}' did not respond to refresh_harnesses "
+                    f"within {_REFRESH_HARNESSES_TIMEOUT_S:.0f}s"
+                ),
+            ) from exc
+    finally:
+        host_conn.pending_harness_refreshes.pop(request_id, None)
 
 
 # The credential write is local keychain/file I/O on the host — fast, unlike the
@@ -1443,6 +1481,45 @@ def create_hosts_router(
         return {
             "object": "directory",
             "path": result.get("path"),
+        }
+
+    @router.post("/hosts/{host_id}/harnesses/refresh")
+    async def refresh_host_harnesses(
+        request: Request,
+        host_id: str,
+    ) -> dict[str, Any]:
+        """Force an immediate full harness-readiness probe on a host."""
+        if not flags.enabled(Feature.HARNESS_INSTALL):
+            raise HTTPException(status_code=404, detail="not found")
+
+        user_id = require_user(request, auth_provider)
+        host = await asyncio.to_thread(host_store.get_host, host_id)
+        if host is None:
+            raise HTTPException(status_code=404, detail="host not found")
+        if user_id is not None and host.user_id != user_id:
+            raise HTTPException(status_code=403, detail="not your host")
+
+        conn = host_registry.get(host.host_id)
+        if conn is None:
+            raise _host_absent_error(host)
+        _require_harness_setup_support(conn, "refreshing harness readiness")
+
+        result = await _proxy_refresh_harnesses(
+            host_registry=host_registry,
+            host_conn=conn,
+        )
+        if result.get("status") == "failed":
+            raise HTTPException(
+                status_code=502,
+                detail=f"host readiness refresh failed: {result.get('error') or 'unknown error'}",
+            )
+
+        refreshed_gateway = optional_str_bool_map(result, "gateway_inference")
+        if refreshed_gateway is not None:
+            host_registry.record_gateway_inference(host.host_id, refreshed_gateway)
+        return {
+            "configured_harnesses": result.get("configured_harnesses") or {},
+            "gateway_inference": refreshed_gateway,
         }
 
     @router.post("/hosts/{host_id}/harnesses/{harness}/install")

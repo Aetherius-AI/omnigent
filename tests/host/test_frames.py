@@ -44,6 +44,8 @@ from omnigent.host.frames import (
     HostModelOptionsResultFrame,
     HostPluginsFrame,
     HostPluginsResultFrame,
+    HostRefreshHarnessesFrame,
+    HostRefreshHarnessesResultFrame,
     HostRemoveWorktreeFrame,
     HostRemoveWorktreeResultFrame,
     HostRunnerExitedFrame,
@@ -1962,6 +1964,28 @@ def test_install_harness_result_failure_round_trip() -> None:
     assert decoded.version is None
     assert decoded.gateway_inference is None
     assert decoded.error == "npm not found"
+
+
+def test_refresh_harnesses_frames_round_trip() -> None:
+    request = decode_host_frame(
+        encode_host_frame(HostRefreshHarnessesFrame(request_id="refresh-1"))
+    )
+    assert isinstance(request, HostRefreshHarnessesFrame)
+    assert request.request_id == "refresh-1"
+
+    result = decode_host_frame(
+        encode_host_frame(
+            HostRefreshHarnessesResultFrame(
+                request_id="refresh-1",
+                status="ok",
+                configured_harnesses={"codex-native": True},
+                gateway_inference={"codex-native": False},
+            )
+        )
+    )
+    assert isinstance(result, HostRefreshHarnessesResultFrame)
+    assert result.configured_harnesses == {"codex-native": True}
+    assert result.gateway_inference == {"codex-native": False}
 
 
 def test_result_frames_round_trip_gateway_inference() -> None:

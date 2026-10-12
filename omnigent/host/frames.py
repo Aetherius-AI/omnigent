@@ -142,6 +142,8 @@ class HostFrameKind(str, Enum):
     CREATE_DIR_RESULT = "host.create_dir_result"
     INSTALL_HARNESS = "host.install_harness"
     INSTALL_HARNESS_RESULT = "host.install_harness_result"
+    REFRESH_HARNESSES = "host.refresh_harnesses"
+    REFRESH_HARNESSES_RESULT = "host.refresh_harnesses_result"
     STORE_SECRET = "host.store_secret"
     STORE_SECRET_RESULT = "host.store_secret_result"
     DETECT_CREDENTIALS = "host.detect_credentials"
@@ -796,6 +798,24 @@ class HostInstallHarnessResultFrame:
 
 
 @dataclass
+class HostRefreshHarnessesFrame:
+    """Server → host: immediately re-probe all harness readiness."""
+
+    request_id: str
+
+
+@dataclass
+class HostRefreshHarnessesResultFrame:
+    """Host → server: result of a forced harness readiness re-probe."""
+
+    request_id: str
+    status: str
+    configured_harnesses: dict[str, HarnessAvailability] | None = None
+    gateway_inference: dict[str, bool] | None = None
+    error: str | None = None
+
+
+@dataclass
 class HostStoreSecretFrame:
     """Server → host: write a harness provider credential on the host.
 
@@ -1281,6 +1301,8 @@ HostFrame = (
     | HostCreateDirResultFrame
     | HostInstallHarnessFrame
     | HostInstallHarnessResultFrame
+    | HostRefreshHarnessesFrame
+    | HostRefreshHarnessesResultFrame
     | HostStoreSecretFrame
     | HostStoreSecretResultFrame
     | HostDetectCredentialsFrame
@@ -1589,6 +1611,24 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "status": frame.status,
                 "configured_harnesses": frame.configured_harnesses,
                 "version": frame.version,
+                "gateway_inference": frame.gateway_inference,
+                "error": frame.error,
+            }
+        )
+    if isinstance(frame, HostRefreshHarnessesFrame):
+        return _encode_payload(
+            {
+                "kind": HostFrameKind.REFRESH_HARNESSES.value,
+                "request_id": frame.request_id,
+            }
+        )
+    if isinstance(frame, HostRefreshHarnessesResultFrame):
+        return _encode_payload(
+            {
+                "kind": HostFrameKind.REFRESH_HARNESSES_RESULT.value,
+                "request_id": frame.request_id,
+                "status": frame.status,
+                "configured_harnesses": frame.configured_harnesses,
                 "gateway_inference": frame.gateway_inference,
                 "error": frame.error,
             }
@@ -2133,6 +2173,10 @@ def _decode_known_host_frame(
             return _decode_install_harness(msg)
         case HostFrameKind.INSTALL_HARNESS_RESULT:
             return _decode_install_harness_result(msg)
+        case HostFrameKind.REFRESH_HARNESSES:
+            return HostRefreshHarnessesFrame(request_id=_required_str(msg, "request_id"))
+        case HostFrameKind.REFRESH_HARNESSES_RESULT:
+            return _decode_refresh_harnesses_result(msg)
         case HostFrameKind.STORE_SECRET:
             return _decode_store_secret(msg)
         case HostFrameKind.STORE_SECRET_RESULT:
@@ -2615,6 +2659,17 @@ def _decode_install_harness_result(msg: _JsonObject) -> HostInstallHarnessResult
         status=_required_str(msg, "status"),
         configured_harnesses=_optional_str_availability_map(msg, "configured_harnesses"),
         version=_optional_nullable_str(msg, "version"),
+        gateway_inference=optional_str_bool_map(msg, "gateway_inference"),
+        error=_optional_nullable_str(msg, "error"),
+    )
+
+
+def _decode_refresh_harnesses_result(msg: _JsonObject) -> HostRefreshHarnessesResultFrame:
+    """Decode a host.refresh_harnesses_result frame."""
+    return HostRefreshHarnessesResultFrame(
+        request_id=_required_str(msg, "request_id"),
+        status=_required_str(msg, "status"),
+        configured_harnesses=_optional_str_availability_map(msg, "configured_harnesses"),
         gateway_inference=optional_str_bool_map(msg, "gateway_inference"),
         error=_optional_nullable_str(msg, "error"),
     )

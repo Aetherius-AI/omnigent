@@ -62,6 +62,8 @@ from omnigent.host.frames import (
     HostModelOptionsResultFrame,
     HostPluginsFrame,
     HostPluginsResultFrame,
+    HostRefreshHarnessesFrame,
+    HostRefreshHarnessesResultFrame,
     HostRunnerExitedFrame,
     HostRunnerStatusFrame,
     HostRunnerStatusResultFrame,
@@ -4627,6 +4629,40 @@ def test_handle_create_dir_expands_tilde(tmp_path: Path, monkeypatch) -> None:
 
 
 # ── host.install_harness handler ────────────────────────
+
+
+def test_handle_refresh_harnesses_bypasses_cache_and_returns_fresh_maps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A forced refresh invalidates login cache before the full re-probe."""
+    import omnigent.host.connect as connect
+
+    calls: list[str] = []
+
+    def _invalidate() -> None:
+        calls.append("invalidate")
+
+    def _configured() -> dict[str, bool]:
+        calls.append("configured")
+        return {"codex-native": True}
+
+    def _gateway() -> dict[str, bool]:
+        calls.append("gateway")
+        return {"codex-native": False}
+
+    monkeypatch.setattr(connect, "invalidate_harness_login_probe_cache", _invalidate)
+    monkeypatch.setattr(connect, "configured_harness_map", _configured)
+    monkeypatch.setattr(connect, "gateway_inference_map", _gateway)
+
+    result = _make_host_process()._handle_refresh_harnesses(
+        HostRefreshHarnessesFrame(request_id="refresh-1")
+    )
+
+    assert isinstance(result, HostRefreshHarnessesResultFrame)
+    assert result.status == "ok"
+    assert result.configured_harnesses == {"codex-native": True}
+    assert result.gateway_inference == {"codex-native": False}
+    assert calls == ["invalidate", "configured", "gateway"]
 
 
 def test_handle_install_harness_success_returns_refreshed_readiness(
