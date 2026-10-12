@@ -20,6 +20,7 @@ import httpx
 import pytest
 import yaml
 from playwright.sync_api import Locator, Page, Response, expect
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from tests._helpers.compat import (
     COMPAT_SERVER_VERSION_ENV,
@@ -312,7 +313,7 @@ def _select_agent(page: Page, agent_id: str) -> None:
         submenu = page.get_by_test_id("new-chat-landing-custom-agents")
         expect(submenu).to_be_visible()
         for _ in range(20):
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(PlaywrightTimeoutError):
                 submenu.hover(timeout=1000)
             if row.count():
                 break
@@ -435,6 +436,7 @@ def test_first_message_survives_slow_monorepo_clone(
 
 
 def test_small_repository_first_message_is_answered(page: Page, deployment: _Deployment) -> None:
+    """Control: the rig answers a fast clone, so a monorepo failure is not a fixture failure."""
     _start_sandbox_session(page, deployment.base_url, _SMALL_REPO, deployment.agent_id)
     expect(page.locator(_ASSISTANT)).to_have_count(1, timeout=180_000)
     expect(page.get_by_test_id("error-pill")).to_have_count(0)

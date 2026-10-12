@@ -77,6 +77,20 @@ async def test_clone_longer_than_the_budget_keeps_the_message_parked(
     await asyncio.wait_for(waiter, timeout=1.0)
 
 
+async def test_long_clone_then_bounded_stage_counts_from_the_transition(
+    waiters: list[asyncio.Task[None]],
+) -> None:
+    """After a clone outlives the ordinary budget, the next stage's budget starts at
+    the transition, not at the clone's start."""
+    tracker = _begin("cloning")
+    waiter = _wait_on(tracker, waiters)
+    await _still_parked(waiter, 2 * _BUDGET_S)
+    tracker.advance(_SESSION, "starting")
+    await _still_parked(waiter, _WINDOW_S)
+    tracker.finish(_SESSION)
+    await asyncio.wait_for(waiter, timeout=1.0)
+
+
 async def test_clone_past_its_own_ceiling_still_gives_up(
     monkeypatch: pytest.MonkeyPatch, waiters: list[asyncio.Task[None]]
 ) -> None:
@@ -128,6 +142,18 @@ async def test_failure_during_the_clone_surfaces_its_reason(
     assert "clone exited 128" in str(excinfo.value)
 
 
+def test_advance_publishes_stage_and_timestamp_as_one_value() -> None:
+    """The waiter reads the pair in one load, so it must be published as one value."""
+    tracker = _begin()
+    launch = tracker.get(_SESSION)
+    assert launch is not None
+    before = launch.progress
+    tracker.advance(_SESSION, "cloning")
+    assert launch.progress[0] == "cloning"
+    assert launch.progress[1] >= before[1]
+    assert (launch.stage, launch.progressed_at) == launch.progress
+
+
 def test_advance_ignores_unknown_and_settled_entries() -> None:
     tracker = ManagedLaunchTracker()
     tracker.advance("conv_missing", "cloning")
@@ -135,10 +161,10 @@ def test_advance_ignores_unknown_and_settled_entries() -> None:
     tracker.fail(_SESSION, "boom")
     launch = tracker.get(_SESSION)
     assert launch is not None
-    before = launch.progressed_at
+    before = launch.progress
     tracker.advance(_SESSION, "cloning")
+    assert launch.progress == before
     assert launch.stage == "provisioning"
-    assert launch.progressed_at == before
 
 
 async def test_provision_relays_pipeline_stages_to_the_tracker(

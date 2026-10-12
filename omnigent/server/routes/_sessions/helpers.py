@@ -6381,14 +6381,15 @@ async def _await_settled_managed_launch(launch: ManagedLaunch) -> None:
     from omnigent.server import managed_hosts
 
     while not launch.settled.is_set():
+        stage, progressed_at = launch.progress
         remaining = (
-            launch.progressed_at
-            + managed_hosts.launch_stage_rendezvous_timeout_s(launch.stage)
+            progressed_at
+            + managed_hosts.launch_stage_rendezvous_timeout_s(stage)
             - time.monotonic()
         )
         if remaining <= 0:
             raise OmnigentError(
-                f"The session's managed sandbox is still {launch.stage}; try again shortly",
+                f"The session's managed sandbox is still {stage}; try again shortly",
                 code=ErrorCode.RUNNER_UNAVAILABLE,
             )
         with contextlib.suppress(asyncio.TimeoutError):

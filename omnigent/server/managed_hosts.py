@@ -494,18 +494,28 @@ class ManagedLaunch:
     :param error: Failure detail once settled unsuccessfully, e.g.
         ``"managed sandbox launch failed: …"``. ``None`` while
         in flight and on success.
-    :param stage: The launch stage most recently reported through
-        :meth:`ManagedLaunchTracker.advance`, one of
-        :data:`omnigent.server.schemas.SandboxLaunchStage`; starts at
-        ``"provisioning"``.
-    :param progressed_at: ``time.monotonic()`` when *stage* was entered.
-        A waiter's rendezvous budget counts from here.
+    :param progress: The launch stage most recently reported through
+        :meth:`ManagedLaunchTracker.advance` — one of
+        :data:`omnigent.server.schemas.SandboxLaunchStage`, starting at
+        ``"provisioning"`` — paired with the ``time.monotonic()`` at which it
+        was entered. A waiter's rendezvous budget counts from that time. One
+        immutable value, so a waiter on the event loop never pairs a stale
+        timestamp with a newer stage reported from the launcher's worker thread.
     """
 
     settled: asyncio.Event
     error: str | None = None
-    stage: str = "provisioning"
-    progressed_at: float = dataclass_field(default_factory=time.monotonic)
+    progress: tuple[str, float] = dataclass_field(
+        default_factory=lambda: ("provisioning", time.monotonic())
+    )
+
+    @property
+    def stage(self) -> str:
+        return self.progress[0]
+
+    @property
+    def progressed_at(self) -> float:
+        return self.progress[1]
 
 
 class ManagedLaunchTracker:
@@ -558,10 +568,8 @@ class ManagedLaunchTracker:
         entry = self._by_session.get(session_id)
         if entry is None or entry.settled.is_set():
             return
-        # Timestamp first: an unsynchronized reader that pairs the new timestamp
-        # with the stale stage only refreshes a budget; the reverse order could 503.
-        entry.progressed_at = time.monotonic()
-        entry.stage = stage
+        # One assignment: a reader on the event loop sees either pair, never a torn one.
+        entry.progress = (stage, time.monotonic())
 
     def finish(self, session_id: str) -> None:
         """

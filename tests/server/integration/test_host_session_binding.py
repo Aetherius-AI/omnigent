@@ -884,6 +884,17 @@ async def test_parked_message_rides_out_a_clone_longer_than_the_rendezvous_budge
     assert resp.status_code == 201, resp.text
     session_id = resp.json()["id"]
 
+    async def _wait_for_cloning_stage() -> None:
+        while True:
+            snapshot = await env.client.get(f"/v1/sessions/{session_id}")
+            if (snapshot.json().get("sandbox_status") or {}).get("stage") == "cloning":
+                return
+            await asyncio.sleep(0.05)
+
+    # Park the message once the launch is cloning, so the bounded provisioning
+    # stage cannot time it out on a slow runner.
+    await asyncio.wait_for(_wait_for_cloning_stage(), timeout=10.0)
+
     message_task = asyncio.create_task(
         env.client.post(
             f"/v1/sessions/{session_id}/events",

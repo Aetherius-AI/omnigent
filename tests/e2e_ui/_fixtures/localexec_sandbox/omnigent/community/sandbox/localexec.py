@@ -65,10 +65,10 @@ class LocalExecLauncher(SandboxLauncher):
     def _environment(self, sandbox_id: str) -> dict[str, str]:
         venv_bin = str(Path(sys.executable).parent)
         return {
+            **self._env,
             "HOME": str(self._home(sandbox_id)),
             "PATH": os.pathsep.join([venv_bin, "/usr/local/bin", "/usr/bin", "/bin"]),
             "LANG": "C.UTF-8",
-            **self._env,
         }
 
     def run(self, sandbox_id: str, command: str, *, check: bool = True) -> RemoteCommandResult:
@@ -102,6 +102,8 @@ class LocalExecLauncher(SandboxLauncher):
         self, sandbox_id: str, command: str, *, log_path: str = "/tmp/omnigent-host.log"
     ) -> RemoteCommandResult:
         home = self._home(sandbox_id)
+        if not home.is_dir():
+            raise click.ClickException(f"sandbox '{sandbox_id}' does not exist")
         # Only the basename is kept: the log always lands in the sandbox HOME.
         with open(home / Path(log_path).name, "ab") as log:
             process = subprocess.Popen(
