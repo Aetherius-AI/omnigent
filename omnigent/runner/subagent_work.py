@@ -409,6 +409,12 @@ def unregister_subagent_work_for_session(session_id: str) -> None:
         _drained_delivered_subagent_children.discard(child_id)
         _provisional_cancelled_subagent_work.pop(child_id, None)
         _in_flight_send_locks.pop(child_id, None)
+    # Drained optimistic cancellations are retained keyed by child id, outside the
+    # parent-child index, so clear this parent's retained records too: a late
+    # completion then acknowledges as delivered instead of re-registering work.
+    for child_id, provisional in list(_provisional_cancelled_subagent_work.items()):
+        if provisional.parent_session_id == session_id:
+            _provisional_cancelled_subagent_work.pop(child_id, None)
     _subagent_work_by_parent.pop(session_id, None)
 
 
@@ -669,9 +675,9 @@ def mark_subagent_work_terminal(
     if entry is None:
         provisional = _provisional_cancelled_subagent_work.get(child_session_id)
         if provisional is not None and confirms_cancellation:
-            # A confirmed kill makes the retained optimistic cancellation final,
-            # so a late survivor completion can no longer correct it.
-            provisional.cancellation_confirmed = True
+            # A confirmed kill finalizes the abort; the drained-delivery tombstone
+            # alone blocks a late survivor correction, so drop the retained entry.
+            _provisional_cancelled_subagent_work.pop(child_session_id, None)
         elif (
             corrects_cancellation
             and provisional is not None
@@ -752,7 +758,7 @@ def mark_subagent_work_terminal(
             or (
                 status == "completed"
                 and entry.status == "cancelled"
-                and entry.cancellation_confirmed
+                and (entry.cancellation_confirmed or not corrects_cancellation)
             )
         )
         if not keep_recorded:

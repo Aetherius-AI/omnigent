@@ -358,9 +358,13 @@ async def test_confirmed_completion_corrects_grace_cancelled_dispatch(
                 client, {"status": "idle", "turn_completed": True, "output": "the verdict"}
             )
             assert resp.status_code == 204, resp.text
-        assert [(item["status"], item["output"]) for item in rig.drained()] == [
+        delivered = rig.drained()
+        assert [(item["status"], item["output"]) for item in delivered] == [
             ("completed", "the verdict")
         ], "the survivor's confirmed completion must correct the provisional cancellation"
+        assert delivered[0]["corrected_status"] == "cancelled", (
+            "the corrected completion must carry the superseded cancellation status"
+        )
     finally:
         rig.close()
 
@@ -451,8 +455,10 @@ async def test_confirmed_stop_blocks_late_completion_after_drain(
                 f"/v1/sessions/{rig.child_id}/events", json={"type": "stop_session"}
             )
             assert resp.status_code == 204, resp.text
-            provisional = subagent_work._provisional_cancelled_subagent_work.get(rig.child_id)
-            assert provisional is not None and provisional.cancellation_confirmed
+            # The confirmed kill drops the retained record; the drained tombstone
+            # alone keeps the abort final against a late completion.
+            assert rig.child_id not in subagent_work._provisional_cancelled_subagent_work
+            assert rig.child_id in subagent_work._drained_delivered_subagent_children
 
             # A late straggler completion edge must not overturn the confirmed abort.
             resp = await rig.post_status(
@@ -462,8 +468,8 @@ async def test_confirmed_stop_blocks_late_completion_after_drain(
         assert rig.drained() == [], (
             "a confirmed cancellation must not be corrected by a late completion"
         )
-        provisional = subagent_work._provisional_cancelled_subagent_work.get(rig.child_id)
-        assert provisional is not None and provisional.status == "cancelled"
+        assert rig.child_id not in subagent_work._provisional_cancelled_subagent_work
+        assert rig.child_id in subagent_work._drained_delivered_subagent_children
     finally:
         rig.close()
         subagent_work._drained_delivered_subagent_children.discard(rig.child_id)
@@ -544,6 +550,135 @@ def test_undelivered_confirmed_cancellation_survives_late_completion() -> None:
         )
     finally:
         subagent_work.unregister_subagent_work(child_id)
+        subagent_work._session_inboxes_ref.pop(parent_id, None)
+
+
+def test_undelivered_optimistic_cancel_not_overturned_by_unconfirmed_completion() -> None:
+    """An unconfirmed completion cannot launder an undelivered optimistic cancel.
+
+    The optimistic ``cancelled`` is recorded while the parent inbox is missing, so
+    it never delivered. A later unconfirmed ``completed`` (a legacy bare idle) must
+    not rewrite that abort into a success merely because delivery had not happened
+    yet; only a confirmed completion may correct it.
+    """
+    parent_id = uuid.uuid4().hex
+    child_id = uuid.uuid4().hex
+    inbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    subagent_work.register_subagent_work(
+        parent_session_id=parent_id,
+        child_session_id=child_id,
+        agent="researcher",
+        title="cite-check",
+    )
+    try:
+        ack = subagent_work.mark_subagent_work_terminal(
+            child_id, status="cancelled", output="partial work"
+        )
+        assert not ack.delivered
+        entry = subagent_work.get_subagent_work(child_id)
+        assert entry is not None and not entry.cancellation_confirmed and not entry.delivered
+
+        subagent_work._session_inboxes_ref[parent_id] = inbox
+        done = subagent_work.mark_subagent_work_terminal(
+            child_id, status="completed", output="done"
+        )
+        assert done.delivered_now
+        statuses = []
+        while not inbox.empty():
+            item = inbox.get_nowait()
+            statuses.append((item["status"], item["output"]))
+        assert statuses == [("cancelled", "partial work")], (
+            "an unconfirmed completion must not launder an undelivered cancellation"
+        )
+    finally:
+        subagent_work.unregister_subagent_work(child_id)
+        subagent_work._session_inboxes_ref.pop(parent_id, None)
+
+
+def test_undelivered_optimistic_cancel_corrected_by_confirmed_completion() -> None:
+    """A confirmed completion still corrects an undelivered optimistic cancel.
+
+    The optimistic ``cancelled`` never delivered, but the child genuinely survived
+    and its confirmed turn-end arrives: the dispatch must reach the parent as
+    ``completed`` with the real result.
+    """
+    parent_id = uuid.uuid4().hex
+    child_id = uuid.uuid4().hex
+    inbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    subagent_work.register_subagent_work(
+        parent_session_id=parent_id,
+        child_session_id=child_id,
+        agent="researcher",
+        title="cite-check",
+    )
+    try:
+        ack = subagent_work.mark_subagent_work_terminal(
+            child_id, status="cancelled", output="partial work"
+        )
+        assert not ack.delivered
+
+        subagent_work._session_inboxes_ref[parent_id] = inbox
+        done = subagent_work.mark_subagent_work_terminal(
+            child_id, status="completed", output="the verdict", confirmed_completion=True
+        )
+        assert done.delivered_now
+        statuses = []
+        while not inbox.empty():
+            item = inbox.get_nowait()
+            statuses.append((item["status"], item["output"]))
+        assert statuses == [("completed", "the verdict")], (
+            "a confirmed completion must correct an undelivered optimistic cancellation"
+        )
+    finally:
+        subagent_work.unregister_subagent_work(child_id)
+        subagent_work._session_inboxes_ref.pop(parent_id, None)
+
+
+def test_parent_teardown_clears_drained_provisional_cancellation() -> None:
+    """Deleting a parent drops its drained optimistic cancellations.
+
+    A drained optimistic cancellation is retained keyed by the child so a survivor
+    can still correct it. Once the parent session is deleted that record is
+    unreachable, so teardown must drop it; a late completion then acknowledges as
+    already delivered instead of re-registering work against the gone parent.
+    """
+    parent_id = uuid.uuid4().hex
+    child_id = uuid.uuid4().hex
+    inbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    subagent_work._session_inboxes_ref[parent_id] = inbox
+    subagent_work.register_subagent_work(
+        parent_session_id=parent_id,
+        child_session_id=child_id,
+        agent="researcher",
+        title="cite-check",
+    )
+    try:
+        ack = subagent_work.mark_subagent_work_terminal(
+            child_id, status="cancelled", output="partial work"
+        )
+        assert ack.delivered_now
+
+        # The parent drains the optimistic cancellation, retaining the record.
+        subagent_work.unregister_subagent_work(child_id, remember_drained_delivery=True)
+        assert child_id in subagent_work._provisional_cancelled_subagent_work
+        assert child_id in subagent_work._drained_delivered_subagent_children
+
+        # The parent session is deleted.
+        subagent_work._session_inboxes_ref.pop(parent_id, None)
+        subagent_work.unregister_subagent_work_for_session(parent_id)
+        assert child_id not in subagent_work._provisional_cancelled_subagent_work
+
+        # A late completion must not re-register work against the deleted parent.
+        done = subagent_work.mark_subagent_work_terminal(
+            child_id, status="completed", output="late result", confirmed_completion=True
+        )
+        assert done.delivered and not done.delivered_now
+        assert subagent_work.get_subagent_work(child_id) is None
+        assert parent_id not in subagent_work._subagent_work_by_parent
+    finally:
+        subagent_work.unregister_subagent_work_for_session(parent_id)
+        subagent_work._drained_delivered_subagent_children.discard(child_id)
+        subagent_work._provisional_cancelled_subagent_work.pop(child_id, None)
         subagent_work._session_inboxes_ref.pop(parent_id, None)
 
 
