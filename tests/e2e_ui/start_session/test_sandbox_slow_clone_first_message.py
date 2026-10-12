@@ -21,7 +21,12 @@ import pytest
 import yaml
 from playwright.sync_api import Locator, Page, Response, expect
 
-from tests._helpers.compat import apply_server_env, server_executable
+from tests._helpers.compat import (
+    COMPAT_SERVER_VERSION_ENV,
+    apply_server_env,
+    meets_min_server_version,
+    server_executable,
+)
 from tests.e2e_ui.conftest import (
     _BUILD_OUTPUT,
     _REPO_ROOT,
@@ -40,6 +45,8 @@ _MONOREPO_PAYLOAD_MIB = 12
 _CLONE_BYTES_PER_SECOND = 256 * 1024
 # Lowered from the product's 240 s so the test stays short; the throttled clone still outlives it.
 _RENDEZVOUS_BUDGET_S = int(os.environ.get("OMNIGENT_E2E_RENDEZVOUS_BUDGET_S", "20"))
+# The per-stage rendezvous shipped in 0.18.0; older servers fail this module by design.
+_MIN_SERVER_VERSION = "0.18.0"
 _PROMPT = "Summarize this repository's layout."
 _ASSISTANT = '[data-testid="message-bubble"][data-role="assistant"]'
 
@@ -169,6 +176,11 @@ def deployment(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> Iterator[_Deployment]:
     """Spawn a server whose only execution target is the ``localexec`` sandbox."""
+    # Gate here rather than with the marker: the marker's skip runs only after
+    # this module-scoped server has been spawned.
+    pinned = os.environ.get(COMPAT_SERVER_VERSION_ENV)
+    if pinned and not meets_min_server_version(pinned, _MIN_SERVER_VERSION):
+        pytest.skip(f"requires server >= {_MIN_SERVER_VERSION}; compat run pins {pinned}")
     scratch = tmp_path_factory.mktemp("monorepo_sandbox")
     (scratch / "git").mkdir()
     _bare_repo(scratch, _SMALL_REPO, payload_mib=0)
@@ -415,6 +427,11 @@ def test_first_message_survives_slow_monorepo_clone(
     )
     expect(page.get_by_test_id("error-pill")).to_have_count(0)
     expect(page.locator(_ASSISTANT)).to_have_count(1)
+    # Without this the test could pass vacuously if the throttle stopped biting.
+    assert outcome.since_send_s > _RENDEZVOUS_BUDGET_S, (
+        f"the clone finished {outcome.since_send_s:.0f}s after send, inside the "
+        f"{_RENDEZVOUS_BUDGET_S}s rendezvous budget, so the regression was not exercised"
+    )
 
 
 def test_small_repository_first_message_is_answered(page: Page, deployment: _Deployment) -> None:
