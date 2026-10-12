@@ -6,6 +6,7 @@ import asyncio
 import errno
 import json
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -20,6 +21,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 import omnigent.inner.terminal as terminal_mod
+from omnigent._platform import IS_LINUX
 from omnigent.harnesses.diagnostics import sanitize_diagnostic_text
 from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec, TerminalEnvSpec
 from omnigent.inner.terminal import (
@@ -3552,6 +3554,7 @@ def test_null_device_problem_accepts_the_real_null_device() -> None:
     assert terminal_mod._null_device_problem() is None
 
 
+@pytest.mark.skipif(not IS_LINUX, reason="the /dev/null diagnosis is Linux-only")
 def test_null_device_problem_names_what_replaced_the_device(tmp_path: Path) -> None:
     regular = tmp_path / "null"
     regular.write_text("runner-host\n")
@@ -3567,9 +3570,39 @@ def test_null_device_problem_names_what_replaced_the_device(tmp_path: Path) -> N
     )
     missing = tmp_path / "gone"
     assert terminal_mod._null_device_problem(str(missing)) == (
-        f"{missing} is missing (No such file or directory)",
+        f"{missing} is missing",
         f"mknod -m 666 {missing} c 1 3",
     )
+    spaced = tmp_path / "dev null"
+    spaced.write_text("")
+    assert terminal_mod._null_device_problem(str(spaced)) == (
+        f"{spaced} is a regular file instead of the null character device",
+        f"rm -f '{spaced}' && mknod -m 666 '{spaced}' c 1 3",
+    )
+
+
+@pytest.mark.skipif(not IS_LINUX, reason="the /dev/null diagnosis is Linux-only")
+@pytest.mark.skipif(os.geteuid() == 0, reason="root is not denied directory access")
+def test_null_device_problem_stays_silent_when_the_entry_cannot_be_inspected(
+    tmp_path: Path,
+) -> None:
+    locked = tmp_path / "locked"
+    locked.mkdir(mode=0o000)
+    try:
+        assert terminal_mod._null_device_problem(str(locked / "null")) is None
+    finally:
+        locked.chmod(0o700)
+
+
+def test_null_device_problem_is_linux_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """glibc's daemon() check and the mknod numbers do not apply elsewhere."""
+    regular = tmp_path / "null"
+    regular.write_text("")
+    monkeypatch.setattr(terminal_mod, "IS_LINUX", False)
+
+    assert terminal_mod._null_device_problem(str(regular)) is None
 
 
 @pytest.mark.parametrize(

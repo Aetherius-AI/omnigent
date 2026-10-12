@@ -682,9 +682,8 @@ async def test_failed_recreate_does_not_wait(
 
 
 _BROKEN_NULL_DEVICE = (
-    "tmux cannot start its server because /dev/null is a regular file instead of the null "
-    "character device. Recreate the device with `rm -f /dev/null && mknod -m 666 /dev/null "
-    "c 1 3` (as root) or restart the container, then retry."
+    "tmux cannot start its server because /dev/null is a regular file "
+    "(repair text omitted; this suite proves propagation, not wording)"
 )
 
 
@@ -770,7 +769,7 @@ async def test_failed_recreate_reports_the_terminal_start_error(
         "Native Claude terminal failed to start: tmux cannot start its server because "
         "/dev/null is a regular file"
     ), detail
-    assert "rm -f /dev/null && mknod -m 666 /dev/null c 1 3" in detail
+    assert _BROKEN_NULL_DEVICE in detail
     assert "not advertised" not in detail
     assert "see the runner log" not in detail
 

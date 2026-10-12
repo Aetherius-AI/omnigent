@@ -405,35 +405,39 @@ def _null_device_problem(path: str = os.devnull) -> _NullDeviceProblem | None:
 
     glibc's ``daemon()``, which tmux uses to start its server, fails with
     ``ENODEV`` unless ``/dev/null`` is character device 1,3; tmux then only
-    reports "server exited unexpectedly". Returns ``None`` for a healthy device.
+    reports "server exited unexpectedly". Both the check and the ``mknod``
+    numbers are Linux specifics. Returns ``None`` for a healthy device, another
+    platform, or an entry that cannot be inspected.
     """
-    mknod = f"mknod -m 666 {path} c 1 3"
+    if not IS_LINUX:
+        return None
+    quoted = shlex.quote(path)
+    mknod = f"mknod -m 666 {quoted} c 1 3"
     try:
         st = os.stat(path)
-    except OSError as exc:
-        return _NullDeviceProblem(
-            f"{path} is missing ({exc.strerror or type(exc).__name__})", mknod
-        )
-    if stat.S_ISCHR(st.st_mode):
-        if IS_LINUX:
-            major, minor = os.major(st.st_rdev), os.minor(st.st_rdev)
-            if (major, minor) != (1, 3):
-                return _NullDeviceProblem(
-                    f"{path} is character device {major},{minor} instead of 1,3",
-                    f"rm -f {path} && {mknod}",
-                )
+    except FileNotFoundError:
+        return _NullDeviceProblem(f"{path} is missing", mknod)
+    except OSError:
         return None
+    if stat.S_ISCHR(st.st_mode):
+        major, minor = os.major(st.st_rdev), os.minor(st.st_rdev)
+        if (major, minor) == (1, 3):
+            return None
+        return _NullDeviceProblem(
+            f"{path} is character device {major},{minor} instead of 1,3",
+            f"rm -f {quoted} && {mknod}",
+        )
     if stat.S_ISDIR(st.st_mode):
         return _NullDeviceProblem(
             f"{path} is a directory instead of the null character device",
-            f"rmdir {path} && {mknod}",
+            f"rmdir {quoted} && {mknod}",
         )
     kind = next(
         (name for is_kind, name in _NULL_DEVICE_TYPE_NAMES if is_kind(st.st_mode)),
         "non-device file",
     )
     return _NullDeviceProblem(
-        f"{path} is a {kind} instead of the null character device", f"rm -f {path} && {mknod}"
+        f"{path} is a {kind} instead of the null character device", f"rm -f {quoted} && {mknod}"
     )
 
 
