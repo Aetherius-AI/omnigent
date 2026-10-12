@@ -7156,131 +7156,105 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
       });
     });
 
-    it("keeps a live failure map that arrives while the bind snapshot is still loading", async () => {
-      let resolveSnapshot!: (response: Response) => void;
-      const snapshot = new Promise<Response>((resolve) => {
-        resolveSnapshot = resolve;
-      });
-      fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (
-          url.split("?")[0] === "/v1/sessions/conv_mcp_race" &&
-          (init?.method ?? "GET") === "GET"
-        ) {
-          return snapshot;
+    const snapshotRaces: Array<{
+      name: string;
+      id: string;
+      /** A second reader of the session snapshot, started before or after the bind. */
+      concurrent?: { when: "before" | "after"; start: (id: string) => Promise<unknown> };
+      snapshotStartup: Record<string, McpServerStartup> | null;
+      liveServers: Record<string, McpServerStartup>;
+      expected: Record<string, string> | null;
+    }> = [
+      {
+        name: "the bind snapshot is still loading",
+        id: "conv_mcp_race",
+        snapshotStartup: null,
+        liveServers: { pipeshub: { status: "failed", error: "fresh" } },
+        expected: { pipeshub: "fresh" },
+      },
+      {
+        name: "another fetch of the session was already in flight",
+        id: "conv_mcp_inflight",
+        concurrent: {
+          when: "before",
+          start: (id) =>
+            client.fetchQuery({
+              queryKey: ["session", id],
+              queryFn: () => getSessionSlim(id),
+              staleTime: 0,
+              retry: false,
+            }),
+        },
+        snapshotStartup: null,
+        liveServers: { pipeshub: { status: "failed", error: "fresh" } },
+        expected: { pipeshub: "fresh" },
+      },
+      {
+        name: "a runner-online refresh joins the bind snapshot",
+        id: "conv_mcp_joined",
+        concurrent: {
+          when: "after",
+          start: (id) => useChatStore.getState().refreshSessionState(id),
+        },
+        snapshotStartup: null,
+        liveServers: { pipeshub: { status: "failed", error: "fresh" } },
+        expected: { pipeshub: "fresh" },
+      },
+      {
+        name: "a recovery lands before a stale failed snapshot resolves",
+        id: "conv_mcp_recovered",
+        snapshotStartup: { pipeshub: { status: "failed", error: "stale" } },
+        liveServers: { pipeshub: { status: "ready", error: null } },
+        expected: null,
+      },
+    ];
+
+    it.each(snapshotRaces)(
+      "keeps the newer live failure map when $name",
+      async ({ id, concurrent, snapshotStartup, liveServers, expected }) => {
+        let resolveSnapshot!: (response: Response) => void;
+        const snapshot = new Promise<Response>((resolve) => {
+          resolveSnapshot = resolve;
+        });
+        fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+          const url = typeof input === "string" ? input : input.toString();
+          if (url.split("?")[0] === `/v1/sessions/${id}` && (init?.method ?? "GET") === "GET") {
+            return snapshot;
+          }
+          return defaultFetchHandler(input, init);
+        });
+        const pending: Promise<unknown>[] = [];
+        if (concurrent?.when === "before") {
+          pending.push(concurrent.start(id));
+          await tick();
         }
-        return defaultFetchHandler(input, init);
-      });
-
-      const switching = useChatStore.getState().switchTo("conv_mcp_race");
-      await tick();
-      handleSessionEvent({
-        type: "session_mcp_startup",
-        conversationId: "conv_mcp_race",
-        servers: { pipeshub: { status: "failed", error: "fresh" } },
-      });
-      // The snapshot was built before the live event and carries no failures.
-      resolveSnapshot(
-        mockResponse({
-          id: "conv_mcp_race",
-          agent_id: "agent_xyz",
-          status: "idle",
-          created_at: 0,
-          items: [],
-          mcp_startup: null,
-        }),
-      );
-      await switching;
-
-      expect(useChatStore.getState().mcpStartupFailures).toEqual({ pipeshub: "fresh" });
-    });
-
-    it("keeps a live failure map even when another fetch of the session was in flight", async () => {
-      let resolveSnapshot!: (response: Response) => void;
-      const snapshot = new Promise<Response>((resolve) => {
-        resolveSnapshot = resolve;
-      });
-      fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (
-          url.split("?")[0] === "/v1/sessions/conv_mcp_inflight" &&
-          (init?.method ?? "GET") === "GET"
-        ) {
-          return snapshot;
+        pending.push(useChatStore.getState().switchTo(id));
+        await tick();
+        if (concurrent?.when === "after") {
+          pending.push(concurrent.start(id));
+          await tick();
         }
-        return defaultFetchHandler(input, init);
-      });
-      // A component read of the same session is already fetching when the bind starts.
-      const sibling = client.fetchQuery({
-        queryKey: ["session", "conv_mcp_inflight"],
-        queryFn: () => getSessionSlim("conv_mcp_inflight"),
-        staleTime: 0,
-        retry: false,
-      });
-      await tick();
+        handleSessionEvent({
+          type: "session_mcp_startup",
+          conversationId: id,
+          servers: liveServers,
+        });
+        // The snapshot was built before the live event.
+        resolveSnapshot(
+          mockResponse({
+            id,
+            agent_id: "agent_xyz",
+            status: "idle",
+            created_at: 0,
+            items: [],
+            mcp_startup: snapshotStartup,
+          }),
+        );
+        await Promise.all(pending);
 
-      const switching = useChatStore.getState().switchTo("conv_mcp_inflight");
-      await tick();
-      handleSessionEvent({
-        type: "session_mcp_startup",
-        conversationId: "conv_mcp_inflight",
-        servers: { pipeshub: { status: "failed", error: "fresh" } },
-      });
-      resolveSnapshot(
-        mockResponse({
-          id: "conv_mcp_inflight",
-          agent_id: "agent_xyz",
-          status: "idle",
-          created_at: 0,
-          items: [],
-          mcp_startup: null,
-        }),
-      );
-      await Promise.all([sibling, switching]);
-
-      expect(useChatStore.getState().mcpStartupFailures).toEqual({ pipeshub: "fresh" });
-    });
-
-    it("keeps a live failure map when a runner-online refresh joins the bind snapshot", async () => {
-      let resolveSnapshot!: (response: Response) => void;
-      const snapshot = new Promise<Response>((resolve) => {
-        resolveSnapshot = resolve;
-      });
-      fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (
-          url.split("?")[0] === "/v1/sessions/conv_mcp_joined" &&
-          (init?.method ?? "GET") === "GET"
-        ) {
-          return snapshot;
-        }
-        return defaultFetchHandler(input, init);
-      });
-
-      const switching = useChatStore.getState().switchTo("conv_mcp_joined");
-      await tick();
-      // The runner-online hook refreshes while the bind snapshot is still in flight.
-      const refreshing = useChatStore.getState().refreshSessionState("conv_mcp_joined");
-      await tick();
-      handleSessionEvent({
-        type: "session_mcp_startup",
-        conversationId: "conv_mcp_joined",
-        servers: { pipeshub: { status: "failed", error: "fresh" } },
-      });
-      resolveSnapshot(
-        mockResponse({
-          id: "conv_mcp_joined",
-          agent_id: "agent_xyz",
-          status: "idle",
-          created_at: 0,
-          items: [],
-          mcp_startup: null,
-        }),
-      );
-      await Promise.all([switching, refreshing]);
-
-      expect(useChatStore.getState().mcpStartupFailures).toEqual({ pipeshub: "fresh" });
-    });
+        expect(useChatStore.getState().mcpStartupFailures).toEqual(expected);
+      },
+    );
 
     it("does not confuse user-chosen server names with Object.prototype members", () => {
       useChatStore.setState({ mcpStartupFailures: null });

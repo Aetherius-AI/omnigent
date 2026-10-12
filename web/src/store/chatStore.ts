@@ -1002,6 +1002,8 @@ export interface ConversationState {
   mcpStartup: Record<string, McpServerStartup> | null;
   /** Failed MCP servers retained for diagnostics until a later map clears them. */
   mcpStartupFailures: Record<string, string> | null;
+  /** Count of applied `session_mcp_startup` events; snapshot hydration defers to a newer live map. */
+  mcpStartupGeneration: number;
   /** Launch state kept separate so terminal metadata cannot consume its rearm signal. */
   mcpStartupLaunch: { pending: boolean; dismissed: boolean };
   /**
@@ -1920,6 +1922,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
   sandboxStatus: null,
   mcpStartup: null,
   mcpStartupFailures: null,
+  mcpStartupGeneration: 0,
   mcpStartupLaunch: { pending: false, dismissed: false },
   abortController: null,
   historyGeneration: 0,
@@ -4081,24 +4084,27 @@ function updateMcpStartupLaunch(
 interface McpStartupBeforeFetch {
   /** `undefined` while another fetch is in flight: a joined request cannot prove a new launch. */
   launch: ConversationState["mcpStartupLaunch"] | undefined;
-  failures: ConversationState["mcpStartupFailures"];
+  generation: number;
 }
 
 function mcpStartupBeforeSnapshot(
   id: string,
-  state: Pick<ConversationState, "mcpStartupLaunch" | "mcpStartupFailures"> | null,
+  state: Pick<ConversationState, "mcpStartupLaunch" | "mcpStartupGeneration"> | null,
 ): McpStartupBeforeFetch | undefined {
   if (state === null) return undefined;
   const fetching = queryClient?.getQueryState(["session", id])?.fetchStatus === "fetching";
   return {
     launch: fetching ? undefined : state.mcpStartupLaunch,
-    failures: state.mcpStartupFailures,
+    generation: state.mcpStartupGeneration,
   };
 }
 
 function mcpStartupSnapshotPatch(
   session: Session,
-  state: Pick<ConversationState, "mcpStartupLaunch" | "mcpStartupFailures">,
+  state: Pick<
+    ConversationState,
+    "mcpStartupLaunch" | "mcpStartupFailures" | "mcpStartupGeneration"
+  >,
   mcpBeforeFetch: McpStartupBeforeFetch | undefined,
 ): Pick<ConversationState, "mcpStartup" | "mcpStartupLaunch" | "mcpStartupFailures"> {
   // Fresh text creates a new latch object; older snapshots cannot rearm it.
@@ -4108,7 +4114,7 @@ function mcpStartupSnapshotPatch(
       : state.mcpStartupLaunch;
   // A startup event that landed during the fetch is newer than the snapshot.
   const failures =
-    mcpBeforeFetch !== undefined && state.mcpStartupFailures !== mcpBeforeFetch.failures
+    mcpBeforeFetch !== undefined && state.mcpStartupGeneration !== mcpBeforeFetch.generation
       ? state.mcpStartupFailures
       : settledMcpFailures(session.mcpStartup);
   return {
@@ -4157,6 +4163,7 @@ function sessionBindingPatch(
     ConversationState,
     | "mcpStartupLaunch"
     | "mcpStartupFailures"
+    | "mcpStartupGeneration"
     | "sessionModelSeeded"
     | "llmModel"
     | "sessionModelOverride"
@@ -4894,7 +4901,7 @@ async function reconcileActiveSessionStatus(
     current.backgroundTaskCount !== stateBeforeFetch.backgroundTaskCount ||
     current.backgroundTasks !== stateBeforeFetch.backgroundTasks ||
     current.mcpStartup !== stateBeforeFetch.mcpStartup ||
-    current.mcpStartupFailures !== stateBeforeFetch.mcpStartupFailures ||
+    current.mcpStartupGeneration !== stateBeforeFetch.mcpStartupGeneration ||
     current.contextWindow !== stateBeforeFetch.contextWindow ||
     current.tokensUsed !== stateBeforeFetch.tokensUsed ||
     current.sessionCostUsd !== stateBeforeFetch.sessionCostUsd ||
@@ -4905,7 +4912,7 @@ async function reconcileActiveSessionStatus(
   set((s) =>
     reconnectStatusPatch(session, s, {
       launch: stateBeforeFetch.mcpStartupLaunch,
-      failures: stateBeforeFetch.mcpStartupFailures,
+      generation: stateBeforeFetch.mcpStartupGeneration,
     }),
   );
   if (session.usageIncluded === false) void hydrateSessionUsage(id);
@@ -7090,6 +7097,7 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
       applyToConversation((s) => ({
         mcpStartup: activeMcpStartup(event.servers, s.mcpStartupLaunch.dismissed),
         mcpStartupFailures: settledMcpFailures(event.servers),
+        mcpStartupGeneration: s.mcpStartupGeneration + 1,
       }));
       return;
     }
