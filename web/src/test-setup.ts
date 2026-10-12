@@ -101,41 +101,38 @@ vi.mock("@tanstack/react-virtual", () => ({
     const rect = element.getBoundingClientRect();
     return instance.options.horizontal ? rect.width : rect.height;
   },
-  useVirtualizer: ({
-    count,
-    getItemKey,
-  }: {
-    count: number;
-    getItemKey?: (i: number) => unknown;
-  }) => {
-    const items = Array.from({ length: count }, (_, index) => ({
-      index,
-      key: getItemKey ? getItemKey(index) : index,
-      start: index * ROW,
-      size: ROW,
-      end: (index + 1) * ROW,
-      lane: 0,
-    }));
-    return {
-      getVirtualItems: () => items,
-      getTotalSize: () => count * ROW,
-      measureElement: () => {},
-      scrollToIndex: () => {},
-      getVirtualItemForOffset: (offset: number) =>
-        items[Math.max(0, Math.min(Math.floor(offset / ROW), count - 1))],
-      getOffsetForIndex: (index: number) => [index * ROW, "start"] as const,
-      takeSnapshot: () => items,
-      scrollOffset: 0,
-      scrollAdjustments: 0,
-      scrollDirection: null,
-      range: count > 0 ? { startIndex: 0, endIndex: count - 1 } : null,
-      // The transcript's prepend hold measures fresh rows itself and reads the
-      // raw measurements back; sizes never change under jsdom.
-      measurementsCache: items,
-      itemSizeCache: new Map(),
-      resizeItem: () => {},
-    };
-  },
+  // A vi.fn so component tests can assert the options a consumer passes in.
+  useVirtualizer: vi.fn(
+    ({ count, getItemKey }: { count: number; getItemKey?: (i: number) => unknown }) => {
+      const items = Array.from({ length: count }, (_, index) => ({
+        index,
+        key: getItemKey ? getItemKey(index) : index,
+        start: index * ROW,
+        size: ROW,
+        end: (index + 1) * ROW,
+        lane: 0,
+      }));
+      return {
+        getVirtualItems: () => items,
+        getTotalSize: () => count * ROW,
+        measureElement: () => {},
+        scrollToIndex: () => {},
+        getVirtualItemForOffset: (offset: number) =>
+          items[Math.max(0, Math.min(Math.floor(offset / ROW), count - 1))],
+        getOffsetForIndex: (index: number) => [index * ROW, "start"] as const,
+        takeSnapshot: () => items,
+        scrollOffset: 0,
+        scrollAdjustments: 0,
+        scrollDirection: null,
+        range: count > 0 ? { startIndex: 0, endIndex: count - 1 } : null,
+        // The transcript's prepend hold measures fresh rows itself and reads the
+        // raw measurements back; sizes never change under jsdom.
+        measurementsCache: items,
+        itemSizeCache: new Map(),
+        resizeItem: () => {},
+      };
+    },
+  ),
 }));
 
 Object.defineProperty(window, "matchMedia", {

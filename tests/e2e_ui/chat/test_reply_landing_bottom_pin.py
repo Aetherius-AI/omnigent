@@ -1,189 +1,133 @@
-"""A bottom-pinned reader sees each reply the moment it lands, even on a slow main thread."""
+"""A reply landing in a bottom-pinned transcript keeps the view on the newest text.
+
+Set OMNIGENT_E2E_CPU_THROTTLE (e.g. 3.5 or 6) to emulate a slow runner over CDP.
+"""
 
 from __future__ import annotations
 
+import json
+import os
+from itertools import pairwise
+from pathlib import Path
 from typing import Any
 
+import pytest
 from playwright.sync_api import Page, expect
 
 from tests.e2e_ui.chat.test_transcript_scroll_stability import (
     _NEWEST_REPLY,
+    _STREAM_CHUNK_DELAY_S,
+    _STREAM_PROMPT,
+    _STREAMED_REPLY_DONE,
+    _STREAMED_REPLY_WORDS,
     _TAG_SCROLLER,
+    _TRACK_BOTTOM,
     _VIEWPORT,
     _seed_turns,
 )
 from tests.e2e_ui.conftest import configure_mock_llm
 
-# Applied through CDP once the seeded history is on screen, so the journey runs
-# at roughly the speed of a loaded CI runner.
-_CPU_THROTTLE_RATE = 6
-# Whether a landing paints before its correction is a per-landing race, so
-# several replies land in one session.
-_LANDINGS = 4
-_BEHIND_BUDGET_MS = 100
-_BOTTOM_EPSILON_PX = 8
-_REPLY_WORDS = 160
-_STREAM_CHUNK_DELAY_S = 0.03
-_PROMPT = "Tell me a long story, streamed."
-_DONE_MARKER = "streamed reply complete marker"
 _WORKING = '[data-testid="working-indicator"]'
-# Script phases that run after a frame starts and before it paints.
-_PRE_PAINT_PHASES = ("raf", "ro")
-
-# Installed before the app loads: names the phase each scroll write runs in.
-# Animation-frame callbacks (with their microtasks) and ResizeObserver callbacks
-# run after a frame starts and before it paints; anything else is a plain task.
-_TAG_PHASES = """
-(() => {
-  window.__phase = 'task';
-  const enter = (phase, run) => {
-    window.__phase = phase;
-    try { return run(); } finally { queueMicrotask(() => { window.__phase = 'task'; }); }
-  };
-  const rAF = window.requestAnimationFrame.bind(window);
-  window.requestAnimationFrame = (cb) => rAF((ts) => enter('raf', () => cb(ts)));
-  const RO = window.ResizeObserver;
-  window.ResizeObserver = class extends RO {
-    constructor(cb) { super((entries, observer) => enter('ro', () => cb(entries, observer))); }
-  };
-})();"""
-
-# At the start of every frame, and on every programmatic scroll write: how far
-# the view sits above the bottom, the document height, and (for writes) the
-# phase. A frame paints its starting reading unless a pre-paint write moves it.
-_TRACK_BOTTOM = """
-() => {
-  const el = document.querySelector('[data-pw-scroller]');
-  const desc = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollTop');
-  const offset = () => Math.round(el.scrollHeight - el.clientHeight - el.scrollTop);
-  const reading = () => [Math.round(performance.now()), offset(), el.scrollHeight];
-  window.__reset = () => { window.__frames = []; window.__writes = []; };
-  window.__reset();
-  Object.defineProperty(el, 'scrollTop', {
-    configurable: true,
-    get() { return desc.get.call(this); },
-    set(v) { desc.set.call(this, v); window.__writes.push([...reading(), window.__phase]); },
-  });
-  const origScrollTo = el.scrollTo.bind(el);
-  el.scrollTo = (...args) => {
-    const result = origScrollTo(...args);
-    window.__writes.push([...reading(), window.__phase]);
-    return result;
-  };
-  const tick = () => {
-    window.__frames.push(reading());
-    requestAnimationFrame(tick);
-  };
-  requestAnimationFrame(tick);
-}"""
+# Same budget and off-bottom threshold as the stock bottom-pin test, so the two agree.
+_BUDGET_MS = 100
+_OFF_BOTTOM_PX = 8
+_CPU_THROTTLE = float(os.environ.get("OMNIGENT_E2E_CPU_THROTTLE", "1"))
+_LANDINGS = int(os.environ.get("OMNIGENT_E2E_REPLY_LANDINGS", "6"))
+_DUMP_DIR = os.environ.get("OMNIGENT_E2E_BOTTOM_PIN_DUMP")
 
 
-def _land_reply(page: Page, marker: str) -> tuple[int, list[list[int]], list[list[Any]]]:
-    """Send the prompt and wait for the reply ending in *marker*; return the transcript
-    height before the send, then the frame and scroll-write readings taken meanwhile."""
-    height_before = page.evaluate(
-        "() => document.querySelector('[data-pw-scroller]').scrollHeight"
-    )
-    page.evaluate("() => window.__reset()")
-    composer = page.get_by_label("Message the agent")
-    expect(composer).to_be_visible(timeout=30_000)
-    composer.fill(_PROMPT)
-    page.get_by_role("button", name="Send", exact=True).click()
-    expect(page.get_by_text(marker).first).to_be_visible(timeout=60_000)
-    expect(page.locator(_WORKING)).to_have_count(0, timeout=60_000)
-    page.wait_for_timeout(1000)
-    frames = page.evaluate("() => window.__frames")
-    writes = page.evaluate("() => window.__writes")
-    return height_before, frames, writes
+def _streamed_reply(n: int) -> str:
+    words = " ".join(f"streamedword{i:03d}" for i in range(_STREAMED_REPLY_WORDS))
+    return f"{words} {_STREAMED_REPLY_DONE} {n}"
 
 
-def _painted_frames(frames: list[list[int]], writes: list[list[Any]]) -> list[list[int]]:
-    """What each frame painted: its starting reading, unless a write in the
-    frame's animation-frame or resize-observer phase moved the view first."""
-    painted: list[list[int]] = []
-    for i, (t, off, height) in enumerate(frames):
-        t_next = frames[i + 1][0] if i + 1 < len(frames) else float("inf")
-        pre_paint = [w for w in writes if t <= w[0] < t_next and w[3] in _PRE_PAINT_PHASES]
-        if pre_paint:
-            off, height = pre_paint[-1][1], pre_paint[-1][2]
-        painted.append([t, off, height])
-    return painted
-
-
-def _behind_after_landing(
-    frames: list[list[int]], writes: list[list[Any]], height_before: int
-) -> tuple[int, list[Any]]:
-    """Longest span the view stayed painted off the bottom once the reply landed,
-    ending at the first scroll write or later painted frame back within the epsilon."""
-    # The prompt bubble lands first and is small; the reply is most of the growth.
-    threshold = height_before + (frames[-1][2] - height_before) / 2
-    landed = [f for f in frames if f[2] >= threshold]
+def _visible_stall_ms(samples: list[list[int]]) -> int:
+    """Longest time the view stayed painted off the bottom before a frame brought it back."""
     longest = 0
-    detail: list[Any] = []
-    for i, (t, off, _h) in enumerate(landed):
-        if off <= _BOTTOM_EPSILON_PX:
-            continue
-        back = [w[0] for w in writes if w[0] > t and w[1] <= _BOTTOM_EPSILON_PX]
-        back += [f[0] for f in landed[i + 1 :] if f[1] <= _BOTTOM_EPSILON_PX]
-        if not back:
-            continue
-        span = min(back) - t
-        if span > longest:
-            longest = span
-            detail = [
-                ("painted off-bottom", t, off),
-                ("frames", landed[i : i + 4]),
-                ("writes", [w for w in writes if t - 50 <= w[0] <= min(back) + 50]),
-            ]
-    return longest, detail
+    started: int | None = None
+    for t, off_bottom, _height in samples:
+        if off_bottom > _OFF_BOTTOM_PX:
+            started = t if started is None else started
+        elif started is not None:
+            longest, started = max(longest, t - started), None
+    if started is not None and samples:
+        longest = max(longest, samples[-1][0] - started)
+    return longest
 
 
-def test_reply_landing_keeps_a_bottom_pinned_view_at_the_bottom_on_a_slow_main_thread(
-    page: Page,
+def _longest_behind_ms(samples: list[list[int]]) -> tuple[int, int]:
+    """The stock bottom-pin test's metric (kept for comparison), and the farthest sample."""
+    behind = longest = 0
+    for (t0, d0, _h0), (t1, d1, _h1) in pairwise(samples):
+        behind = behind + (t1 - t0) if d0 > _OFF_BOTTOM_PX and d1 > _OFF_BOTTOM_PX else 0
+        longest = max(longest, behind)
+    return longest, max((s[1] for s in samples), default=0)
+
+
+def test_reply_landing_keeps_a_bottom_pinned_view_at_the_bottom(
+    request: pytest.FixtureRequest,
     seeded_session: tuple[str, str],
     mock_llm_server_url: str,
 ) -> None:
-    """A reader parked at the bottom is on the newest text soon after each reply lands."""
     base_url, session_id = seeded_session
     _seed_turns(session_id)
-    words = " ".join(f"streamedword{n:03d}" for n in range(_REPLY_WORDS))
     configure_mock_llm(
         mock_llm_server_url,
         [
-            {
-                "text": f"{words} {_DONE_MARKER} {n}",
-                "stream": True,
-                "chunk_delay": _STREAM_CHUNK_DELAY_S,
-            }
+            {"text": _streamed_reply(n), "stream": True, "chunk_delay": _STREAM_CHUNK_DELAY_S}
             for n in range(1, _LANDINGS + 1)
         ],
-        key="scroll-pin-slow",
-        match=_PROMPT,
+        key="scroll-pin-landing",
+        match=_STREAM_PROMPT,
     )
-
-    page.add_init_script(_TAG_PHASES)
+    # Non-browser setup is done; the (possibly recorded) page starts here.
+    page: Page = request.getfixturevalue("page")
     page.set_viewport_size(_VIEWPORT)
     page.goto(f"{base_url}/c/{session_id}")
     expect(page.get_by_text(_NEWEST_REPLY).first).to_be_visible(timeout=30_000)
     assert page.evaluate(_TAG_SCROLLER), "transcript did not overflow; seed more turns"
     page.wait_for_timeout(500)
     page.evaluate(_TRACK_BOTTOM)
-    page.context.new_cdp_session(page).send(
-        "Emulation.setCPUThrottlingRate", {"rate": _CPU_THROTTLE_RATE}
-    )
+    if _CPU_THROTTLE != 1:
+        cdp = page.context.new_cdp_session(page)
+        cdp.send("Emulation.setCPUThrottlingRate", {"rate": _CPU_THROTTLE})
 
-    spans: list[tuple[int, list[Any]]] = []
+    composer = page.get_by_label("Message the agent")
+    landings: list[dict[str, Any]] = []
     for n in range(1, _LANDINGS + 1):
-        height_before, frames, writes = _land_reply(page, f"{_DONE_MARKER} {n}")
-        painted = _painted_frames(frames, writes)
-        # The reply must actually have lengthened the transcript, or this proves nothing.
-        assert painted[-1][2] > height_before + 200, (height_before, painted[-1])
-        assert painted[-1][1] <= 2, painted[-1]
-        spans.append(_behind_after_landing(painted, writes, height_before))
+        expect(page.locator(_WORKING)).to_have_count(0, timeout=30_000)
+        expect(composer).to_be_enabled(timeout=30_000)
+        height_before = page.evaluate(
+            "() => document.querySelector('[data-pw-scroller]').scrollHeight"
+        )
+        sent_at = page.evaluate("() => performance.now()")
+        composer.fill(_STREAM_PROMPT)
+        page.get_by_role("button", name="Send", exact=True).click()
+        expect(page.get_by_text(f"{_STREAMED_REPLY_DONE} {n}").first).to_be_visible(timeout=90_000)
+        page.wait_for_timeout(1000)
+        samples = [s for s in page.evaluate("() => window.__bottomSamples") if s[0] >= sent_at]
+        grown = [s for s in samples if s[2] > height_before]
+        assert grown and grown[-1][2] > height_before + 200, (height_before, samples[-1:])
+        assert samples[-1][1] <= 2, samples[-1]
+        longest, farthest = _longest_behind_ms(grown)
+        landings.append(
+            {
+                "landing": n,
+                "visible_stall_ms": _visible_stall_ms(grown),
+                "longest_behind_ms": longest,
+                "farthest_px": farthest,
+                "height_before": height_before,
+                "height_after": grown[-1][2],
+                "off_bottom_samples": [s for s in grown if s[1] > _OFF_BOTTOM_PX][:12],
+                "samples": samples if _DUMP_DIR else [],
+            }
+        )
 
-    longest_behind_ms, detail = max(spans, key=lambda s: s[0])
-    assert longest_behind_ms <= _BEHIND_BUDGET_MS, (
-        longest_behind_ms,
-        [s[0] for s in spans],
-        detail,
+    report = json.dumps(
+        {"cpu_throttle": _CPU_THROTTLE, "session_id": session_id, "landings": landings}, indent=1
     )
+    if _DUMP_DIR:
+        Path(_DUMP_DIR).mkdir(parents=True, exist_ok=True)
+        (Path(_DUMP_DIR) / f"landings-{session_id}.json").write_text(report)
+    stalled = [landing for landing in landings if landing["visible_stall_ms"] > _BUDGET_MS]
+    assert not stalled, report

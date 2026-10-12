@@ -1,8 +1,9 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import type { RefObject } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import type { Bubble } from "@/lib/renderItems";
 import { Conversation, ConversationContent } from "@/components/ai-elements/conversation";
-import type { Virtualizer } from "@tanstack/react-virtual";
+import { type Virtualizer, useVirtualizer } from "@tanstack/react-virtual";
 import {
   isNativeFindShortcut,
   measureRowAndPin,
@@ -32,6 +33,7 @@ function list(
   scrollEl: HTMLElement,
   onGeometryChange: (geometry: TranscriptGeometry) => void = vi.fn(),
   disableVirtualization = false,
+  pinRef?: RefObject<(() => void) | null>,
 ) {
   return (
     <Conversation>
@@ -46,6 +48,7 @@ function list(
           hasTasks={hasTasks}
           disableVirtualization={disableVirtualization}
           onGeometryChange={onGeometryChange}
+          pinRef={pinRef}
         />
       </ConversationContent>
     </Conversation>
@@ -120,6 +123,19 @@ it("pins after an observer re-measure of a row, never after a mount measure", ()
   // Without a registered pin the measurement still goes through.
   expect(measureRowAndPin({ current: null })(node, entry, instance)).toBe(64);
   expect(measureRowAndPin(undefined)(node, entry, instance)).toBe(64);
+});
+
+it("hands the virtualizer a row measure that runs the shared bottom pin", () => {
+  const pin = vi.fn();
+  render(list(false, document.createElement("div"), vi.fn(), false, { current: pin }));
+
+  const measure = vi.mocked(useVirtualizer).mock.calls.at(-1)![0].measureElement!;
+  const entry = {
+    borderBoxSize: [{ blockSize: 64, inlineSize: 600 }],
+  } as unknown as ResizeObserverEntry;
+  const instance = { options: { horizontal: false } } as unknown as Parameters<typeof measure>[2];
+  expect(measure(document.createElement("div"), entry, instance)).toBe(64);
+  expect(pin).toHaveBeenCalledOnce();
 });
 
 it("publishes navigation that distinguishes loaded and missing turns", async () => {
