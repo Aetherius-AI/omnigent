@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import httpx
 import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -19,14 +19,17 @@ _FILENAME = "ios-download-demo.mp4"
 @pytest.fixture
 def ios_download_session(seeded_session: tuple[str, str]) -> Iterator[tuple[str, str]]:
     base_url, session_id = seeded_session
-    workspace = _REPO_ROOT / session_id
-    workspace.mkdir(parents=True, exist_ok=True)
-    # Binary bytes force the same "Preview not available" File Viewer shown in the report.
-    (workspace / _FILENAME).write_bytes(b"\x00\x00\x00\x18ftypmp42native-ios-download-demo")
-    try:
-        yield base_url, session_id
-    finally:
-        shutil.rmtree(workspace, ignore_errors=True)
+    file_url = (
+        f"{base_url}/v1/sessions/{session_id}"
+        f"/resources/environments/default/filesystem/{_FILENAME}"
+    )
+    response = httpx.put(
+        file_url,
+        json={"content": "native iOS download demo", "encoding": "utf-8"},
+        timeout=10.0,
+    )
+    response.raise_for_status()
+    yield base_url, session_id
 
 
 @pytest.mark.timeout(600)
