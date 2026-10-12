@@ -11,7 +11,6 @@ import re
 import shutil
 import subprocess
 import time
-import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -20,7 +19,6 @@ import pytest
 from playwright.sync_api import Page, expect
 
 from tests.e2e_ui.conftest import (
-    _REPO_ROOT,
     _create_native_cursor_session,
     _ensure_runner_online,
     _server_state,
@@ -50,12 +48,12 @@ def _cursor_terminal_unavailable() -> str | None:
 @pytest.fixture
 def cursor_git_workspace_session(
     live_server: str,
+    tmp_path: Path,
     tmp_path_factory: pytest.TempPathFactory,
 ) -> Iterator[tuple[str, str, Path]]:
     """A runner-bound cursor-native session pinned to a fresh, clean git repo.
 
-    The workspace lives under the repo tree (gitignored) so an out-of-process
-    runner shares this test's view of it; binding writes the ``.cursor`` plumbing.
+    Binding the session makes the runner write the ``.cursor`` plumbing into it.
 
     :returns: ``(base_url, session_id, workspace)``.
     """
@@ -63,9 +61,7 @@ def cursor_git_workspace_session(
     if reason:
         pytest.skip(reason)
 
-    ws_root = _REPO_ROOT / ".omnigent" / "e2e-tmp"
-    ws_root.mkdir(parents=True, exist_ok=True)
-    workspace = ws_root / f"cursor-plumbing-{uuid.uuid4().hex[:8]}"
+    workspace = tmp_path / "cursor-workspace"
     workspace.mkdir()
 
     def _git(*args: str) -> None:
@@ -89,7 +85,6 @@ def cursor_git_workspace_session(
         if session_id is not None:
             with contextlib.suppress(httpx.HTTPError):
                 httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
-        shutil.rmtree(workspace, ignore_errors=True)
         if respawned is not None:
             respawned.terminate()
             try:
@@ -137,9 +132,7 @@ def test_cursor_plumbing_hidden_from_session_changes(
         changes_tab.click()
     expect(changes_tab).to_have_attribute("aria-selected", "true")
 
-    # Correct behavior. On a build with the bug the rail instead lists the two
-    # injected files under a "Changes 2 changed" badge, so each assertion here
-    # is what fails.
+    # A regression would list the two injected files here; the rail must stay empty.
     expect(rail.get_by_text("No workspace changes yet")).to_be_visible(timeout=30_000)
     for n in _INJECTED:
         expect(rail.get_by_text(n, exact=True)).to_have_count(0)
