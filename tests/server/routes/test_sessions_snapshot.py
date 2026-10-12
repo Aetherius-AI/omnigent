@@ -11,9 +11,15 @@ from typing import Any
 import pytest
 from sqlalchemy.exc import StatementError
 
+from omnigent._wrapper_labels import CLAUDE_NATIVE_WRAPPER_VALUE, CODEX_NATIVE_WRAPPER_VALUE
 from omnigent.entities import Conversation, ConversationItem, MessageData, PagedList
 from omnigent.server.routes import sessions as _sessions_mod
+from omnigent.server.routes._sessions.common import _ACP_SUBAGENT_ID_LABEL_KEY
 from omnigent.server.routes.sessions import (
+    _CLAUDE_NATIVE_SUBAGENT_WRAPPER_LABEL_VALUE,
+    _CLAUDE_NATIVE_WRAPPER_LABEL_KEY,
+    _CODEX_NATIVE_SUBAGENT_DISPLAY_FALLBACK,
+    _CODEX_NATIVE_SUBAGENT_WRAPPER_LABEL_VALUE,
     _LABEL_VALUE_MAX_LEN,
     SessionLiveness,
     _get_session_snapshot,
@@ -440,22 +446,52 @@ async def test_session_snapshot_unresolvable_sub_agent_warns_and_reports_parent(
     assert child.context_window == 200_000
 
 
+# Native CLIs name their own sub-agents; the forwarders record that name as
+# ``sub_agent_name`` on a child row stamped with the native sub-agent wrapper.
+_NATIVE_SUB_AGENT_CHILDREN = (
+    pytest.param(
+        "claude-native-ui",
+        "claude-native",
+        CLAUDE_NATIVE_WRAPPER_VALUE,
+        _CLAUDE_NATIVE_SUBAGENT_WRAPPER_LABEL_VALUE,
+        "general-purpose",
+        "general-purpose:a077d260f05ff9be8",
+        id="claude-task-agent",
+    ),
+    pytest.param(
+        "codex-native-ui",
+        "codex-native",
+        CODEX_NATIVE_WRAPPER_VALUE,
+        _CODEX_NATIVE_SUBAGENT_WRAPPER_LABEL_VALUE,
+        _CODEX_NATIVE_SUBAGENT_DISPLAY_FALLBACK,
+        "codex-native-ui-subagent:thread_child",
+        id="codex-spawned-agent",
+    ),
+)
+
+
 @pytest.mark.asyncio
-async def test_session_snapshot_native_sub_agent_reports_parent_without_warning(
+@pytest.mark.parametrize(
+    ("parent_name", "harness", "parent_wrapper", "child_wrapper", "sub_agent_name", "title"),
+    _NATIVE_SUB_AGENT_CHILDREN,
+)
+async def test_session_snapshot_native_sub_agent_child_reports_parent_without_warning(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    parent_name: str,
+    harness: str,
+    parent_wrapper: str,
+    child_wrapper: str,
+    sub_agent_name: str,
+    title: str,
 ) -> None:
-    """
-    A native sub-agent's CLI-chosen name never resolves in the parent spec.
-
-    Claude Code names its Task sub-agents (``general-purpose``, ``Explore``) and
-    Codex its spawned agents; the parent spec doesn't list them, so the parent's
-    identity is the expected answer and is not worth a warning on every snapshot.
+    """A CLI-named native child (Claude Task / Codex agent) keeps the parent's
+    identity and logs no warning; its name never resolves in the native spec.
     """
     parent_spec = AgentSpec(
         spec_version=1,
-        name="claude-native-ui",
-        executor=ExecutorSpec(config={"harness": "claude-native"}, model="claude-sonnet"),
+        name=parent_name,
+        executor=ExecutorSpec(config={"harness": harness}),
     )
     conversations = {
         "conv_parent": Conversation(
@@ -463,18 +499,20 @@ async def test_session_snapshot_native_sub_agent_reports_parent_without_warning(
             created_at=1,
             updated_at=1,
             root_conversation_id="conv_parent",
-            agent_id="ag_claude",
+            agent_id="ag_native",
+            labels={_CLAUDE_NATIVE_WRAPPER_LABEL_KEY: parent_wrapper},
         ),
         "conv_child": Conversation(
             id="conv_child",
             created_at=1,
             updated_at=1,
+            title=title,
             root_conversation_id="conv_parent",
             parent_conversation_id="conv_parent",
-            agent_id="ag_claude",
+            agent_id="ag_native",
             kind="sub_agent",
-            sub_agent_name="general-purpose",
-            labels={"omnigent.wrapper": "claude-code-native-ui-subagent"},
+            sub_agent_name=sub_agent_name,
+            labels={_CLAUDE_NATIVE_WRAPPER_LABEL_KEY: child_wrapper},
         ),
     }
     conv_store = _ConversationStore([], conversations=conversations)
@@ -482,21 +520,23 @@ async def test_session_snapshot_native_sub_agent_reports_parent_without_warning(
     class _AgentStore:
         @staticmethod
         def get(agent_id: str) -> Any:
+            assert agent_id == "ag_native"
             return type(
                 "StoredAgent",
                 (),
                 {
                     "id": agent_id,
-                    "name": "claude-native-ui",
+                    "name": parent_name,
                     "bundle_location": "bundle",
                     "session_id": None,
-                    "operator_authored": False,
+                    "operator_authored": True,
                 },
             )()
 
     class _AgentCache:
         @staticmethod
         def load(agent_id: str, bundle_location: str, *, expand_env: bool = True) -> Any:
+            assert (agent_id, bundle_location) == ("ag_native", "bundle")
             return type("LoadedAgent", (), {"spec": parent_spec})()
 
     monkeypatch.setattr("omnigent.runtime.get_runner_client", lambda: None)
@@ -510,9 +550,91 @@ async def test_session_snapshot_native_sub_agent_reports_parent_without_warning(
             agent_cache=_AgentCache(),  # type: ignore[arg-type]
         )
 
-    assert "did not resolve" not in caplog.text
-    assert child.agent_name == "claude-native-ui"
-    assert child.llm_model == "claude-sonnet"
+    assert child.agent_name == parent_name
+    assert child.sub_agent_name == sub_agent_name
+    unresolved = [r for r in caplog.records if "did not resolve" in r.getMessage()]
+    assert not unresolved, (
+        f"snapshot of the native {sub_agent_name!r} child warned about an unresolved "
+        f"sub-agent: {[r.getMessage() for r in unresolved]!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_session_snapshot_acp_mirrored_sub_agent_child_reports_parent_without_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An ACP-mirrored child (e.g. Devin) carries an ACP subagent-id label, not a
+    ``*-subagent`` wrapper, so its CLI name never resolves and no warning fires.
+    """
+    parent_spec = AgentSpec(
+        spec_version=1,
+        name="devin-native-ui",
+        executor=ExecutorSpec(config={"harness": "devin-native"}),
+    )
+    conversations = {
+        "conv_parent": Conversation(
+            id="conv_parent",
+            created_at=1,
+            updated_at=1,
+            root_conversation_id="conv_parent",
+            agent_id="ag_devin",
+        ),
+        "conv_child": Conversation(
+            id="conv_child",
+            created_at=1,
+            updated_at=1,
+            title="mathutils",
+            root_conversation_id="conv_parent",
+            parent_conversation_id="conv_parent",
+            agent_id="ag_devin",
+            kind="sub_agent",
+            sub_agent_name="mathutils",
+            labels={_ACP_SUBAGENT_ID_LABEL_KEY: "sub_abc123"},
+        ),
+    }
+    conv_store = _ConversationStore([], conversations=conversations)
+
+    class _AgentStore:
+        @staticmethod
+        def get(agent_id: str) -> Any:
+            assert agent_id == "ag_devin"
+            return type(
+                "StoredAgent",
+                (),
+                {
+                    "id": agent_id,
+                    "name": "devin-native-ui",
+                    "bundle_location": "bundle",
+                    "session_id": None,
+                    "operator_authored": True,
+                },
+            )()
+
+    class _AgentCache:
+        @staticmethod
+        def load(agent_id: str, bundle_location: str, *, expand_env: bool = True) -> Any:
+            assert (agent_id, bundle_location) == ("ag_devin", "bundle")
+            return type("LoadedAgent", (), {"spec": parent_spec})()
+
+    monkeypatch.setattr("omnigent.runtime.get_runner_client", lambda: None)
+    monkeypatch.setattr("omnigent.runtime.get_runner_router", lambda: None)
+
+    with caplog.at_level(logging.WARNING, logger="omnigent.server.routes._sessions.orchestration"):
+        child = await _get_session_snapshot(
+            conv_store,  # type: ignore[arg-type]
+            "conv_child",
+            agent_store=_AgentStore(),  # type: ignore[arg-type]
+            agent_cache=_AgentCache(),  # type: ignore[arg-type]
+        )
+
+    assert child.agent_name == "devin-native-ui"
+    assert child.sub_agent_name == "mathutils"
+    unresolved = [r for r in caplog.records if "did not resolve" in r.getMessage()]
+    assert not unresolved, (
+        f"snapshot of the ACP-mirrored 'mathutils' child warned about an unresolved "
+        f"sub-agent: {[r.getMessage() for r in unresolved]!r}"
+    )
 
 
 @pytest.mark.asyncio
