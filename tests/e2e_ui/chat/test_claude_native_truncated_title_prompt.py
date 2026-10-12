@@ -116,11 +116,16 @@ def _wait_for(page: Page, predicate: Callable[[], bool], timeout_s: float, what:
 
 
 def _frame_around_prompt(pane: str) -> tuple[str, list[str]] | None:
-    """Return the row above the last ``❯``-led row (the composer) and the two rows below it."""
+    """Return the row above the last ``❯``-led row (the composer) and the rule rows below it."""
     lines = [line for line in pane.splitlines() if line.strip()]
     for idx in range(len(lines) - 1, 0, -1):
         if lines[idx].strip().startswith("❯"):
-            return lines[idx - 1], lines[idx + 1 : idx + 3]
+            below: list[str] = []
+            for row in lines[idx + 1 :]:
+                if set(row.strip()) - _BOX_RULE_CHARS:
+                    break
+                below.append(row.strip())
+            return lines[idx - 1], below
     return None
 
 
@@ -136,14 +141,14 @@ def _rename_from_terminal(page: Page, mirror: PaneMirror, title: str) -> None:
         "the rename draft to land in the composer",
     )
     page.keyboard.press("Enter")
-    marker = title[:12]
-    # The confirmation and the echoed title wrap at the pane width, so match
-    # them with the row breaks removed.
+    marker = "".join(title[:12].split())
+    # The confirmation and the echoed title wrap at the pane width, with the
+    # continuation rows indented, so match them with all whitespace removed.
     _wait_for(
         page,
         lambda: (
-            "renamed" in mirror.text().lower().replace("\n", "")
-            and marker in mirror.text().replace("\n", "")
+            "renamed" in "".join(mirror.text().lower().split())
+            and marker in "".join(mirror.text().split())
         ),
         _RENAME_TIMEOUT_S,
         f"Claude Code to confirm the rename to {title[:24]!r}",
@@ -211,14 +216,14 @@ def test_native_claude_composer_delivers_under_title_wider_than_terminal(
             above,
             below,
         )
-        # The renderer either wrapped the box (a full-width closing row plus a
-        # shorter continuation) or clipped the title one space in with "…";
-        # both leave the opening rule's trailing glyph directly above ❯.
+        # The renderer either wrapped the box (a full-width closing row that
+        # continues onto rows no wider than the pane) or clipped the title one
+        # space in with "…"; both leave the opening rule's trailing glyph
+        # directly above ❯.
         wrapped = (
             len(below) >= 2
             and below[0] == "─" * mirror.cols
-            and 0 < len(below[1]) < mirror.cols
-            and set(below[1]) <= _BOX_RULE_CHARS
+            and all(0 < len(row) <= mirror.cols for row in below)
         )
         clipped = (
             above.startswith(" ") and not above.startswith("  ") and above.rstrip().endswith("… ─")

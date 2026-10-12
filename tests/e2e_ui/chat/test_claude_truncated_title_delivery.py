@@ -85,7 +85,10 @@ def test_web_message_reaches_claude_beneath_a_truncated_title(
     deadline = time.monotonic() + 10
     while typed not in "".join(_pane_text(base_url, session_id).split()):
         if time.monotonic() >= deadline:
-            break
+            raise AssertionError(
+                "the /rename draft never landed in the composer:\n"
+                + _pane_text(base_url, session_id)
+            )
         time.sleep(0.2)
     subprocess.run([*tmux, "send-keys", "-t", target, "Enter"], check=True, timeout=10)
     subprocess.run(
