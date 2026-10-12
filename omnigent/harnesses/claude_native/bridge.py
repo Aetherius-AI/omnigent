@@ -4714,10 +4714,7 @@ def _permission_mode_from_pane(pane: str) -> str | None:
         pane is mid-repaint, or the mode is one with no footer).
     """
     lines = [line for line in pane.splitlines() if line.strip()]
-    # Below the last box rule is the footer region. With no rule the input box
-    # isn't mounted; fall back to the tail so a footer still reads during boot.
-    last_rule = max((i for i, line in enumerate(lines) if _is_box_rule(line)), default=None)
-    region = lines[last_rule + 1 :] if last_rule is not None else lines[-_PROMPT_SCAN_TAIL_LINES:]
+    region = _rows_below_last_rule(lines, _PROMPT_SCAN_TAIL_LINES)
     for line in reversed(region):
         for mode, footer in _PERMISSION_MODE_FOOTERS.items():
             if footer in line:
@@ -5737,23 +5734,56 @@ def _composer_row(pane: str) -> str | None:
     terminal), the lowest rule is the opening one and the row under it is
     the composer.
 
+    A title wider than the pane wraps the whole box: the opening rule's
+    trailing glyph drops to its own row or trails a bare slice of the
+    title, so no row of that rule reads as one, and the closing rule wraps
+    onto stub rows. Rules are therefore read as bands (:func:`_rule_bands`),
+    and when no composer glyph sits under the opening rule the box is read
+    upward from its closing rule
+    (:func:`_composer_row_above_closing_rule`).
+
     :param pane: Captured pane text from :func:`_capture_pane`.
     :returns: The row's text, e.g. ``"❯ fix the bug"`` or ``"!"`` in shell
         mode, or ``None`` when no input box is on screen.
     """
     non_empty = [line for line in pane.splitlines() if line.strip()]
-    rules = [idx for idx, line in enumerate(non_empty) if _is_box_rule(line)]
-    if not rules:
+    bands = _rule_bands(non_empty)
+    if not bands:
         return None
-    candidates = [rules[-2] + 1] if len(rules) >= 2 else []
-    candidates.append(rules[-1] + 1)
+    candidates = [bands[-2][1] + 1] if len(bands) >= 2 else []
+    candidates.append(bands[-1][1] + 1)
     for idx in candidates:
         if idx >= len(non_empty):
             continue
         row = non_empty[idx]
         if row.strip()[:1] in _COMPOSER_MODE_GLYPHS:
             return row
-    return None
+    return _composer_row_above_closing_rule(non_empty, bands[-1][0])
+
+
+def _composer_row_above_closing_rule(lines: list[str], closing_rule: int) -> str | None:
+    """
+    Return the composer row when no row of the box's opening rule reads as one.
+
+    When the title overflows the pane the opening rule wraps: its trailing
+    glyph lands alone on a row, or after a bare slice of the title, so
+    :func:`_is_box_rule` finds nothing above ``❯``. The box is still
+    framed: its composer is the mode-glyph row above the closing rule, past
+    the draft's indented continuation rows, and the row above it ends in
+    the opening rule's glyph (:func:`_is_rule_tail`). A menu's selected row
+    or an echoed prompt has no such row above it.
+
+    :param lines: Non-empty pane rows, in order.
+    :param closing_rule: Index in *lines* of the closing rule's first row.
+    :returns: The composer row, or ``None`` when the rows above the closing
+        rule are not framed that way.
+    """
+    idx = closing_rule - 1
+    while idx > 0 and lines[idx].startswith("  "):
+        idx -= 1
+    if idx < 1 or lines[idx].strip()[:1] not in _COMPOSER_MODE_GLYPHS:
+        return None
+    return lines[idx] if _is_rule_tail(lines[idx - 1]) else None
 
 
 def _claude_prompt_rendered(pane: str) -> bool:
@@ -5802,8 +5832,7 @@ def _history_search_footer_shown(pane: str) -> bool:
     :returns: ``True`` when a footer row names the history search.
     """
     lines = [line for line in pane.splitlines() if line.strip()]
-    last_rule = max((i for i, line in enumerate(lines) if _is_box_rule(line)), default=None)
-    region = lines[last_rule + 1 :] if last_rule is not None else lines[-_PROMPT_SCAN_TAIL_LINES:]
+    region = _rows_below_last_rule(lines, _PROMPT_SCAN_TAIL_LINES)
     # A narrow pane wraps the footer's left cell across rows ("search" /
     # "prompts:"), interleaving the right cell's text, so no single row
     # carries the whole marker. Each row's left-cell fragment is the text
@@ -5869,6 +5898,76 @@ def _is_box_rule(line: str) -> bool:
         starts_at_edge = line.startswith(" ") and not line.startswith("  ")
         return starts_at_edge and label.endswith("… ") and bool(label[:-2].strip())
     return label.startswith(" ") and label.endswith(" ") and bool(label.strip())
+
+
+def _is_rule_tail(line: str) -> bool:
+    """
+    Return whether a row ends the way a wrapped labelled rule's last row does.
+
+    That row is the rule's trailing run of edge glyphs, alone or spaced off
+    from the tail of the title, with no other rule glyph on the row.
+
+    :param line: A single pane line, e.g. ``"─"`` or ``"lease-freeze ─"``.
+    :returns: ``True`` when the row can close a wrapped labelled rule.
+    """
+    stripped = line.strip()
+    trail = len(stripped) - len(stripped.rstrip(_TITLED_RULE_EDGE_GLYPHS))
+    if trail < 1:
+        return False
+    label = stripped[:-trail]
+    if any(ch in _BOX_RULE_CHARS for ch in label):
+        return False
+    return not label or label.endswith(" ")
+
+
+def _is_edge_glyph_run(line: str) -> bool:
+    """Return whether *line* is nothing but horizontal rule glyphs, however few."""
+    stripped = line.strip()
+    return bool(stripped) and all(ch in _TITLED_RULE_EDGE_GLYPHS for ch in stripped)
+
+
+def _rule_bands(lines: list[str]) -> list[tuple[int, int]]:
+    """
+    Return each box rule's row span as ``(first, last)`` indices into *lines*.
+
+    A rule wider than the pane wraps onto the rows below it, so consecutive
+    rule rows are one rule. The wrapped remainder can be shorter than
+    :func:`_is_box_rule` admits (a lone ``─`` under a full-width row), so a
+    bare run of edge glyphs joins an adjacent rule; on its own it is content.
+
+    :param lines: Non-empty pane rows, in order.
+    :returns: Rule spans, top to bottom.
+    """
+    bands: list[tuple[int, int]] = []
+    start: int | None = None
+    has_rule = False
+    for idx, line in enumerate([*lines, ""]):
+        is_rule = _is_box_rule(line)
+        if is_rule or _is_edge_glyph_run(line):
+            start = idx if start is None else start
+            has_rule = has_rule or is_rule
+            continue
+        if start is not None and has_rule:
+            bands.append((start, idx - 1))
+        start, has_rule = None, False
+    return bands
+
+
+def _rows_below_last_rule(lines: list[str], tail_lines: int) -> list[str]:
+    """
+    Return the rows under the last box rule, where Claude Code's footer sits.
+
+    With no rule on screen the input box is not mounted, so the last
+    *tail_lines* rows stand in for the footer region. A wrapped closing
+    rule ends with the last row of its band (:func:`_rule_bands`), so a stub
+    shorter than a rule never leads the region.
+
+    :param lines: Non-empty pane rows, in order.
+    :param tail_lines: Rows to take from the bottom when no rule is drawn.
+    :returns: The footer region, top to bottom.
+    """
+    bands = _rule_bands(lines)
+    return lines[bands[-1][1] + 1 :] if bands else lines[-tail_lines:]
 
 
 def _submit_needle(content: str) -> str:
@@ -5977,8 +6076,7 @@ def _terminal_dialog_headline(pane: str) -> str | None:
     if not pane.strip() or _composer_row(pane) is not None:
         return None
     lines = [line for line in pane.splitlines() if line.strip()]
-    last_rule = max((i for i, line in enumerate(lines) if _is_box_rule(line)), default=None)
-    region = lines[last_rule + 1 :] if last_rule is not None else lines[-_DIALOG_SCAN_TAIL_LINES:]
+    region = _rows_below_last_rule(lines, _DIALOG_SCAN_TAIL_LINES)
     footer = next((line for line in reversed(region) if _DIALOG_FOOTER_RE.search(line)), None)
     if footer is None:
         return None
