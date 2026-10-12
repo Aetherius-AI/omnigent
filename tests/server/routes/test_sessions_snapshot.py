@@ -11,10 +11,18 @@ from typing import Any
 import pytest
 from sqlalchemy.exc import StatementError
 
-from omnigent._wrapper_labels import CLAUDE_NATIVE_WRAPPER_VALUE, CODEX_NATIVE_WRAPPER_VALUE
+from omnigent._wrapper_labels import (
+    ANTIGRAVITY_NATIVE_WRAPPER_VALUE,
+    CLAUDE_NATIVE_WRAPPER_VALUE,
+    CODEX_NATIVE_WRAPPER_VALUE,
+)
 from omnigent.entities import Conversation, ConversationItem, MessageData, PagedList
 from omnigent.server.routes import sessions as _sessions_mod
-from omnigent.server.routes._sessions.common import _ACP_SUBAGENT_ID_LABEL_KEY
+from omnigent.server.routes._sessions.common import (
+    _ACP_SUBAGENT_ID_LABEL_KEY,
+    _ANTIGRAVITY_NATIVE_SUBAGENT_DISPLAY_FALLBACK,
+    _ANTIGRAVITY_NATIVE_SUBAGENT_WRAPPER_LABEL_VALUE,
+)
 from omnigent.server.routes.sessions import (
     _CLAUDE_NATIVE_SUBAGENT_WRAPPER_LABEL_VALUE,
     _CLAUDE_NATIVE_WRAPPER_LABEL_KEY,
@@ -456,6 +464,8 @@ _NATIVE_SUB_AGENT_CHILDREN = (
         _CLAUDE_NATIVE_SUBAGENT_WRAPPER_LABEL_VALUE,
         "general-purpose",
         "general-purpose:a077d260f05ff9be8",
+        "anthropic/claude-sonnet-4.5",
+        1_000_000,
         id="claude-task-agent",
     ),
     pytest.param(
@@ -465,7 +475,20 @@ _NATIVE_SUB_AGENT_CHILDREN = (
         _CODEX_NATIVE_SUBAGENT_WRAPPER_LABEL_VALUE,
         _CODEX_NATIVE_SUBAGENT_DISPLAY_FALLBACK,
         "codex-native-ui-subagent:thread_child",
+        "openai-codex/gpt-5.6-sol:high",
+        272_000,
         id="codex-spawned-agent",
+    ),
+    pytest.param(
+        "antigravity-native-ui",
+        "antigravity-native",
+        ANTIGRAVITY_NATIVE_WRAPPER_VALUE,
+        _ANTIGRAVITY_NATIVE_SUBAGENT_WRAPPER_LABEL_VALUE,
+        _ANTIGRAVITY_NATIVE_SUBAGENT_DISPLAY_FALLBACK,
+        "antigravity-native-ui-subagent:cascade_child",
+        "google/gemini-3-pro",
+        1_048_576,
+        id="antigravity-cascade-agent",
     ),
 )
 
@@ -477,7 +500,10 @@ async def _assert_native_child_reports_parent_without_warning(
     parent_spec: AgentSpec,
     conversations: dict[str, Conversation],
     agent_id: str,
+    stored_agent_name: str,
     expected_agent_name: str,
+    expected_llm_model: str,
+    expected_context_window: int,
     expected_sub_agent_name: str,
     child_label: str,
 ) -> None:
@@ -493,7 +519,7 @@ async def _assert_native_child_reports_parent_without_warning(
                 (),
                 {
                     "id": agent_id,
-                    "name": expected_agent_name,
+                    "name": stored_agent_name,
                     "bundle_location": "bundle",
                     "session_id": None,
                     "operator_authored": True,
@@ -517,7 +543,12 @@ async def _assert_native_child_reports_parent_without_warning(
             agent_cache=_AgentCache(),  # type: ignore[arg-type]
         )
 
+    # The stored row name differs from the spec name, so matching the spec name
+    # (and its model/window) proves the parent fallback completed rather than a
+    # swallowed predicate error leaving the row's name with no model or window.
     assert child.agent_name == expected_agent_name
+    assert child.llm_model == expected_llm_model
+    assert child.context_window == expected_context_window
     assert child.sub_agent_name == expected_sub_agent_name
     unresolved = [r for r in caplog.records if "did not resolve" in r.getMessage()]
     assert not unresolved, (
@@ -528,7 +559,16 @@ async def _assert_native_child_reports_parent_without_warning(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("parent_name", "harness", "parent_wrapper", "child_wrapper", "sub_agent_name", "title"),
+    (
+        "parent_name",
+        "harness",
+        "parent_wrapper",
+        "child_wrapper",
+        "sub_agent_name",
+        "title",
+        "model",
+        "context_window",
+    ),
     _NATIVE_SUB_AGENT_CHILDREN,
 )
 async def test_session_snapshot_native_sub_agent_child_reports_parent_without_warning(
@@ -540,14 +580,20 @@ async def test_session_snapshot_native_sub_agent_child_reports_parent_without_wa
     child_wrapper: str,
     sub_agent_name: str,
     title: str,
+    model: str,
+    context_window: int,
 ) -> None:
-    """A CLI-named native child (Claude Task / Codex agent) keeps the parent's
+    """A CLI-named native child (Claude/Codex/Antigravity) keeps the parent's
     identity and logs no warning; its name never resolves in the native spec.
     """
     parent_spec = AgentSpec(
         spec_version=1,
         name=parent_name,
-        executor=ExecutorSpec(config={"harness": harness}),
+        executor=ExecutorSpec(
+            config={"harness": harness},
+            model=model,
+            context_window=context_window,
+        ),
     )
     conversations = {
         "conv_parent": Conversation(
@@ -577,7 +623,10 @@ async def test_session_snapshot_native_sub_agent_child_reports_parent_without_wa
         parent_spec=parent_spec,
         conversations=conversations,
         agent_id="ag_native",
+        stored_agent_name=f"{parent_name}-row",
         expected_agent_name=parent_name,
+        expected_llm_model=model,
+        expected_context_window=context_window,
         expected_sub_agent_name=sub_agent_name,
         child_label=f"native {sub_agent_name!r}",
     )
@@ -594,7 +643,11 @@ async def test_session_snapshot_acp_mirrored_sub_agent_child_reports_parent_with
     parent_spec = AgentSpec(
         spec_version=1,
         name="devin-native-ui",
-        executor=ExecutorSpec(config={"harness": "devin-native"}),
+        executor=ExecutorSpec(
+            config={"harness": "devin-native"},
+            model="devin/devin-1",
+            context_window=256_000,
+        ),
     )
     conversations = {
         "conv_parent": Conversation(
@@ -623,7 +676,10 @@ async def test_session_snapshot_acp_mirrored_sub_agent_child_reports_parent_with
         parent_spec=parent_spec,
         conversations=conversations,
         agent_id="ag_devin",
+        stored_agent_name="devin-native-ui-row",
         expected_agent_name="devin-native-ui",
+        expected_llm_model="devin/devin-1",
+        expected_context_window=256_000,
         expected_sub_agent_name="mathutils",
         child_label="ACP-mirrored 'mathutils'",
     )
