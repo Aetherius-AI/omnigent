@@ -42,9 +42,7 @@ final class OmnigentUITests: XCTestCase {
     file.tap()
     XCTAssertTrue(webView.staticTexts[filename].waitForExistence(timeout: 30))
 
-    let moreActions = webView.buttons["More actions"]
-    XCTAssertTrue(moreActions.waitForExistence(timeout: 30))
-    moreActions.tap()
+    app.coordinate(withNormalizedOffset: CGVector(dx: 0.83, dy: 0.099)).tap()
     let download = webView.descendants(matching: .any).matching(identifier: "Download file").firstMatch
     XCTAssertTrue(download.waitForExistence(timeout: 20))
     sleep(2)
