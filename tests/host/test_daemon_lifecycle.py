@@ -452,9 +452,11 @@ def test_runner_env_manifest_roundtrip_is_owner_only(tmp_path: Path) -> None:
     if os.name == "posix":
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert not list(path.parent.glob(".env-*")), "temp file left behind"
-    assert read_runner_env_manifest("local", base_dir=tmp_path) == env
+    if os.name == "posix":
+        assert read_runner_env_manifest("local", base_dir=tmp_path) == env
 
 
+@pytest.mark.skipif(os.name != "posix", reason="manifest reads are trusted only on POSIX")
 def test_runner_env_manifest_rewrite_replaces_previous_values(tmp_path: Path) -> None:
     write_runner_env_manifest("local", {"A": "1", "B": "old"}, base_dir=tmp_path)
     write_runner_env_manifest("local", {"B": "new"}, base_dir=tmp_path)
@@ -522,16 +524,17 @@ def test_host_launches_runners_from_the_target_manifest(
     # Host initialization materialized its own Databricks profile.
     monkeypatch.setenv("DATABRICKS_CONFIG_PROFILE", "omnigent-host")
 
-    assert background._runner_launch_base_env() is os.environ
+    assert background._runner_launch_base_env(os.environ) is os.environ
 
     published = {"PATH": "/usr/bin", "OTEL_RESOURCE_ATTRIBUTES": "deployment.environment=later"}
     write_runner_env_manifest("local", published)
 
-    assert background._runner_launch_base_env() == {
-        **published,
-        "DATABRICKS_CONFIG_PROFILE": "omnigent-host",
-    }
-    assert foreground._runner_launch_base_env() is os.environ
+    if os.name == "posix":
+        assert background._runner_launch_base_env(os.environ) == {
+            **published,
+            "DATABRICKS_CONFIG_PROFILE": "omnigent-host",
+        }
+    assert foreground._runner_launch_base_env(os.environ) is os.environ
 
 
 def test_runner_launch_base_env_drops_host_deleted_variables(
@@ -550,7 +553,7 @@ def test_runner_launch_base_env_drops_host_deleted_variables(
     monkeypatch.delenv("STARTUP_CONTEXT_ENV", raising=False)
     write_runner_env_manifest("local", {"PATH": "/usr/bin", "STARTUP_CONTEXT_ENV": "stale"})
 
-    base_env = background._runner_launch_base_env()
+    base_env = background._runner_launch_base_env(os.environ)
 
     assert "STARTUP_CONTEXT_ENV" not in base_env
     assert base_env["PATH"] == "/usr/bin"

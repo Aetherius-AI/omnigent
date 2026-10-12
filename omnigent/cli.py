@@ -84,6 +84,7 @@ from omnigent.host.daemon_lifecycle import write_daemon_record as _write_daemon_
 from omnigent.host.daemon_lifecycle import (
     write_runner_env_manifest as _write_runner_env_manifest_impl,
 )
+from omnigent.host.identity_env import HOST_TOKEN_ENV_VAR as _HOST_TOKEN_ENV_VAR
 from omnigent.host.local_server import (
     _DEFAULT_LOCAL_PORT,
     LocalServerStartupError,
@@ -3574,8 +3575,10 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
     expected_host_id = _load_existing_host_id()
     spawned = _spawn_host_daemon_process(args=args, env=daemon_env)
     if spawned is None:
-        # No daemon will read the manifest published above; drop it.
-        _delete_runner_env_manifest_impl(target, base_dir=_HOST_PID_PATH.parent)
+        # Drop the manifest published above only when no daemon serves the
+        # target; a concurrent invocation may already own one.
+        if _find_daemon_record(target) is None:
+            _delete_runner_env_manifest_impl(target, base_dir=_HOST_PID_PATH.parent)
         _record_host_state("start_failed")
         return False
     claimed = _wait_for_daemon_claim(target, spawned)
@@ -3583,9 +3586,10 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
         _record_host_state("start_timeout")
         _stop_spawned_host_daemon_process(spawned)
         _delete_spawned_daemon_record(target, spawned)
-        # Nothing claimed the record, so no daemon serves this target: drop the
-        # orphaned manifest alongside the (absent) record.
-        _delete_runner_env_manifest_impl(target, base_dir=_HOST_PID_PATH.parent)
+        # Drop the orphaned manifest only when no daemon owns the target: a
+        # concurrent launcher may have claimed just after our deadline.
+        if _find_daemon_record(target) is None:
+            _delete_runner_env_manifest_impl(target, base_dir=_HOST_PID_PATH.parent)
         # The spawned daemon (or a concurrent winner) never wrote its record:
         # it likely crashed during startup. Point at its log so the failure is
         # diagnosable instead of silently absent from `host status`.
@@ -3702,12 +3706,10 @@ def _build_host_daemon_env(
     return env
 
 
-# Credentials the runner launch never consumes stay out of the on-disk manifest
-# to limit secret-at-rest exposure: the database URI may embed a password, and
-# the host identity token authenticates the daemon itself, which the runner-env
-# filter never forwards to runners.
+# Keep never-forwarded credentials out of the on-disk manifest: the DB URI may
+# embed a password, and the host token authenticates the daemon itself.
 _RUNNER_ENV_MANIFEST_EXCLUDED: frozenset[str] = frozenset(
-    {"OMNIGENT_DATABASE_URI", "OMNIGENT_HOST_TOKEN"}
+    {"OMNIGENT_DATABASE_URI", _HOST_TOKEN_ENV_VAR}
 )
 
 

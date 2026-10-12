@@ -1344,20 +1344,19 @@ class HostProcess:
         self._lifecycle_task: asyncio.Task[None] | None = None
         self._lifecycle_lost = asyncio.Event()
 
-    def _runner_launch_base_env(self) -> Mapping[str, str]:
+    def _runner_launch_base_env(self, environ: Mapping[str, str]) -> Mapping[str, str]:
         """Return the env runner launches are filtered from: the latest published
-        manifest with host-set variables on top for background daemons, else
-        ``os.environ``."""
+        manifest with host-set variables on top for background daemons, else the
+        caller's process-environment snapshot."""
         if self._runner_env_target is None:
-            return os.environ
+            return environ
         manifest = read_runner_env_manifest(self._runner_env_target)
         if manifest is None:
-            return os.environ
-        host_owned = {k: v for k, v in os.environ.items() if self._launch_env.get(k) != v}
-        # A variable the host unset after launch (e.g. a startup-only context var
-        # popped during init) is host-owned too; drop it so the manifest cannot
-        # resurrect it on every runner launch.
-        host_deleted = self._launch_env.keys() - os.environ.keys()
+            return environ
+        host_owned = {k: v for k, v in environ.items() if self._launch_env.get(k) != v}
+        # A variable the host unset after launch is host-owned too; drop it so
+        # the manifest cannot resurrect it on every runner launch.
+        host_deleted = self._launch_env.keys() - environ.keys()
         merged = {**manifest, **host_owned}
         for name in host_deleted:
             merged.pop(name, None)
@@ -1961,7 +1960,9 @@ class HostProcess:
             self._current_auth_token,
             initialize=False,
         )
-        base_env = await asyncio.to_thread(self._runner_launch_base_env)
+        # Snapshot os.environ on the event-loop thread: the host assigns keys
+        # here during init, so reading it in the worker could race that write.
+        base_env = await asyncio.to_thread(self._runner_launch_base_env, dict(os.environ))
         env = _build_runner_env(
             base_env,
             server_url=self._server_url,

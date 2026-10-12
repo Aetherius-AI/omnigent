@@ -982,6 +982,48 @@ def test_ensure_host_daemon_stops_spawned_daemon_that_never_claims(
     assert read_runner_env_manifest("https://server.example.com", base_dir=tmp_path) is None
 
 
+def test_ensure_host_daemon_keeps_manifest_when_a_concurrent_daemon_claims(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A concurrent winner's manifest survives when our own spawn times out."""
+    monkeypatch.setattr(cli, "_HOST_PID_PATH", tmp_path / "host.pid")
+    monkeypatch.setattr(cli, "_build_host_daemon_env", lambda **_kw: {})
+    monkeypatch.setattr(cli, "server_config_signature", lambda **_kw: "sig")
+    monkeypatch.setattr(
+        cli,
+        "_spawn_host_daemon_process",
+        lambda **_kw: cli._SpawnedDaemonProcess(pid=4242, log_path=str(tmp_path / "host.log")),
+    )
+    monkeypatch.setattr(cli, "_stop_spawned_host_daemon_process", lambda spawned: None)
+    target = "https://server.example.com"
+
+    def _another_launcher_wins(*_a: object, **_kw: object) -> None:
+        # A concurrent invocation claims the target while we wait, then publishes
+        # the manifest its runners read. Its pid differs from our spawned child.
+        _write_daemon_registry_record(
+            tmp_path,
+            pid=9999,
+            target=target,
+            mode="server",
+            server_url=target,
+            log_path=str(tmp_path / "winner.log"),
+            started_at=1_000_000,
+        )
+        write_runner_env_manifest(target, {"PATH": "/usr/bin", "WINNER": "yes"}, base_dir=tmp_path)
+        return
+
+    monkeypatch.setattr(cli, "_wait_for_daemon_claim", _another_launcher_wins)
+
+    with pytest.raises(click.ClickException):
+        _ensure_host_daemon(target)
+
+    assert read_runner_env_manifest(target, base_dir=tmp_path) == {
+        "PATH": "/usr/bin",
+        "WINNER": "yes",
+    }
+
+
 def test_ensure_host_daemon_deletes_manifest_when_spawn_fails(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
