@@ -4017,6 +4017,16 @@ export function NewChatLandingScreen() {
     else if (supportsDevinPermission) setDevinPermissionMode(mode);
     rememberPickerOptions(selectedNativeHarness, { mode });
   };
+  // The add menu's Plan entry: Codex arms a collaboration mode, other harnesses
+  // pick their "plan" permission preset.
+  let landingPlanHandler: (() => void) | undefined;
+  let landingPlanLabel: string | undefined;
+  if (codexPlanModeSelectable) {
+    landingPlanHandler = () => setPlanMode((armed) => !armed);
+    landingPlanLabel = planMode ? "Exit Plan mode" : "Enter Plan mode";
+  } else if (directModeOptions.some((mode) => mode.value === "plan")) {
+    landingPlanHandler = () => selectDirectMode("plan");
+  }
   // Clear shared state on agent changes; the harness seed restores its own
   // saved options. Initial agent resolution must preserve the landing draft.
   const prevAgentIdRef = useRef<string | null | undefined>(undefined);
@@ -5377,13 +5387,13 @@ export function NewChatLandingScreen() {
       // DANGEROUS codex full-bypass opt-in rides along as an extra label (only
       // when the toggle is armed for a codex-native agent) so the runner
       // launches with --dangerously-bypass-approvals-and-sandbox and the choice
-      // survives reload. A pre-launch Plan pick rides the label the in-session
-      // toggle persists, so the runner starts the fresh thread in Plan mode.
+      // survives reload.
       const codexCreateLabels = {
         ...(agentSupportsApprovalMode && bypassSandbox
           ? { [CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY]: "1" }
           : {}),
-        ...(nativeAgent?.harness === "codex-native" && planMode
+        // A pre-launch Plan pick rides the label the in-session toggle persists.
+        ...(codexPlanModeSelectable && planMode
           ? { [CODEX_NATIVE_COLLABORATION_MODE_LABEL_KEY]: "plan" }
           : {}),
       };
@@ -6556,25 +6566,13 @@ export function NewChatLandingScreen() {
                         testIdPrefix="new-chat-landing"
                         disabled={creating}
                         onAttach={() => fileInputRef.current?.click()}
-                        onPlan={
-                          codexPlanModeSelectable
-                            ? () => setPlanMode((armed) => !armed)
-                            : directModeOptions.some((mode) => mode.value === "plan")
-                              ? () => selectDirectMode("plan")
-                              : undefined
-                        }
+                        onPlan={landingPlanHandler}
                         planActive={
                           (supportsPermissionMode && permissionMode === "plan") ||
                           (supportsCursorMode && cursorExecMode === "plan") ||
                           (codexPlanModeSelectable && planMode)
                         }
-                        planLabel={
-                          codexPlanModeSelectable
-                            ? planMode
-                              ? "Exit Plan mode"
-                              : "Enter Plan mode"
-                            : undefined
-                        }
+                        planLabel={landingPlanLabel}
                         projects={projectList ?? []}
                         onProjectSelect={(name) => {
                           const params = new URLSearchParams(searchParams);

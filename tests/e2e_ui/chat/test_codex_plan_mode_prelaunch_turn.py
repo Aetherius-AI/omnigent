@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import json
 import subprocess
+import uuid
 from collections.abc import Iterator
 
 import httpx
 import pytest
 from playwright.sync_api import Page, expect
 
+from omnigent.stores.conversation_store import CODEX_NATIVE_COLLABORATION_MODE_LABEL_KEY
 from tests._helpers.native_session import create_native_session
 from tests.e2e_ui.chat.test_codex_plan_mode_respected import (
     _PLAN_MODE_PRESET,
@@ -27,6 +29,7 @@ from tests.e2e_ui.conftest import (
     _ensure_runner_online,
     _server_state,
     _temp_omnigent_mock_config,
+    reset_mock_llm,
     set_fallback_mock_llm,
 )
 from tests.e2e_ui.messages.test_message_render_parity import (
@@ -40,9 +43,6 @@ from tests.e2e_ui.messages.test_native_codex_render_parity import (
     _open_terminal_view,
     _wait_terminal_connected,
 )
-
-_COLLABORATION_MODE_LABEL_KEY = "omnigent.codex_native.collaboration_mode"
-_CODING_PROMPT = "Add a hello.txt file with a greeting."
 
 
 @pytest.fixture
@@ -63,7 +63,7 @@ def native_codex_plan_session(
             harness="codex",
             metadata={
                 "workspace": str(_REPO_ROOT),
-                "labels": {_COLLABORATION_MODE_LABEL_KEY: "plan"},
+                "labels": {CODEX_NATIVE_COLLABORATION_MODE_LABEL_KEY: "plan"},
             },
         )
         session_id = str(created["session_id"])
@@ -98,7 +98,11 @@ def test_prelaunch_plan_mode_governs_the_first_turn(
     # The seeded label shows Plan mode before any prompt is sent.
     expect(page.get_by_test_id("composer-plan-mode")).to_contain_text("Plan mode", timeout=30_000)
 
-    _send(page, _CODING_PROMPT)
+    # The mock server is shared across tests: drop earlier captures and key the
+    # turn on a unique marker so only this session's request can satisfy it.
+    reset_mock_llm(mock_llm_server_url)
+    marker = f"prelaunch-plan-{uuid.uuid4().hex[:8]}"
+    _send(page, f"Add a hello.txt file with a greeting. Marker {marker}.")
     expect(page.locator(_ASSISTANT).last).to_be_visible(timeout=60_000)
     expect(page.locator(_WORKING)).to_have_count(0, timeout=60_000)
 
@@ -106,7 +110,7 @@ def test_prelaunch_plan_mode_governs_the_first_turn(
     coding_turns = [
         request
         for request in requests
-        if isinstance(request, dict) and _CODING_PROMPT in json.dumps(request)
+        if isinstance(request, dict) and marker in json.dumps(request)
     ]
     assert coding_turns, "no model request carried the first coding prompt"
     developer_texts = _developer_instruction_texts(coding_turns[:1])

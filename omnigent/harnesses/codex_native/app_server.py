@@ -4570,8 +4570,6 @@ async def apply_codex_thread_collaboration_mode(
     """Switch a loaded thread's collaboration mode via ``thread/settings/update``,
     keeping ``settings.developer_instructions`` null so a value there cannot replace
     Codex's built-in Plan Mode prompt. ``effort`` is clamped to what ``model`` accepts."""
-    from omnigent.util.reasoning_effort import clamp_effort_for_model
-
     client = client_for_transport(transport, client_name="omnigent-codex-native-runner")
     try:
         await asyncio.wait_for(client.connect(), timeout=_EFFORT_CONNECT_TIMEOUT_SECONDS)
