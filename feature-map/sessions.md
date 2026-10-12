@@ -205,7 +205,10 @@ plain `uv run pytest`, which starts a private server for the test.
   Dropping an unpinned row onto a pinned row has web unit coverage only.
 - **`rename`:**
   `tests/e2e_ui/sessions/test_sidebar_rename.py::test_rename_session_enforces_user_title_limit`,
-  `tests/e2e_ui/sessions/test_header_session_menu.py::test_header_session_menu_renames_owner_and_hides_for_subagent`
+  `tests/e2e_ui/sessions/test_header_session_menu.py::test_header_session_menu_renames_owner_and_hides_for_subagent`.
+  The iOS drawer rename under the soft keyboard:
+  `tests/e2e_ui/mobile/test_rename_keeps_sidebar_sessions_reachable.py::test_rename_keeps_sidebar_sessions_reachable`,
+  `tests/e2e_ui/mobile/test_rename_keeps_sidebar_sessions_reachable.py::test_rename_scrolls_edit_row_into_view_above_keyboard`
 - **`archive`:**
   `tests/e2e_ui/sessions/test_sidebar_bulk_actions.py::test_bulk_archive_moves_session_to_archived`,
   `tests/e2e_ui/sessions/test_archived_project_filter.py::test_archived_project_filter_narrows_and_resets`,
@@ -286,6 +289,12 @@ plain `uv run pytest`, which starts a private server for the test.
   the mobile entry point; keep browser evidence outside the checkout.
 - **`reconnect`, stopped session (own environment):**
   `tests/e2e_ui/sessions/test_sidebar_stop.py::test_stopped_session_shows_reconnect_affordance`
+- **`reconnect`, completed turn after host handoff (own environment):**
+  `tests/e2e/test_runner_exit_replica_handoff_e2e.py::test_host_report_after_handoff_preserves_only_completed_turns`
+  moves a real host tunnel to a different server replica while its runner
+  stays on the original replica, then kills that owned runner. Reloaded API
+  snapshots keep completed work idle; interrupted work and runners that never
+  connected still fail. The OpenAI Agents harness uses local scripted replies.
 - **`reconnect`, idle replica handoff (own environment):**
   `tests/e2e_ui/sessions/test_idle_runner_handoff.py::test_idle_session_stays_healthy_after_unreadable_replica_handoff`
   moves a real runner between two servers sharing storage, then makes the old
