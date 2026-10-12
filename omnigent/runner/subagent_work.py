@@ -678,11 +678,7 @@ def mark_subagent_work_terminal(
             # A confirmed kill finalizes the abort; the drained-delivery tombstone
             # alone blocks a late survivor correction, so drop the retained entry.
             _provisional_cancelled_subagent_work.pop(child_session_id, None)
-        elif (
-            corrects_cancellation
-            and provisional is not None
-            and not provisional.cancellation_confirmed
-        ):
+        elif corrects_cancellation and provisional is not None:
             return _deliver_corrected_completion(provisional, output)
         if child_session_id in _drained_delivered_subagent_children:
             return _SubagentDeliveryAck(

@@ -421,17 +421,21 @@ async def test_confirmed_completion_corrects_drained_grace_cancel(
         rig.close()
 
 
+@pytest.mark.parametrize("drain_before_stop", [True, False], ids=["drained", "registered"])
 @pytest.mark.asyncio
 async def test_confirmed_stop_blocks_late_completion_after_drain(
+    drain_before_stop: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A confirmed hard stop makes a drained cancellation final against a late idle.
+    """A confirmed hard stop makes a cancellation final against a late idle.
 
-    The grace timer delivers an optimistic ``cancelled`` and the parent drains
-    it (recording the drained-delivery tombstone). The runner then confirms the
-    kill via ``stop_session``. A late ``turn_completed`` idle -- a straggler edge
-    from the torn-down pane -- must not resurrect the dispatch as a completion;
-    the confirmed abort stands.
+    The grace timer delivers an optimistic ``cancelled``. Whether or not the
+    parent has already drained it (recording the drained-delivery tombstone),
+    the runner then confirms the kill via ``stop_session``. A late
+    ``turn_completed`` idle -- a straggler edge from the torn-down pane -- must
+    not resurrect the dispatch as a completion; the confirmed abort stands. The
+    drained path finalizes the retained provisional record while the still-
+    registered path confirms the live entry in place.
     """
     import omnigent.harnesses.claude_native.bridge as claude_bridge
     from omnigent.runner.tool_dispatch import _cleanup_drained_subagent_work
@@ -452,20 +456,26 @@ async def test_confirmed_stop_blocks_late_completion_after_drain(
             cancelled = rig.drained()
             assert [(item["status"], item["output"]) for item in cancelled] == [("cancelled", "")]
 
-            # The parent drains the cancellation, recording the drained tombstone.
-            for payload in cancelled:
-                await _cleanup_drained_subagent_work(payload, server_client=None)
-            assert rig.child_id in subagent_work._drained_delivered_subagent_children
+            if drain_before_stop:
+                # The parent drains the cancellation, recording the drained tombstone.
+                for payload in cancelled:
+                    await _cleanup_drained_subagent_work(payload, server_client=None)
+                assert rig.child_id in subagent_work._drained_delivered_subagent_children
 
             # The runner confirms the kill, making the cancellation final.
             resp = await client.post(
                 f"/v1/sessions/{rig.child_id}/events", json={"type": "stop_session"}
             )
             assert resp.status_code == 204, resp.text
-            # The confirmed kill drops the retained record; the drained tombstone
-            # alone keeps the abort final against a late completion.
+            # The confirmed kill never leaves a correctable optimistic record: a
+            # drained record is dropped (the tombstone alone keeps the abort final)
+            # and a still-registered entry is confirmed in place.
             assert rig.child_id not in subagent_work._provisional_cancelled_subagent_work
-            assert rig.child_id in subagent_work._drained_delivered_subagent_children
+            if drain_before_stop:
+                assert rig.child_id in subagent_work._drained_delivered_subagent_children
+            else:
+                entry = subagent_work.get_subagent_work(rig.child_id)
+                assert entry is not None and entry.cancellation_confirmed
 
             # A late straggler completion edge must not overturn the confirmed abort.
             resp = await rig.post_status(
@@ -476,7 +486,6 @@ async def test_confirmed_stop_blocks_late_completion_after_drain(
             "a confirmed cancellation must not be corrected by a late completion"
         )
         assert rig.child_id not in subagent_work._provisional_cancelled_subagent_work
-        assert rig.child_id in subagent_work._drained_delivered_subagent_children
     finally:
         rig.close()
         subagent_work._drained_delivered_subagent_children.discard(rig.child_id)
@@ -683,6 +692,52 @@ def test_parent_teardown_clears_drained_provisional_cancellation() -> None:
         assert done.delivered and not done.delivered_now
         assert subagent_work.get_subagent_work(child_id) is None
         assert parent_id not in subagent_work._subagent_work_by_parent
+    finally:
+        subagent_work.unregister_subagent_work_for_session(parent_id)
+        subagent_work._drained_delivered_subagent_children.discard(child_id)
+        subagent_work._provisional_cancelled_subagent_work.pop(child_id, None)
+        subagent_work._session_inboxes_ref.pop(parent_id, None)
+
+
+def test_new_send_clears_drained_optimistic_cancellation() -> None:
+    """Re-dispatching a child supersedes its retained optimistic-cancel state.
+
+    A drained optimistic cancellation is kept keyed by the child so a late
+    survivor completion can still correct it. Registering a fresh dispatch for
+    the same child replaces that turn: the retained provisional record and the
+    drained-delivery tombstone are cleared and the new dispatch becomes the live
+    entry, so its own completion is not mistaken for the superseded one.
+    """
+    parent_id = uuid.uuid4().hex
+    child_id = uuid.uuid4().hex
+    inbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    subagent_work._session_inboxes_ref[parent_id] = inbox
+    subagent_work.register_subagent_work(
+        parent_session_id=parent_id,
+        child_session_id=child_id,
+        agent="researcher",
+        title="A",
+    )
+    try:
+        # Dispatch A is optimistically cancelled, delivered, then drained.
+        ack = subagent_work.mark_subagent_work_terminal(
+            child_id, status="cancelled", output="partial work"
+        )
+        assert ack.delivered_now
+        subagent_work.unregister_subagent_work(child_id, remember_drained_delivery=True)
+        assert child_id in subagent_work._provisional_cancelled_subagent_work
+        assert child_id in subagent_work._drained_delivered_subagent_children
+
+        # Dispatch B reuses the same child session, superseding the retained state.
+        entry_b = subagent_work.register_subagent_work(
+            parent_session_id=parent_id,
+            child_session_id=child_id,
+            agent="researcher",
+            title="B",
+        )
+        assert child_id not in subagent_work._provisional_cancelled_subagent_work
+        assert child_id not in subagent_work._drained_delivered_subagent_children
+        assert subagent_work.get_subagent_work(child_id) is entry_b
     finally:
         subagent_work.unregister_subagent_work_for_session(parent_id)
         subagent_work._drained_delivered_subagent_children.discard(child_id)
