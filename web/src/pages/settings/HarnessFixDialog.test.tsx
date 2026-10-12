@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -18,14 +18,6 @@ function json(body: unknown, init: ResponseInit = {}) {
     headers: { "Content-Type": "application/json" },
     ...init,
   });
-}
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
 }
 
 const catalog = {
@@ -90,7 +82,6 @@ function renderDialog(overrides: Partial<HarnessFixDialogProps> = {}) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.spyOn(window, "open").mockImplementation(() => null);
   vi.mocked(authenticatedFetch).mockImplementation(async (input) => {
     if (String(input) === "/v1/harnesses") return json(catalog);
     throw new Error(`Unexpected URL: ${String(input)}`);
@@ -98,35 +89,57 @@ beforeEach(() => {
 });
 
 describe("HarnessFixDialog", () => {
-  it("configures Isaac with the Databricks broker and reports success", async () => {
-    const response = deferred<Response>();
+  it("shows the Isaac setup fallback without calling the credential endpoint", async () => {
     vi.mocked(authenticatedFetch).mockImplementation(async (input, init) => {
       const url = String(input);
       if (url === "/v1/harnesses") return json(catalog);
-      if (url.endsWith("/credential")) return response.promise;
       throw new Error(`Unexpected URL: ${url} ${init?.method}`);
     });
-    const props = renderDialog();
+    renderDialog();
     const user = userEvent.setup();
 
     expect(screen.getByRole("heading", { name: "Reconfigure Codex" })).toBeVisible();
     expect(screen.getByRole("radio", { name: /Isaac/ })).toHaveAttribute("aria-checked", "true");
     await user.click(screen.getByRole("button", { name: "Authenticate" }));
 
-    expect(screen.getByRole("heading", { name: "Reconfiguring Codex…" })).toBeVisible();
-    expect(screen.getByText("Connected to the Databricks Unity Gateway")).toBeVisible();
-    expect(authenticatedFetch).toHaveBeenCalledWith(
-      "/v1/hosts/host%2F1/harnesses/codex-native/credential",
-      expect.objectContaining({ body: JSON.stringify({ kind: "databricks" }) }),
-    );
+    expect(
+      screen.getByRole("heading", { name: "Set up Isaac for Codex on Local laptop" }),
+    ).toBeVisible();
+    expect(
+      screen.getByText("Run this in a terminal on Local laptop, then come back."),
+    ).toBeVisible();
+    expect(screen.getByText("omni setup")).toBeVisible();
+    expect(
+      screen.getByText("Choose Codex, then the Databricks Unity Gateway credential."),
+    ).toBeVisible();
+    expect(screen.getAllByRole("button", { name: "Close" })).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "Check again" })).toBeVisible();
+    expect(
+      vi
+        .mocked(authenticatedFetch)
+        .mock.calls.every(([input]) => !String(input).includes("/credential")),
+    ).toBe(true);
+  });
 
-    response.resolve(
-      json({
-        object: "harness_credential",
-        harness: "codex-native",
-        configured_harnesses: { "codex-native": true },
-      }),
-    );
+  it("finishes Isaac setup when Check again reports gateway readiness", async () => {
+    vi.mocked(authenticatedFetch).mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/v1/harnesses") return json(catalog);
+      if (url.endsWith("/harnesses/refresh")) {
+        expect(init).toEqual({ method: "POST" });
+        return json({
+          configured_harnesses: { "codex-native": true },
+          gateway_inference: { "codex-native": true },
+        });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const props = renderDialog();
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("button", { name: "Authenticate" }));
+    await user.click(screen.getByRole("button", { name: "Check again" }));
+
     await waitFor(() =>
       expect(props.onFixed).toHaveBeenCalledWith({
         configuredHarnesses: { "codex-native": true },
@@ -137,31 +150,14 @@ describe("HarnessFixDialog", () => {
     expect(props.onOpenChange).toHaveBeenCalledWith(false);
   });
 
-  it("opens Databricks sign-in after a 409, polls status, and retries Isaac", async () => {
-    const status = deferred<Response>();
-    let credentialCalls = 0;
+  it("keeps Isaac setup open when Check again is not ready", async () => {
     vi.mocked(authenticatedFetch).mockImplementation(async (input) => {
       const url = String(input);
       if (url === "/v1/harnesses") return json(catalog);
-      if (url === "/v1/connections/databricks/status") return status.promise;
-      if (url.endsWith("/credential")) {
-        credentialCalls += 1;
-        if (credentialCalls === 1) {
-          return json(
-            {
-              detail: {
-                code: "databricks_not_connected",
-                message: "Connect Databricks first.",
-                connect_url: "/v1/connections/databricks/connect?workspace=acme",
-              },
-            },
-            { status: 409 },
-          );
-        }
+      if (url.endsWith("/harnesses/refresh")) {
         return json({
-          object: "harness_credential",
-          harness: "codex-native",
-          configured_harnesses: { "codex-native": true },
+          configured_harnesses: { "codex-native": "needs-auth" },
+          gateway_inference: { "codex-native": false },
         });
       }
       throw new Error(`Unexpected URL: ${url}`);
@@ -170,28 +166,11 @@ describe("HarnessFixDialog", () => {
     const user = userEvent.setup();
 
     await user.click(screen.getByRole("button", { name: "Authenticate" }));
-    expect(await screen.findByText("Waiting for Databricks sign-in")).toBeVisible();
-    expect(window.open).toHaveBeenCalledWith(
-      "/v1/connections/databricks/connect?workspace=acme",
-      "_blank",
-      "noopener,noreferrer",
-    );
-    await user.click(screen.getByRole("button", { name: "Open the Databricks sign-in tab again" }));
-    expect(window.open).toHaveBeenCalledTimes(2);
+    await user.click(screen.getByRole("button", { name: "Check again" }));
 
-    await act(async () =>
-      status.resolve(
-        json({
-          enabled: true,
-          connected: true,
-          workspace_host: "https://acme.cloud.databricks.com",
-          databricks_user: "user@example.com",
-          connected_at: 1,
-        }),
-      ),
-    );
-    await waitFor(() => expect(credentialCalls).toBe(2));
-    await waitFor(() => expect(props.onFixed).toHaveBeenCalled());
+    expect(await screen.findByText("Still not signed in on Local laptop.")).toBeVisible();
+    expect(props.onFixed).not.toHaveBeenCalled();
+    expect(props.onOpenChange).not.toHaveBeenCalledWith(false);
   });
 
   it("shows Claude's server command and succeeds after Check again", async () => {
@@ -219,7 +198,9 @@ describe("HarnessFixDialog", () => {
     ).toBeVisible();
     expect(screen.getByText("claude auth login --claudeai")).toBeVisible();
     expect(
-      screen.getByText("Sign in with your Claude plan when it opens the browser."),
+      screen.getByText(
+        "Open the link it prints, then paste the code from your browser back into the terminal.",
+      ),
     ).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Copy login command" }));
     expect(copyText).toHaveBeenCalledWith("claude auth login --claudeai");
@@ -253,9 +234,7 @@ describe("HarnessFixDialog", () => {
     await user.click(screen.getByRole("button", { name: "Authenticate" }));
 
     expect(screen.getByText("codex login --device-auth")).toBeVisible();
-    expect(
-      screen.getByText("Sign in with your ChatGPT plan when it opens the browser."),
-    ).toBeVisible();
+    expect(screen.getByText("Open the link it prints and enter the one-time code.")).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Check again" }));
     expect(await screen.findByText("Still not signed in on Local laptop.")).toBeVisible();
     expect(props.onFixed).not.toHaveBeenCalled();
@@ -339,7 +318,7 @@ describe("HarnessFixDialog", () => {
     );
   });
 
-  it("installs without a body and then applies the selected credential", async () => {
+  it("installs without a body and then shows the selected Isaac setup", async () => {
     vi.mocked(authenticatedFetch).mockImplementation(async (input, init) => {
       const url = String(input);
       if (url === "/v1/harnesses") return json(catalog);
@@ -352,11 +331,11 @@ describe("HarnessFixDialog", () => {
           version: "1.0.0",
         });
       }
-      if (url.endsWith("/credential")) {
+      if (url.endsWith("/harnesses/refresh")) {
+        expect(init).toEqual({ method: "POST" });
         return json({
-          object: "harness_credential",
-          harness: "codex-native",
           configured_harnesses: { "codex-native": true },
+          gateway_inference: { "codex-native": true },
         });
       }
       throw new Error(`Unexpected URL: ${url}`);
@@ -365,6 +344,10 @@ describe("HarnessFixDialog", () => {
     const user = userEvent.setup();
 
     await user.click(screen.getByRole("button", { name: "Install" }));
+    expect(
+      await screen.findByRole("heading", { name: "Set up Isaac for Codex on Local laptop" }),
+    ).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Check again" }));
     await waitFor(() => expect(props.onFixed).toHaveBeenCalled());
     expect(props.onFixed).toHaveBeenCalledWith({
       configuredHarnesses: { "codex-native": true },
