@@ -432,7 +432,8 @@ def _null_device_problem(path: str = os.devnull) -> _NullDeviceProblem | None:
         entry = os.lstat(path)
     except FileNotFoundError:
         return _NullDeviceProblem(f"{path} is missing", mknod)
-    except OSError:
+    except OSError as exc:
+        logger.debug("Skipping the %s check: %s", path, type(exc).__name__)
         return None
     if stat.S_ISLNK(entry.st_mode):
         # The link itself is what rm -f removes, whatever it points at.
@@ -440,7 +441,8 @@ def _null_device_problem(path: str = os.devnull) -> _NullDeviceProblem | None:
             target = os.stat(path)
         except FileNotFoundError:
             return _NullDeviceProblem(f"{path} is a dangling symbolic link", replace)
-        except OSError:
+        except OSError as exc:
+            logger.debug("Skipping the %s check: %s", path, type(exc).__name__)
             return None
         if _is_null_device(target):
             return None

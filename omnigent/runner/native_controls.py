@@ -985,8 +985,7 @@ def build_native_controls(
             # still registered; polling for readiness cannot help.
             return start_failure
         if terminal_registry.get(conv_id, terminal_name, "main") is None:
-            # Nothing was created and nothing is booting; the injection fails
-            # fast as it did before this heal existed.
+            # Nothing was created or is booting, so the injection should fail fast.
             return None
         deadline = time.monotonic() + _CLAUDE_PANE_READY_TIMEOUT_S
         while True:

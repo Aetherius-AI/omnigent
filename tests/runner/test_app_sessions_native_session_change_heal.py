@@ -12,6 +12,7 @@ from __future__ import annotations
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -851,3 +852,80 @@ async def test_failed_recreate_without_a_readable_error_still_fails_fast(
 
     assert resp.status_code == 503, resp.text
     assert resp.json()["detail"] == resource_routes._NATIVE_PANE_RECREATE_FAILED
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        (
+            b'{"error": {"code": "x", "error_id": "err_1", "message": "the start error"}}',
+            "the start error",
+        ),
+        (b"not json", None),
+        (b'["error"]', None),
+        (b'{"error": "flat string"}', None),
+        (b'{"error": {"code": "x"}}', None),
+        (b'{"error": {"message": ""}}', None),
+        (b'{"error": {"message": 7}}', None),
+        (b"", None),
+    ],
+)
+def test_terminal_start_error_message_reads_only_the_runner_envelope(
+    body: bytes, expected: str | None
+) -> None:
+    assert resource_routes._terminal_start_error_message(SimpleNamespace(body=body)) == expected
+
+
+def test_terminal_start_error_message_without_a_body() -> None:
+    assert resource_routes._terminal_start_error_message(object()) is None
+
+
+@pytest.mark.asyncio
+async def test_repaired_prerequisite_lets_the_next_control_recreate_the_pane(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Once the host is repaired, the next control re-creates the pane and applies."""
+    conv_id = "293a4b5c6d7e8f901a2b3c4d5e6f0718"
+    auto_create_calls: list[str] = []
+    app, registry = await _open_claude_native_session(
+        monkeypatch, conv_id=conv_id, auto_create_calls=auto_create_calls
+    )
+    auto_create_calls.clear()
+    bridge_dir = bridge_dir_for_conversation_id(conv_id)
+    _plant_dead_claude_pane(registry, conv_id, tmp_path, bridge_dir)
+    _break_claude_terminal_start(monkeypatch)
+    captured: list[str] = []
+    monkeypatch.setattr(
+        claude_native_bridge,
+        "inject_slash_command",
+        lambda _bridge_dir, *, command, **_kwargs: captured.append(command),
+    )
+    monkeypatch.setattr(claude_native_bridge, "claude_pane_ready", lambda _bridge_dir: True)
+
+    async def _launch_succeeds(
+        first: object = None, *_args: object, **_kwargs: object
+    ) -> SessionResourceView:
+        session_id = first if isinstance(first, str) else getattr(first, "session_id", conv_id)
+        auto_create_calls.append(session_id)
+        return SessionResourceView(
+            id="terminal_claude_main", type="terminal", session_id=session_id, name="claude"
+        )
+
+    async with _runner_client(app) as client:
+        event = {"type": "effort_change", "effort": "high"}
+        failed = await client.post(f"/v1/sessions/{conv_id}/events", json=event)
+        assert failed.status_code == 503, failed.text
+        assert captured == []
+        # The operator recreates /dev/null; nothing is restarted.
+        for target in (
+            "omnigent.runner.native.orchestration._auto_create_claude_terminal",
+            "omnigent.runner.native._auto_create_claude_terminal",
+            "omnigent.runner.native.orchestration._launch_claude",
+            "omnigent.runner.native._launch_claude",
+        ):
+            monkeypatch.setattr(target, _launch_succeeds)
+        repaired = await client.post(f"/v1/sessions/{conv_id}/events", json=event)
+
+    assert repaired.status_code == 204, repaired.text
+    assert auto_create_calls == [conv_id], "the repaired host must be re-created once"
+    assert captured == ["/effort high"]
