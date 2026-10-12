@@ -4,11 +4,13 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { showToast } from "@/components/ui/toast";
+import { copyText } from "@/lib/clipboard";
 import { authenticatedFetch } from "@/lib/identity";
 import { HarnessFixDialog, type HarnessFixDialogProps } from "./HarnessFixDialog";
 
 vi.mock("@/lib/identity", () => ({ authenticatedFetch: vi.fn() }));
 vi.mock("@/components/ui/toast", () => ({ showToast: vi.fn() }));
+vi.mock("@/lib/clipboard", () => ({ copyText: vi.fn().mockResolvedValue(undefined) }));
 
 function json(body: unknown, init: ResponseInit = {}) {
   return new Response(JSON.stringify(body), {
@@ -117,6 +119,9 @@ describe("HarnessFixDialog", () => {
       "https://auth.example/device",
     );
     expect(screen.getByText("ABCD-EFGH")).toBeVisible();
+    expect(screen.getByText("ABCD-EFGH")).toHaveClass("text-base", "font-semibold");
+    await user.click(screen.getByRole("button", { name: "Copy sign-in code" }));
+    expect(copyText).toHaveBeenCalledWith("ABCD-EFGH");
     expect(window.open).toHaveBeenCalledWith(
       "https://auth.example/device",
       "_blank",
@@ -168,6 +173,7 @@ describe("HarnessFixDialog", () => {
         object: "harness_install",
         harness: "opencode-native",
         configured_harnesses: { "opencode-native": true },
+        version: "2.0.0",
       }),
     );
     const props = renderDialog({
@@ -201,6 +207,7 @@ describe("HarnessFixDialog", () => {
           object: "harness_install",
           harness: "codex-native",
           configured_harnesses: { "codex-native": "needs-auth" },
+          version: "1.0.0",
         });
       }
       if (url.endsWith("/credential")) {
@@ -225,11 +232,11 @@ describe("HarnessFixDialog", () => {
     });
   });
 
-  it("uses the omni setup fallback for unsupported harness authentication", () => {
-    renderDialog({ harness: "cursor-native", harnessLabel: "Cursor" });
+  it("uses the omni setup fallback for Pi while its login flow is unsupported", () => {
+    renderDialog({ harness: "pi-native", harnessLabel: "Pi" });
 
     expect(screen.getByText(/Run/)).toHaveTextContent(
-      "Run omni setup on Local laptop to finish setting up Cursor.",
+      "Run omni setup on Local laptop to finish setting up Pi.",
     );
     expect(screen.queryByRole("radio")).not.toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "Close" })[0]).toBeVisible();

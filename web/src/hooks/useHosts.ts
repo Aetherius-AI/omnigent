@@ -176,6 +176,7 @@ export interface InstallHarnessResult {
   object: "harness_install";
   harness: string;
   configured_harnesses: Record<string, boolean | string>;
+  version: string | null;
 }
 
 export interface StartHarnessLoginResult {
@@ -341,10 +342,39 @@ export interface StoreCredentialInput {
   env_var?: string;
 }
 
-interface StoreCredentialResult {
+export interface StoreCredentialResult {
   object: "harness_credential";
   harness: string;
   configured_harnesses: Record<string, boolean | string>;
+}
+
+export function buildIsaacCredentialRequest(harness: string): StoreCredentialInput {
+  return { harness, kind: "gateway" };
+}
+
+export async function storeHarnessCredentialOnHost(
+  hostId: string,
+  input: StoreCredentialInput,
+): Promise<StoreCredentialResult> {
+  const { harness, ...body } = input;
+  const res = await authenticatedFetch(
+    `/v1/hosts/${encodeURIComponent(hostId)}/harnesses/${encodeURIComponent(harness)}/credential`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+  if (!res.ok) throw new Error(await responseDetail(res));
+  return (await res.json()) as StoreCredentialResult;
+}
+
+/** Provisional Isaac action; retarget this helper once the host contract lands. */
+export function configureIsaacCredential(
+  hostId: string,
+  harness: string,
+): Promise<StoreCredentialResult> {
+  return storeHarnessCredentialOnHost(hostId, buildIsaacCredentialRequest(harness));
 }
 
 /**
@@ -360,26 +390,7 @@ export function useStoreCredential(hostId: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (input: StoreCredentialInput): Promise<StoreCredentialResult> => {
-      const { harness, ...body } = input;
-      const res = await authenticatedFetch(
-        `/v1/hosts/${encodeURIComponent(hostId)}/harnesses/${encodeURIComponent(harness)}/credential`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        },
-      );
-      if (!res.ok) {
-        let detail = `${res.status} ${res.statusText}`;
-        try {
-          const err = (await res.json()) as { detail?: string };
-          if (typeof err.detail === "string" && err.detail) detail = err.detail;
-        } catch {
-          // Non-JSON error body — keep the status-line detail.
-        }
-        throw new Error(detail);
-      }
-      return (await res.json()) as StoreCredentialResult;
+      return storeHarnessCredentialOnHost(hostId, input);
     },
     // This mutation-level onSuccess patches the ["hosts"] cache (badge flip) and
     // invalidates the detect query so a just-adopted credential stops showing.

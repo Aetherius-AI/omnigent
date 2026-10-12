@@ -13,11 +13,11 @@ import {
 import { showToast } from "@/components/ui/toast";
 import {
   cancelHarnessLogin,
+  configureIsaacCredential,
   fetchHarnessLoginStatus,
   installHarnessOnHost,
   startHarnessLogin,
   useInstallHarness,
-  useStoreCredential,
 } from "@/hooks/useHosts";
 import { copyText } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";
@@ -44,14 +44,7 @@ export interface HarnessFixDialogProps {
 type CredentialChoice = "isaac" | "personal";
 type Phase = "choose" | "progress" | "error";
 
-const AUTHENTICATABLE_HARNESSES = new Set([
-  "claude",
-  "claude-native",
-  "codex",
-  "codex-native",
-  "pi",
-  "pi-native",
-]);
+const PERSONAL_LOGIN_HARNESSES = new Set(["claude", "claude-native", "codex", "codex-native"]);
 const LOGIN_POLL_MS = 1_000;
 
 export function HarnessFixDialog(props: HarnessFixDialogProps) {
@@ -75,8 +68,7 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
   const loginId = useRef<string | null>(null);
   const loginWindow = useRef<Window | null>(null);
   const install = useInstallHarness(hostId);
-  const storeCredential = useStoreCredential(hostId);
-  const authenticatable = AUTHENTICATABLE_HARNESSES.has(harness);
+  const personalLoginSupported = PERSONAL_LOGIN_HARNESSES.has(harness);
 
   const finish = useCallback(
     (configuredHarnesses: Record<string, boolean | string>, credentialDisplayLabel?: string) => {
@@ -132,10 +124,10 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
         return;
       }
 
-      const result = await storeCredential.mutateAsync({ harness, kind: "gateway" });
+      const result = await configureIsaacCredential(hostId, harness);
       if (runId.current === id) finish(result.configured_harnesses, "Isaac");
     },
-    [finish, harness, hostId, pollLogin, storeCredential],
+    [finish, harness, hostId, pollLogin],
   );
 
   const start = useCallback(async () => {
@@ -155,7 +147,7 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
       if (mode === "install") {
         const result = await install.mutateAsync(harness);
         if (runId.current !== id) return;
-        if (!authenticatable) {
+        if (!personalLoginSupported) {
           finish(result.configured_harnesses);
           return;
         }
@@ -164,7 +156,7 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
     } catch (reason) {
       fail(reason, id);
     }
-  }, [authenticate, authenticatable, choice, fail, finish, harness, hostId, install, mode]);
+  }, [authenticate, choice, fail, finish, harness, hostId, install, mode, personalLoginSupported]);
   const startRef = useRef(start);
   startRef.current = start;
 
@@ -205,7 +197,7 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
     if (mode === "update") void start();
   };
 
-  const unsupported = mode !== "update" && !authenticatable;
+  const unsupported = mode !== "update" && !personalLoginSupported;
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -412,25 +404,49 @@ function ProgressState({
               ]
         }
       />
-      {personal && authUrl && (
-        <p className="text-sm text-muted-foreground">
-          Browser didn’t open?{" "}
-          <a
-            href={authUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="text-foreground underline underline-offset-2"
-          >
-            Open the sign-in page
-          </a>
-        </p>
-      )}
-      {personal && userCode && (
-        <p className="text-sm text-muted-foreground">
-          Enter code <code className="font-mono text-foreground">{userCode}</code> if prompted.
-        </p>
+      {personal && (authUrl || userCode) && (
+        <PersonalLoginHandoff authUrl={authUrl} userCode={userCode} />
       )}
     </>
+  );
+}
+
+function PersonalLoginHandoff({
+  authUrl,
+  userCode,
+}: {
+  authUrl: string | null;
+  userCode: string | null;
+}) {
+  return (
+    <div className="flex flex-col gap-2 rounded-xl border border-border bg-muted/30 p-3">
+      <p className="text-sm text-muted-foreground">Browser didn’t open?</p>
+      <div className="flex flex-wrap items-center gap-2">
+        {userCode && (
+          <code className="mr-auto font-mono text-base font-semibold tracking-wide text-foreground">
+            {userCode}
+          </code>
+        )}
+        {userCode && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void copyText(userCode)}
+            aria-label="Copy sign-in code"
+          >
+            <CopyIcon className="size-3.5" />
+            Copy code
+          </Button>
+        )}
+        {authUrl && (
+          <Button asChild variant="outline" size="sm">
+            <a href={authUrl} target="_blank" rel="noreferrer">
+              Open the sign-in page
+            </a>
+          </Button>
+        )}
+      </div>
+    </div>
   );
 }
 
