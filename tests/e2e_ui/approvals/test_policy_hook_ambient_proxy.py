@@ -303,6 +303,11 @@ def _spawn_proxied_host_runner(
             last = repr(exc)
         time.sleep(_POLL_S)
     proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
     raise RuntimeError(
         f"proxied-host runner never came online (last: {last}); log:\n"
         f"{log_path.read_text()[-3000:]}"

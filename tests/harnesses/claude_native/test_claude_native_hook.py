@@ -1588,40 +1588,6 @@ def test_ask_user_question_subcommand_is_a_silent_noop(
     assert captured.err == ""
 
 
-def test_evaluate_policy_ignores_ambient_proxy_environment(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Policy callbacks must reach the local runner instead of an inherited proxy."""
-    client_options: dict[str, object] = {}
-
-    class _CapturingClient:
-        def __init__(self, **kwargs: object) -> None:
-            client_options.update(kwargs)
-
-        def __enter__(self) -> _CapturingClient:
-            return self
-
-        def __exit__(self, *_args: object) -> None:
-            return None
-
-        def post(self, url: str, *, json: dict[str, object]) -> httpx.Response:
-            return httpx.Response(200, request=httpx.Request("POST", url))
-
-    monkeypatch.setattr(native_policy_hook.httpx, "Client", _CapturingClient)
-
-    response, error = native_policy_hook.post_evaluate_with_retry(
-        "http://127.0.0.1:8787/v1/sessions/session/policies/evaluate",
-        {"Authorization": "Bearer token"},
-        {"event": {}},
-        read_timeout=60.0,
-        hook_label="evaluate-policy hook",
-    )
-
-    assert response is not None
-    assert error is None
-    assert client_options["trust_env"] is False
-
-
 @pytest.mark.parametrize("mode", ["connect_error", "non_2xx", "empty_body", "malformed_json"])
 def test_evaluate_policy_pre_tool_use_fails_closed_when_verdict_unavailable(
     tmp_path: Path,
