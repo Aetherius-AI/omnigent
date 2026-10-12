@@ -1600,7 +1600,14 @@ struct OmnigentWebView: UIViewRepresentable {
         decisionHandler(.cancel)
         return
       }
-      decisionHandler(response.canShowMIMEType ? .allow : .download)
+      let disposition = (response.response as? HTTPURLResponse)?
+        .value(forHTTPHeaderField: "Content-Disposition")
+      let isAttachment = disposition?
+        .split(separator: ";", maxSplits: 1)
+        .first?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .caseInsensitiveCompare("attachment") == .orderedSame
+      decisionHandler(response.canShowMIMEType && !isAttachment ? .allow : .download)
     }
 
     func handleWorkspaceHTTPStatus(_ status: Int) -> Bool {
