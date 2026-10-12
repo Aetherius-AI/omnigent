@@ -214,6 +214,65 @@ from guessing at code. Read the linked issue/ticket in full: its description, th
 reproduction steps, the version, any attached transcript or stack trace, and the
 discussion.
 
+Separate reported facts, observed facts, and hypotheses. Record the exact
+entry point, harness, build, authentication mode/profile, relevant configuration,
+and starting state; leave unknowns explicit. An OAuth user login, service
+principal, and PAT are different paths even when they show the same error.
+Do not replace the reported path with whichever configuration is easiest to run.
+
+Before choosing expected results, inspect relevant code, tests, and targeted
+history (`git log -S`, `git blame`, and linked decisions). An existing fallback
+or restriction may be intentional. Cite the rationale you find; absence of a
+comment is not evidence of accidental behavior. Keep observed symptoms separate
+from suspected causes. When code or logs suggest a competing explanation, use
+a discriminating observation or focused check and record what it supports or
+rules out. A familiar error message alone does not establish its cause.
+Follow the reported path to any shared registry, default, or policy definition
+that governs the behavior, then read its rationale, relevant callers, and tests.
+Do not infer the full contract from one local fallback.
+Even when the local fallback is explicit, follow the phase or operation type to
+its declaration and inspect other consumers for a shared table or default
+controlling error behavior. Cite that declaration, or a bounded search if absent.
+Follow imported policy symbols to their defining files: search for the declaration
+and other consumers. Record the governing symbol/value, definition path, historical
+rationale, and pinning test in `evidence`. A filename in search output or a symbol
+in a caller is not a definition read. If no shared definition exists, record the
+search that established that before choosing the test's expected result.
+
+For credential-lifetime or recovery hypotheses, first establish a working control
+through the reported credential-selection code and SDK. When external auth
+services are unavailable or sanitized, substitute only boundaries that this
+provider uses, with bounded local services and fake credentials. Static
+credentials need no invented issuance or refresh service. Keep application token
+resolution and the installed SDK intact; replacing the suspected component with
+canned results assumes the cause. Put timeouts on discovery and subprocess calls.
+After the control succeeds, follow the retained auth wrapper to its credential-
+producing delegate. Record that delegate's runtime class/module and the method
+actually invoked on it, without credential values. Profile-loading logs or
+subprocess calls shared by several providers do not identify which succeeded.
+If the executing delegate cannot be established, keep provider identity unresolved.
+Start with the smallest credential consumer, such as request-header construction,
+and preserve its working control before adding a long-running process. Add the
+full process only when the remaining hypothesis requires it. If initialization
+hangs, capture the blocking stack and output in the same bounded tool call; keep
+probe logs under the workspace. Use that observation to choose the next probe.
+If the stack identifies external configuration metadata/discovery calls, provide
+controlled responses and record whether the control reached them. Preserve other
+concrete blockers.
+Load an isolated version of the reported profile and use its credential at the
+caller's transport boundary. Keep the same application credential object while
+exercising the suspected expiry or rejection. Record whether it refreshes or
+recovers; mocking that object or its factory cannot satisfy this check. Complete
+this before writing a test that assumes stale credentials are the cause. A
+controlled check does not by itself reproduce an unavailable production incident;
+retain the controlled boundaries, concrete blockers and unsupported hypotheses.
+
+Keep this investigation bounded to the reported journey; a complete diagnosis
+is not required to hand off a valid reproduction. Preserve unresolved intent in
+`evidence` for Resolve and PR review. Do not turn a guess into an assertion or
+pause just because several fixes are possible. If missing report details prevent
+defining an observable failure, retain the `needs_more_info` rule below.
+
 Write down the concrete journey: the entry point (which screen/agent/command),
 the ordered user inputs, the environment/data it needed, and the observable
 failure (crash, traceback, wrong output, missing UI affordance). If the report is
@@ -556,14 +615,16 @@ fixed shape documented under Output, including `bug_url`, `verdict`, and
 `session_id`. Do this **before** authoring or recording work that could exhaust
 the turn, so CI can still dispatch the fix step if the final response is cut off.
 
-**Report reproducible test references.** For an unchanged reused test, give its
-exact repository revision, path/node ID, command, and result in `evidence`;
-do not paste the whole existing file into the final response. Keep its source
-available for the handoff. For new or modified reproduction tests, retain the
-complete files in retrievable evidence and show their complete, verbatim source
-in path-labelled code blocks immediately before the final JSON handoff. Do not
-truncate or substitute placeholders in those source blocks. The parser reads
-only the last JSON fence.
+**Report reproducible test references.** For every test, put its path/node ID,
+tested repository revision, exact command, result, and source location in
+`evidence`. Keep complete new or modified files at their declared `test_path`
+in the worktree, with any required fixtures and helpers; include their source
+hashes because the revision alone does not identify uncommitted changes.
+Locally, identify the Repro session's workspace. In CI, identify the run and
+`repro-bundle-<run-id>/files/<test_path>`; describe the upload as pending until
+confirmed. Check that the files exist before finishing, and report missing
+source explicitly. Summarize these references in the final response without
+pasting complete test files. Resolve reads the workspace or bundle files.
 
 ## Step 4 — Record the reproduction
 
@@ -616,16 +677,20 @@ choice:
   recording results, atomically rewrite it, and emit that same object in the
   final fence. The checkpoint and final block must not disagree.
 
-- Before the test references/source and JSON block, include a **Steps to reproduce**
+- Before the test references and JSON block, include a **Steps to reproduce**
   section using the manual recipe from Step 1: prerequisites, numbered actions,
   and expected/observed results at the relevant step. This section is required,
   even when a recording is available. For `needs_more_info` or
   `needs_manual_review`, include the known steps and clearly identify missing
   information or unverified steps; do not invent a successful reproduction.
+  For a component probe, label the manual user journey as unrun and report the
+  probe's observations separately. Before emitting either prose or JSON, match
+  each claimed observation to the executed operation and output. A printed label
+  is not proof that the named operation ran; a general stand-in caveat does not
+  make an unexecuted login, new process, connection, or recovery observed.
   You may also include a brief verdict and per-facet notes. Then, as the
-  last thing before the JSON block, report the reproduction tests per Step 3:
-  exact references for unchanged tests, and complete source blocks for new or
-  modified tests. But all of this is
+  last thing before the JSON block, give concise test references per Step 3,
+  including source locations and results. All of this is
   **context, not the contract**: everything the parser needs lives *inside* the
   JSON block, and the ```json block is the **last chunk** of the message, with
   nothing after its closing fence.
@@ -725,7 +790,23 @@ Field meanings:
   state, leaked subscriptions, timeouts) in `facets`/`evidence`.
 - `evidence` — what you observed live (snapshot reference, response, or log
   excerpt), plus any root-cause leads you noticed while reproducing (hypotheses
-  only — you do not fix).
+  only — you do not fix). Include the tested configuration, sources for expected
+  behavior, competing explanations checked, and remaining uncertainty. Keep this
+  concise and distinguish observations from inferences; never include secrets.
+  Before finalizing, check that this field contains the governing definition
+  (symbol/value and source), its rationale and pinning test, or the bounded
+  search establishing that no shared definition exists. A local handler alone
+  does not establish that absence: inspect shared policy/type declarations and
+  other consumers. For credential hypotheses, include the configured-path
+  control and observation from Step 1. Execute missing feasible checks before
+  the final handoff; preserve concrete blockers and unverified causes explicitly.
+  For credential-related investigations, identify the provider that actually
+  returns credentials using its runtime type or call trace, including fallback
+  selection. Attempted SDK setup is not successful provider execution. Without
+  that evidence, keep provider identity unresolved and do not claim its failure
+  mode was ruled out by a different provider's successful control.
+  Label fresh-instance header checks separately from new-process or successful-
+  connection checks, and keep unexercised outcomes unverified throughout the handoff.
 - `recordings` — the Step 4 captures: a list of
   `{"surface", "kind", "path", "format", "capture_mode", "caption"}` objects. `kind` is
   `"before"` for a `reproduced` facet's failing run or `"fixed"` for an
@@ -751,7 +832,7 @@ Field meanings:
   - Do not substitute a video of test output or a made-up demonstration.
 
 Keep other prose terse, but include the full manual reproduction recipe and
-the test references/source described in Step 3. You produce the live-confirmed reproduction +
+the test references described in Step 3. You produce the live-confirmed reproduction +
 the test; the fix step takes it from here. You take no further
 action — no fix, no merge, no push.
 
