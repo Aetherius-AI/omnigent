@@ -366,7 +366,7 @@ function harnessVersion(harness: string, host: Host): string | undefined {
 
 function credentialLabel(host: Host | null, harness: string, override?: string) {
   if (override) return override;
-  return host?.gateway_inference?.[harness] === true ? "Isaac" : "Personal subscription";
+  return host?.gateway_inference?.[harness] === true ? "Isaac" : "Signed in";
 }
 
 function reconfigurationReason(reason: string | null) {

@@ -245,7 +245,7 @@ describe("Harnesses grid", () => {
     renderHarnesses();
 
     expect(within(card("claude-native")).getByText("Configured")).toBeTruthy();
-    expect(within(card("claude-native")).getByText("· Personal subscription")).toBeTruthy();
+    expect(within(card("claude-native")).getByText("· Signed in")).toBeTruthy();
     expect(screen.queryByTestId("harness-action-claude-native")).toBeNull();
 
     const warning = within(card("codex-native")).getByLabelText(
@@ -267,6 +267,14 @@ describe("Harnesses grid", () => {
     expect(dialog.getAttribute("data-harness")).toBe("codex-native");
     expect(dialog.getAttribute("data-host")).toBe("h1");
     expect(dialog.getAttribute("data-mode")).toBe("install");
+  });
+
+  it("uses the existing inventory label instead of guessing a personal subscription", () => {
+    hosts = [{ ...ONLINE, gateway_inference: { "claude-native": false } }];
+    renderHarnesses();
+
+    expect(within(card("claude-native")).getByText("· Signed in")).toBeTruthy();
+    expect(within(card("claude-native")).queryByText(/Personal subscription/)).toBeNull();
   });
 
   it("treats unknown readiness (host reports nothing) as neutral, not needs-setup", () => {
@@ -644,7 +652,7 @@ describe("Launch settings compatibility", () => {
     startupError = new ApiError("unavailable", status, null);
     renderHarnesses("claude-native");
     selectTab("Settings");
-    expect(screen.getByText("Personal subscription")).toBeTruthy();
+    expect(screen.getByText("Signed in")).toBeTruthy();
     expect(screen.queryByText("Startup configuration")).toBeNull();
     if (status === 501)
       expect(screen.getByText("Update my-laptop to see launch settings.")).toBeTruthy();
