@@ -56,6 +56,13 @@ if TYPE_CHECKING:
     from omnigent.harnesses.codex_native.bridge import CodexNativeBridgeState
 
 
+class SubagentWorkEntryRef(Protocol):
+    """The sub-agent work entry a delivery acted on, mutable where a confirmed
+    kill must mark the abort so a late survivor completion cannot overturn it."""
+
+    cancellation_confirmed: bool
+
+
 class SubagentDeliveryAck(Protocol):
     """Result of attempting to deliver a terminal sub-agent payload."""
 
@@ -64,7 +71,7 @@ class SubagentDeliveryAck(Protocol):
         raise NotImplementedError
 
     @property
-    def entry(self) -> object | None:
+    def entry(self) -> SubagentWorkEntryRef | None:
         raise NotImplementedError
 
     @property
