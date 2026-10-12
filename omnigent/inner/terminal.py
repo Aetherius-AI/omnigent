@@ -1768,7 +1768,7 @@ class TerminalInstance:
                 # Only a server that died while daemonizing can be blamed on
                 # /dev/null; other tmux errors keep their own diagnostic.
                 if _TMUX_SERVER_EXITED_UNEXPECTEDLY in stderr:
-                    problem = _null_device_problem()
+                    problem = _null_device_problem(os.devnull)
                     if problem is not None:
                         raise _terminal_launch_prerequisite_error(problem) from launch_error
                 raise launch_error
