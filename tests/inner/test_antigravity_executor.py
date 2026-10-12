@@ -242,10 +242,17 @@ class _FakeAgent:
 
 
 _MODEL_NOT_PROVIDED = object()
+_POLICIES_NOT_PROVIDED = object()
 
 
 class _FakeLocalAgentConfig:
-    """Mirror of ``LocalAgentConfig`` — accepts exactly the fields the executor sets."""
+    """Mirror of ``LocalAgentConfig`` — accepts the fields the executor may set.
+
+    The real ``LocalAgentConfig`` accepts a ``policies`` kwarg that governs the
+    native built-in tools (e.g. ``run_command``); when omitted the SDK applies
+    its default ``confirm_run_command()``. The fake tracks whether the executor
+    passed one via ``policies_provided``.
+    """
 
     def __init__(
         self,
@@ -258,7 +265,7 @@ class _FakeLocalAgentConfig:
         location: str | None = None,
         tools: Any = None,
         hooks: Any = None,
-        policies: Any = None,
+        policies: Any = _POLICIES_NOT_PROVIDED,
     ) -> None:
         self.system_instructions = system_instructions
         self.model = model if isinstance(model, str) else None
@@ -269,7 +276,8 @@ class _FakeLocalAgentConfig:
         self.location = location
         self.tools = tools
         self.hooks = hooks
-        self.policies = policies
+        self.policies_provided = policies is not _POLICIES_NOT_PROVIDED
+        self.policies = None if policies is _POLICIES_NOT_PROVIDED else policies
 
 
 class _FakePostToolCallHook:
@@ -892,6 +900,36 @@ async def test_no_tool_executor_means_no_sdk_tools(monkeypatch: pytest.MonkeyPat
     )
 
     assert captured["configs"][0].tools is None
+
+
+@pytest.mark.asyncio
+async def test_run_command_is_not_left_to_default_deny_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The executor must configure a run_command policy, not the SDK default.
+
+    Native built-in tools such as ``run_command`` are governed by
+    ``LocalAgentConfig.policies``. When the executor passes none, the SDK
+    applies its default ``confirm_run_command()`` with no ``AskUserHandler``,
+    which denies every ``run_command`` as 'Denied by policy confirm_run_command'
+    and surfaces a bare, unrecoverable ``ExecutorError`` with no approval card —
+    so a user cannot run any shell command on an Antigravity-brain agent
+    (Polly / Debby). The executor must instead configure ``policies`` (a
+    permissive policy, or ``confirm_run_command`` wired to an approval handler).
+    """
+    captured = _install_fake_sdk(monkeypatch, scripts=[[_text_step("done")]])
+    executor = AntigravityExecutor(model="gemini-2.5-flash", api_key="k")
+
+    await _drain(
+        executor,
+        [{"role": "user", "content": "create a file and run ls", "session_id": "s1"}],
+    )
+
+    config = captured["configs"][0]
+    assert config.policies_provided and config.policies, (
+        "executor built LocalAgentConfig without a policies kwarg, so the SDK "
+        "default confirm_run_command() denies run_command with no recovery"
+    )
 
 
 @pytest.mark.asyncio
@@ -1632,6 +1670,34 @@ async def test_error_step_after_approved_run_command_still_fails_turn(
 
     errors = [e for e in events if isinstance(e, ExecutorError)]
     assert len(errors) == 1 and errors[0].message == "model exploded"
+    assert not any(isinstance(e, TurnComplete) for e in events)
+
+
+@pytest.mark.asyncio
+async def test_unrelated_error_after_denied_run_command_still_fails_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A queued refusal absorbs only the harness's denial report, not any ERROR step."""
+    script: list[_TurnAction] = [
+        _ConfirmRunCommand(_RUN_COMMAND),
+        _YieldStep(
+            _FakeStep(step_type=_StepType.FINISH, status=_StepStatus.ERROR, error="model exploded")
+        ),
+    ]
+    _install_fake_sdk(monkeypatch, scripts=[script])
+    executor = AntigravityExecutor()
+
+    async def _decline(tool_name: str, tool_input: dict[str, Any]) -> bool:
+        return False
+
+    executor._elicitation_handler = _decline
+
+    events = await _drain(executor, [{"role": "user", "content": "run ls", "session_id": "s1"}])
+
+    errors = [e for e in events if isinstance(e, ExecutorError)]
+    assert len(errors) == 1 and errors[0].message == "model exploded"
+    # The unrelated error is not rewritten into a run_command failure.
+    assert not any(isinstance(e, (ToolCallRequest, ToolCallComplete)) for e in events)
     assert not any(isinstance(e, TurnComplete) for e in events)
 
 

@@ -305,6 +305,23 @@ class _DeniedTool:
     args: ToolArgs
 
 
+def _is_denial_report(text: str, denied: _DeniedTool) -> bool:
+    """Whether an ERROR step's text is the harness reporting the refused *denied* call.
+
+    The harness wraps the policy hook's answer, e.g. ``Denied by user
+    (confirm_run_command). ("denied by pre-tool hook: ...")``. Anything else is
+    an unrelated turn error and must not be mistaken for the queued refusal.
+    """
+    lowered = text.lower()
+    if "denied" not in lowered:
+        return False
+    return (
+        "pre-tool hook" in lowered
+        or "confirm_run_command" in lowered
+        or denied.name.lower() in lowered
+    )
+
+
 @dataclass
 class _AntigravitySessionState:
     """Per-session state for the Antigravity executor.
@@ -792,14 +809,19 @@ class AntigravityExecutor(Executor):
     def _complete_denied_tool(self, step: SDKStep, state: _AntigravitySessionState) -> bool:
         """Turn the ERROR step reporting a confirmation-time denial into a failed tool call.
 
-        Returns ``False`` when no denial is outstanding, leaving the step a turn error."""
+        Returns ``False`` when no denial is outstanding or the step does not carry
+        the harness's denial report, leaving the step a turn error."""
         queue = state.active_queue
         if queue is None or not state.denied_tools:
             return False
-        denied = state.denied_tools.popleft()
+        denied = state.denied_tools[0]
+        reported = getattr(step, "error", "") or ""
+        if not _is_denial_report(reported or getattr(step, "content_delta", "") or "", denied):
+            return False
+        state.denied_tools.popleft()
         raw_id = getattr(step, "id", None)
         call_id = raw_id if isinstance(raw_id, str) and raw_id else uuid.uuid4().hex
-        error = getattr(step, "error", "") or f"{denied.name} was not approved"
+        error = reported or f"{denied.name} was not approved"
         queue.put_nowait(
             ToolCallRequest(name=denied.name, args=denied.args, metadata={"call_id": call_id})
         )

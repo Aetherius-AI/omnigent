@@ -1,6 +1,7 @@
 """E2E: the Antigravity SDK brain must surface a run_command approval, not a fatal deny.
 
-Polly asks for shell work against a scripted mock Gemini through a real ``omnigent host``."""
+Polly asks for shell work against a scripted mock Gemini through a real ``omnigent host``.
+Approving the card runs the command; rejecting it leaves the command unrun."""
 
 from __future__ import annotations
 
@@ -31,6 +32,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 _POLLY_AGENT_NAME = "polly"
 _PROMPT = "create a file and run ls, then delete it"
+_REPLY_AFTER_TOOL = "The directory listing is above."
 # The SDK refuses to start without a Gemini-shaped key; this one only ever reaches the mock.
 _FAKE_GEMINI_KEY = "AIzaSyOmnigentE2eFakeKey00000000000000000"
 
@@ -40,6 +42,8 @@ _TURN_OUTCOME_TIMEOUT_MS = 240_000
 _VIEWPORT = {"width": 1280, "height": 720}
 
 _APPROVAL_CARD = '[data-testid="approval-card"]'
+_PENDING_CARD = f'{_APPROVAL_CARD}[data-state="pending"]'
+_RESPONDED_CARD = f'{_APPROVAL_CARD}[data-state="responded"]'
 _ERROR_PILL = '[data-testid="error-pill"]'
 _ASSISTANT_BUBBLE = '[data-testid="message-bubble"][data-role="assistant"]'
 
@@ -51,12 +55,12 @@ pytestmark = pytest.mark.skipif(
 
 def _run_in_fresh_loop(coro: Coroutine[Any, Any, None]) -> None:
     """Run *coro* to completion in a dedicated thread with its own event loop."""
-    captured: dict[str, BaseException] = {}
+    captured: dict[str, Exception] = {}
 
     def _worker() -> None:
         try:
             asyncio.run(coro)
-        except BaseException as exc:
+        except Exception as exc:
             captured["error"] = exc
 
     thread = threading.Thread(target=_worker)
@@ -67,10 +71,15 @@ def _run_in_fresh_loop(coro: Coroutine[Any, Any, None]) -> None:
 
 
 class _MockGemini:
-    """Gemini ``streamGenerateContent`` mock whose first model turn calls ``run_command``."""
+    """Gemini ``streamGenerateContent`` mock whose first model turn calls ``run_command``.
+
+    The proposed command creates ``marker`` in the workspace, so whether the
+    command actually ran is visible on disk, not just in the transcript.
+    """
 
     def __init__(self, workspace: str) -> None:
         self.requests: list[dict[str, Any]] = []
+        self.marker = "omnigent-run-command-marker"
         self._workspace = workspace
         self._lock = threading.Lock()
         mock = self
@@ -106,14 +115,14 @@ class _MockGemini:
         contents = body.get("contents") or []
         last_parts = (contents[-1].get("parts") if contents else None) or []
         if any("functionResponse" in part for part in last_parts):
-            parts: list[dict[str, Any]] = [{"text": "The directory listing is above."}]
+            parts: list[dict[str, Any]] = [{"text": _REPLY_AFTER_TOOL}]
         else:
             parts = [
                 {
                     "functionCall": {
                         "name": "run_command",
                         "args": {
-                            "CommandLine": "ls",
+                            "CommandLine": f"touch {self.marker} && ls",
                             "Cwd": self._workspace,
                             "Blocking": True,
                             "SafeToAutoRun": False,
@@ -138,11 +147,11 @@ class _MockGemini:
             return b"data: " + data + b"\r\n\r\n"
         return data
 
-    def run_command_outcomes(self) -> list[str]:
+    def run_command_outcomes(self, start: int = 0) -> list[str]:
         """The ``run_command`` function responses the SDK relayed back to the model."""
         outcomes: list[str] = []
         with self._lock:
-            bodies = list(self.requests)
+            bodies = list(self.requests[start:])
         for body in bodies:
             for content in body.get("contents") or []:
                 for part in content.get("parts") or []:
@@ -271,9 +280,27 @@ async def _dismiss_menus(page: Any) -> None:
         await page.keyboard.press("Escape")
 
 
+async def _read_error_pill(page: Any) -> str:
+    error_pill = page.locator(_ERROR_PILL)
+    if await error_pill.count() == 0:
+        return ""
+    pill = error_pill.first
+    headline = pill.get_by_test_id("error-headline")
+    if await headline.count() > 0:
+        with contextlib.suppress(Exception):
+            await headline.click()
+            await page.wait_for_timeout(500)
+    return (await pill.inner_text()).strip()
+
+
 async def _drive(
-    base_url: str, host: dict[str, Any], agent_id: str, result: dict[str, Any]
+    base_url: str,
+    host: dict[str, Any],
+    agent_id: str,
+    decision: str,
+    result: dict[str, Any],
 ) -> None:
+    """Start a Polly-on-Antigravity session, send the prompt, answer the card with *decision*."""
     context_kwargs: dict[str, Any] = {"viewport": _VIEWPORT}
     if os.environ.get("OMNIGENT_E2E_RECORD_DIR"):
         context_kwargs["record_video_size"] = _VIEWPORT
@@ -308,46 +335,56 @@ async def _drive(
             match = re.search(r"/c/([0-9a-f]+)", page.url)
             result["session_id"] = match.group(1) if match else None
 
-            approval = page.locator(_APPROVAL_CARD)
+            pending = page.locator(_PENDING_CARD)
             error_pill = page.locator(_ERROR_PILL)
             assistant = page.locator(_ASSISTANT_BUBBLE)
             await (
-                approval.or_(error_pill)
+                pending.or_(error_pill)
                 .or_(assistant)
                 .first.wait_for(state="visible", timeout=_TURN_OUTCOME_TIMEOUT_MS)
             )
             # Let a trailing error/approval land after the first visible outcome.
-            await page.wait_for_timeout(5_000)
-
+            await page.wait_for_timeout(3_000)
             result["approval_visible"] = (
-                await approval.count() > 0 and await approval.first.is_visible()
+                await pending.count() > 0 and await pending.first.is_visible()
             )
-            if await error_pill.count() > 0:
-                pill = error_pill.first
-                headline = pill.get_by_test_id("error-headline")
-                if await headline.count() > 0:
-                    with contextlib.suppress(Exception):
-                        await headline.click()
-                        await page.wait_for_timeout(500)
-                result["error_pill"] = (await pill.inner_text()).strip()
-            await page.wait_for_timeout(2_000)
+            if not result["approval_visible"]:
+                result["error_pill"] = await _read_error_pill(page)
+                return
+
+            card = pending.first
+            result["card_text"] = (await card.inner_text()).strip()
+            await card.get_by_role("button", name=decision.capitalize()).click()
+            responded = page.locator(_RESPONDED_CARD).first
+            await responded.wait_for(state="visible", timeout=30_000)
+            result["responded_text"] = (await responded.inner_text()).strip()
+
+            if decision == "approve":
+                reply = assistant.filter(has_text=_REPLY_AFTER_TOOL)
+                await reply.or_(error_pill).first.wait_for(
+                    state="visible", timeout=_TURN_OUTCOME_TIMEOUT_MS
+                )
+                result["reply_visible"] = await reply.count() > 0
+            # Give a (wrongly) executed command time to show up on disk before we look.
+            await page.wait_for_timeout(5_000)
+            result["error_pill"] = await _read_error_pill(page)
+            await page.wait_for_timeout(1_500)
         finally:
             await page.close()
             await context.close()
             await browser.close()
 
 
-@pytest.mark.timeout(900)
-def test_antigravity_sdk_run_command_surfaces_approval_card(
-    live_server: str,
-    antigravity_sdk_host: dict[str, Any],
-) -> None:
-    """Polly on the Antigravity brain proposes ``run_command`` → an approval card, not a deny."""
-    mock: _MockGemini = antigravity_sdk_host["mock"]
+def _run_journey(
+    live_server: str, host: dict[str, Any], decision: str, marker: str
+) -> dict[str, Any]:
+    mock: _MockGemini = host["mock"]
+    mock.marker = marker
+    start = len(mock.requests)
     agent_id = _builtin_polly_id(live_server)
     result: dict[str, Any] = {}
     try:
-        _run_in_fresh_loop(_drive(live_server, antigravity_sdk_host, agent_id, result))
+        _run_in_fresh_loop(_drive(live_server, host, agent_id, decision, result))
     finally:
         session_id = result.get("session_id")
         transcript_errors: list[str] = []
@@ -364,28 +401,72 @@ def test_antigravity_sdk_run_command_surfaces_approval_card(
                     if item.get("type") == "error"
                 ]
         result["transcript_errors"] = transcript_errors
+        result["run_command_outcomes"] = mock.run_command_outcomes(start)
+        result["marker_exists"] = (Path(host["workspace"]) / marker).exists()
+        result["mock_requests"] = len(mock.requests) - start
 
     sdk_version = importlib.metadata.version("google-antigravity")
-    host_log_tail = Path(antigravity_sdk_host["log_path"]).read_text()[-1500:]
-    assert mock.requests, (
+    host_log_tail = Path(host["log_path"]).read_text()[-1500:]
+    assert result["mock_requests"], (
         "the Antigravity SDK never reached the mock Gemini endpoint — the journey did not "
         f"exercise the model (google-antigravity {sdk_version}); host log:\n{host_log_tail}"
     )
-
-    outcomes = mock.run_command_outcomes()
     pill_text = result.get("error_pill") or ""
     denied = "confirm_run_command" in pill_text or any(
         "confirm_run_command" in err for err in result["transcript_errors"]
     )
-    ran_unapproved = any("completed successfully" in outcome for outcome in outcomes)
     if denied:
         observed = "the turn died with the SDK's policy denial and no approval card"
-    elif ran_unapproved:
+    elif result["marker_exists"] and not result.get("approval_visible"):
         observed = "the SDK auto-approved the command and it ran with no approval card"
     else:
         observed = "no approval card was rendered"
     assert result.get("approval_visible"), (
         f"Antigravity's run_command must surface Omnigent's approval card; instead {observed}. "
         f"google-antigravity {sdk_version}; error pill: {pill_text!r}; transcript errors: "
-        f"{result['transcript_errors']!r}; run_command results relayed to the model: {outcomes!r}"
+        f"{result['transcript_errors']!r}; run_command results relayed to the model: "
+        f"{result['run_command_outcomes']!r}"
     )
+    assert "run_command" in result["card_text"], result["card_text"]
+    return result
+
+
+@pytest.mark.timeout(900)
+def test_antigravity_sdk_run_command_approval_runs_the_command(
+    live_server: str,
+    antigravity_sdk_host: dict[str, Any],
+) -> None:
+    """Approving the card runs the command, the reply lands, and no error pill appears."""
+    result = _run_journey(live_server, antigravity_sdk_host, "approve", "approved-marker")
+
+    assert "Approved" in result["responded_text"], result["responded_text"]
+    assert result["marker_exists"], (
+        "the approved run_command never ran: "
+        f"relayed results {result['run_command_outcomes']!r}; error pill "
+        f"{result.get('error_pill')!r}; transcript errors {result['transcript_errors']!r}"
+    )
+    assert result["run_command_outcomes"], "the SDK relayed no run_command result to the model"
+    assert result.get("reply_visible"), (
+        f"the model's reply after the tool never rendered; error pill {result.get('error_pill')!r}"
+    )
+    assert not result.get("error_pill"), result["error_pill"]
+    assert not result["transcript_errors"], result["transcript_errors"]
+
+
+@pytest.mark.timeout(900)
+def test_antigravity_sdk_run_command_rejection_leaves_command_unrun(
+    live_server: str,
+    antigravity_sdk_host: dict[str, Any],
+) -> None:
+    """Rejecting the card marks it rejected and the command never runs, without a turn error."""
+    result = _run_journey(live_server, antigravity_sdk_host, "reject", "rejected-marker")
+
+    assert "Rejected" in result["responded_text"], result["responded_text"]
+    assert not result["marker_exists"], "the rejected run_command ran anyway"
+    pill_text = result.get("error_pill") or ""
+    assert "inner executor error" not in pill_text and "confirm_run_command" not in pill_text, (
+        pill_text
+    )
+    assert not any("inner executor error" in err for err in result["transcript_errors"]), result[
+        "transcript_errors"
+    ]
