@@ -8884,6 +8884,21 @@ def test_history_search_in_a_box_wider_than_the_pane_still_reads_as_occupied() -
     assert _occupying_surface(pane) == "the prompt-history search"
 
 
+def test_permission_mode_reads_the_footer_below_a_wrapped_closing_rule() -> None:
+    """The footer region starts below the whole wrapped closing rule, stub included."""
+    pane = "\n".join(
+        [
+            f" {_PANE_WIDE_TITLE[:55]}",
+            "─",
+            "❯ ",
+            "─" * 57,
+            "─",
+            "  ⏸ plan mode on (shift+tab to cycle)",
+        ]
+    )
+    assert claude_native_bridge._permission_mode_from_pane(pane) == "plan"
+
+
 def test_claude_prompt_rendered_ignores_a_menu_row_above_a_rule() -> None:
     """
     A selected menu row directly above a rule is not a composer.
@@ -8932,21 +8947,29 @@ def test_claude_prompt_rendered_ignores_a_menu_row_under_a_glyph_terminated_line
     assert _claude_prompt_rendered(pane) is False
 
 
-def test_claude_prompt_rendered_ignores_an_echoed_prompt_under_a_glyph_terminated_line() -> None:
+@pytest.mark.parametrize(
+    "rule_rows",
+    [["─" * 40], ["───", "─" * 40], ["─", "─" * 40]],
+    ids=["single-rule", "divider-then-rule", "stub-then-rule"],
+)
+def test_claude_prompt_rendered_ignores_an_echoed_prompt_under_a_glyph_terminated_line(
+    rule_rows: list[str],
+) -> None:
     """
     An echoed prompt above a dialog's rule is not a composer.
 
     A transcript line at the pane edge can end in a rule glyph, but a box
-    wider than the pane wraps its closing rule onto more than one row, and
-    the one single-row shape is the title that exactly fills the opening
-    rule, one space in. A full-width line ending in ``─`` over a scrollback
-    ``❯`` above a dialog's rule is neither, so the dialog keeps the gate shut.
+    wider than the pane wraps its closing rule into rows no wider than the
+    first, and the one single-row shape is the title that exactly fills the
+    opening rule, one space in. A full-width line ending in ``─`` over a
+    scrollback ``❯`` above a dialog's rule is neither, with or without a
+    short divider or stray glyph row touching that rule.
     """
     pane = "\n".join(
         [
             "● build output trails off… ─",
             "❯ old prompt echo",
-            "─" * 40,
+            *rule_rows,
             "  Rewind",
             "  Restore the code and/or conversation to the point before…",
             "  ❯ (current)",

@@ -84,7 +84,12 @@ class PaneMirror:
             msg = json.loads(payload)
         except ValueError:
             return
-        if isinstance(msg, dict) and msg.get("type") == "resize":
+        if (
+            isinstance(msg, dict)
+            and msg.get("type") == "resize"
+            and "cols" in msg
+            and "rows" in msg
+        ):
             with self.lock:
                 self.cols, self.rows = int(msg["cols"]), int(msg["rows"])
                 self.screen.resize(self.rows, self.cols)
@@ -110,12 +115,12 @@ def _wait_for(page: Page, predicate: Callable[[], bool], timeout_s: float, what:
     raise AssertionError(f"timed out after {timeout_s}s waiting for {what}")
 
 
-def _row_above_prompt(pane: str) -> str | None:
-    """Return the row directly above the last ``❯``-led row (the live composer)."""
+def _frame_around_prompt(pane: str) -> tuple[str, list[str]] | None:
+    """Return the row above the last ``❯``-led row (the composer) and the two rows below it."""
     lines = [line for line in pane.splitlines() if line.strip()]
     for idx in range(len(lines) - 1, 0, -1):
         if lines[idx].strip().startswith("❯"):
-            return lines[idx - 1]
+            return lines[idx - 1], lines[idx + 1 : idx + 3]
     return None
 
 
@@ -123,7 +128,13 @@ def _rename_from_terminal(page: Page, mirror: PaneMirror, title: str) -> None:
     """Type ``/rename <title>`` into the embedded TUI and wait for Claude Code's confirmation."""
     _focus_tui(page)
     page.keyboard.type(f"/rename {title}", delay=15)
-    page.wait_for_timeout(500)
+    typed = "".join(title[-12:].split())
+    _wait_for(
+        page,
+        lambda: typed in "".join(mirror.text().split()),
+        10.0,
+        "the rename draft to land in the composer",
+    )
     page.keyboard.press("Enter")
     marker = title[:12]
     # The confirmation and the echoed title wrap at the pane width, so match
@@ -190,18 +201,30 @@ def test_native_claude_composer_delivers_under_title_wider_than_terminal(
 
         _rename_from_terminal(page, mirror, title)
         pane = mirror.text()
-        rule_row = _row_above_prompt(pane)
+        frame = _frame_around_prompt(pane)
+        assert frame is not None, f"no ❯ row after /rename; pane was:\n{pane}"
+        above, below = frame
         _log.info(
-            "terminal %dx%d; row above the composer after /rename: %r",
+            "terminal %dx%d; rows around the composer after /rename: above=%r below=%r",
             mirror.cols,
             mirror.rows,
-            rule_row,
+            above,
+            below,
         )
-        assert rule_row is not None and rule_row.rstrip().endswith("─"), (
-            f"expected the title's tail and trailing rule glyph above ❯; pane was:\n{pane}"
+        # The renderer either wrapped the box (a full-width closing row plus a
+        # shorter continuation) or clipped the title one space in with "…";
+        # both leave the opening rule's trailing glyph directly above ❯.
+        wrapped = (
+            len(below) >= 2
+            and below[0] == "─" * mirror.cols
+            and 0 < len(below[1]) < mirror.cols
+            and set(below[1]) <= _BOX_RULE_CHARS
         )
-        assert rule_row.strip()[0] not in _BOX_RULE_CHARS, (
-            f"the title did not consume the leading rule glyphs: {rule_row!r}\n{pane}"
+        clipped = (
+            above.startswith(" ") and not above.startswith("  ") and above.rstrip().endswith("… ─")
+        )
+        assert above.rstrip().endswith("─") and (wrapped or clipped), (
+            f"expected a wrapped or clipped title frame around ❯; pane was:\n{pane}"
         )
         page.wait_for_timeout(2000)
 
@@ -219,7 +242,7 @@ def test_native_claude_composer_delivers_under_title_wider_than_terminal(
             _log.info("error pill: %s\ntranscript errors: %s", pill_text, errors)
             raise AssertionError(
                 "the message was not delivered although the terminal showed an idle ❯ "
-                f"under {rule_row!r}:\n{pill_text}\n\ntranscript errors: {errors}"
+                f"under {above!r}:\n{pill_text}\n\ntranscript errors: {errors}"
             )
         expect(reply).to_be_visible()
         page.wait_for_timeout(2000)

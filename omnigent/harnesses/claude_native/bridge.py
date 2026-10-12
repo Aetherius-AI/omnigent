@@ -5734,14 +5734,12 @@ def _composer_row(pane: str) -> str | None:
     terminal), the lowest rule is the opening one and the row under it is
     the composer.
 
-    A title wider than the pane wraps the whole box: the opening rule's
-    trailing glyph drops to its own row or trails a bare slice of the
-    title, so no row of that rule reads as one, and the closing rule wraps
-    onto stub rows. Rules are therefore read as bands (:func:`_rule_bands`),
-    and when no composer glyph sits under the opening rule the box is read
-    upward from its closing rule (:func:`_composer_row_above_closing_rule`)
-    before the row under the lowest rule is tried: with a complete box that
-    row is the ``?`` panel's "! for shell mode" row.
+    Rules are read as bands (:func:`_rule_bands`) because a box wider than
+    the pane wraps them. When a title wraps the opening rule beyond
+    recognition, the composer is found by scanning upward from the closing
+    rule band (:func:`_composer_row_above_closing_rule`), tried before the
+    row under the lowest rule: with a complete box that row is the ``?``
+    panel's "! for shell mode" row.
 
     :param pane: Captured pane text from :func:`_capture_pane`.
     :returns: The row's text, e.g. ``"❯ fix the bug"`` or ``"!"`` in shell
@@ -5781,9 +5779,9 @@ def _composer_row_above_closing_rule(
     framed: its composer is the mode-glyph row above the closing rule, past
     the draft's indented continuation rows, and the row above it ends in
     the opening rule's glyph (:func:`_is_rule_tail`). A box wider than the
-    pane wraps its closing rule onto further rows as well; the one shape
-    that keeps a single-row closing rule is a title that exactly fills the
-    opening rule, one space in (:func:`_is_edge_aligned_title_row`). An
+    pane wraps its closing rule as well (:func:`_is_wrapped_rule`); the one
+    shape that keeps a single-row closing rule is a title that exactly fills
+    the opening rule, one space in (:func:`_is_edge_aligned_title_row`). An
     echoed prompt under a transcript line that happens to end in a rule
     glyph meets neither condition.
 
@@ -5792,7 +5790,7 @@ def _composer_row_above_closing_rule(
     :returns: The composer row, or ``None`` when the rows above the closing
         rule are not framed that way.
     """
-    first, last = closing_rule
+    first = closing_rule[0]
     idx = first - 1
     while idx > 0 and lines[idx].startswith("  "):
         idx -= 1
@@ -5801,7 +5799,7 @@ def _composer_row_above_closing_rule(
     above = lines[idx - 1]
     if not _is_rule_tail(above):
         return None
-    if first == last and not _is_edge_aligned_title_row(above):
+    if not _is_wrapped_rule(lines, closing_rule) and not _is_edge_aligned_title_row(above):
         return None
     return lines[idx]
 
@@ -5969,24 +5967,41 @@ def _rule_bands(lines: list[str]) -> list[tuple[int, int]]:
     A rule wider than the pane wraps onto the rows below it, so consecutive
     rule rows are one rule. The wrapped remainder can be shorter than
     :func:`_is_box_rule` admits (a lone ``─`` under a full-width row), so a
-    bare run of edge glyphs joins an adjacent rule; on its own it is content.
+    bare run of edge glyphs continues the rule above it; on its own, or above
+    a rule, it is content.
 
     :param lines: Non-empty pane rows, in order.
     :returns: Rule spans, top to bottom.
     """
     bands: list[tuple[int, int]] = []
     start: int | None = None
-    has_rule = False
     for idx, line in enumerate([*lines, ""]):
-        is_rule = _is_box_rule(line)
-        if is_rule or _is_edge_glyph_run(line):
+        if _is_box_rule(line) or (start is not None and _is_edge_glyph_run(line)):
             start = idx if start is None else start
-            has_rule = has_rule or is_rule
             continue
-        if start is not None and has_rule:
+        if start is not None:
             bands.append((start, idx - 1))
-        start, has_rule = None, False
+        start = None
     return bands
+
+
+def _is_wrapped_rule(lines: list[str], band: tuple[int, int]) -> bool:
+    """
+    Return whether a rule band is one rule wrapped at the pane width.
+
+    A wrapped rule starts with a full-width row and continues with rows no
+    wider than it. Two separate rules on neighbouring rows, such as a short
+    divider over a dialog's frame, do not have that shape.
+
+    :param lines: Non-empty pane rows, in order.
+    :param band: ``(first, last)`` row span from :func:`_rule_bands`.
+    :returns: ``True`` when the band spans several rows of a single rule.
+    """
+    first, last = band
+    width = len(lines[first].strip())
+    return last > first and all(
+        len(lines[idx].strip()) <= width for idx in range(first + 1, last + 1)
+    )
 
 
 def _rows_below_last_rule(lines: list[str], tail_lines: int) -> list[str]:
