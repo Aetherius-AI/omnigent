@@ -5483,10 +5483,8 @@ describe("Composer native picker terminal startup", () => {
       expect(screen.queryByTestId("composer-model-pending")).toBeNull();
       const detail =
         failure === "rejection" ? "Host is offline" : "Unable to start the session terminal";
-      const error = screen.getByTestId("composer-config-error");
-      expect(error).toHaveAccessibleName(`Couldn't update configuration: ${detail}`);
-      fireEvent.focus(error);
-      expect(await screen.findByTestId("composer-config-error-tooltip")).toHaveTextContent(detail);
+      expect(useChatStore.getState().sessionConfigError).toBe(detail);
+      expect(screen.queryByTestId("composer-config-error")).toBeNull();
       expect(useChatStore.getState().setModel).not.toHaveBeenCalled();
       await user.click(textarea());
       await openSessionModels();
@@ -5621,9 +5619,10 @@ describe("Composer native picker terminal startup", () => {
       expect(screen.queryByTestId("composer-model-pending")).toBeNull();
       expect(useChatStore.getState().sessionConfigPhase).toBeNull();
       expect(screen.getByTestId("composer-config-gear")).toBeEnabled();
-      expect(screen.getByTestId("composer-config-error")).toHaveAccessibleName(
-        `Couldn't update configuration: ${phase === "startup" ? "Host is offline" : "Model change was not applied"}`,
+      expect(useChatStore.getState().sessionConfigError).toBe(
+        phase === "startup" ? "Host is offline" : "Model change was not applied",
       );
+      expect(screen.queryByTestId("composer-config-error")).toBeNull();
       useChatStore.setState({ setModel: vi.fn().mockResolvedValue(undefined) });
       await selectSetting("model");
       await waitFor(() => expect(useChatStore.getState().setModel).toHaveBeenCalledTimes(1));
@@ -6317,13 +6316,19 @@ describe("Composer config gear", () => {
     await openSessionModels();
     fireEvent.click(screen.getByTestId("composer-agent-model-sonnet"));
     await waitFor(() =>
-      expect(setModel).toHaveBeenCalledWith("sonnet", { expectConfirmation: true }),
+      expect(setModel).toHaveBeenCalledWith("sonnet", { expectConfirmation: true }, "conv_test"),
     );
     await waitFor(() =>
       expect(screen.getByTestId("composer-agent-edit")).not.toHaveAttribute("data-disabled"),
     );
     expect(screen.queryByTestId("composer-config-error")).not.toBeInTheDocument();
     expect(screen.queryByText("Host stopped responding")).not.toBeInTheDocument();
+    fireEvent.keyDown(screen.getByTestId("composer-agent-menu"), { key: "Escape" });
+    const configTrigger = screen.getByTestId("composer-config-gear");
+    fireEvent.pointerEnter(configTrigger.parentElement!);
+    fireEvent.focus(configTrigger);
+    const tooltip = await screen.findByTestId("composer-config-gear-tooltip");
+    expect(tooltip).not.toHaveTextContent("Host stopped responding");
   });
 
   it("recomputes the Codex effort ladder after a confirmed model change and drops an unsupported level", async () => {

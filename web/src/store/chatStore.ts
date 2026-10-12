@@ -3213,8 +3213,10 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
           setterFor(conversationId)({ sessionReasoningEffort: null });
           return;
         }
-        await updateSession(conversationId, { reasoningEffort: effort });
-        pick.confirm(effort);
+        const updated = await updateSession(conversationId, { reasoningEffort: effort });
+        const canonical = updated.reasoningEffort === undefined ? effort : updated.reasoningEffort;
+        setterFor(conversationId)({ sessionReasoningEffort: canonical });
+        pick.confirm(canonical);
       } catch (err) {
         // Adopt the server's settled effort, not an earlier unconfirmed pick; keep a newer pick.
         const settled = await settledSessionSetting(conversationId, "reasoningEffort", pick);
@@ -3225,10 +3227,6 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       } finally {
         pick.done();
       }
-      const updated = await updateSession(conversationId, { reasoningEffort: effort });
-      const canonical = updated.reasoningEffort === undefined ? effort : updated.reasoningEffort;
-      setterFor(conversationId)({ sessionReasoningEffort: canonical });
-      pick.confirm(canonical);
     }
   },
 

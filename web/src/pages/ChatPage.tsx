@@ -4539,7 +4539,6 @@ function SessionHarnessPicker({
   const terminalFirst = useTerminalFirst();
   const [menuOpen, setMenuOpen] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);
-  const error = useChatStore((state) => state.sessionConfigError);
   const appliedOpenNonce = useRef(openNonce);
   const conversationId = useChatStore((state) => state.conversationId);
   const sessionHarness = useChatStore((state) => state.sessionHarness);
@@ -4623,7 +4622,6 @@ function SessionHarnessPicker({
   const apply = (change: (sessionId: string | null) => Promise<unknown>) => {
     if (disabled || busy || busyRef.current || pendingModelChange !== null) return;
     return useChatStore.getState().applySessionConfig(change, { startTerminal: needsTerminal });
-  };
   };
   const selectModel = (modelId: string | null) =>
     void apply(async (sessionId) => {
@@ -4783,7 +4781,7 @@ function SessionHarnessPicker({
         icon: <ComposerAgentIcon agent={iconAgent} />,
         disabled: busy || !configurable,
         "aria-disabled": disabled || busy || !configurable,
-        className: cn(disabled && "cursor-default opacity-50", error && "text-destructive"),
+        className: disabled ? "cursor-default opacity-50" : undefined,
         testIdPrefix: "composer",
         "data-testid": "composer-config-gear",
         loading: modelLabelLoading && !routingOn,
@@ -4792,16 +4790,7 @@ function SessionHarnessPicker({
           ((sessionModelSeeded || pendingModelChange !== null) &&
             (modelPickerKind === "claude" || modelPickerKind === "codex")),
       }}
-      tooltip={
-        <>
-          <ComposerConfigTooltipRows rows={summary} />
-          {error && (
-            <div className="mt-2 border-t border-border pt-2 text-xs leading-5 text-destructive">
-              Couldn’t update configuration: {error}
-            </div>
-          )}
-        </>
-      }
+      tooltip={<ComposerConfigTooltipRows rows={summary} />}
       tooltipTestId="composer-config-gear-tooltip"
       testId="composer-agent-menu"
     >
