@@ -5066,6 +5066,8 @@ def run_host_process(
             daemon_target=daemon_target,
             lifecycle_lock=lifecycle_lock,
             interactive_shells=interactive_shells,
+            runner_env_target=runner_env_target,
+            launch_env=launch_env,
         )
     except BaseException as exc:
         # A stop signal already being handled owns the exit: never returns then.
@@ -5108,6 +5110,8 @@ def _serve_host_until_exit(
     daemon_target: str | None,
     lifecycle_lock: DaemonLifecycleLock | None,
     interactive_shells: list[str] | None,
+    runner_env_target: str | None,
+    launch_env: Mapping[str, str] | None,
 ) -> bool:
     """Run the host until it exits; see :func:`run_host_process`.
 

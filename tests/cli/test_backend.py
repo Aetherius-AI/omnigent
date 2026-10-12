@@ -468,6 +468,8 @@ def test_ensure_host_daemon_local_daemon_serves_requested_url_is_noop(
     _ensure_host_daemon("http://127.0.0.1:8123")
 
     assert "args" not in captured  # reused, not respawned
+    # A foreground host launches runners from its own environment.
+    assert read_runner_env_manifest("local", base_dir=tmp_path) is None
 
 
 def test_ensure_host_daemon_reuses_healthy_background_daemon(
@@ -569,6 +571,50 @@ def test_ensure_host_daemon_refreshes_runner_env_manifest_on_background_reuse(
     assert manifest is not None
     assert manifest["CLAUDE_CODE_ENABLE_TELEMETRY"] == "1"
     assert manifest["OTEL_RESOURCE_ATTRIBUTES"] == "deployment.environment=second-launch"
+
+
+def test_ensure_host_daemon_refreshes_local_manifest_when_addressed_by_loopback_url(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Reusing the local daemon through its loopback URL refreshes its own manifest.
+
+    The manifest is keyed by the ``"local"`` target the daemon reads and is
+    built with the local-mode allowlist, so the daemon's server credentials
+    stay available to the runners it launches next.
+    """
+    captured: dict[str, object] = {}
+    _patch_daemon_spawn(monkeypatch, tmp_path, captured)
+    _write_daemon_registry_record(
+        tmp_path,
+        pid=4242,
+        target="local",
+        mode="local",
+        server_url=None,
+        log_path=str(tmp_path / "daemon.log"),
+        started_at=1_000_000,
+        config_sig=cli.server_config_signature(),
+        resolved_server_url="http://127.0.0.1:8123",
+    )
+    monkeypatch.setattr(cli, "_pid_is_recorded_daemon", lambda record: cli._pid_alive(record.pid))
+    monkeypatch.setattr(cli, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(cli, "local_server_url_if_healthy", lambda: "http://127.0.0.1:8123")
+    write_runner_env_manifest(
+        "local",
+        {"PATH": "/usr/bin", "MY_GATEWAY_URL": "https://old.example.test"},
+        base_dir=tmp_path,
+    )
+    monkeypatch.setenv("OMNIGENT_RUNNER_ENV_PASSTHROUGH", "MY_GATEWAY_URL")
+    monkeypatch.setenv("MY_GATEWAY_URL", "https://new.example.test")
+    monkeypatch.setenv("OPENAI_API_KEY", "local-provider-secret")
+
+    _ensure_host_daemon("http://127.0.0.1:8123")
+
+    assert "args" not in captured  # reused, not respawned
+    manifest = read_runner_env_manifest("local", base_dir=tmp_path)
+    assert manifest is not None
+    assert manifest["MY_GATEWAY_URL"] == "https://new.example.test"
+    assert manifest["OPENAI_API_KEY"] == "local-provider-secret"
+    assert read_runner_env_manifest("http://127.0.0.1:8123", base_dir=tmp_path) is None
 
 
 def test_ensure_host_daemon_publishes_no_manifest_for_foreground_reuse(

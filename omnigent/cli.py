@@ -3071,14 +3071,10 @@ class _DaemonReuseDecision:
         Distinct from a transparent tunnel-health heal — only a config
         change forces the caller to ask the user to re-run, because the
         server was restarted into a different auth posture mid-command.
-    :param background: ``True`` when the reused daemon was spawned detached by
-        this CLI. Such a daemon launches runners from its target's runner-env
-        manifest, so the caller republishes its own environment for it.
     """
 
     reuse: bool
     config_changed: bool
-    background: bool = False
 
 
 def _daemon_owner_is_live(record: _HostDaemonRecord) -> bool:
@@ -3147,7 +3143,7 @@ def _reuse_existing_daemon_record(target: str) -> _DaemonReuseDecision:
         # concern; its own reconnect loop covers transient tunnel drops). Keep
         # the original PID-liveness reuse so a live daemon for the URL is
         # reused as-is.
-        return _DaemonReuseDecision(reuse=True, config_changed=False, background=background)
+        return _DaemonReuseDecision(reuse=True, config_changed=False)
 
     if not background:
         # Foreground host / legacy host.pid: keep prior behavior — a
@@ -3168,7 +3164,7 @@ def _reuse_existing_daemon_record(target: str) -> _DaemonReuseDecision:
     if age_s >= _DAEMON_REUSE_MIN_AGE_S and not _daemon_tunnel_recovers(existing):
         _terminate_host_unit(existing, reason="host tunnel is offline")
         return _DaemonReuseDecision(reuse=False, config_changed=False)
-    return _DaemonReuseDecision(reuse=True, config_changed=False, background=True)
+    return _DaemonReuseDecision(reuse=True, config_changed=False)
 
 
 def _local_daemon_serves_target(target: str, server_url: str | None) -> bool:
@@ -3547,13 +3543,14 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
 
     decision = _reuse_existing_daemon_record(target)
     if decision.reuse:
-        if decision.background:
-            # The reused daemon keeps serving; hand it this invocation's
-            # environment for the runners it launches next.
-            _publish_runner_env_manifest(target, _build_host_daemon_env(server_url=server_url))
+        _refresh_reused_daemon_env(target, server_url=server_url)
         _record_host_state("reused")
         return False
     if not decision.config_changed and _local_daemon_serves_target(target, server_url):
+        # The daemon serving this loopback URL is the local-mode one: refresh
+        # the manifest it reads, keyed by its own target and built with the
+        # local allowlist so its server credentials stay available.
+        _refresh_reused_daemon_env(_LOCAL_DAEMON_MARKER, server_url=None)
         _record_host_state("reused_local_daemon", running_before=True)
         return False
 
@@ -3699,14 +3696,36 @@ _RUNNER_ENV_MANIFEST_EXCLUDED: frozenset[str] = frozenset({"OMNIGENT_DATABASE_UR
 
 def _publish_runner_env_manifest(target: str, daemon_env: Mapping[str, str]) -> None:
     """Publish this invocation's sanitized env for *target*'s daemon.
-    A failed write keeps the previous manifest and is only logged."""
+    A failed write keeps the previous manifest and is reported, not raised."""
     env = {k: v for k, v in daemon_env.items() if k not in _RUNNER_ENV_MANIFEST_EXCLUDED}
     try:
         _write_runner_env_manifest_impl(target, env, base_dir=_HOST_PID_PATH.parent)
-    except OSError:
+    except OSError as exc:
         logging.getLogger(__name__).warning(
             "Could not publish the runner environment for host daemon %r", target, exc_info=True
         )
+        click.echo(
+            f"Warning: could not refresh the runner environment of the host daemon for "
+            f"{_host_display_url(target)!r} ({exc}); new sessions keep the environment "
+            "published by the previous invocation.",
+            err=True,
+        )
+
+
+def _refresh_reused_daemon_env(target: str, *, server_url: str | None) -> None:
+    """Hand the reused daemon for *target* this invocation's environment.
+
+    Only a background daemon launches runners from the manifest; a foreground
+    host (no captured log) uses its own environment, so nothing is published.
+
+    :param target: Normalized daemon target, e.g. ``"local"``.
+    :param server_url: Server URL the daemon connects to, or ``None`` for the
+        local-mode allowlist.
+    """
+    record = _find_daemon_record(target)
+    if record is None or record.log_path is None:
+        return
+    _publish_runner_env_manifest(target, _build_host_daemon_env(server_url=server_url))
 
 
 def _read_host_pid_file() -> tuple[int, str] | None:
