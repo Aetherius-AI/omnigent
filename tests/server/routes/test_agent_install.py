@@ -948,3 +948,47 @@ async def test_runner_never_expands_an_installed_agents_variables(
 
     assert contents.status_code == 200, contents.text
     assert contents.headers["X-Agent-Session-Scoped"] == "true"
+
+
+@pytest.mark.parametrize("installed", [False, True])
+async def test_persisted_registry_bundle_remains_readable(multi_user_client, installed):
+    """Upload/install preserves literal registry references for older readers."""
+    client = multi_user_client
+    client.headers.update(ALICE)
+    config = {
+        "spec_version": 1,
+        "name": "registry-reader",
+        "executor": {"type": "omnigent", "config": {"harness": "claude-sdk"}},
+        "tools": {"tracker": {"type": "mcp", "transport": "registry", "tools": []}},
+    }
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as archive:
+        data = json.dumps(config).encode()
+        entry = tarfile.TarInfo("config.yaml")
+        entry.size = len(data)
+        archive.addfile(entry, io.BytesIO(data))
+    bundle = buf.getvalue()
+    response = await client.post(
+        "/v1/agents" if installed else "/v1/sessions",
+        data={} if installed else {"metadata": "{}"},
+        files={"bundle": ("agent.tar.gz", bundle, "application/gzip")},
+    )
+    assert response.status_code == (200 if installed else 201), response.text
+    if installed:
+        response = await client.post("/v1/sessions", json={"agent_id": response.json()["id"]})
+        assert response.status_code == 201, response.text
+        session_id = response.json()["id"]
+    else:
+        session_id = response.json()["session_id"]
+    base = f"/v1/sessions/{session_id}/agent"
+    summary = await client.get(base)
+    listing = await client.get(f"{base}/mcp-servers")
+    contents = await client.get(f"{base}/contents")
+    assert summary.status_code == listing.status_code == contents.status_code == 200
+    assert summary.json()["mcp_servers"] == listing.json()["data"]
+    assert listing.json()["data"][0]["transport"] == "registry"
+    assert contents.content == bundle
+    edit = await client.post(
+        f"{base}/mcp-servers", json={"name": "another", "transport": "registry"}
+    )
+    assert edit.status_code == 422

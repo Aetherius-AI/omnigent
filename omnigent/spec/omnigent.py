@@ -392,6 +392,8 @@ def _mcp_server_to_mcp_tool(config: MCPServerConfig) -> MCPTool:
         required field for its declared transport (a programmatic
         construction path that bypassed the validator).
     """
+    if config.transport == "registry":
+        return MCPTool(registry=True, description=config.description, tools=config.tools)
     if config.transport == "stdio":
         if config.command is None:
             raise OmnigentError(
@@ -1836,6 +1838,27 @@ def _translate_mcp_tool_from_def(
         ``databricks_server`` shape is caught upstream by
         :func:`_fail_on_unsupported_tool`).
     """
+    if tool.registry:
+        if (
+            tool.url is not None
+            or tool.command is not None
+            or tool.args
+            or tool.env
+            or tool.headers
+            or tool.profile is not None
+            or tool.databricks_server is not None
+            or tool.tool_name is not None
+        ):
+            raise OmnigentError(
+                "registry MCP tools cannot override server connection settings",
+                code=ErrorCode.INVALID_INPUT,
+            )
+        return MCPServerConfig(
+            name=tool_name,
+            transport="registry",
+            description=tool.description,
+            tools=tool.tools,
+        )
     if tool.url is not None:
         return MCPServerConfig(
             name=tool_name,

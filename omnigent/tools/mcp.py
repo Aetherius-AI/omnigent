@@ -1149,6 +1149,11 @@ class McpServerConnection:
             anyio memory object streams parameterized over
             ``SessionMessage``.
         """
+        if self.config.transport == "registry":
+            raise RuntimeError(
+                f"MCP registry service {self.config.name!r} requires a gateway-capable "
+                "Omnigent runtime; this build supports reading registry references only."
+            )
         if self.config.transport == "stdio":
             return await self._open_stdio_transport(stack)
         return await self._open_http_transport(stack)

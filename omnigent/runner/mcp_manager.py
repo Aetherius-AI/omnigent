@@ -509,6 +509,8 @@ class RunnerMcpManager:
 
                 if connect_task is not None:
                     await connect_task
+                if ref.config.transport == "registry" and ref.entry.error is not None:
+                    raise RuntimeError(ref.entry.error)
                 if (
                     ref.entry.error is None
                     and ref.entry.connection is not None

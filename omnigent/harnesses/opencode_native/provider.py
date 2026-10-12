@@ -205,6 +205,11 @@ def build_opencode_mcp_block(
     """
     block: dict[str, dict[str, object]] = {}
     for server in servers:
+        if getattr(server, "transport", "http") == "registry":
+            raise RuntimeError(
+                f"MCP registry service {server.name!r} requires a gateway-capable "
+                "Omnigent runtime; this build supports reading registry references only."
+            )
         name = getattr(server, "name", None)
         if not name:
             continue

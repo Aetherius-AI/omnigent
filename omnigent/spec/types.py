@@ -917,7 +917,7 @@ class MCPServerConfig:
     """
     An MCP server declaration from ``tools/mcp/<name>.yaml``.
 
-    Two transports are supported:
+    Two executable transports and one read-compatible reference are supported:
 
     - ``"http"`` — HTTP (SSE) endpoint, reached via
       :func:`mcp.client.sse.sse_client`. ``url`` (and optionally
@@ -983,7 +983,8 @@ class MCPServerConfig:
     """
 
     name: str
-    transport: Literal["http", "stdio"] = "http"
+    # Registry references can be read but require a gateway-capable runtime to execute.
+    transport: Literal["http", "stdio", "registry"] = "http"
     # HTTP-only fields.
     url: str | None = None
     headers: dict[str, str] = field(default_factory=dict, repr=False)
