@@ -223,30 +223,38 @@ class ClaudeNativeExecutor(Executor):
         # ``/model`` only accepts this session's picker values, aliases, and
         # custom slot; anything else is ignored and the pane keeps its model.
         wanted_model_arg = self._model_command_arg(wanted_model)
+        cleanup_error: str | None = None
         try:
             with telemetry.span("claude_native.inject"):
                 async with self._inject_lock:
-                    context_path = self._bridge_dir / CLAUDE_FRAMEWORK_CONTEXT_FILE
-                    context_path.unlink(missing_ok=True)
-                    if wanted_model_arg is not None:
-                        # Accepted trade-off: ``/model <id>`` also saves the
-                        # pick as the person's global default for new Claude
-                        # sessions. Runs to completion before the message
-                        # inject below (same lock), so its confirm Enter can't
-                        # race the message.
-                        await self._inject(
-                            partial(
-                                inject_slash_command,
-                                self._bridge_dir,
-                                command=f"/model {wanted_model_arg}",
-                                auto_confirm=True,
-                                confirm_hint=SWITCH_MODEL_DIALOG_HINT,
+                    try:
+                        context_path = self._bridge_dir / CLAUDE_FRAMEWORK_CONTEXT_FILE
+                        context_path.unlink(missing_ok=True)
+                        if wanted_model_arg is not None:
+                            # Accepted trade-off: ``/model <id>`` also saves the
+                            # pick as the person's global default for new Claude
+                            # sessions. Runs to completion before the message
+                            # inject below (same lock), so its confirm Enter can't
+                            # race the message.
+                            await self._inject(
+                                partial(
+                                    inject_slash_command,
+                                    self._bridge_dir,
+                                    command=f"/model {wanted_model_arg}",
+                                    auto_confirm=True,
+                                    confirm_hint=SWITCH_MODEL_DIALOG_HINT,
+                                )
                             )
-                        )
-                        # Track the routed id, not the alias: the next turn's
-                        # comparison is against what routing asked for.
-                        self._applied_model = wanted_model
-                    await self._inject_prompt(text, notices)
+                            # Track the routed id, not the alias: the next turn's
+                            # comparison is against what routing asked for.
+                            self._applied_model = wanted_model
+                        await self._inject_prompt(text, notices)
+                    except ClaudePromptTimeout:
+                        # Reap while still holding the lock: a timed-out pane may
+                        # yet come alive, and queued steering must not land in it
+                        # before the kill finishes.
+                        cleanup_error = await self._reap_failed_turn()
+                        raise
         except ClaudeTerminalExited as exc:
             # Claude Code exits 0 on /quit or a closed window. The turn still
             # fails, but the person's own teardown is not a defect; a pane that
@@ -259,7 +267,6 @@ class ClaudeNativeExecutor(Executor):
                 exc_info=not clean_exit,
                 extra={"session_id": self._request_session_id},
             )
-            cleanup_error = await self._reap_failed_turn()
             message = describe_exception(exc)
             if cleanup_error is not None:
                 message = f"{message} Cleanup also failed: {cleanup_error}"
@@ -270,7 +277,6 @@ class ClaudeNativeExecutor(Executor):
                 "claude-native: prompt delivery to harness timed out",
                 extra={"session_id": self._request_session_id},
             )
-            cleanup_error = await self._reap_failed_turn()
             message = describe_exception(exc)
             if cleanup_error is not None:
                 message = f"{message} Cleanup also failed: {cleanup_error}"

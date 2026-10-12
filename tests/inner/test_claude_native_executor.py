@@ -2100,14 +2100,17 @@ async def test_prompt_timeout_reap_keeps_event_loop_responsive(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The event loop must run while cleanup waits, before the turn error is yielded."""
+    """The loop keeps running during cleanup, and steering waits until the kill ends."""
     kill_started = threading.Event()
     release_kill = threading.Event()
     killed = threading.Event()
+    steered: list[str] = []
 
-    def fail_inject(bridge_dir_arg: Path, *, content: str, timeout_s: float = 30.0) -> None:
-        del bridge_dir_arg, content, timeout_s
-        raise ClaudePromptTimeout("terminal did not become ready")
+    def inject(bridge_dir_arg: Path, *, content: str, timeout_s: float = 30.0) -> None:
+        del bridge_dir_arg, timeout_s
+        if content == "hi":
+            raise ClaudePromptTimeout("terminal did not become ready")
+        steered.append("after kill" if killed.is_set() else "mid kill")
 
     def slow_kill(bridge_dir_arg: Path, *, timeout_s: float) -> None:
         del bridge_dir_arg, timeout_s
@@ -2115,7 +2118,8 @@ async def test_prompt_timeout_reap_keeps_event_loop_responsive(
         release_kill.wait(10)
         killed.set()
 
-    monkeypatch.setattr(claude_native_executor, "inject_user_message", fail_inject)
+    monkeypatch.delenv(REQUEST_SESSION_ID_ENV_VAR, raising=False)
+    monkeypatch.setattr(claude_native_executor, "inject_user_message", inject)
     monkeypatch.setattr(claude_native_executor, "kill_session", slow_kill)
     executor = ClaudeNativeExecutor(tmp_path / "bridge")
 
@@ -2130,21 +2134,31 @@ async def test_prompt_timeout_reap_keeps_event_loop_responsive(
         ]
 
     turn = asyncio.create_task(collect())
+    steer: asyncio.Task[bool] | None = None
     try:
         assert await asyncio.wait_for(asyncio.to_thread(kill_started.wait, 10), 15)
         # A synchronous kill blocks this coroutine until its wait has already ended.
         assert not killed.is_set(), "cleanup blocked the event loop"
         assert not turn.done(), "turn finished before cleanup completed"
+        # A timed-out pane may still come alive: steering queued mid-kill must
+        # wait for the injection lock rather than land in the doomed pane.
+        steer = asyncio.create_task(executor.enqueue_session_message("session", "steer"))
+        await asyncio.sleep(0.05)
+        assert not steer.done(), "steering entered the pane while the kill was pending"
+        assert executor._inject_lock.locked()
         release_kill.set()
         events = await asyncio.wait_for(turn, 10)
+        assert await asyncio.wait_for(steer, 10) is True
     finally:
         release_kill.set()
-        if not turn.done():
-            turn.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await turn
+        for task in (turn, steer):
+            if task is not None and not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
     assert killed.is_set(), "cleanup skipped or orphaned the kill"
+    assert steered == ["after kill"]
     assert len(events) == 1
     assert isinstance(events[0], ExecutorError)
 
