@@ -1928,6 +1928,7 @@ def test_install_harness_result_success_round_trip() -> None:
         request_id="req_install_2",
         status="ok",
         configured_harnesses={"claude-native": True, "codex-native": "needs-auth"},
+        version="2.1.295",
     )
     decoded = decode_host_frame(encode_host_frame(original))
     assert isinstance(decoded, HostInstallHarnessResultFrame)
@@ -1936,6 +1937,7 @@ def test_install_harness_result_success_round_trip() -> None:
         "claude-native": True,
         "codex-native": "needs-auth",
     }
+    assert decoded.version == "2.1.295"
     assert decoded.error is None
 
 
@@ -1957,6 +1959,7 @@ def test_install_harness_result_failure_round_trip() -> None:
     assert isinstance(decoded, HostInstallHarnessResultFrame)
     assert decoded.status == "failed"
     assert decoded.configured_harnesses is None
+    assert decoded.version is None
     assert decoded.gateway_inference is None
     assert decoded.error == "npm not found"
 

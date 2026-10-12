@@ -136,6 +136,7 @@ from omnigent.onboarding.harness_auth import (
 )
 from omnigent.onboarding.harness_install import (
     harness_cli_installed,
+    harness_cli_version,
     harness_setup_hint,
     try_install_harness_cli,
     ui_install_key,
@@ -2941,8 +2942,9 @@ class HostProcess:
         ``omnigent setup``) uses, then recomputes readiness so the result frame
         carries a fresh ``configured_harnesses`` map. The ``ui_install_key``
         guard re-checks the allowlist as defence in depth against a spoofed
-        frame. Idempotent: an already-installed CLI skips the install. Runs off
-        the event loop (it shells out / probes ``PATH``).
+        frame. Idempotent: an already-installed, version-compatible CLI skips
+        the install. An outdated CLI runs the installer again to upgrade in
+        place. Runs off the event loop (it shells out / probes ``PATH``).
 
         :param frame: The install request frame. ``frame.harness`` is a UI
             harness identifier, e.g. ``"claude"``.
@@ -2964,6 +2966,7 @@ class HostProcess:
                 request_id=frame.request_id,
                 status="ok",
                 configured_harnesses=configured_harness_map(),
+                version=harness_cli_version(key)[0],
                 gateway_inference=gateway_inference_map(),
             )
         installed, reason = try_install_harness_cli(key)
@@ -2978,6 +2981,7 @@ class HostProcess:
             request_id=frame.request_id,
             status="ok",
             configured_harnesses=configured_harness_map(),
+            version=harness_cli_version(key)[0],
             gateway_inference=gateway_inference_map(),
         )
 
