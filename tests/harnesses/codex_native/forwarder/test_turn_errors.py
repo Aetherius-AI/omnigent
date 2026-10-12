@@ -868,3 +868,164 @@ async def test_interrupted_turn_keeps_launcher_certificate_record(tmp_path: Path
     )
 
     assert read_certificate_failure(tmp_path) is not None
+
+
+_HTTP_ERROR_INFO_VARIANTS = (
+    "httpConnectionFailed",
+    "responseStreamConnectionFailed",
+    "responseStreamDisconnected",
+    "responseTooManyFailedAttempts",
+)
+_NEUTRAL_MESSAGE = "The request could not be completed."
+
+
+def _externally_tagged_http_error(variant: str, http_status: int) -> dict:
+    """The app-server's serde shape for an HTTP-bearing ``CodexErrorInfo`` variant."""
+    return {
+        "message": _NEUTRAL_MESSAGE,
+        "codexErrorInfo": {variant: {"httpStatusCode": http_status}},
+    }
+
+
+@pytest.mark.parametrize("variant", _HTTP_ERROR_INFO_VARIANTS)
+@pytest.mark.parametrize("http_status", [401, 403])
+def test_classify_codex_error_externally_tagged_http_variant_is_auth(
+    variant: str, http_status: int
+) -> None:
+    """A typed 401/403 is auth even when the message text says nothing about auth."""
+    error = _externally_tagged_http_error(variant, http_status)
+
+    assert fwd._classify_codex_error(error, _NEUTRAL_MESSAGE) == fwd._CODEX_ERROR_KIND_AUTH
+
+
+@pytest.mark.parametrize(
+    "info",
+    [
+        {"type": 401},
+        {"type": {"nested": True}},
+        {"responseStreamConnectionFailed": "401"},
+        ["unauthorized"],
+        401,
+    ],
+)
+def test_classify_codex_error_tolerates_malformed_variant_metadata(info: object) -> None:
+    """Malformed ``codexErrorInfo`` metadata is ignored instead of raising."""
+    assert (
+        fwd._classify_codex_error({"codexErrorInfo": info}, "disk full")
+        == fwd._CODEX_ERROR_KIND_GENERIC
+    )
+
+
+def test_terminal_turn_status_edge_malformed_error_info_still_fails_turn(tmp_path: Path) -> None:
+    """The failed edge is still derived when the variant metadata is malformed."""
+    _seed_active_turn(tmp_path, "turn_123")
+    params = {
+        "turn": {
+            "id": "turn_123",
+            "status": "failed",
+            "error": {"message": "disk full", "codexErrorInfo": {"type": 401}},
+        }
+    }
+
+    edge = fwd._terminal_turn_status_edge(tmp_path, "turn/completed", params)
+
+    assert edge is not None
+    assert edge.status == "failed"
+    assert edge.error is not None
+    assert edge.error.message == "disk full"
+    assert edge.error.is_auth is False
+
+
+def _assert_failed_edge_keeps_provider_evidence(data: dict, *, variant: str) -> None:
+    assert data["status"] == "failed"
+    assert data["reauth_required"] is True
+    assert _NEUTRAL_MESSAGE in data["output"]
+    context = data["failure_context"]
+    assert context["http_status"] == 401
+    assert variant in {value for value in context.values() if isinstance(value, str)}
+
+
+@pytest.mark.asyncio
+async def test_live_terminal_turn_error_posts_provider_evidence(tmp_path: Path) -> None:
+    """The ``turn/completed`` failed edge keeps the HTTP status and error variant."""
+    _seed_active_turn(tmp_path, "turn_123")
+    variant = "responseStreamConnectionFailed"
+    params = {
+        "threadId": "thread_123",
+        "turn": {
+            "id": "turn_123",
+            "status": "failed",
+            "error": _externally_tagged_http_error(variant, 401),
+        },
+    }
+    client = _RecordingClient()
+
+    edge = fwd._terminal_turn_status_edge(tmp_path, "turn/completed", params)
+    await fwd._post_turn_status_edge(client, "conv_x", edge)
+
+    assert len(client.posts) == 1
+    _url, body = client.posts[0]
+    assert body["type"] == "external_session_status"
+    _assert_failed_edge_keeps_provider_evidence(body["data"], variant=variant)
+
+
+@pytest.mark.asyncio
+async def test_standalone_error_notification_posts_provider_evidence(tmp_path: Path) -> None:
+    """The non-retrying ``error`` notification keeps the HTTP status and error variant."""
+    client = _RecordingClient()
+    variant = "httpConnectionFailed"
+
+    await fwd._handle_event(
+        client,  # type: ignore[arg-type]
+        session_id="conv_x",
+        bridge_dir=tmp_path,
+        event={
+            "method": "error",
+            "params": {
+                "threadId": "thread_123",
+                "turnId": "turn_123",
+                "willRetry": False,
+                "error": _externally_tagged_http_error(variant, 401),
+            },
+        },
+        usage_coalescer=fwd._SessionUsageCoalescer(client, "conv_x"),  # type: ignore[arg-type]
+        elicitation_tracker=fwd._CodexElicitationTaskTracker(),
+        expected_thread_id="thread_123",
+    )
+
+    status_posts = [
+        body for _url, body in client.posts if body["type"] == "external_session_status"
+    ]
+    assert len(status_posts) == 1
+    _assert_failed_edge_keeps_provider_evidence(status_posts[0]["data"], variant=variant)
+
+
+@pytest.mark.asyncio
+async def test_resume_terminal_turn_error_posts_provider_evidence(tmp_path: Path) -> None:
+    """The ``thread/resume`` parity edge keeps the HTTP status and error variant."""
+    write_bridge_state(
+        tmp_path,
+        CodexNativeBridgeState(
+            session_id="conv_x",
+            socket_path=str(tmp_path / "app-server.sock"),
+            thread_id="thread_123",
+            codex_home=str(tmp_path / "codex-home"),
+            active_turn_id="turn_123",
+        ),
+    )
+    variant = "responseTooManyFailedAttempts"
+    turns = [
+        {
+            "id": "turn_123",
+            "status": "failed",
+            "error": _externally_tagged_http_error(variant, 401),
+        }
+    ]
+    client = _RecordingClient()
+
+    edge = fwd._resume_terminal_status_edge_for_latest_turn(tmp_path, "thread_123", turns)
+    await fwd._post_turn_status_edge(client, "conv_x", edge)
+
+    assert len(client.posts) == 1
+    _url, body = client.posts[0]
+    _assert_failed_edge_keeps_provider_evidence(body["data"], variant=variant)

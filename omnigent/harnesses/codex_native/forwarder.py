@@ -972,6 +972,9 @@ class _CodexTerminalError:
     :param message: Human-readable error text, e.g.
         ``"401 Unauthorized: ChatGPT login expired"``.
     :param kind: Classification, either ``"auth"`` or ``"generic"``.
+    :param failure_context: Bounded provider evidence read from the error
+        payload (HTTP status, ``codexErrorInfo`` variant, request ids), or
+        ``None`` for errors the forwarder synthesizes itself.
     """
 
     message: str
@@ -6846,6 +6849,9 @@ async def _post_status(
     :param reauth_required: When ``True``, mark a ``failed`` edge as caused by
         an authentication error so the surface can prompt a re-auth.
         Surface-only: no automatic ``codex login`` is triggered.
+    :param failure_context: Optional bounded failure evidence attached to a
+        ``failed`` edge for server-side telemetry; display text stays in
+        ``output``.
     :returns: None.
     """
     data: _JsonObject = {"status": status}
