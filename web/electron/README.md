@@ -319,8 +319,8 @@ sign-in has a passkey step), then `just electron-dev`:
    (the cookie is renewed silently).
 5. **Invalidate Cached Refresh Token**, then **Simulate Session Expiry**, then
    reload: the connect screen says "Sign in to <host> to continue."
-6. Sign out from the app's settings: the connect screen says "You're signed out
-   of <host>." Relaunching doesn't sign you back in.
+6. Sign out from the app's settings: the connect screen opens without a message.
+   Relaunching doesn't sign you back in.
 7. An accounts-mode server and `http://localhost:6767` (header mode) still sign
    in exactly as before.
 
@@ -750,7 +750,9 @@ Local packages use the `ai.omnigent.desktop-dev` app ID and the **Omnigent Dev**
 name; output lands in `electron/dist-dev/` (the DMG is named
 `Omnigent Dev-<version>-<arch>.dmg`). They keep their own app data and do not
 install production desktop updates. `build:mac:release` retains
-`ai.omnigent.desktop`, **Omnigent**, and `electron/dist/`.
+`ai.omnigent.desktop`, **Omnigent**, and `electron/dist/`. For the full
+cross-platform publishing and update-feed checklist, see [the desktop release
+runbook](RELEASING.md).
 
 macOS apps, including unpackaged development, default to V2 onboarding only when the MDM preference
 `databricksInternalFeaturesEnabled` is `true`, for both new and existing profiles.

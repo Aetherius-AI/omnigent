@@ -77,6 +77,16 @@ and steers messages while the agent is busy.
 - Hover the model/effort pill to see the tooltip.
 - Pick a harness, then open its configuration for model, effort (Codex, Claude,
   Pi), and permission mode before the session exists.
+- With a managed sandbox selected and no connected host, the model picker lists
+  the sandbox's default catalog when `/v1/info` advertises `default_models` (an
+  unbound gateway with `sandbox.model_discovery`, or a provider hook): rows under
+  the provider's label plus a "Default" row, for native and SDK agents.
+  A failed listing shows its error and keeps Default launchable; a
+  harness the catalog cannot serve keeps its ordinary list. This is distinct
+  from a connected host's own catalog and from a bound (`inference_models`)
+  target. Covered by
+  `tests/e2e_ui/start_session/test_sandbox_gateway_models_without_binding.py`
+  and `tests/e2e_ui/start_session/test_sandbox_model_selection.py::test_optional_gateway_preview_without_a_host`.
 - Attach files or type `/` before the first send.
 - Open the agent picker's custom agents, then Create custom agent → Import
   bundle: pick a `.tar.gz` agent bundle. It installs, closes the dialog, and
