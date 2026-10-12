@@ -38,9 +38,9 @@ final class OmnigentUITests: XCTestCase {
     let webView = app.webViews.firstMatch
     XCTAssertTrue(webView.waitForExistence(timeout: 90), "Expected the real Omnigent web app.")
 
-    let conversationActions = webView.buttons["Conversation actions"]
-    XCTAssertTrue(conversationActions.waitForExistence(timeout: 60))
-    conversationActions.tap()
+    let sessionActions = webView.buttons["Session actions"]
+    XCTAssertTrue(sessionActions.waitForExistence(timeout: 60))
+    sessionActions.tap()
     let files = webView.descendants(matching: .any).matching(identifier: "Files").firstMatch
     XCTAssertTrue(files.waitForExistence(timeout: 20))
     files.tap()
