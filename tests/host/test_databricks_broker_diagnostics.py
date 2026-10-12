@@ -20,15 +20,18 @@ from omnigent.host import databricks_credential as broker
     "payload",
     [
         ["synthetic-private-response"],
+        "synthetic-private-response",
         True,
         17,
         {"connected": "yes", "token": "t", "workspace_host": "https://workspace.example"},
         {"connected": True, "token": 17, "workspace_host": "https://workspace.example"},
+        {"connected": True, "token": True, "workspace_host": "https://workspace.example"},
         {
             "connected": True,
             "token": {"private": "secret"},
             "workspace_host": "https://workspace.example",
         },
+        {"connected": True, "token": ["t"], "workspace_host": "https://workspace.example"},
         {"connected": True, "token": "t", "workspace_host": ["https://workspace.example"]},
     ],
 )
@@ -139,7 +142,12 @@ def test_real_token_helper_keeps_stdout_as_token_protocol(mode: str, tmp_path: P
             }
         )
     )
-    env = {k: v for k, v in os.environ.items() if k in {"PATH", "LANG", "LC_ALL", "SSL_CERT_FILE"}}
+    # SYSTEMROOT/WINDIR keep Python subprocess startup working on Windows.
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k in {"PATH", "LANG", "LC_ALL", "SSL_CERT_FILE", "SYSTEMROOT", "WINDIR"}
+    }
     env.update(
         OMNIGENT_CONFIG_HOME=str(tmp_path / "config"), OMNIGENT_DATA_DIR=str(tmp_path / "data")
     )

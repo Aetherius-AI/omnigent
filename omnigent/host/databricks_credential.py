@@ -77,7 +77,13 @@ def _credential_url(server: str, host_id: str) -> str:
 
 
 def _fetch(server: str, host_id: str, host_token: str) -> dict | None:
-    """Fetch the broker JSON, or ``None`` on any failure."""
+    """Fetch and validate the broker reply; ``None`` on any failure or malformed body.
+
+    A connected reply must be a JSON object with a boolean ``connected`` and
+    non-empty string ``workspace_host`` and ``token``; a not-connected object is
+    returned as-is. Every attempt records bounded outcome and latency metadata:
+    one stderr JSON line from the auth command, the host logger elsewhere.
+    """
     started = time.monotonic()
     helper_attempt = _token_helper_attempt.get()
     attempt_id = helper_attempt or uuid.uuid4().hex
