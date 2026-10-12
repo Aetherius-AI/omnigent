@@ -12,13 +12,9 @@ no Cursor login is required.
 
 from __future__ import annotations
 
-import io
-import json
 import re
 import shutil
 import subprocess
-import tarfile
-import tempfile
 import time
 import uuid
 from collections.abc import Iterator
@@ -28,6 +24,7 @@ import httpx
 import pytest
 from playwright.sync_api import Page, expect
 
+from tests._helpers.native_session import create_native_session
 from tests.e2e_ui.conftest import (
     _REPO_ROOT,
     _bind_session_runner,
@@ -61,42 +58,15 @@ def _create_cursor_session_in_workspace(base_url: str, runner_id: str, workspace
     Like conftest's ``_create_native_cursor_session``, but with a caller-owned
     workspace so the injected ``.cursor`` plumbing is the only possible change.
     """
-    from omnigent._wrapper_labels import (
-        CURSOR_NATIVE_WRAPPER_VALUE,
-        UI_MODE_LABEL_KEY,
-        UI_MODE_TERMINAL_VALUE,
-        WRAPPER_LABEL_KEY,
-    )
-    from omnigent.harnesses.cursor_native.main import _materialize_cursor_agent_spec
-
-    with tempfile.TemporaryDirectory() as tmp:
-        yaml_text = _materialize_cursor_agent_spec(Path(tmp)).read_text()
-
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        data = yaml_text.encode()
-        info = tarfile.TarInfo("cursor-native-ui.yaml")
-        info.size = len(data)
-        tar.addfile(info, io.BytesIO(data))
-
-    metadata = {
-        "labels": {
-            UI_MODE_LABEL_KEY: UI_MODE_TERMINAL_VALUE,
-            WRAPPER_LABEL_KEY: CURSOR_NATIVE_WRAPPER_VALUE,
-        },
-        "workspace": str(workspace),
+    created = create_native_session(
+        httpx,
+        base_url,
+        harness="cursor",
         # ``-f`` trusts the dir + auto-approves tools so the unattended pane
         # never hangs on Cursor's workspace-trust / per-tool prompts.
-        "terminal_launch_args": ["-f"],
-    }
-    create = httpx.post(
-        f"{base_url}/v1/sessions",
-        data={"metadata": json.dumps(metadata)},
-        files={"bundle": ("cursor-native-ui.tar.gz", buf.getvalue(), "application/gzip")},
-        timeout=30.0,
+        metadata={"workspace": str(workspace), "terminal_launch_args": ["-f"]},
     )
-    create.raise_for_status()
-    session_id = str(create.json()["session_id"])
+    session_id = str(created["session_id"])
     _bind_session_runner(base_url, session_id, runner_id)
     return session_id
 
@@ -152,7 +122,7 @@ def cursor_git_workspace_session(
 @pytest.mark.nightly
 @pytest.mark.timeout(600)
 def test_cursor_plumbing_hidden_from_session_changes(
-    page: Page,
+    request: pytest.FixtureRequest,
     cursor_git_workspace_session: tuple[str, str, Path],
 ) -> None:
     """Injected .cursor/mcp.json + hooks.json must not appear as session changes."""
@@ -171,6 +141,9 @@ def test_cursor_plumbing_hidden_from_session_changes(
             "state this test guards."
         )
 
+    # Open the browser only now, so a recording starts at the user's journey
+    # rather than at the runner bind that precedes it.
+    page: Page = request.getfixturevalue("page")
     page.goto(f"{base_url}/c/{session_id}")
 
     open_right_rail(page)
