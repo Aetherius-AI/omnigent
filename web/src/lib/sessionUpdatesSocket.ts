@@ -16,7 +16,7 @@
 // id list is NEVER trusted from the client for authorization — the server
 // access-checks every watched id against the connection's user.
 
-import { getOmnigentHostConfig, resolveWebSocketUrl } from "@/lib/host";
+import { isHostRoutingEnabled, resolveWebSocketUrl } from "@/lib/host";
 import { nextReconnectDelay } from "@/lib/reconnectBackoff";
 import { modalHostId } from "@/lib/sessionHost";
 import type { SessionListWireItem } from "@/lib/sessionListCache";
@@ -59,7 +59,7 @@ export const HEARTBEAT_WATCHDOG_MS = 70_000;
  * (whether served by the Omnigent server directly or through the Vite dev proxy),
  * and an embedding host rebases it onto its proxied WS surface.
  *
- * When a host fetcher is installed, append `?omnigent_slice_key=<frozen modal
+ * When host routing is enabled, append `?omnigent_slice_key=<frozen modal
  * host>`. A browser WebSocket handshake can't set request headers, so the
  * routing key rides the query string (the same seam the terminal-attach WS
  * uses). This WS watches sessions across MANY hosts, so no single key is
@@ -80,7 +80,7 @@ export const HEARTBEAT_WATCHDOG_MS = 70_000;
  */
 function buildUpdatesUrl(): string {
   const path = "/v1/sessions/updates";
-  if (!getOmnigentHostConfig().fetcher) return resolveWebSocketUrl(path);
+  if (!isHostRoutingEnabled()) return resolveWebSocketUrl(path);
   const sliceKey = modalHostId();
   return resolveWebSocketUrl(
     sliceKey ? `${path}?omnigent_slice_key=${encodeURIComponent(sliceKey)}` : path,
