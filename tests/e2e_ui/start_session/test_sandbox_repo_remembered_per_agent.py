@@ -4,6 +4,7 @@ provider without its SDK, so every managed launch fails right after create."""
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
 from collections.abc import Iterator
@@ -38,6 +39,9 @@ def managed_sandbox_server(
 ) -> Iterator[str]:
     """A server offering managed sandboxes whose launches fail (no Modal SDK)."""
     del built_spa
+    assert importlib.util.find_spec("modal") is None, (
+        "this module needs the Modal SDK absent so every managed launch fails right after create"
+    )
     tmp = tmp_path_factory.mktemp("managed_sandbox_server")
     config = tmp / "config.yaml"
     config.write_text("sandbox:\n  provider: modal\n  server_url: http://127.0.0.1\n")
@@ -48,7 +52,10 @@ def managed_sandbox_server(
 def _agent_ids(base_url: str) -> dict[str, str]:
     with httpx.Client(base_url=base_url, timeout=20.0, trust_env=False) as client:
         agents = client.get("/v1/agents").json()["data"]
-    return {agent["name"]: agent["id"] for agent in agents}
+    ids = {agent["name"]: agent["id"] for agent in agents}
+    missing = {_AGENT_A, _AGENT_B} - ids.keys()
+    assert not missing, f"built-in agents not registered on the test server: {missing}"
+    return ids
 
 
 def _session_labels(base_url: str, session_id: str) -> dict[str, str]:

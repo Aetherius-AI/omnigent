@@ -2441,11 +2441,8 @@ export function NewChatLandingScreen() {
   const [arcaError, setArcaError] = useState<string | null>(null);
   // Mirrors pendingConnectRef for the Arca row: connect after the menu closes.
   const pendingArcaConnectRef = useRef(false);
-  // Sandbox repository inputs — composed into the managed create's
-  // `workspace` string (`<url>[#<branch>]`); both blank = empty
-  // server-created workspace.
-  // Seed from the in-session draft, else the repos last launched with this agent
-  // (remembered per agent) so returning users don't re-pick them; a remembered
+  // Sandbox repos composed into the managed create's `<url>[#<branch>]` workspaces. Seed
+  // from the in-session draft, else the repos last launched with this agent; a remembered
   // repo the account can no longer access simply shows unselected in the combobox.
   const [sandboxRepoSelections, setSandboxRepoSelections] = useState<LastSandboxRepo[]>(
     () => restoredDraft?.sandboxRepoSelections ?? readLastSandboxRepos(pickedAgentId),
@@ -2455,6 +2452,9 @@ export function NewChatLandingScreen() {
   const sandboxReposSeededRef = useRef<boolean>(restoredDraft?.sandboxReposSeeded ?? true);
   // Agent whose remembered repos the current seed came from.
   const sandboxReposSeededForRef = useRef<string | null>(pickedAgentId);
+  // Bumped by the project-switch reset so the re-seed effect runs again even when
+  // the new visit resolves to the same agent.
+  const [sandboxReposSeedNonce, setSandboxReposSeedNonce] = useState(0);
   // Whether the launch provider clones several repos (server-declared per
   // provider via /v1/info). A single-repo provider caps the picker at one, so
   // it reads as a plain single-repo picker and never offers a multi-repo menu.
@@ -2474,14 +2474,13 @@ export function NewChatLandingScreen() {
     (url: string, branch = ""): void => {
       const u = url.trim();
       if (u === "") return;
-      sandboxReposSeededRef.current = false;
-      setSandboxRepoSelections((prev) =>
+      setSandboxRepoSelections((prev) => {
         // Cap at the provider's limit so a selection can't only fail with a 422
-        // at create; a duplicate URL is a no-op.
-        prev.some((r) => r.url === u) || prev.length >= maxSandboxRepos
-          ? prev
-          : [...prev, { url: u, branch: branch.trim() }],
-      );
+        // at create; a duplicate URL is a no-op that leaves the seed untouched.
+        if (prev.some((r) => r.url === u) || prev.length >= maxSandboxRepos) return prev;
+        sandboxReposSeededRef.current = false;
+        return [...prev, { url: u, branch: branch.trim() }];
+      });
     },
     [maxSandboxRepos],
   );
@@ -2798,10 +2797,11 @@ export function NewChatLandingScreen() {
     setAutoSeededBranch("");
     // Drafted sandbox repo fields are location state too — left in place they
     // would clone the previous project's repo into this project's sandbox. The
-    // agent's remembered repos may seed again once this visit's agent resolves.
+    // agent's remembered repos seed again once this visit's agent resolves.
     setSandboxRepoSelections([]);
     sandboxReposSeededRef.current = true;
     sandboxReposSeededForRef.current = null;
+    setSandboxReposSeedNonce((n) => n + 1);
     setPendingRepoUrl("");
     agentFromConfigRef.current = false;
     workspaceFromConfigRef.current = false;
@@ -3097,7 +3097,7 @@ export function NewChatLandingScreen() {
     if (sandboxReposSeededForRef.current === effectiveAgentId) return;
     sandboxReposSeededForRef.current = effectiveAgentId;
     setSandboxRepoSelections(readLastSandboxRepos(effectiveAgentId));
-  }, [effectiveAgentId]);
+  }, [effectiveAgentId, sandboxReposSeedNonce]);
   const selectedAgent = useMemo(
     () =>
       effectiveAgentId === PENDING_AGENT_ID && pendingAgent

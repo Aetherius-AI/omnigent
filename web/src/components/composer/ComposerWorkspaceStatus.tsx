@@ -3,20 +3,18 @@ import { FolderIcon, GitForkIcon } from "lucide-react";
 import { COMPOSER_WORKSPACE_COLLAPSED_LABEL_CLASS } from "./ChatComposer";
 import type { ComposerBranchState } from "@/hooks/useComposerGitStatus";
 import { cn } from "@/lib/utils";
+import { deriveRepoName } from "@/shell/NewChatDialog";
 
 /** Trailing path segment, e.g. ``feature-login``. */
 function pathTail(path: string): string {
   return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
 }
 
-/**
- * Repo name[#branch] of one ``<url>[#<branch>]`` sandbox workspace, matching the landing chip.
- */
+/** Repo name[#branch] of one ``<url>[#<branch>]`` sandbox workspace, named like the landing chip. */
 function sandboxRepoTail(workspace: string): string {
   const hash = workspace.indexOf("#");
-  const url = (hash === -1 ? workspace : workspace.slice(0, hash)).replace(/\/+$/, "");
-  const last = url.split(/[/:]/).pop() ?? url;
-  const name = last.endsWith(".git") ? last.slice(0, -4) : last;
+  const url = hash === -1 ? workspace : workspace.slice(0, hash);
+  const name = deriveRepoName(url) ?? url;
   return hash === -1 ? name : `${name}#${workspace.slice(hash + 1)}`;
 }
 

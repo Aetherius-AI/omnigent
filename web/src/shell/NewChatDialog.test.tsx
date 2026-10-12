@@ -7402,6 +7402,43 @@ describe("NewChatLandingScreen", () => {
     expect(screen.getByTestId("new-chat-landing-repo-chip")).toHaveTextContent("mine");
   });
 
+  it("re-seeds the agent's remembered repositories after an in-place project reset", async () => {
+    localStorage.setItem(
+      "omnigent:last-sandbox-repos",
+      JSON.stringify({ a1: [{ url: "https://github.com/org/api", branch: "" }] }),
+    );
+    useProjectsMock.mockReturnValue({
+      ...SUCCESS_QUERY_STATE,
+      data: [{ id: "proj_alpha", name: "Alpha" }],
+    });
+    const projectConfig = {
+      ...SUCCESS_QUERY_STATE,
+      data: { host_id: "host_1", agent_id: "a1", model: "sonnet" },
+    };
+    useProjectConfigMock.mockReturnValue(projectConfig);
+    renderLanding({ managed_sandboxes_enabled: true }, "/?project=Alpha");
+    fireEvent.pointerDown(screen.getByTestId("new-chat-landing-host-chip"), { button: 0 });
+    fireEvent.click(screen.getByTestId("new-chat-landing-sandbox-option"));
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-repo-chip")).toHaveTextContent("api"),
+    );
+
+    // Editing the project's stored defaults restarts the landing in place and clears
+    // the repo list; the same agent's remembered repo must seed again.
+    useProjectConfigMock.mockReturnValue({
+      ...projectConfig,
+      data: { ...projectConfig.data, model: "haiku" },
+    });
+    fireEvent.change(screen.getByTestId("new-chat-landing-input"), {
+      target: { value: "set me up again" },
+    });
+    fireEvent.pointerDown(screen.getByTestId("new-chat-landing-host-chip"), { button: 0 });
+    fireEvent.click(screen.getByTestId("new-chat-landing-sandbox-option"));
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-repo-chip")).toHaveTextContent("api"),
+    );
+  });
+
   it("carries the picked provider in the managed create when several are offered", async () => {
     // A multi-provider server renders one row per provider. Picking the
     // second (non-default) row must ride into the POST as sandbox_provider,

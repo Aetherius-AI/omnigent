@@ -1,11 +1,10 @@
-// Per-agent preference for the last GitHub repos (and branches) the user
-// launched a sandbox session with; written on create, read by the landing.
-//
-// Seeding from the agent's own entry lets returning users skip re-picking
-// without a repo picked for one agent riding into another agent's launch;
-// a stored repo the account can no longer access simply shows unselected.
+// Per-agent preference for the last sandbox repos (and branches), written on
+// create and read by the landing to seed the picker; keying by agent keeps one
+// agent's remembered repos from riding into another agent's launch.
 
 const STORAGE_KEY = "omnigent:last-sandbox-repos";
+// Single-repo key written by builds before multi-repo; cleared on write.
+const LEGACY_STORAGE_KEY = "omnigent:last-sandbox-repo";
 
 /**
  * Strip any userinfo (`user[:secret]@`) from an http(s) URL, so a pasted
@@ -73,6 +72,7 @@ export function writeLastSandboxRepos(
       .filter((r) => r.url !== "");
     const { [agentId]: _previous, ...others } = readMap();
     const map = cleaned.length === 0 ? others : { ...others, [agentId]: cleaned };
+    window.localStorage.removeItem(LEGACY_STORAGE_KEY);
     if (Object.keys(map).length === 0) {
       window.localStorage.removeItem(STORAGE_KEY);
       return;
