@@ -99,7 +99,7 @@ vi.mock("@tanstack/react-virtual", () => ({
     const box = entry?.borderBoxSize?.[0];
     if (box) return Math.round(instance.options.horizontal ? box.inlineSize : box.blockSize);
     const rect = element.getBoundingClientRect();
-    return instance.options.horizontal ? rect.width : rect.height;
+    return Math.round(instance.options.horizontal ? rect.width : rect.height);
   },
   // A vi.fn so component tests can assert the options a consumer passes in.
   useVirtualizer: vi.fn(

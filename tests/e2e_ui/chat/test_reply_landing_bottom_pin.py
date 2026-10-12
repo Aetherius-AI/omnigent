@@ -31,6 +31,11 @@ _WORKING = '[data-testid="working-indicator"]'
 # Same budget and off-bottom threshold as the stock bottom-pin test, so the two agree.
 _BUDGET_MS = 100
 _OFF_BOTTOM_PX = 8
+# A distinct superset of the stock bottom-pin test's prompt. Both tests share the
+# session-scoped mock server with no reset between them, so matching on the same
+# token would let one test's exhausted queue capture the other's request. The
+# superset still routes correctly in both directions under longest-match.
+_LANDING_PROMPT = f"{_STREAM_PROMPT} (landing)"
 _CPU_THROTTLE = float(os.environ.get("OMNIGENT_E2E_CPU_THROTTLE", "1"))
 _LANDINGS = int(os.environ.get("OMNIGENT_E2E_REPLY_LANDINGS", "6"))
 _DUMP_DIR = os.environ.get("OMNIGENT_E2E_BOTTOM_PIN_DUMP")
@@ -78,7 +83,7 @@ def test_reply_landing_keeps_a_bottom_pinned_view_at_the_bottom(
             for n in range(1, _LANDINGS + 1)
         ],
         key="scroll-pin-landing",
-        match=_STREAM_PROMPT,
+        match=_LANDING_PROMPT,
     )
     # Non-browser setup is done; the (possibly recorded) page starts here.
     page: Page = request.getfixturevalue("page")
@@ -101,7 +106,7 @@ def test_reply_landing_keeps_a_bottom_pinned_view_at_the_bottom(
             "() => document.querySelector('[data-pw-scroller]').scrollHeight"
         )
         sent_at = page.evaluate("() => performance.now()")
-        composer.fill(_STREAM_PROMPT)
+        composer.fill(_LANDING_PROMPT)
         page.get_by_role("button", name="Send", exact=True).click()
         expect(page.get_by_text(f"{_STREAMED_REPLY_DONE} {n}").first).to_be_visible(timeout=90_000)
         page.wait_for_timeout(1000)

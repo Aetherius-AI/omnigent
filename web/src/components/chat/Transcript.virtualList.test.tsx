@@ -127,6 +127,8 @@ it("pins after an observer re-measure of a row, never after a mount measure", ()
 
 it("hands the virtualizer a row measure that runs the shared bottom pin", () => {
   const pin = vi.fn();
+  // The mock's call history is shared across tests; clear it so the last call is this render's.
+  vi.mocked(useVirtualizer).mockClear();
   render(list(false, document.createElement("div"), vi.fn(), false, { current: pin }));
 
   const measure = vi.mocked(useVirtualizer).mock.calls.at(-1)![0].measureElement!;
