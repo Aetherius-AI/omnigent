@@ -6616,11 +6616,9 @@ def create_runner_app(
                     )
                 elif status == "idle":
                     _native_interrupt_runner.clear_pending_interrupt(conversation_id)
-                    # Reaching here means a confirmed turn-end (``turn_completed``)
-                    # or a legacy harness's idle completion, never a bare
-                    # quiescence idle (that returns via ``ambiguous_idle``). Such
-                    # a confirmed completion corrects an optimistic cancellation
-                    # the grace timer may have already delivered for this dispatch.
+                    # Confirmed turn-end or legacy-harness idle, never a bare
+                    # quiescence idle (which returns via ``ambiguous_idle``), so this
+                    # completion may correct an optimistic grace-timer cancellation.
                     delivery_ack = _mark_subagent_terminal_and_wake(
                         conversation_id,
                         status="completed",

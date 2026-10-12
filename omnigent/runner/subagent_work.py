@@ -185,10 +185,9 @@ class _SubagentDeliveryAck:
 _subagent_work_by_child: dict[str, _SubagentWorkEntry] = {}
 _subagent_work_by_parent: dict[str, set[str]] = {}
 _drained_delivered_subagent_children: set[str] = set()
-# Optimistic (grace-timer) cancellations that were delivered and then drained,
-# retained so a surviving child's confirmed completion can still correct the
-# parent's record under the same dispatch. A confirmed abort is never kept
-# here, and a new send to the child or session teardown clears the entry.
+# Optimistic (grace-timer) cancellations, delivered then drained, kept so a
+# surviving child's confirmed completion can still correct the parent under the
+# same dispatch. Confirmed aborts are not kept; a new send or teardown clears it.
 _provisional_cancelled_subagent_work: dict[str, _SubagentWorkEntry] = {}
 # Parents whose restart-recovery scan completed in this process, plus a
 # per-parent lock so an init racing a sys_read_inbox drain cannot run two
