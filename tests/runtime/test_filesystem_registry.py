@@ -590,6 +590,11 @@ def test_agent_edit_registry_hides_omnigent_cursor_plumbing(
         f"Expected only user content and real changes, got {paths}. "
         "Both registries should agree on hiding Omnigent cursor plumbing."
     )
+    for name in ("mcp.json", "hooks.json", "omnigent-hook.sh"):
+        assert registry.get_changed_file(conv_id, f".cursor/{name}") is None, (
+            f"Expected get_changed_file to hide .cursor/{name}, matching the git registry."
+        )
+    assert registry.get_changed_file(conv_id, ".cursor/rules/style.md") is not None
 
 
 def test_git_list_changed_files_raises_on_timeout(tmp_path: Path, monkeypatch) -> None:

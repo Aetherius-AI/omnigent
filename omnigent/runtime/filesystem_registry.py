@@ -841,6 +841,8 @@ class AgentEditFilesystemRegistry(FilesystemRegistry):
         norm = _normalize_path(path, self._cwd)
         if norm is None:
             return None
+        if _is_ephemeral(norm) or _is_harness_plumbing(norm):
+            return None
         with self._lock:
             events = [e for e in self._session_events.get(session_id, []) if e.path == norm]
         if not events:
