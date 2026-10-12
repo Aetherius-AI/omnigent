@@ -37,6 +37,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import Response
+from packaging.version import InvalidVersion, Version
 from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError, StatementError
 
@@ -10240,6 +10241,47 @@ def _reject_reserved_cost_control_label_seed(labels: dict[str, str]) -> None:
         )
 
 
+_CODEX_PRELAUNCH_PLAN_MIN_HOST_VERSION = (0, 18, 0)
+
+
+def _require_codex_prelaunch_plan_host_support(
+    host_registry: HostRegistry | None,
+    host_id: str | None,
+    labels: dict[str, str] | None,
+) -> None:
+    """
+    Refuse a Plan-armed create on a host whose runner predates launch-time Plan mode.
+
+    Such a runner ignores the seeded label and starts the thread in Default
+    while the composer, which reads the label, shows Plan. An offline host or an
+    unparseable version is left to the launch step, like the harness-setup floor.
+
+    :param host_registry: Live host connections, or ``None`` in minimal wirings.
+    :param host_id: Caller-supplied host to launch on, or ``None``.
+    :param labels: Client-supplied create labels, or ``None``.
+    :raises OmnigentError: ``CONFLICT`` with an update-the-host hint.
+    """
+    if host_registry is None or host_id is None or not labels:
+        return
+    if labels.get(_CODEX_NATIVE_COLLABORATION_MODE_LABEL_KEY) != "plan":
+        return
+    conn = host_registry.get(host_id)
+    if conn is None:
+        return
+    try:
+        release = tuple(Version(conn.hello.version).release)
+    except InvalidVersion:
+        return
+    if release + (0,) * (3 - len(release)) >= _CODEX_PRELAUNCH_PLAN_MIN_HOST_VERSION:
+        return
+    raise OmnigentError(
+        f"host '{conn.hello.name}' runs omnigent {conn.hello.version}, which cannot start "
+        "a session in Plan mode — update omnigent on the host, or create the session "
+        "without Plan mode and turn it on from the composer",
+        code=ErrorCode.CONFLICT,
+    )
+
+
 def _reject_server_reserved_label_seed(labels: dict[str, str] | None) -> None:
     """
     Reject a client-supplied label map that touches server-internal keys.
@@ -11957,6 +11999,7 @@ __all__ = [
     "_repl_terminal_ui_labels",
     "_replace_text_in_message_body",
     "_require_codex_approval_mode_forward",
+    "_require_codex_prelaunch_plan_host_support",
     "_require_collaboration_mode_forward",
     "_require_cost_control_label_authority",
     "_require_declared_subagent",

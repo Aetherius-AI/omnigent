@@ -157,12 +157,13 @@ def app(runtime_init: None, db_uri: str, tmp_path) -> FastAPI:
     )
 
 
-async def _connect_host(app: FastAPI) -> ApplicationCommunicator:
+async def _connect_host(app: FastAPI, *, version: str = "0.1.0-test") -> ApplicationCommunicator:
     """Connect a mock host over the WebSocket tunnel and wait for it
     to register in the app's host registry.
 
     :param app: The FastAPI app under test (its ``state.host_registry``
         is the same instance the session-create launch path reads).
+    :param version: The omnigent version the host's hello reports.
     :returns: The connected ASGI communicator, ready to exchange frames.
     """
     path = f"/v1/hosts/{_HOST_ID}/tunnel"
@@ -172,7 +173,7 @@ async def _connect_host(app: FastAPI) -> ApplicationCommunicator:
     assert accepted["type"] == "websocket.accept"
 
     hello = encode_host_frame(
-        HostHelloFrame(version="0.1.0-test", frame_protocol_version=1, name="laptop")
+        HostHelloFrame(version=version, frame_protocol_version=1, name="laptop")
     )
     await comm.send_input({"type": "websocket.receive", "text": hello})
     registry = app.state.host_registry
@@ -3985,3 +3986,57 @@ async def test_rider_of_a_refused_relaunch_surfaces_the_refusal(
             f"host refusal: {item!r}"
         )
         assert "omnigent setup" in item["message"], item
+
+
+@pytest.mark.parametrize(
+    ("host_version", "accepted"),
+    [("0.17.3", False), ("0.18.0.dev0", True), ("0.1.0-test", True)],
+    ids=["predates-plan-mode", "supports-plan-mode", "unparseable-stays-permissive"],
+)
+async def test_plan_armed_create_needs_a_host_that_starts_in_plan_mode(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+    db_uri: str,
+    host_version: str,
+    accepted: bool,
+) -> None:
+    """A create that seeds the Plan label is refused before anything is written
+    when the host's runner predates launch-time Plan mode: such a runner would
+    start the thread in Default while the composer, reading the label, shows
+    Plan. Newer and unparseable versions take the normal launch path."""
+    comm = await _connect_host(app, version=host_version)
+    agent = await create_test_agent(client)
+    store = SqlAlchemyConversationStore(db_uri)
+    rows_before = {conv.id for conv in store.list_conversations(limit=50).data}
+    responder = (
+        asyncio.create_task(_serve_one_launch(comm, launch_status="launched"))
+        if accepted
+        else None
+    )
+    resp = await client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": agent["id"],
+            "host_id": _HOST_ID,
+            "workspace": _WORKSPACE,
+            "labels": {"omnigent.codex_native.collaboration_mode": "plan"},
+        },
+    )
+    if responder is not None:
+        await responder
+    if accepted:
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        assert body["runner_id"] is not None
+        conv = store.get_conversation(body["id"])
+        assert conv is not None
+        assert conv.labels["omnigent.codex_native.collaboration_mode"] == "plan"
+        return
+    assert resp.status_code == 409, resp.text
+    error = resp.json()["error"]
+    assert error["code"] == "conflict"
+    assert "Plan mode" in error["message"]
+    assert "update omnigent on the host" in error["message"]
+    assert not await _expect_no_launch(comm, budget_s=0.5)
+    # Refused before any write: no unbound row carrying a Plan label is left behind.
+    assert {conv.id for conv in store.list_conversations(limit=50).data} == rows_before

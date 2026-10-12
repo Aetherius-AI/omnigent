@@ -153,6 +153,7 @@ from omnigent.server.routes._sessions.helpers import (
     _reject_reserved_cost_control_label_seed,
     _reject_server_reserved_label_seed,
     _require_codex_approval_mode_forward,
+    _require_codex_prelaunch_plan_host_support,
     _require_collaboration_mode_forward,
     _require_cost_control_label_authority,
     _require_permission_mode_forward,
@@ -778,6 +779,9 @@ def register_core_routes(
             # message survives in each entry's `msg`.
             raise HTTPException(status_code=422, detail=exc.errors(include_context=False)) from exc
 
+        _require_codex_prelaunch_plan_host_support(
+            getattr(request.app.state, "host_registry", None), body.host_id, body.labels
+        )
         creation_metadata(parent_session_id=body.parent_session_id, host_type=body.host_type)
         resp, conv = await _create_session_from_existing_agent(
             conversation_store,
@@ -1008,6 +1012,11 @@ def register_core_routes(
         )
         _reject_reserved_cost_control_label_seed(parsed_metadata.labels)
         _reject_server_reserved_label_seed(parsed_metadata.labels)
+        _require_codex_prelaunch_plan_host_support(
+            getattr(request.app.state, "host_registry", None),
+            parsed_metadata.host_id,
+            parsed_metadata.labels,
+        )
 
         inherited_runner_id: str | None = None
         parent_conv = None

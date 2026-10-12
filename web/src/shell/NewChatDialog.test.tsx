@@ -5874,7 +5874,7 @@ describe("NewChatLandingScreen", () => {
   });
 
   it("offers Plan mode in the add menu for Codex before the first prompt", () => {
-    renderLanding();
+    renderLanding({ server_version: "0.18.0" });
     selectAgent("a2");
     fireEvent.pointerDown(screen.getByTestId("new-chat-landing-attach"), { button: 0 });
     const plan = screen.getByTestId("composer-plan-action");
@@ -5892,37 +5892,52 @@ describe("NewChatLandingScreen", () => {
     expect(screen.queryByTestId("new-chat-landing-plan-mode")).toBeNull();
   });
 
-  it("seeds the collaboration-mode label in the create body when Plan mode is armed", async () => {
+  it.each([
+    ["armed", true, "plan"],
+    ["left off", false, undefined],
+  ])(
+    "seeds the collaboration-mode label in the create body only when Plan mode is %s",
+    async (_case, armed, expected) => {
+      authenticatedFetchMock.mockResolvedValue({
+        ok: true,
+        json: async () => ({ id: "conv_new" }),
+      } as unknown as Response);
+      renderLanding({ server_version: "0.18.0" });
+      selectAgent("a2");
+      if (armed) {
+        fireEvent.pointerDown(screen.getByTestId("new-chat-landing-attach"), { button: 0 });
+        fireEvent.click(screen.getByTestId("composer-plan-action"));
+      }
+      const { body } = await submitAndReadBody("plan the auth refactor");
+      const labels = body.labels as Record<string, string>;
+      // The runner reads this label to start the fresh thread in Plan mode.
+      expect(labels["omnigent.codex_native.collaboration_mode"]).toBe(expected);
+      expect(labels["omnigent.wrapper"]).toBe("codex-native-ui");
+    },
+  );
+
+  it("keeps Plan unavailable before the first prompt on a server that predates it", async () => {
     authenticatedFetchMock.mockResolvedValue({
       ok: true,
       json: async () => ({ id: "conv_new" }),
     } as unknown as Response);
-    renderLanding();
+    renderLanding({ server_version: "0.17.2" });
     selectAgent("a2");
     fireEvent.pointerDown(screen.getByTestId("new-chat-landing-attach"), { button: 0 });
-    fireEvent.click(screen.getByTestId("composer-plan-action"));
+    const plan = screen.getByTestId("composer-plan-action");
+    // An older server's runner would ignore the label and run Default under a Plan badge.
+    expect(plan).toHaveAttribute("data-disabled");
+    expect(plan.getAttribute("title")).toContain("0.18.0");
+    fireEvent.keyDown(plan, { key: "Escape" });
+    expect(screen.queryByTestId("new-chat-landing-plan-mode")).toBeNull();
     const { body } = await submitAndReadBody("plan the auth refactor");
-    const labels = body.labels as Record<string, string>;
-    // The runner reads this label to start the fresh thread in Plan mode.
-    expect(labels["omnigent.codex_native.collaboration_mode"]).toBe("plan");
-    expect(labels["omnigent.wrapper"]).toBe("codex-native-ui");
-  });
-
-  it("omits the collaboration-mode label when Plan mode is left off", async () => {
-    authenticatedFetchMock.mockResolvedValue({
-      ok: true,
-      json: async () => ({ id: "conv_new" }),
-    } as unknown as Response);
-    renderLanding();
-    selectAgent("a2");
-    const { body } = await submitAndReadBody("run the build");
     expect(
       (body.labels as Record<string, string>)["omnigent.codex_native.collaboration_mode"],
     ).toBeUndefined();
   });
 
   it("drops the armed Plan mode when the agent changes", () => {
-    renderLanding();
+    renderLanding({ server_version: "0.18.0" });
     selectAgent("a2");
     fireEvent.pointerDown(screen.getByTestId("new-chat-landing-attach"), { button: 0 });
     fireEvent.click(screen.getByTestId("composer-plan-action"));

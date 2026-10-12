@@ -182,7 +182,11 @@ import {
   writeLastSandboxRepos,
 } from "@/lib/repoPreferences";
 import { readHarnessOptions, writeHarnessOption, type HarnessOptions } from "@/lib/modePreferences";
-import { CODEX_NATIVE_COLLABORATION_MODE_LABEL_KEY } from "@/lib/codexPlanMode";
+import {
+  CODEX_NATIVE_COLLABORATION_MODE_LABEL_KEY,
+  CODEX_PRELAUNCH_PLAN_MIN_SERVER_VERSION,
+  serverSupportsCodexPrelaunchPlanMode,
+} from "@/lib/codexPlanMode";
 import {
   getNewChatPickerCacheKey,
   readNewChatPermissionCache,
@@ -3276,6 +3280,11 @@ export function NewChatLandingScreen() {
   // add menu arms it directly; Smart Routing may not land on Codex at all.
   const codexPlanModeSelectable =
     !smartRoutingHarnessSelected && selectedNativeHarness === "codex-native";
+  // Older servers, and the runners they manage, ignore the seeded label: a
+  // pre-launch pick would launch Default under a Plan badge.
+  const codexPrelaunchPlanSupported =
+    codexPlanModeSelectable &&
+    serverSupportsCodexPrelaunchPlanMode(info === "loading" ? null : info.server_version);
   const selectedAgentHasAdvancedSettings = agentHasAdvancedSettings(
     selectedAgent,
     brainHarnessLabelsAll,
@@ -3409,7 +3418,7 @@ export function NewChatLandingScreen() {
         ...modelRows,
         ...effortRows,
         { label: "Permission mode", value: approvalValue },
-        ...(isCodex && planMode ? [{ label: "Plan mode", value: "On" }] : []),
+        ...(codexPrelaunchPlanSupported && planMode ? [{ label: "Plan mode", value: "On" }] : []),
         ...(isCodex ? sourceRows(codexModelOptions) : []),
       ];
     }
@@ -3458,6 +3467,7 @@ export function NewChatLandingScreen() {
     approvalMode,
     bypassSandbox,
     planMode,
+    codexPrelaunchPlanSupported,
     cursorExecMode,
     agySkipMode,
     pickedHarness,
@@ -4021,9 +4031,14 @@ export function NewChatLandingScreen() {
   // pick their "plan" permission preset.
   let landingPlanHandler: (() => void) | undefined;
   let landingPlanLabel: string | undefined;
-  if (codexPlanModeSelectable) {
+  let landingPlanDisabledReason: string | undefined;
+  if (codexPrelaunchPlanSupported) {
     landingPlanHandler = () => setPlanMode((armed) => !armed);
     landingPlanLabel = planMode ? "Exit Plan mode" : "Enter Plan mode";
+  } else if (codexPlanModeSelectable) {
+    landingPlanDisabledReason =
+      `Plan mode before the first prompt needs omnigent ${CODEX_PRELAUNCH_PLAN_MIN_SERVER_VERSION}` +
+      " or newer on the server; start the session and turn it on from the composer";
   } else if (directModeOptions.some((mode) => mode.value === "plan")) {
     landingPlanHandler = () => selectDirectMode("plan");
   }
@@ -5393,7 +5408,7 @@ export function NewChatLandingScreen() {
           ? { [CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY]: "1" }
           : {}),
         // A pre-launch Plan pick rides the label the in-session toggle persists.
-        ...(codexPlanModeSelectable && planMode
+        ...(codexPrelaunchPlanSupported && planMode
           ? { [CODEX_NATIVE_COLLABORATION_MODE_LABEL_KEY]: "plan" }
           : {}),
       };
@@ -6567,10 +6582,12 @@ export function NewChatLandingScreen() {
                         disabled={creating}
                         onAttach={() => fileInputRef.current?.click()}
                         onPlan={landingPlanHandler}
+                        planDisabled={landingPlanDisabledReason !== undefined}
+                        planDisabledReason={landingPlanDisabledReason}
                         planActive={
                           (supportsPermissionMode && permissionMode === "plan") ||
                           (supportsCursorMode && cursorExecMode === "plan") ||
-                          (codexPlanModeSelectable && planMode)
+                          (codexPrelaunchPlanSupported && planMode)
                         }
                         planLabel={landingPlanLabel}
                         projects={projectList ?? []}
@@ -6801,7 +6818,7 @@ export function NewChatLandingScreen() {
                       />
                     ) : null}
                     {/* Mirrors the in-session composer's Plan-mode marker. */}
-                    {codexPlanModeSelectable && planMode && (
+                    {codexPrelaunchPlanSupported && planMode && (
                       <span
                         data-testid="new-chat-landing-plan-mode"
                         className="inline-flex shrink-0 items-center gap-1 px-1 text-sm font-medium text-foreground"
