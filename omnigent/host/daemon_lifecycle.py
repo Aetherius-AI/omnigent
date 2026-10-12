@@ -152,8 +152,13 @@ def runner_env_manifest_path(target: str, *, base_dir: Path | None = None) -> Pa
 
 def write_runner_env_manifest(
     target: str, env: Mapping[str, str], *, base_dir: Path | None = None
-) -> Path:
-    """Atomically write *env* as *target*'s owner-only (0600) manifest; return its path."""
+) -> Path | None:
+    """Atomically write *env* as *target*'s owner-only (0600) manifest and return its
+    path, or ``None`` without writing where POSIX ownership is unavailable (e.g.
+    Windows): such a file is never trusted on read, so writing one would only leave
+    credentials unused on disk."""
+    if not hasattr(os, "getuid"):
+        return None
     path = runner_env_manifest_path(target, base_dir=base_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(

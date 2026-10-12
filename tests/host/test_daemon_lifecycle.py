@@ -438,6 +438,7 @@ async def test_monitor_startup_grace_before_first_ownership(
             await monitor
 
 
+@pytest.mark.skipif(os.name != "posix", reason="manifest is written and trusted only on POSIX")
 def test_runner_env_manifest_roundtrip_is_owner_only(tmp_path: Path) -> None:
     env = {
         "PATH": "/usr/bin",
@@ -447,13 +448,12 @@ def test_runner_env_manifest_roundtrip_is_owner_only(tmp_path: Path) -> None:
 
     path = write_runner_env_manifest("local", env, base_dir=tmp_path)
 
+    assert path is not None
     # Kept out of the registry directory itself, which is scanned as ``*.json``.
     assert path.parent == daemon_record_path("local", base_dir=tmp_path).parent / "runner-env"
-    if os.name == "posix":
-        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert not list(path.parent.glob(".env-*")), "temp file left behind"
-    if os.name == "posix":
-        assert read_runner_env_manifest("local", base_dir=tmp_path) == env
+    assert read_runner_env_manifest("local", base_dir=tmp_path) == env
 
 
 @pytest.mark.skipif(os.name != "posix", reason="manifest reads are trusted only on POSIX")
@@ -485,6 +485,7 @@ def test_runner_env_manifest_rejects_shared_or_indirect_files(tmp_path: Path) ->
     """A manifest another user could have written never feeds runner launches."""
     path = write_runner_env_manifest("local", {"PATH": "/usr/bin"}, base_dir=tmp_path)
 
+    assert path is not None
     path.chmod(0o644)
     assert read_runner_env_manifest("local", base_dir=tmp_path) is None
     path.chmod(0o600)
@@ -537,6 +538,7 @@ def test_host_launches_runners_from_the_target_manifest(
     assert foreground._runner_launch_base_env(os.environ) is os.environ
 
 
+@pytest.mark.skipif(os.name != "posix", reason="manifest reads are trusted only on POSIX")
 def test_runner_launch_base_env_drops_host_deleted_variables(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -559,12 +561,16 @@ def test_runner_launch_base_env_drops_host_deleted_variables(
     assert base_env["PATH"] == "/usr/bin"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="simulates a non-POSIX host by removing os.getuid")
 def test_runner_env_manifest_untrusted_without_posix_ownership(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Without POSIX ownership semantics (e.g. Windows) the manifest is never trusted."""
+    """Without POSIX ownership semantics (e.g. Windows) the manifest is neither
+    written nor trusted."""
     write_runner_env_manifest("local", {"PATH": "/usr/bin"}, base_dir=tmp_path)
     assert read_runner_env_manifest("local", base_dir=tmp_path) == {"PATH": "/usr/bin"}
 
     monkeypatch.delattr(os, "getuid", raising=False)
     assert read_runner_env_manifest("local", base_dir=tmp_path) is None
+    assert write_runner_env_manifest("other", {"PATH": "/usr/bin"}, base_dir=tmp_path) is None
+    assert read_runner_env_manifest("other", base_dir=tmp_path) is None

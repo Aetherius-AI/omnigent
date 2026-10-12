@@ -1042,15 +1042,17 @@ def test_publish_runner_env_manifest_warns_on_oserror(
 ) -> None:
     """A failed manifest write is reported, not raised, and keeps the prior manifest."""
     monkeypatch.setattr(cli, "_HOST_PID_PATH", tmp_path / "host.pid")
+    write_runner_env_manifest("local", {"PATH": "/usr/bin"}, base_dir=tmp_path)
 
     def _raise(*_a: object, **_kw: object) -> None:
         raise OSError("disk full")
 
     monkeypatch.setattr(cli, "_write_runner_env_manifest_impl", _raise)
 
-    cli._publish_runner_env_manifest("local", {"PATH": "/usr/bin"})
+    cli._publish_runner_env_manifest("local", {"PATH": "/usr/local/bin"})
 
     assert "could not refresh the runner environment" in capsys.readouterr().err
+    assert read_runner_env_manifest("local", base_dir=tmp_path) == {"PATH": "/usr/bin"}
 
 
 def test_ensure_host_daemon_stops_spawned_daemon_on_identity_mismatch(
