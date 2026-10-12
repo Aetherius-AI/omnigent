@@ -18,8 +18,8 @@ from omnigent.server.routes._sessions.helpers import (
 
 # Parked windows are 40% of the budget, so event-loop scheduling delay on a
 # loaded runner cannot push a stage past it.
-_BUDGET_S = 1.0
-_WINDOW_S = 0.4
+_BUDGET_S = 2.0
+_WINDOW_S = 0.8
 _SESSION = "conv_1"
 
 
@@ -106,6 +106,23 @@ async def test_clone_past_its_own_ceiling_still_gives_up(
     assert "still cloning" in str(excinfo.value)
 
 
+async def test_repeated_clone_reports_restart_the_clone_budget(
+    monkeypatch: pytest.MonkeyPatch, waiters: list[asyncio.Task[None]]
+) -> None:
+    """Each repository's clone report restarts the clone budget, so several
+    repositories do not share one window."""
+    monkeypatch.setattr(managed_hosts, "MANAGED_LAUNCH_CLONE_RENDEZVOUS_TIMEOUT_S", _BUDGET_S)
+    tracker = _begin("cloning")
+    waiter = _wait_on(tracker, waiters)
+    window_s = _BUDGET_S - _WINDOW_S
+    await _still_parked(waiter, window_s)
+    tracker.advance(_SESSION, "cloning")
+    # Past one clone budget in total; the second clone's own budget has room left.
+    await _still_parked(waiter, window_s)
+    tracker.finish(_SESSION)
+    await asyncio.wait_for(waiter, timeout=1.0)
+
+
 async def test_budget_restarts_at_every_stage(waiters: list[asyncio.Task[None]]) -> None:
     """Bounded stages that each fit the budget never add up to a timeout."""
     tracker = _begin()
@@ -142,29 +159,23 @@ async def test_failure_during_the_clone_surfaces_its_reason(
     assert "clone exited 128" in str(excinfo.value)
 
 
-def test_advance_publishes_stage_and_timestamp_as_one_value() -> None:
-    """The waiter reads the pair in one load, so it must be published as one value."""
-    tracker = _begin()
-    launch = tracker.get(_SESSION)
-    assert launch is not None
-    before = launch.progress
-    tracker.advance(_SESSION, "cloning")
-    assert launch.progress[0] == "cloning"
-    assert launch.progress[1] >= before[1]
-    assert (launch.stage, launch.progressed_at) == launch.progress
-
-
-def test_advance_ignores_unknown_and_settled_entries() -> None:
+def test_advance_replaces_the_progress_pair_and_ignores_unknown_or_settled_entries() -> None:
+    """``advance`` publishes stage and timestamp as one value, and leaves unknown or
+    settled entries untouched."""
     tracker = ManagedLaunchTracker()
     tracker.advance("conv_missing", "cloning")
     tracker.begin(_SESSION)
-    tracker.fail(_SESSION, "boom")
     launch = tracker.get(_SESSION)
     assert launch is not None
-    before = launch.progress
+    seeded = launch.progress
+    assert seeded[0] == "provisioning"
     tracker.advance(_SESSION, "cloning")
-    assert launch.progress == before
-    assert launch.stage == "provisioning"
+    assert launch.progress[0] == "cloning"
+    assert launch.progress[1] >= seeded[1]
+    tracker.fail(_SESSION, "boom")
+    settled = launch.progress
+    tracker.advance(_SESSION, "starting")
+    assert launch.progress == settled
 
 
 async def test_provision_relays_pipeline_stages_to_the_tracker(
@@ -187,7 +198,7 @@ async def test_provision_relays_pipeline_stages_to_the_tracker(
             on_stage(stage)
             launch = tracker.get(_SESSION)
             assert launch is not None
-            tracked.append(launch.stage)
+            tracked.append(launch.progress[0])
         return ManagedHostLaunch(host_id="host_1", workspace="/root/workspace/repo")
 
     monkeypatch.setattr(managed_hosts, "launch_managed_host", _fake_launch)

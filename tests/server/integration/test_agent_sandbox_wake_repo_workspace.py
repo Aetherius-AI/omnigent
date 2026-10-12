@@ -356,7 +356,7 @@ async def test_agent_sandbox_wake_reconstructs_repo_workspaces(
 
     async def _fake_wait_for_runner(_runner_id: str, *, timeout_s: float) -> object:
         launch = launch_tracker.get(session_ids[0]) if session_ids else None
-        stages_while_connecting.append(launch.stage if launch is not None else "<settled>")
+        stages_while_connecting.append(launch.progress[0] if launch is not None else "<settled>")
         return object()
 
     monkeypatch.setattr(app.state.tunnel_registry, "wait_for_runner", _fake_wait_for_runner)

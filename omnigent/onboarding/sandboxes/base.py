@@ -955,8 +955,9 @@ class SandboxHostLauncher(SandboxLifecycle):
             workspace root that parents them all.
         :param host_config: Deployment-supplied ``~/.omnigent/config.yaml``
             content installed into the sandbox's config BEFORE the host starts.
-        :param on_stage: Progress observer invoked with ``"cloning"`` (once per
-            repository to clone) and ``"starting"``.
+        :param on_stage: Progress observer invoked with ``"cloning"`` (at least
+            once when repositories are cloned; the exec-model launcher reports it
+            once per repository) and ``"starting"``.
         :returns: The absolute in-sandbox workspace path — the working
             directory the host starts the agent in.
         """

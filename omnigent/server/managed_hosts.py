@@ -501,6 +501,7 @@ class ManagedLaunch:
         was entered. A waiter's rendezvous budget counts from that time. One
         immutable value, so a waiter on the event loop never pairs a stale
         timestamp with a newer stage reported from the launcher's worker thread.
+        Read it in one load; there are deliberately no per-field accessors.
     """
 
     settled: asyncio.Event
@@ -508,14 +509,6 @@ class ManagedLaunch:
     progress: tuple[str, float] = dataclass_field(
         default_factory=lambda: ("provisioning", time.monotonic())
     )
-
-    @property
-    def stage(self) -> str:
-        return self.progress[0]
-
-    @property
-    def progressed_at(self) -> float:
-        return self.progress[1]
 
 
 class ManagedLaunchTracker:
@@ -568,7 +561,6 @@ class ManagedLaunchTracker:
         entry = self._by_session.get(session_id)
         if entry is None or entry.settled.is_set():
             return
-        # One assignment: a reader on the event loop sees either pair, never a torn one.
         entry.progress = (stage, time.monotonic())
 
     def finish(self, session_id: str) -> None:

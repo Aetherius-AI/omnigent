@@ -866,8 +866,8 @@ async def test_parked_message_rides_out_a_clone_longer_than_the_rendezvous_budge
     clone_gate = threading.Event()
 
     def _hold_clone(command: str) -> None:
-        if "git clone" in command:
-            assert clone_gate.wait(timeout=30), "test never released the clone gate"
+        if "git clone" in command and not clone_gate.wait(timeout=30):
+            raise TimeoutError("test never released the clone gate")
 
     fake = FakeSandboxLauncher(on_command=_hold_clone, fail_on_host_start=True)
     install_fake_modal_launcher(monkeypatch, fake)
@@ -970,8 +970,8 @@ async def test_managed_launch_progress_surfaces_on_snapshot_and_stream(
     stages_while_connecting: list[str] = []
 
     async def _fake_wait_for_runner(_runner_id: str, *, timeout_s: float) -> object:
-        launch = tracker.get(session_ids[0])
-        stages_while_connecting.append(launch.stage if launch is not None else "<settled>")
+        launch = tracker.get(session_ids[0]) if session_ids else None
+        stages_while_connecting.append(launch.progress[0] if launch is not None else "<settled>")
         return object()
 
     monkeypatch.setattr(env.app.state.tunnel_registry, "wait_for_runner", _fake_wait_for_runner)
