@@ -98,6 +98,11 @@ interface MonacoCodeEditorProps extends CommentProps {
    */
   searchOpen?: boolean;
   /**
+   * Bumped on every Cmd+F. Re-running Monaco's find action while the widget is
+   * already open refocuses its input, which `searchOpen` alone can't trigger.
+   */
+  searchFocusNonce?: number;
+  /**
    * Called when the find widget is closed from within Monaco (Escape or the
    * widget's ✕) so the parent can reset the toggle and keep the toolbar button
    * in sync — otherwise the next click would no-op instead of re-opening.
@@ -123,6 +128,7 @@ export function MonacoCodeEditor({
   onDirtyChange,
   onSaveStatusChange,
   searchOpen,
+  searchFocusNonce,
   onSearchHandled,
   comments,
   activeSelection,
@@ -166,6 +172,7 @@ export function MonacoCodeEditor({
       setContentRef={setContentRef}
       onSaveStatusChange={onSaveStatusChange}
       searchOpen={searchOpen}
+      searchFocusNonce={searchFocusNonce}
       onSearchHandled={onSearchHandled}
       comments={comments}
       activeSelection={activeSelection}
@@ -192,6 +199,7 @@ interface InnerProps extends CommentProps {
   setContentRef: React.RefObject<((content: string) => void) | null>;
   onSaveStatusChange?: (status: SaveStatus) => void;
   searchOpen?: boolean;
+  searchFocusNonce?: number;
   onSearchHandled?: () => void;
 }
 
@@ -220,6 +228,7 @@ function MonacoCodeEditorInner({
   setContentRef,
   onSaveStatusChange,
   searchOpen,
+  searchFocusNonce,
   onSearchHandled,
   comments,
   activeSelection,
@@ -374,7 +383,8 @@ function MonacoCodeEditorInner({
   // `searchOpen` true opens find; false closes it (so re-clicking the toolbar
   // button, which toggles the flag, hides the widget). The controller drives the
   // close directly rather than the open action so it's a real toggle, not a
-  // second open.
+  // second open. `searchFocusNonce` re-runs the action for a Cmd+F pressed
+  // while the widget is already open, which refocuses its input.
   useEffect(() => {
     if (!mounted) return;
     const editor = editorInstanceRef.current;
@@ -385,7 +395,7 @@ function MonacoCodeEditorInner({
       const controller = editor.getContribution<FindController>(FIND_CONTROLLER_ID);
       if (controller?.getState().isRevealed) controller.closeFindWidget();
     }
-  }, [mounted, searchOpen]);
+  }, [mounted, searchOpen, searchFocusNonce]);
 
   // Reflect a find close initiated inside Monaco (Escape or the widget's ✕) back
   // to the toolbar toggle, so its state matches the visible widget and the next
