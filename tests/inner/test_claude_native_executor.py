@@ -2115,7 +2115,7 @@ async def test_prompt_timeout_reap_keeps_event_loop_responsive(
     def slow_kill(bridge_dir_arg: Path, *, timeout_s: float) -> None:
         del bridge_dir_arg, timeout_s
         kill_started.set()
-        release_kill.wait(10)
+        assert release_kill.wait(10), "test did not release the in-flight kill"
         killed.set()
 
     monkeypatch.delenv(REQUEST_SESSION_ID_ENV_VAR, raising=False)
@@ -2123,7 +2123,7 @@ async def test_prompt_timeout_reap_keeps_event_loop_responsive(
     monkeypatch.setattr(claude_native_executor, "kill_session", slow_kill)
     executor = ClaudeNativeExecutor(tmp_path / "bridge")
 
-    async def collect() -> list:
+    async def collect() -> list[object]:
         return [
             event
             async for event in executor.run_turn(

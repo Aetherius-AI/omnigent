@@ -16,6 +16,7 @@ import shlex
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -56,9 +57,9 @@ _SLOW_KILL_TMUX = """\
 #!/usr/bin/env bash
 for arg in "$@"; do
   if [ "$arg" = "kill-session" ]; then
-    echo "start $(date +%s.%N)" >> {kill_log}
+    echo "start $({python} -c 'import time; print(time.time())')" >> {kill_log}
     sleep {delay}
-    echo "exec $(date +%s.%N)" >> {kill_log}
+    echo "exec $({python} -c 'import time; print(time.time())')" >> {kill_log}
     break
   fi
 done
@@ -83,6 +84,7 @@ class _ClaudePaneRig:
             _SLOW_KILL_TMUX.format(
                 kill_log=shlex.quote(str(self.kill_log)),
                 delay=_KILL_DELAY_S,
+                python=shlex.quote(sys.executable),
                 real_tmux=shlex.quote(_REAL_TMUX),
             ),
             encoding="utf-8",
@@ -159,7 +161,12 @@ class _ClaudePaneRig:
 
 @pytest.fixture
 def pane_rig(monkeypatch: pytest.MonkeyPatch) -> Iterator[_ClaudePaneRig]:
-    rig = _ClaudePaneRig(Path(tempfile.mkdtemp(prefix="reap-")))
+    work = Path(tempfile.mkdtemp(prefix="reap-"))
+    try:
+        rig = _ClaudePaneRig(work)
+    except BaseException:
+        shutil.rmtree(work, ignore_errors=True)
+        raise
     monkeypatch.setenv("PATH", f"{rig.shim_dir}{os.pathsep}{os.environ['PATH']}")
     try:
         yield rig
