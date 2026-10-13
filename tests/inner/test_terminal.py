@@ -6,7 +6,9 @@ import asyncio
 import errno
 import json
 import logging
+import os
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -3546,3 +3548,83 @@ async def test_read_join_wrapped_asks_tmux_to_join_wrapped_rows(tmp_path: Path) 
     assert calls[1] == ("capture-pane", "-t", instance.tmux_target, "-p", "-J")
     assert plain["screen"] == joined["screen"]
     assert "https://signin.example.com/device?user_code=ABCDEFGH" in joined["screen"]
+
+
+def test_socket_recovery_refuses_a_preclaimed_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A squatted symlink at the reaped dir name is never followed.
+
+    On a shared ``/tmp`` another user can pre-create the reaped terminal
+    directory name as a symlink. Recovery must refuse the existing path rather
+    than chmod or write an owner claim through it into the target.
+    """
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    os.chmod(victim, 0o755)
+    (victim / "owner.pid").write_text("attacker")
+    private_dir = tmp_path / "omnigent-terminal-squat"
+    private_dir.symlink_to(victim, target_is_directory=True)
+
+    instance = TerminalInstance(
+        name="runtime",
+        session_key="main",
+        socket_path=private_dir / "tmux.sock",
+        private_dir=private_dir,
+        running=True,
+    )
+    monkeypatch.setattr(instance, "_tmux_server_process_alive", lambda: True)
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(terminal_mod.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+
+    assert instance._begin_socket_recovery() is False
+    assert stat.S_IMODE(victim.stat().st_mode) == 0o755
+    assert (victim / "owner.pid").read_text() == "attacker"
+    assert killed == []
+
+
+def test_socket_recovery_rejects_a_recycled_server_pid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A recorded pid whose start time no longer matches is not signalled."""
+    private_dir = tmp_path / "omnigent-terminal-recycled"
+    instance = TerminalInstance(
+        name="runtime",
+        session_key="main",
+        socket_path=private_dir / "tmux.sock",
+        private_dir=private_dir,
+        running=True,
+    )
+    instance._tmux_server_pid = os.getpid()
+    instance._tmux_server_create_time = -1.0
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(terminal_mod.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+
+    assert instance._begin_socket_recovery() is False
+    assert not private_dir.exists()
+    assert killed == []
+
+
+def test_socket_recovery_times_out_when_the_socket_never_returns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recovery signals the live server but gives up if the socket never reappears."""
+    private_dir = tmp_path / "omnigent-terminal-timeout"
+    instance = TerminalInstance(
+        name="runtime",
+        session_key="main",
+        socket_path=private_dir / "tmux.sock",
+        private_dir=private_dir,
+        running=True,
+    )
+    instance._tmux_server_pid = os.getpid()
+    monkeypatch.setattr(instance, "_tmux_server_process_alive", lambda: True)
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(terminal_mod.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+    monkeypatch.setattr(terminal_mod, "_SOCKET_RECOVERY_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(terminal_mod, "_SOCKET_RECOVERY_POLL_SECONDS", 0.005)
+
+    assert instance._recover_private_socket_sync() is False
+    assert private_dir.is_dir() and not private_dir.is_symlink()
+    assert stat.S_IMODE(private_dir.stat().st_mode) == 0o700
+    assert killed == [(os.getpid(), terminal_mod.signal.SIGUSR1)]

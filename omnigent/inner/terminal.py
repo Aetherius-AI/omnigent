@@ -320,10 +320,9 @@ _IDLE_POLL_INTERVAL_SECONDS = 1.0
 # A running tmux client can fail transiently while the server and pane remain
 # healthy. Require repeated capture + session-probe failures before exit.
 _IDLE_EXIT_FAILURE_THRESHOLD = 3
-# A managed terminal's private tmux socket can be unlinked by OS temp cleanup
-# (macOS reaps idle ``$TMPDIR`` entries after ~3 days) while the server process
-# and its pane keep running. tmux recreates the socket on SIGUSR1; bound the
-# wait for the recreated file so a liveness probe never blocks indefinitely.
+# OS temp cleanup can unlink a terminal's private tmux socket (macOS reaps idle
+# ``$TMPDIR`` entries after ~3 days) while its server and pane keep running.
+# tmux recreates the socket on SIGUSR1; bound the wait for the recreated file.
 _SOCKET_RECOVERY_WAIT_SECONDS = 2.0
 _SOCKET_RECOVERY_POLL_SECONDS = 0.02
 _PROBE_ERROR_MAX_CHARS = 1024
@@ -1171,6 +1170,11 @@ class TerminalInstance:
     # pid. ``None`` until launch records it; recovery is a no-op without it.
     _tmux_server_pid: int | None = field(default=None, repr=False)
     _tmux_server_create_time: float | None = field(default=None, repr=False)
+    # Serialises socket recovery so the async command path and the threaded
+    # idle watcher cannot race to recreate the private dir concurrently.
+    _recovery_lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False, compare=False
+    )
 
     @property
     def tmux_target(self) -> str:
@@ -2760,9 +2764,8 @@ class TerminalInstance:
         """
         with contextlib.suppress(ValueError, IndexError):
             pid = int(launch_output.decode(errors="replace").split()[0])
-            # Only enable recovery with a verified identity: record the pid
-            # together with its start time so SIGUSR1 can never hit a recycled
-            # pid. If the start time is unreadable, leave recovery disabled.
+            # Store pid and start time together, or neither: recovery stays
+            # disabled unless both are known so SIGUSR1 never hits a recycled pid.
             with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied, OSError):
                 create_time = psutil.Process(pid).create_time()
                 self._tmux_server_pid = pid
@@ -2795,27 +2798,35 @@ class TerminalInstance:
             server was signalled to recreate it; ``False`` when there is no live
             server to recover (a genuine exit the caller still reports).
         """
-        if self.socket_path.exists():
+        with self._recovery_lock:
+            if self.socket_path.exists():
+                return True
+            if not self._tmux_server_process_alive():
+                return False
+            try:
+                # Recreate the reaped dir with a bare mkdir: it fails on any
+                # existing path, so a symlink pre-claimed at the predictable name
+                # on a shared /tmp is never followed into another user's dir.
+                os.mkdir(self.private_dir, 0o700)
+                os.chmod(self.private_dir, 0o700)
+                # The orphan sweep qualifies ownership from this file; the
+                # cleaner removed it with the dir, so re-establish it.
+                owner_claim.write_owner_claim(self.private_dir)
+                # Re-confirm identity just before signalling so a pid recycled
+                # during recovery is rejected by its start time, not signalled.
+                if not self._tmux_server_process_alive():
+                    return False
+                os.kill(cast(int, self._tmux_server_pid), signal.SIGUSR1)
+            except OSError:
+                return False
+            logger.warning(
+                "Recreating reaped tmux socket for terminal %s:%s: the private "
+                "socket was removed while server pid %s and its pane stayed alive",
+                self.name,
+                self.session_key,
+                self._tmux_server_pid,
+            )
             return True
-        if not self._tmux_server_process_alive():
-            return False
-        try:
-            self.private_dir.mkdir(parents=True, exist_ok=True)
-            os.chmod(self.private_dir, 0o700)
-            # The orphan sweep qualifies ownership from this file; the cleaner
-            # removed it with the dir, so re-establish it for the live owner.
-            owner_claim.write_owner_claim(self.private_dir)
-            os.kill(cast(int, self._tmux_server_pid), signal.SIGUSR1)
-        except OSError:
-            return False
-        logger.warning(
-            "Recreating reaped tmux socket for terminal %s:%s: the private "
-            "socket was removed while server pid %s and its pane stayed alive",
-            self.name,
-            self.session_key,
-            self._tmux_server_pid,
-        )
-        return True
 
     def _recover_private_socket_sync(self) -> bool:
         """Restore a reaped private socket for the threaded watcher's probes."""

@@ -66,7 +66,9 @@ def _alive(pid: int) -> bool:
 
 
 def _terminal_listed(base_url: str, session_id: str) -> bool:
-    data = httpx.get(f"{base_url}/v1/sessions/{session_id}/resources", timeout=10).json()
+    response = httpx.get(f"{base_url}/v1/sessions/{session_id}/resources", timeout=10)
+    response.raise_for_status()
+    data = response.json()
     return any(item.get("type") == "terminal" for item in data.get("data", []))
 
 
@@ -92,18 +94,10 @@ def _watch_terminal(page: Page, base_url: str, session_id: str, duration_s: floa
     }
 
 
-def _save_runner_logs(session_id: str, evidence_dir: Path) -> str:
-    lines: list[str] = []
+def _save_runner_logs(evidence_dir: Path) -> None:
+    """Copy the runner logs into the evidence dir for post-hoc debugging."""
     for log in sorted(logs_root().glob("runner/*.log")):
         shutil.copy(log, evidence_dir / log.name)
-        for line in log.read_text(errors="replace").splitlines():
-            if (
-                "tmux unavailable" in line
-                or "terminal_unavailable" in line
-                or (session_id in line and "exited" in line)
-            ):
-                lines.append(f"{log.name}: {line}")
-    return "\n".join(lines)
 
 
 @pytest.mark.timeout(420)
@@ -134,13 +128,14 @@ def test_claude_terminal_survives_bridge_files_removed_from_tmp(
         assert path.exists() and path.resolve().is_relative_to(tmp_root), path
     tmux_pid, pane_pid = _tmux_pids(socket_path, tmux_info["tmux_target"])
     runner_pid = int(_server_state["runner_pid"])
-    pane_before = subprocess.run(
+    pane_capture = subprocess.run(
         ["tmux", "-S", str(socket_path), "capture-pane", "-p", "-t", tmux_info["tmux_target"]],
         capture_output=True,
         text=True,
         timeout=10,
-    ).stdout
-    (evidence_dir / "pane-before-deletion.txt").write_text(pane_before)
+    )
+    assert pane_capture.returncode == 0, pane_capture.stderr
+    (evidence_dir / "pane-before-deletion.txt").write_text(pane_capture.stdout)
 
     # Stand-in for the macOS temp cleaner: remove the same three artifacts, touch no process.
     tmux_file.unlink()
@@ -163,20 +158,14 @@ def test_claude_terminal_survives_bridge_files_removed_from_tmp(
         "tmux_server": _alive(tmux_pid),
         "pane": _alive(pane_pid),
     }
-    (evidence_dir / "runner-log-excerpt.txt").write_text(
-        _save_runner_logs(session_id, evidence_dir)
-    )
+    _save_runner_logs(evidence_dir)
     (evidence_dir / "evidence.json").write_text(
         json.dumps(
             {
-                "session_id": session_id,
-                "base_url": base_url,
-                "runner_id": _server_state.get("runner_id"),
                 "runner_pid": runner_pid,
                 "tmux_server_pid": tmux_pid,
                 "pane_pid": pane_pid,
                 "tempdir": str(tmp_root),
-                "bridge_dir": str(bridge_dir),
                 "terminal_dir": str(terminal_dir),
                 "deleted_at_unix": deleted_at,
                 "alive_after_delete": alive_after_delete,
@@ -198,3 +187,4 @@ def test_claude_terminal_survives_bridge_files_removed_from_tmp(
     expect(main_terminal.get_by_text(_PLACEHOLDER, exact=True)).to_have_count(0)
     expect(page.locator(_TERMINAL_VIEW).last).to_have_attribute("data-state", "connected")
     assert live["terminal_resource_listed"], "terminal resource was removed"
+    assert socket_path.exists(), "the reaped private socket was not recreated"

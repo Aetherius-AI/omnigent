@@ -107,6 +107,12 @@ def test_reaped_private_socket_is_recovered_while_the_server_lives(
                 time.sleep(0.02)
             assert not exit_fired.is_set()
             assert terminal.running
+            # The watcher resumes healthy probing and the original pane is still
+            # driveable through the recreated socket: the same server survived.
+            healthy_tick.clear()
+            assert healthy_tick.wait(_TIMEOUT_S), "watcher did not resume after recovery"
+            pane = terminal._tmux_output_sync("capture-pane", "-p", "-t", terminal.tmux_target)
+            assert "ready" in pane, pane
         finally:
             terminal._stop_idle_watcher_thread()
     assert any(_RECOVERY_SIGNATURE in record.getMessage() for record in caplog.records)
