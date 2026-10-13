@@ -72,6 +72,9 @@ def test_native_skill_tool_runs_bundled_skill_under_skills_none(
         match=token,
     )
     monkeypatch.setenv("ANTHROPIC_BASE_URL", mock_llm_server_url)
+    # The tight CLI sandbox is rooted at the bundle cwd and would hide this
+    # test's venv from its launcher; the allowlist gate does not depend on it.
+    monkeypatch.setenv("OMNIGENT_CLAUDE_SDK_NO_SANDBOX", "1")
 
     executor = ClaudeSDKExecutor(
         cwd=str(bundle),
