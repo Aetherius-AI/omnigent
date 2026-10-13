@@ -1,10 +1,6 @@
-"""E2E: Files panel on an asleep host session whose workspace holds a large nested repo.
-
-The report's journey: a host session rooted at the user's home directory, a very
-large git checkout one level down, and the runner asleep so a real ``omnigent host``
-daemon serves the panel. The checkout is sized past the search scan budget, and a
-hidden directory under the root holds more name matches than the search result cap.
-"""
+"""E2E: Files panel of an asleep host session rooted at a home-like directory holding a
+large nested git checkout, served by a real ``omnigent host`` daemon. The checkout exceeds
+the search scan budget and a hidden directory holds more name matches than the result cap."""
 
 from __future__ import annotations
 

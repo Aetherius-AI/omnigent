@@ -314,15 +314,9 @@ _NESTED_REPO_SCAN_BUDGET = 1000
 
 
 def find_nested_git_roots(root: Path) -> list[Path]:
-    """Return the repositories up to :data:`_NESTED_REPO_MAX_DEPTH` levels below *root*.
-
-    Hidden directories and :data:`_SKIP_DIRS` are not entered, symlinks are
-    not followed, and a found repository is not descended into. At most
-    :data:`_NESTED_REPO_SCAN_BUDGET` directories are listed, breadth first.
-
-    :param root: Resolved workspace root that is not itself inside a repository.
-    :returns: Repository roots in breadth-first, name-sorted order.
-    """
+    """Repositories up to :data:`_NESTED_REPO_MAX_DEPTH` levels below *root*, breadth first,
+    listing at most :data:`_NESTED_REPO_SCAN_BUDGET` directories; hidden and
+    :data:`_SKIP_DIRS` directories, symlinks and a found repository are not entered."""
     found: list[Path] = []
     queue: deque[tuple[Path, int]] = deque([(root, 0)])
     listed = 0
@@ -1477,16 +1471,9 @@ class GitFilesystemRegistry(FilesystemRegistry):
 
 
 class NestedGitFilesystemRegistry(FilesystemRegistry):
-    """Registry for a workspace that is not inside a git repository.
-
-    Agent tool-call edits are tracked as :class:`AgentEditFilesystemRegistry`
-    does; every repository :func:`find_nested_git_roots` finds below the root
-    (a home directory holding checkouts) adds its ``git status``, baselines and
-    index with paths re-rooted at the workspace. Repositories are rediscovered
-    on each changed-files listing, so a checkout cloned mid-session shows up.
-
-    :param watch_path: The workspace directory, e.g. ``Path("/home/alice")``.
-    """
+    """Registry for a workspace that is not inside a git repository: agent tool-call
+    edits as :class:`AgentEditFilesystemRegistry` tracks them, plus the git status,
+    baselines and index of repositories found below the root, re-rooted at the workspace."""
 
     def __init__(self, watch_path: Path) -> None:
         super().__init__(watch_path)
