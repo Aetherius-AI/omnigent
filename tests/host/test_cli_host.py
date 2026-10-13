@@ -344,6 +344,48 @@ def test_host_enable_subcommand_installs_user_service(
     assert "Enabled the Omnigent host user service for local" in result.output
 
 
+@pytest.mark.parametrize(
+    ("launch_token", "expected_preflight"),
+    [(None, [("https://myapp-1234.aws.databricksapps.com", True)]), ("launch-token", [])],
+    ids=["user-host", "launch-token-host"],
+)
+def test_host_enable_preflight_follows_launch_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    launch_token: str | None,
+    expected_preflight: list[tuple[str, bool]],
+) -> None:
+    """``host enable`` runs the sign-in pre-flight unless a launch token covers the host."""
+    from omnigent.host.service import HostService
+
+    server = "https://myapp-1234.aws.databricksapps.com"
+    monkeypatch.delenv("OMNIGENT_HOST_TOKEN", raising=False)
+    if launch_token is not None:
+        monkeypatch.setenv("OMNIGENT_HOST_TOKEN", launch_token)
+    preflight: list[tuple[str, bool]] = []
+
+    def _capture(server_url: str, *, non_interactive: bool = False) -> None:
+        preflight.append((server_url, non_interactive))
+
+    monkeypatch.setattr("omnigent.cli._ensure_databricks_server_auth", _capture)
+    monkeypatch.setattr("omnigent.cli._find_daemon_record", lambda target: None)
+    monkeypatch.setattr("omnigent.cli._build_host_daemon_env", lambda *, server_url: {})
+    service_path = tmp_path / "omnigent-host.service"
+    enabled: list[str | None] = []
+
+    def _enable(server_url: str | None, *, environment: dict[str, str]) -> HostService:
+        enabled.append(server_url)
+        return HostService(kind="systemd_user", path=service_path, label=service_path.name)
+
+    monkeypatch.setattr("omnigent.host.service.enable_user_host_service", _enable)
+
+    result = CliRunner().invoke(cli, ["host", "enable", "--server", server, "--non-interactive"])
+
+    assert result.exit_code == 0, result.output
+    assert preflight == expected_preflight
+    assert enabled == [server]
+
+
 def test_host_disable_subcommand_removes_user_service(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

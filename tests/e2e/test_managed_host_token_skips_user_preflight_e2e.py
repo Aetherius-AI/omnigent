@@ -89,9 +89,21 @@ class DatabricksAppsEdge:
     url: str = ""
     requests: list[SeenRequest] = field(default_factory=list)
     tunnel_dialed: threading.Event = field(default_factory=threading.Event)
+    # Handler threads record while the test thread reads.
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def record(self, seen: SeenRequest) -> None:
+        with self.lock:
+            self.requests.append(seen)
+        if seen.path == TUNNEL_PATH and seen.has_host_token:
+            self.tunnel_dialed.set()
+
+    def seen_requests(self) -> list[SeenRequest]:
+        with self.lock:
+            return list(self.requests)
 
     def tunnel_requests(self) -> list[SeenRequest]:
-        return [seen for seen in self.requests if seen.path == TUNNEL_PATH]
+        return [seen for seen in self.seen_requests() if seen.path == TUNNEL_PATH]
 
 
 class _EdgeHandler(BaseHTTPRequestHandler):
@@ -114,9 +126,7 @@ class _EdgeHandler(BaseHTTPRequestHandler):
             has_authorization=bool(self.headers.get("Authorization")),
             has_host_token=bool(self.headers.get(MANAGED_HOST_TOKEN_HEADER)),
         )
-        self.edge.requests.append(seen)
-        if seen.path == TUNNEL_PATH and seen.has_host_token:
-            self.edge.tunnel_dialed.set()
+        self.edge.record(seen)
         if seen.has_host_token:
             body = b"stub edge recorded the launch-token request"
             self.send_response(400)
@@ -248,7 +258,8 @@ def run_host_until_tunnel_or_exit(
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
-    reader.join(timeout=10)
+    # The process is dead here, so stdout reaches EOF and the drain completes.
+    reader.join()
     return proc.returncode, "".join(chunks)
 
 
@@ -270,6 +281,6 @@ def test_launch_token_host_skips_user_sign_in_preflight(
     tunnel = databricks_apps_edge.tunnel_requests()
     assert tunnel, (
         "no tunnel upgrade reached the edge; requests seen: "
-        f"{databricks_apps_edge.requests}\n{output}"
+        f"{databricks_apps_edge.seen_requests()}\n{output}"
     )
     assert all(seen.has_host_token and not seen.has_authorization for seen in tunnel), tunnel
