@@ -7,6 +7,9 @@ import contextlib
 import hashlib
 import json
 import logging
+import secrets
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,6 +21,7 @@ _logger = logging.getLogger(__name__)
 
 _POLL_INTERVAL_S = 0.4
 _POST_TIMEOUT_S = 86400.0
+_DELIVERY_CONFIRM_TIMEOUT_S = 5.0
 _PREVIEW_MAX = 1024
 _SUPPORTED_ACCEPT_OPTION = "allow_once"
 _SUPPORTED_DECLINE_OPTION = "reject_once"
@@ -202,71 +206,98 @@ async def supervise_kiro_permission_mirror(
     except OSError:
         offset = 0
     pending: dict[str, _PendingPermission] = {}
-    queued: dict[str, KiroPermissionRequest] = {}
+    queued: dict[str, tuple[KiroPermissionRequest, int]] = {}
     timeout = httpx.Timeout(_POST_TIMEOUT_S, connect=10.0)
     from omnigent.cli_auth import open_server_client
 
     async with open_server_client(base_url, headers=headers, auth=auth, timeout=timeout) as client:
-        while True:
-            try:
-                events, offset = await asyncio.to_thread(
-                    _read_new_permission_events, record_file, offset
-                )
-                # Reap finished delivery tasks so a completed or failed web verdict
-                # frees the single-prompt slot. Without this, a keystroke-delivery
-                # failure would leave the slot occupied forever and silently block
-                # every later prompt from the web mirror. A late matching response
-                # event then finds no pending entry and is safely ignored.
-                for done_id in [rid for rid, entry in pending.items() if entry.task.done()]:
-                    pending.pop(done_id, None)
-                resolved_in_batch = {
-                    event.request_id for event in events if event.kind == "response"
-                }
-                for event in events:
-                    if event.kind == "request":
-                        if (
-                            event.permission is None
-                            or event.request_id in resolved_in_batch
-                            or event.request_id in pending
-                            or event.request_id in queued
-                        ):
-                            continue
-                        queued[event.request_id] = event.permission
-                    else:
-                        queued.pop(event.request_id, None)
-                        entry = pending.pop(event.request_id, None)
-                        if entry is None:
-                            continue
-                        if not entry.task.done():
-                            await _post_external_elicitation_resolved(
-                                client, session_id, entry.elicitation_id
-                            )
-                            entry.task.cancel()
-                if not pending and queued:
-                    request_id = next(iter(queued))
-                    permission = queued.pop(request_id)
-                    elicitation_id = kiro_permission_elicitation_id(session_id, request_id)
-                    task = asyncio.create_task(
-                        _run_one_permission(
-                            client,
-                            session_id=session_id,
-                            bridge_dir=bridge_dir,
-                            permission=permission,
-                            elicitation_id=elicitation_id,
-                        ),
-                        name=f"kiro-permission-{request_id}",
+        try:
+            while True:
+                try:
+                    batch_offset = offset
+                    events, offset = await asyncio.to_thread(
+                        _read_new_permission_events, record_file, offset
                     )
-                    task.add_done_callback(_consume_task_result)
-                    pending[request_id] = _PendingPermission(elicitation_id, task)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                _logger.exception(
-                    "kiro permission mirror poll failed; session=%s bridge_dir=%s",
-                    session_id,
-                    bridge_dir,
-                )
-            await asyncio.sleep(poll_interval_s)
+                    # Confirmed or abandoned hooks free the slot. Unconfirmed
+                    # deliveries keep their worker parked for an explicit retry.
+                    for done_id in [rid for rid, entry in pending.items() if entry.task.done()]:
+                        pending.pop(done_id, None)
+                    resolved_in_batch = {
+                        event.request_id for event in events if event.kind == "response"
+                    }
+                    for event in events:
+                        if event.kind == "request":
+                            if (
+                                event.permission is None
+                                or event.request_id in resolved_in_batch
+                                or event.request_id in pending
+                                or event.request_id in queued
+                            ):
+                                continue
+                            queued[event.request_id] = (event.permission, batch_offset)
+                        else:
+                            queued.pop(event.request_id, None)
+                            entry = pending.pop(event.request_id, None)
+                            if entry is None:
+                                continue
+                            if not entry.task.done():
+                                entry.task.cancel()
+                                await asyncio.gather(entry.task, return_exceptions=True)
+                                await _post_external_elicitation_resolved(
+                                    client, session_id, entry.elicitation_id
+                                )
+                    if not pending and queued:
+                        request_id = next(iter(queued))
+                        permission, record_offset = queued.pop(request_id)
+                        elicitation_id = kiro_permission_elicitation_id(session_id, request_id)
+                        task = asyncio.create_task(
+                            _run_one_permission(
+                                client,
+                                session_id=session_id,
+                                bridge_dir=bridge_dir,
+                                permission=permission,
+                                elicitation_id=elicitation_id,
+                                record_offset=record_offset,
+                            ),
+                            name=f"kiro-permission-{request_id}",
+                        )
+                        task.add_done_callback(_consume_task_result)
+                        pending[request_id] = _PendingPermission(elicitation_id, task)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    _logger.exception(
+                        "kiro permission mirror poll failed; session=%s bridge_dir=%s",
+                        session_id,
+                        bridge_dir,
+                    )
+                await asyncio.sleep(poll_interval_s)
+        finally:
+            for entry in pending.values():
+                entry.task.cancel()
+            await asyncio.gather(
+                *(entry.task for entry in pending.values()), return_exceptions=True
+            )
+
+
+class _VerdictDeliveryProbe:
+    """Read only new recorder bytes and remember this request's response."""
+
+    def __init__(self, record_file: Path, request_id: str, offset: int) -> None:
+        self.record_file = record_file
+        self.request_id = request_id
+        self.offset = offset
+        self.recorded = False
+        self.stopped = threading.Event()
+
+    def is_resolved(self) -> bool:
+        if not self.recorded and not self.stopped.is_set():
+            events, self.offset = _read_new_permission_events(self.record_file, self.offset)
+            self.recorded = any(
+                event.kind == "response" and event.request_id == self.request_id
+                for event in events
+            )
+        return self.recorded or self.stopped.is_set()
 
 
 async def _run_one_permission(
@@ -276,8 +307,12 @@ async def _run_one_permission(
     bridge_dir: Path,
     permission: KiroPermissionRequest,
     elicitation_id: str,
+    record_offset: int = 0,
 ) -> None:
-    """Park one Kiro permission request on the server and deliver the verdict."""
+    """Keep the card pending until Kiro answers; retry only on a new user decision."""
+    probe = _VerdictDeliveryProbe(
+        acp_record_path(bridge_dir), permission.request_id, record_offset
+    )
     payload = {
         "elicitation_id": elicitation_id,
         "agent": "Kiro",
@@ -285,68 +320,98 @@ async def _run_one_permission(
         "operation_type": "tool",
         "message": f"Kiro wants approval for {permission.preview}",
         "content_preview": permission.preview,
+        "native_delivery": {"state": "ready", "attempt": secrets.token_hex(16)},
     }
     try:
-        response = await client.post(
-            f"/v1/sessions/{session_id}/hooks/native-permission-request",
-            json=payload,
-        )
-    except httpx.HTTPError:
-        _logger.exception("kiro permission hook POST failed; session=%s", session_id)
-        return
-    if response.status_code >= 400:
-        _logger.warning(
-            "kiro permission hook rejected: status=%s body=%s",
-            response.status_code,
-            response.text[:512],
-        )
-        return
-    if not response.content:
-        return
-    try:
-        result = response.json()
-    except ValueError:
-        _logger.warning("kiro permission hook returned non-JSON: %s", response.text[:512])
-        return
-    action = result.get("action") if isinstance(result, dict) else None
-    if action not in {"accept", "decline", "cancel"}:
-        return
-    try:
-        await asyncio.to_thread(
-            send_kiro_permission_verdict,
-            bridge_dir,
-            action=action,
-            expected_title=permission.title,
-        )
-    except RuntimeError:
-        _logger.exception(
-            "failed to deliver kiro permission verdict for %s; session=%s",
-            permission.request_id,
-            session_id,
-        )
+        while not await asyncio.to_thread(probe.is_resolved):
+            try:
+                response = await client.post(
+                    f"/v1/sessions/{session_id}/hooks/native-permission-request",
+                    json=payload,
+                )
+                if response.status_code >= 400:
+                    _logger.warning("kiro permission hook rejected: %s", response.status_code)
+                    return
+                if not response.content:
+                    # A hook wait can expire without a native response.
+                    await asyncio.sleep(_POLL_INTERVAL_S)
+                    continue
+                try:
+                    result = response.json()
+                except ValueError:
+                    _logger.warning("kiro permission hook returned non-JSON")
+                    return
+            except httpx.HTTPError:
+                _logger.exception("kiro permission hook failed; session=%s", session_id)
+                # Reconnect with the same attempt id; this does not send a key.
+                await asyncio.sleep(_POLL_INTERVAL_S)
+                continue
+            action = result.get("action") if isinstance(result, dict) else None
+            if action not in ("accept", "decline", "cancel"):
+                return
+            if await asyncio.to_thread(probe.is_resolved):
+                break
+            started = time.monotonic()
+            try:
+                await asyncio.to_thread(
+                    send_kiro_permission_verdict,
+                    bridge_dir,
+                    action=action,
+                    expected_title=permission.title,
+                    timeout_s=_DELIVERY_CONFIRM_TIMEOUT_S,
+                    verdict_recorded=probe.is_resolved,
+                )
+            except RuntimeError:
+                _logger.exception(
+                    "failed to deliver kiro permission verdict for %s; session=%s",
+                    permission.request_id,
+                    session_id,
+                )
+            while time.monotonic() - started < _DELIVERY_CONFIRM_TIMEOUT_S:
+                if await asyncio.to_thread(probe.is_resolved):
+                    break
+                await asyncio.sleep(_POLL_INTERVAL_S)
+            if await asyncio.to_thread(probe.is_resolved):
+                break
+            payload["native_delivery"] = {
+                "state": "unconfirmed",
+                "action": action,
+                "attempt": secrets.token_hex(16),
+            }
+        if probe.recorded:
+            await _post_external_elicitation_resolved(client, session_id, elicitation_id)
+    finally:
+        # Cancelling an asyncio waiter does not stop its tmux worker thread.
+        probe.stopped.set()
 
 
 async def _post_external_elicitation_resolved(
     client: httpx.AsyncClient, session_id: str, elicitation_id: str
 ) -> None:
     """Tell the server the native Kiro TUI answered a pending prompt."""
-    try:
-        response = await client.post(
-            f"/v1/sessions/{session_id}/events",
-            json={
-                "type": "external_elicitation_resolved",
-                "data": {"elicitation_id": elicitation_id},
-            },
-            timeout=10.0,
-        )
-        if response.status_code >= 400:
+    while True:
+        try:
+            response = await client.post(
+                f"/v1/sessions/{session_id}/events",
+                json={
+                    "type": "external_elicitation_resolved",
+                    "data": {"elicitation_id": elicitation_id},
+                },
+                timeout=10.0,
+            )
+            if response.status_code < 400:
+                return
             _logger.warning(
                 "kiro external_elicitation_resolved rejected: status=%s body=%s",
                 response.status_code,
                 response.text[:512],
             )
-    except httpx.HTTPError:
-        _logger.exception("kiro external_elicitation_resolved POST failed")
+            if response.status_code < 500 and response.status_code != 429:
+                return
+        except httpx.HTTPError:
+            _logger.exception("kiro external_elicitation_resolved POST failed")
+        # Retrying the receipt is safe; it never sends terminal input.
+        await asyncio.sleep(_POLL_INTERVAL_S)
 
 
 __all__ = [

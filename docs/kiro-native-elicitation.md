@@ -1,7 +1,7 @@
 # Kiro-native Elicitation
 
 **Status:** implemented for one-time tool approvals observed on Kiro CLI 2.8.1.
-**Code:** `omnigent/kiro_native_permissions.py`, `omnigent/kiro_native_bridge.py`, runner wiring in `omnigent/runner/app.py`.
+**Code:** `omnigent/harnesses/kiro_native/permissions.py`, `omnigent/harnesses/kiro_native/bridge.py`, runner wiring in `omnigent/runner/app.py`.
 
 ## Behavior
 
@@ -24,7 +24,7 @@ Not surfaced today:
 
 Kiro's persisted CLI session JSONL under `~/.kiro/sessions/cli` mirrors transcript records, but during the characterization probe it did not contain pending permission records. It contained conversation/tool-result records such as `Prompt`, `AssistantMessage`, and `ToolResults`.
 
-The usable permission signal is Kiro's TUI ACP recorder. The runner sets `KIRO_ACP_RECORD_PATH` to a per-session file under the Kiro bridge directory, then `omnigent/kiro_native_permissions.py` tails that JSONL file. The observed record wrapper is:
+The usable permission signal is Kiro's TUI ACP recorder. The runner sets `KIRO_ACP_RECORD_PATH` to a per-session file under the Kiro bridge directory, then `omnigent/harnesses/kiro_native/permissions.py` tails that JSONL file. The observed record wrapper is:
 
 ```json
 {"dir":"out","msg":"{...json-rpc message...}","ts":"..."}
@@ -56,6 +56,12 @@ Kiro's public docs describe `KIRO_ACP_RECORD_PATH` as a traffic recorder, not as
 - `accept`: `Enter`, because `Yes, single permission` is the default focused option.
 - `decline` / `cancel`: `Down`, `Down`, `Enter`, sent one key at a time with render gaps.
 
+Each web decision sends at most one Enter. The card stays pending with “Waiting for Kiro to confirm” until the recorder contains a response for that request. After five seconds without confirmation, it shows “Approval delivery unconfirmed”, a **Retry sending approval/rejection** button, and **Open terminal**. There is no automatic second Enter. The five-second wait covers prompt readiness and confirmation; a stalled tmux command can delay the update until that command returns.
+
+Retry preserves the original decision and rechecks the recorder, current command, and focused option before sending one more Enter. Each retry has its own attempt token so duplicate clicks or stale cards cannot start another attempt. A late recorder response removes the retry controls. Chat (including mobile and child-session cards), Inbox, and the standalone approval page share the delivery state. Refresh recovers it from the running server's pending-request index; it is not durable across a server restart.
+
+The terminal interface cannot prove that an earlier Enter is lost. A delayed key may still be buffered, so manual Retry carries a remaining risk of answering a subsequent prompt. The card warns that the previous attempt may still be pending. **Open terminal** lets the user inspect the live prompt.
+
 The render gaps are required. A live probe showed that sending `Down Down Enter` as one burst could still select the default approval because the TUI had not processed the intermediate selection movement.
 
 Immediately before pressing `Enter`, the bridge re-verifies that Kiro's approval prompt is visible, focused on the intended row, and associated with the parsed request title — the one-time allow row for `accept` (re-checked after the pre-`Enter` settle delay), or the one-time reject row for `decline` / `cancel` after moving down one row at a time. If those checks fail, the bridge raises instead of typing, so no verdict is delivered and the Terminal remains usable.
@@ -67,10 +73,11 @@ The mirror starts at the current end of the recorder file. Historical recorder e
 For new records:
 
 - A request followed by its response in the same poll batch is skipped, because the prompt already resolved before a web card could safely park.
-- A response for a still-parked request posts `external_elicitation_resolved`, clears the web card when the Terminal wins, and cancels the parked web-delivery task. Cancelling reliably aborts a verdict still waiting on the web user. If a web verdict is already mid-delivery through tmux, the keystroke worker cannot be interrupted, so the per-keypress focus and title re-validation (above) is what stops it: a verdict whose prompt has changed or vanished fails closed rather than landing on a later prompt.
+- A response for the active request posts `external_elicitation_resolved`, clears the web card, and cancels the parked web-delivery task. The keystroke worker checks cancellation and the recorder before sending keys. This prevents future sends; it cannot withdraw a key already handed to tmux.
+- Prompt matching preserves meaningful command whitespace, joins tmux soft-wrapped lines, and excludes completed commands in terminal history. The recorder identifies the request; matching visible text alone does not.
 - A web verdict delivered through tmux is treated as a delivery attempt; Kiro's matching ACP result remains the internal confirmation that the prompt resolved.
 - The mirror handles one approval card at a time. If Kiro emits multiple permission requests together, later requests wait in FIFO order and surface after the active request finishes. A queued request that resolves in the Terminal is removed before it can produce a stale card.
-- The single slot is released as soon as the parked delivery task finishes, not only when a recorder response arrives. A verdict that was delivered, that failed its focus/title checks, or that timed out therefore cannot leave the slot occupied for the rest of the session and silently block every later prompt. A late recorder response for an already-released request finds no parked entry and is ignored.
+- An unconfirmed attempt retains the active slot. A failed focus/title check offers the same manual recovery without promoting a queued prompt into a terminal that is still waiting on the first one.
 
 ## Security Notes
 

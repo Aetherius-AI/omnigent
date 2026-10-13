@@ -74,7 +74,12 @@ export function useApproveHotkey(isMac = isMacPlatform()): void {
       // they are filling in a form.
       const newest = [...blocks]
         .reverse()
-        .find((b): b is ElicitationBlock => b.type === "elicitation" && b.status === "pending");
+        .find(
+          (b): b is ElicitationBlock =>
+            b.type === "elicitation" &&
+            b.status === "pending" &&
+            (!b.nativeDelivery || b.nativeDelivery.state === "ready"),
+        );
       if (!newest) return;
       const takesAPlainVerdict =
         !newest.askUserQuestion && schemaFields(newest.requestedSchema).length === 0;

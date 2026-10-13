@@ -596,7 +596,10 @@ async def _publish_and_wait_for_harness_elicitation(
             _harness_elicitation_owners.pop(elicitation_id, None)
         if _harness_parked_elicitations.get(elicitation_id) is parked:
             _harness_parked_elicitations.pop(elicitation_id, None)
-        if published_request and not settled:
+        delivery_pending = getattr(params, "native_delivery", None) is not None
+        if delivery_pending and (settled_action is not None or not settled):
+            pass  # Only a native response completes a delivery-confirmed card.
+        elif published_request and not settled:
             # Severed without an answer — defer the clear (scheduled
             # before any await so handler cancellation can't skip it).
             _schedule_deferred_elicitation_clear(
@@ -2200,6 +2203,69 @@ async def _persist_model_change_note(
     _publish_external_conversation_item(session_id, persisted_items[0])
 
 
+async def _resolve_native_delivery(
+    session_id: str,
+    elicitation_id: str,
+    data: dict[str, Any],
+    conversation_store: ConversationStore | None,
+) -> bool:
+    """Accept one delivery attempt while keeping its card pending for the native receipt."""
+    entry = pending_elicitations.lookup(elicitation_id)
+    if entry is None:
+        return False
+    event = entry[1]
+    params = event.get("params", {})
+    delivery = params.get("native_delivery") if isinstance(params, dict) else None
+    if not isinstance(delivery, dict):
+        return False
+    if entry[0] != session_id:
+        return True
+    if delivery.get("state") == "sending":
+        return True
+    if delivery.get("state") == "unconfirmed":
+        meta = data.get("_meta")
+        if (
+            not isinstance(meta, dict)
+            or meta.get("native_delivery_attempt") != delivery.get("attempt")
+            or data.get("action") != delivery.get("action")
+        ):
+            raise OmnigentError(
+                "This delivery attempt changed. Refresh the approval before retrying.",
+                code=ErrorCode.INVALID_INPUT,
+            )
+    result = ElicitationResult.model_validate(
+        {k: v for k, v in data.items() if k != "elicitation_id"}
+    )
+    future = _harness_elicitation_registry.get(elicitation_id)
+    if future is not None:
+        if _harness_elicitation_owners.get(elicitation_id) != session_id or future.done():
+            return True
+        future.set_result(result)
+    fingerprint = _harness_elicitation_request_fingerprint(
+        ElicitationRequestParams.model_validate(params)
+    )
+    _prune_pre_resolved_harness_elicitations()
+    _harness_pre_resolved_elicitations[elicitation_id] = _PreResolvedHarnessElicitation(
+        session_id=session_id,
+        created_at=time.time(),
+        result=result,
+        request_fingerprint=fingerprint,
+    )
+    waiting = {
+        **event,
+        "params": {
+            **params,
+            "native_delivery": {**delivery, "state": "sending", "action": result.action},
+        },
+    }
+    session_stream.publish(session_id, waiting)
+    if conversation_store is not None:
+        await asyncio.to_thread(
+            _publish_elicitation_request_to_ancestors, conversation_store, session_id, waiting
+        )
+    return True
+
+
 async def _resolve_elicitation(
     session_id: str,
     data: dict[str, Any],
@@ -2257,6 +2323,10 @@ async def _resolve_elicitation(
     # matches, no resolved event published) rather than 500-ing the
     # client — the runner forward still fires so the runner can reject.
     elicitation_id = data.get("elicitation_id", "")
+    if isinstance(elicitation_id, str) and await _resolve_native_delivery(
+        session_id, elicitation_id, data, conversation_store
+    ):
+        return
     harness_future = _harness_elicitation_registry.get(elicitation_id)
     if harness_future is not None and not harness_future.done():
         # Only the session that owns this elicitation

@@ -173,7 +173,6 @@ class _QueueClient:
         pytest.param(httpx.Response(200, json={"action": "accept"}), "accept", id="accept"),
         pytest.param(httpx.Response(200, json={"action": "decline"}), "decline", id="decline"),
         pytest.param(httpx.Response(200, json={"action": "cancel"}), "cancel", id="cancel"),
-        pytest.param(httpx.Response(200), None, id="empty-200"),
         pytest.param(httpx.Response(400, text="nope"), None, id="rejected"),
         pytest.param(httpx.Response(200, content=b"not-json"), None, id="non-json"),
     ],
@@ -187,14 +186,17 @@ async def test_run_one_permission_posts_then_delivers_verdict(
 ) -> None:
     delivered: list[tuple[Path, str]] = []
 
-    def _fake_send(bridge_dir: Path, *, action: str, expected_title: str | None = None) -> None:
+    def _fake_send(
+        bridge_dir: Path, *, action: str, expected_title: str | None = None, **kwargs: object
+    ) -> None:
         assert expected_title == "Running: pwd"
         delivered.append((bridge_dir, action))
+        acp_record_path(bridge_dir).write_bytes(_record_bytes(_permission_result_msg()))
 
     monkeypatch.setattr(knp, "send_kiro_permission_verdict", _fake_send)
     req = parse_permission_request(_permission_msg("req-1"))
     assert req is not None
-    client = _QueueClient([response])
+    client = _QueueClient([response, httpx.Response(200)])
 
     await knp._run_one_permission(
         client,  # type: ignore[arg-type]
@@ -206,6 +208,9 @@ async def test_run_one_permission_posts_then_delivers_verdict(
 
     url, body = client.posts[0]
     assert url == "/v1/sessions/conv_1/hooks/native-permission-request"
+    delivery = body.pop("native_delivery")
+    assert delivery["state"] == "ready"
+    assert delivery["attempt"]
     assert body == {
         "elicitation_id": "elic_1",
         "agent": "Kiro",
@@ -230,6 +235,56 @@ async def test_post_external_elicitation_resolved_shape() -> None:
             {"type": "external_elicitation_resolved", "data": {"elicitation_id": "elic_9"}},
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_confirmation_survives_a_transient_server_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(knp, "_POLL_INTERVAL_S", 0.01)
+    client = _QueueClient([httpx.Response(503), httpx.Response(202)])
+    await knp._post_external_elicitation_resolved(client, "conv_2", "elic_9")  # type: ignore[arg-type]
+    assert len(client.posts) == 2
+    assert client.posts[0] == client.posts[1]
+
+
+@pytest.mark.asyncio
+async def test_expired_hook_wait_reconnects_without_sending_a_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sent: list[str] = []
+    attempts: list[str] = []
+
+    def send(bridge_dir: Path, *, action: str, **_kwargs: object) -> None:
+        sent.append(action)
+        acp_record_path(bridge_dir).write_bytes(_record_bytes(_permission_result_msg()))
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/events"):
+            return httpx.Response(202)
+        attempts.append(json.loads(request.content)["native_delivery"]["attempt"])
+        assert sent == []
+        if len(attempts) == 1:
+            return httpx.Response(200)
+        return httpx.Response(200, json={"action": "accept"})
+
+    monkeypatch.setattr(knp, "send_kiro_permission_verdict", send)
+    monkeypatch.setattr(knp, "_POLL_INTERVAL_S", 0.01)
+    permission = parse_permission_request(_permission_msg())
+    assert permission is not None
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handle), base_url="http://test"
+    ) as client:
+        await knp._run_one_permission(
+            client,
+            session_id="conv_1",
+            bridge_dir=tmp_path,
+            permission=permission,
+            elicitation_id="elic_1",
+        )
+    assert len(attempts) == 2
+    assert attempts[0] == attempts[1]
+    assert sent == ["accept"]
 
 
 @pytest.mark.asyncio
@@ -558,3 +613,63 @@ async def test_supervise_mirror_reaps_finished_task_and_mirrors_next_request(
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+
+
+@pytest.mark.asyncio
+async def test_delivery_waits_for_explicit_retry_before_sending_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(knp, "_DELIVERY_CONFIRM_TIMEOUT_S", 0.03)
+    monkeypatch.setattr(knp, "_POLL_INTERVAL_S", 0.01)
+    asked_to_retry = asyncio.Event()
+    user_retries = asyncio.Event()
+    attempts: list[str] = []
+    sent: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        data = json.loads(request.content)
+        if request.url.path.endswith("/events"):
+            return httpx.Response(202)
+        delivery = data["native_delivery"]
+        attempts.append(delivery["attempt"])
+        if len(attempts) == 2:
+            assert delivery["state"] == "unconfirmed"
+            assert delivery["action"] == "accept"
+            asked_to_retry.set()
+            await user_retries.wait()
+        return httpx.Response(200, json={"action": "accept"})
+
+    def send(bridge_dir: Path, *, action: str, **kwargs: object) -> None:
+        sent.append(action)
+        if len(sent) == 2:
+            acp_record_path(bridge_dir).write_bytes(_record_bytes(_permission_result_msg()))
+
+    monkeypatch.setattr(knp, "send_kiro_permission_verdict", send)
+    permission = parse_permission_request(_permission_msg())
+    assert permission is not None
+    async with httpx.AsyncClient(
+        base_url="http://test", transport=httpx.MockTransport(handler)
+    ) as client:
+        task = asyncio.create_task(
+            knp._run_one_permission(
+                client,
+                session_id="session",
+                bridge_dir=tmp_path,
+                permission=permission,
+                elicitation_id="elicitation",
+            )
+        )
+        try:
+            async with asyncio.timeout(5):
+                await asked_to_retry.wait()
+            assert sent == ["accept"]
+            assert not task.done()
+            user_retries.set()
+            async with asyncio.timeout(5):
+                await task
+            assert sent == ["accept", "accept"]
+            assert len(set(attempts)) == 2
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)

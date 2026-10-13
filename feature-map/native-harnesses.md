@@ -241,6 +241,20 @@ Cross-harness journeys:
   (`tests/runner/test_app_sessions_native_events_lifecycle.py::test_codex_native_late_settings_ack_still_reaches_an_older_server`).
 - **`approvals`:**
   `tests/e2e_ui/approvals/test_native_edit_tools_approval_card.py::test_native_file_edit_tools_require_approval_card`
+- **`approvals`, Kiro delivery and manual retry:**
+  `tests/e2e_ui/messages/test_kiro_permission_retry.py::test_kiro_manual_retry`
+  (own environment, real browser/server/runner/tmux, fake Kiro) drops the first
+  Enter and checks the five-second wait, refresh recovery, and one explicit retry
+  from desktop/mobile chat, Inbox, and the standalone approval page. It also
+  checks rejection and the Open terminal fallback. Two identical commands have
+  distinct request IDs; only the first may be answered.
+  `tests/e2e_ui/messages/test_kiro_permission_retry.py::test_kiro_late_confirmation_removes_retry`
+  delays input consumption with real elapsed time and checks that late
+  confirmation removes Retry without sending another Enter.
+  Child-session routing uses the shared approval card; server ownership and
+  receipt races are covered by
+  `tests/server/integration/test_kiro_permission_delivery.py`.
+  These tests do not verify a signed-in vendor Kiro CLI.
 - **`resume`, bare picker scoped to this host:**
   `tests/e2e/test_native_resume_picker_cross_host_e2e.py::test_bare_resume_picker_excludes_other_hosts_sessions`
 - **`resume`, Claude and Pi provider selection after a runner restart:**

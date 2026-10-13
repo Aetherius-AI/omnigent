@@ -7,7 +7,7 @@
 // loading, pending, resolved, submitted (approve/reject), and the error paths
 // (bad status, network throw, missing params).
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApprovePage } from "./ApprovePage";
@@ -169,4 +169,69 @@ describe("ApprovePage submission", () => {
     fireEvent.click(await screen.findByRole("button", { name: /Reject/ }));
     expect(await screen.findByText(/Network error:/)).toBeInTheDocument();
   });
+});
+
+it("keeps Kiro sending through a stale poll and recovers confirmation after a network blip", async () => {
+  vi.useFakeTimers();
+  const waiting = {
+    status: "pending",
+    policy_name: "kiro_native_permission",
+    message: "Approve pwd",
+    native_delivery: { state: "unconfirmed", attempt: "retry-2", action: "accept" },
+  };
+  let finishPoll!: (response: Response) => void;
+  let finishSubmit!: (response: Response) => void;
+  let reads = 0;
+  const fetch = vi.mocked(identity.authenticatedFetch);
+  fetch.mockImplementation(async (_url, init) => {
+    if (init?.method === "POST") {
+      return new Promise<Response>((resolve) => {
+        finishSubmit = resolve;
+      });
+    }
+    reads++;
+    if (reads === 1) return jsonResponse(waiting);
+    if (reads === 2)
+      return new Promise<Response>((resolve) => {
+        finishPoll = resolve;
+      });
+    if (reads === 3) throw new Error("temporary disconnect");
+    return jsonResponse({ status: "resolved" });
+  });
+  try {
+    await act(async () => {
+      renderPage();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Retry sending approval" }));
+    expect(screen.getByText("Waiting for Kiro to confirm")).toBeInTheDocument();
+    await act(async () => {
+      finishPoll(jsonResponse(waiting));
+    });
+    expect(
+      screen.queryByRole("button", { name: "Retry sending approval" }),
+    ).not.toBeInTheDocument();
+    await act(async () => {
+      finishSubmit(jsonResponse({}));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(screen.getByText("Waiting for Kiro to confirm")).toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(screen.getByText("Elicitation resolved")).toBeInTheDocument();
+    const posts = fetch.mock.calls.filter(([, init]) => init?.method === "POST");
+    expect(posts).toHaveLength(1);
+    expect(JSON.parse(posts[0]![1]!.body as string)).toEqual({
+      action: "accept",
+      _meta: { native_delivery_attempt: "retry-2" },
+    });
+  } finally {
+    cleanup();
+    vi.useRealTimers();
+  }
 });

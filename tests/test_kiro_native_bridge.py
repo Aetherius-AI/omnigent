@@ -180,6 +180,7 @@ def test_send_kiro_permission_verdict_declines_with_slow_navigation(
         monkeypatch,
         pane_outputs=[
             _PERMISSION_PANE,
+            _PERMISSION_PANE,
             _PERMISSION_PANE_REJECT_FOCUSED,
         ],
     )
@@ -683,3 +684,47 @@ def test_prepare_bridge_dir_rejects_symlinked_ancestor(
         bridge.prepare_bridge_dir("conv_kiro")
 
     assert not (elsewhere / "kiro-native").exists()
+
+
+@pytest.mark.parametrize(
+    ("tool_line", "title", "matches"),
+    [
+        ("Running: pwd", "Running: pwd", True),
+        ("✓ Running: old\nRunning: pwd", "Running: pwd", True),
+        ("↓ Shell rm 'safe name'", "Running: rm 'safe  name'", False),
+        ("↓ arbitrary echo fixture", "Running: echo fixture", False),
+        ("✓ Shell echo fixture", "Running: echo fixture", False),
+        ("↓ Shell echo tools", "Running: ls", False),
+        ("↓ Shell cd /tmp/long-\npath", "Running: cd /tmp/long-path", False),
+        ("↓ Shell pwd\n╰ working_dir=/tmp\n────", "Running: pwd", True),
+    ],
+)
+def test_permission_title_preserves_command_identity(
+    tool_line: str,
+    title: str,
+    matches: bool,
+) -> None:
+    pane = _PERMISSION_PANE.replace("↓ Shell pwd", tool_line)
+    assert bridge._kiro_permission_prompt_matches_title(pane, title) is matches
+
+
+def test_permission_does_not_send_after_receipt_arrives_during_capture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(bridge, "_PERMISSION_ENTER_SETTLE_S", 0)
+    calls = _install_fake_tmux(monkeypatch, pane_outputs=[_PERMISSION_PANE])
+    write_tmux_target(tmp_path, socket_path=Path("/tmp/tmux.sock"), tmux_target="main")
+
+    def captures() -> int:
+        return sum("capture-pane" in call for call in calls)
+
+    send_kiro_permission_verdict(
+        tmp_path,
+        action="accept",
+        expected_title="Running: pwd",
+        timeout_s=0.1,
+        verdict_recorded=lambda: captures() >= 2,
+    )
+    assert not any("send-keys" in call for call in calls)
+    assert all("-J" in call for call in calls if "capture-pane" in call)

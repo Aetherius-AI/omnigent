@@ -41,6 +41,8 @@
  * what clears an approval.
  */
 
+import type { Query } from "@tanstack/react-query";
+import type { Session } from "@/lib/types";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useQueries, useQueryClient } from "@tanstack/react-query";
 import {
@@ -95,7 +97,7 @@ import { conversationDisplayLabel, getConversationAgentType } from "@/shell/side
 type RespondedMap = Record<
   string,
   {
-    action: "accept" | "decline";
+    action: "accept" | "decline" | "cancel";
     content?: Record<string, unknown>;
     _meta?: Record<string, unknown>;
   }
@@ -154,6 +156,7 @@ export function InboxPage() {
   } = useSidebarData();
   const [filter, setFilter] = useState<InboxFilter>(readInboxFilter);
   const [responded, setResponded] = useState<RespondedMap>({});
+  const pendingSubmissions = useRef(new Set<string>());
   // Manual expand/collapse toggles keyed by entry key. Anything not in
   // the map falls back to the default: expanded only for the newest
   // approval. Keying by id (not index) keeps a user's explicit toggles
@@ -174,6 +177,13 @@ export function InboxPage() {
       queryKey: ["inbox-elicitations", row.id, row.pending_elicitations_count, row.updated_at],
       queryFn: () => getSession(row.id),
       retry: 1,
+      refetchInterval: (query: Query<Session>) =>
+        query.state.data?.pendingElicitations?.some((event) => {
+          const params = event.params as Record<string, unknown> | undefined;
+          return params?.native_delivery !== undefined;
+        })
+          ? 1000
+          : false,
     })),
   });
 
@@ -264,9 +274,11 @@ export function InboxPage() {
     setResponded((prev) => {
       if (Object.keys(prev).length === 0) return prev;
       const pendingIds = new Set(items.map((i) => i.elicitation.elicitationId));
-      const stale = Object.keys(prev).filter((id) => pendingIds.has(id));
+      const stale = Object.keys(prev).filter(
+        (id) => pendingIds.has(id) && !pendingSubmissions.current.has(id),
+      );
       if (stale.length === 0) return prev;
-      return Object.fromEntries(Object.entries(prev).filter(([id]) => !pendingIds.has(id)));
+      return Object.fromEntries(Object.entries(prev).filter(([id]) => !stale.includes(id)));
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [snapshotVersionKey]);
@@ -290,6 +302,8 @@ export function InboxPage() {
   // count (and the sidebar badge) drop without waiting for the socket.
   const makeSubmit = (item: InboxItem): SubmitApprovalFn => {
     return (elicitationId, action, content, meta) => {
+      if (pendingSubmissions.current.has(elicitationId)) return;
+      pendingSubmissions.current.add(elicitationId);
       setResponded((prev) => ({
         ...prev,
         [elicitationId]: {
@@ -304,9 +318,17 @@ export function InboxPage() {
         ...(meta === undefined ? {} : { _meta: meta }),
       }).then(
         () => {
+          pendingSubmissions.current.delete(elicitationId);
           void queryClient.invalidateQueries({ queryKey: ["conversations"] });
+          if (item.elicitation.nativeDelivery) {
+            const queryKey = ["inbox-elicitations", item.row.id];
+            void queryClient
+              .cancelQueries({ queryKey })
+              .then(() => queryClient.invalidateQueries({ queryKey }));
+          }
         },
         () => {
+          pendingSubmissions.current.delete(elicitationId);
           // Roll back to pending so the buttons reappear and the user
           // can retry — same recovery the chat store uses.
           setResponded((prev) => {
@@ -360,7 +382,17 @@ export function InboxPage() {
             contentPreview={item.elicitation.contentPreview}
             requestedSchema={item.elicitation.requestedSchema}
             url={item.elicitation.url}
-            status={verdict ? "responded" : "pending"}
+            nativeDelivery={
+              verdict && item.elicitation.nativeDelivery
+                ? {
+                    ...item.elicitation.nativeDelivery,
+                    state: "sending",
+                    action: verdict.action,
+                  }
+                : item.elicitation.nativeDelivery
+            }
+            sessionId={item.resolveSessionId}
+            status={verdict && !item.elicitation.nativeDelivery ? "responded" : "pending"}
             response={verdict ?? null}
             askUserQuestion={item.elicitation.askUserQuestion}
             exitPlanMode={item.elicitation.exitPlanMode}

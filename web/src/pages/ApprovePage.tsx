@@ -15,7 +15,12 @@
  *   or the id is unknown.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { ApprovalCard } from "@/components/blocks/ApprovalCard";
+import {
+  parseNativePermissionDelivery,
+  type NativePermissionDelivery,
+} from "@/lib/nativePermissionDelivery";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "@/lib/routing";
 import { CheckIcon, MessageCircleQuestionMark, XIcon } from "lucide-react";
 import { ElicitationMessage } from "@/components/blocks/ElicitationMessage";
@@ -30,13 +35,14 @@ interface ElicitationData {
   phase?: string;
   policy_name?: string;
   content_preview?: string;
+  native_delivery?: NativePermissionDelivery;
 }
 
 type PageState =
   | { kind: "loading" }
   | { kind: "pending"; data: ElicitationData }
   | { kind: "resolved" }
-  | { kind: "submitted"; action: "accept" | "decline" }
+  | { kind: "submitted"; action: "accept" | "decline" | "cancel" }
   | { kind: "error"; message: string };
 
 export function ApprovePage() {
@@ -45,6 +51,7 @@ export function ApprovePage() {
     elicitationId: string;
   }>();
   const [state, setState] = useState<PageState>({ kind: "loading" });
+  const submission = useRef({ revision: 0, pending: false });
 
   useEffect(() => {
     if (!sessionId || !elicitationId) {
@@ -52,44 +59,71 @@ export function ApprovePage() {
       return;
     }
     let cancelled = false;
-    (async () => {
+    let polling = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const load = async () => {
+      if (submission.current.pending) {
+        timer = setTimeout(() => void load(), 1000);
+        return;
+      }
+      const revision = submission.current.revision;
       try {
         const res = await authenticatedFetch(
           `/v1/sessions/${encodeURIComponent(sessionId)}/elicitations/${encodeURIComponent(elicitationId)}`,
         );
         if (cancelled) return;
         if (!res.ok) {
+          if (polling || revision !== submission.current.revision) return;
           setState({ kind: "error", message: `Server error: ${res.status}` });
           return;
         }
         const data: ElicitationData = await res.json();
+        if (cancelled) return;
+        data.native_delivery = parseNativePermissionDelivery(data.native_delivery);
+        polling = Boolean(data.native_delivery) || revision !== submission.current.revision;
+        if (revision !== submission.current.revision) return;
         if (data.status === "resolved") {
           setState({ kind: "resolved" });
         } else {
           setState({ kind: "pending", data });
         }
       } catch (err) {
-        if (!cancelled) {
+        if (!cancelled && !polling && revision === submission.current.revision) {
           setState({ kind: "error", message: `Failed to load: ${String(err)}` });
         }
+      } finally {
+        if (!cancelled && polling) timer = setTimeout(() => void load(), 1000);
       }
-    })();
+    };
+    void load();
     return () => {
       cancelled = true;
+      clearTimeout(timer);
     };
   }, [sessionId, elicitationId]);
 
   const submit = useCallback(
-    async (action: "accept" | "decline") => {
-      if (!sessionId || !elicitationId) return;
-      setState({ kind: "submitted", action });
+    async (action: "accept" | "decline" | "cancel", meta?: Record<string, unknown>) => {
+      if (!sessionId || !elicitationId || submission.current.pending) return;
+      submission.current = { revision: submission.current.revision + 1, pending: true };
+      if (state.kind === "pending" && state.data.native_delivery) {
+        setState({
+          kind: "pending",
+          data: {
+            ...state.data,
+            native_delivery: { ...state.data.native_delivery, state: "sending", action },
+          },
+        });
+      } else {
+        setState({ kind: "submitted", action });
+      }
       try {
         const res = await authenticatedFetch(
           `/v1/sessions/${encodeURIComponent(sessionId)}/elicitations/${encodeURIComponent(elicitationId)}/resolve`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ action }),
+            body: JSON.stringify({ action, ...(meta ? { _meta: meta } : {}) }),
           },
         );
         if (!res.ok) {
@@ -97,9 +131,11 @@ export function ApprovePage() {
         }
       } catch (err) {
         setState({ kind: "error", message: `Network error: ${String(err)}` });
+      } finally {
+        submission.current.pending = false;
       }
     },
-    [sessionId, elicitationId],
+    [sessionId, elicitationId, state],
   );
 
   return (
@@ -146,7 +182,22 @@ export function ApprovePage() {
         </Alert>
       )}
 
-      {state.kind === "pending" && (
+      {state.kind === "pending" && state.data.native_delivery && (
+        <ApprovalCard
+          elicitationId={elicitationId!}
+          sessionId={sessionId}
+          message={state.data.message ?? ""}
+          phase={state.data.phase ?? ""}
+          policyName={state.data.policy_name ?? ""}
+          contentPreview={state.data.content_preview ?? ""}
+          requestedSchema={{}}
+          status="pending"
+          response={null}
+          nativeDelivery={state.data.native_delivery}
+          onSubmit={(_id, action, _content, meta) => void submit(action, meta)}
+        />
+      )}
+      {state.kind === "pending" && !state.data.native_delivery && (
         <Alert className="flex flex-col gap-3 py-4 px-5">
           <AlertTitle className="flex items-center gap-2 text-ui">
             <MessageCircleQuestionMark className="size-4 text-yellow-600 dark:text-yellow-400" />
