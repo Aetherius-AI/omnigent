@@ -5200,11 +5200,9 @@ def _serve_host_until_exit(
     configure_host_databricks(server_url, identity.host_id)
     _generate_ucode_configs()
 
-    # Executor-agnostic harness setup: on a managed sandbox (arclet), install
-    # the Pi CLI in the background if it is missing, so an owner can start a Pi
-    # session on a fresh host without installing it by hand. Best-effort and
-    # non-blocking; the readiness loop publishes the flip once the binary lands.
-    # A no-op on a laptop (not ``IS_SANDBOX=1``) and when Pi is already present.
+    # On a managed sandbox (arclet), install a missing Pi CLI in the background so
+    # a fresh host offers Pi without manual setup; the readiness loop publishes the
+    # flip. No-op on laptops (``IS_SANDBOX`` unset) and when Pi is already present.
     from omnigent.host.harness_preparation import prepare_host_harnesses
 
     prepare_host_harnesses()

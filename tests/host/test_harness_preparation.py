@@ -1,11 +1,6 @@
-"""Tests for the managed-sandbox harness auto-preparation step.
-
-Models a managed sandbox host (``IS_SANDBOX=1`` is baked into the image); see
-``test_noop_off_sandbox`` for the laptop (unset) no-op. Threads are run
-synchronously so the install dispatch is deterministic, and the npm install
-itself is patched out — this layer owns the sandbox gate and the "install only
-when missing" decision, not real package installation.
-"""
+"""Managed-sandbox harness auto-preparation: the ``IS_SANDBOX`` gate and the
+install-only-when-missing decision. Threads run inline so dispatch is
+deterministic, and the npm install itself is patched out."""
 
 from __future__ import annotations
 

@@ -1,24 +1,6 @@
-"""E2E: Pi is ready on a freshly connected host without manual setup.
-
-Journey from the report: connect a fresh host (an arclet) to Omnigent, pick the
-Pi agent for it in the new-session landing picker and start a session, without
-first installing Pi on that machine. The host daemon's readiness map drives the
-picker, so this registers REAL ``omnigent host`` daemons against the live e2e
-server instead of stubbing ``configured_harnesses``. Two hosts cover "the same
-workflow works on another fresh arclet".
-
-Each host has a model provider configured (an arclet connected through Omnigent
-carries one, and a host with no credential source is correctly reported as
-needing auth) but ``pi`` resolves nowhere on its ``PATH``. The ``npm`` on that
-``PATH`` is a stand-in that installs this runner's own ``pi`` into the host's
-``~/.npm-global/bin`` so the daemon's install step works offline; it records the
-installer argv it was given.
-
-Passes once the host prepares Pi by itself: the Pi row is selectable with no
-notice, the session is created, its runner comes online, and ``pi`` has been
-installed on the host. The failure message carries the host's reported
-readiness and the server's create verdict for a row found disabled.
-"""
+"""E2E: a fresh managed-sandbox host (arclet) offers Pi with no manual setup.
+Real ``omnigent host`` daemons drive the picker's readiness; ``pi`` is off their
+PATH and ``npm`` is an offline stand-in that links this runner's own ``pi``."""
 
 from __future__ import annotations
 
@@ -72,12 +54,9 @@ def path_without_pi(root: Path) -> str:
 
 
 def install_offline_npm(bin_dir: Path, real_pi: str) -> None:
-    """Put an ``npm`` stand-in first on *bin_dir* that installs *real_pi* globally.
-
-    ``npm install -g <pi package>`` links *real_pi* into ``$HOME/.npm-global/bin``,
-    one of the global install dirs the daemon resolves CLIs from. Every call is
-    appended to ``$HOME/npm-invocations.log``; anything else fails loudly.
-    """
+    """Put an ``npm`` stand-in first on *bin_dir*: ``install -g <pi package>`` links
+    *real_pi* into ``$HOME/.npm-global/bin`` (a global dir the daemon resolves CLIs
+    from), every call is logged to ``$HOME/npm-invocations.log``, anything else fails."""
     script = bin_dir / "npm"
     script.write_text(
         "#!/bin/sh\n"
@@ -93,12 +72,9 @@ def install_offline_npm(bin_dir: Path, real_pi: str) -> None:
 
 
 def host_base_env(path: str) -> dict[str, str]:
-    """An explicit base replaces ambient credentials while retaining *path*.
-
-    ``IS_SANDBOX=1`` marks the daemon as a managed sandbox (arclet) — the
-    managed host image bakes it in and a laptop never sets it, so it is what
-    scopes the automatic Pi preparation to arclets.
-    """
+    """Explicit base env (no ambient credentials) retaining *path*. ``IS_SANDBOX=1``
+    marks the daemon as a managed sandbox: the host image bakes it in, a laptop
+    never sets it, and it scopes the automatic Pi preparation to arclets."""
     return {
         "PATH": path,
         "IS_SANDBOX": "1",
@@ -144,11 +120,8 @@ def host_row(client: httpx.Client, host_id: str) -> dict[str, Any] | None:
 def wait_readiness_published(
     client: httpx.Client, host_id: str, *, timeout: float
 ) -> dict[str, Any]:
-    """Return the host row once its daemon has published a readiness map.
-
-    A daemon whose startup probe exceeds its bound registers with readiness
-    unknown and publishes the map from its refresh loop shortly after.
-    """
+    """Return the host row once its daemon has published a readiness map (a slow
+    startup probe registers with readiness unknown and publishes shortly after)."""
     deadline = time.monotonic() + timeout
     row = None
     while time.monotonic() < deadline:
@@ -160,14 +133,9 @@ def wait_readiness_published(
 
 
 def wait_pi_native_ready(client: httpx.Client, host_id: str, *, timeout: float) -> bool:
-    """Poll until the host reports ``pi-native`` ready, or the timeout elapses.
-
-    The fix prepares Pi when the arclet is provisioned, so a fresh host flips
-    from ``binary-missing`` to ready shortly after it connects. Returns whether
-    that happened; the caller still asserts the user-visible outcome. On the
-    unfixed host the flip never comes, so this returns ``False`` and the picker
-    row stays disabled.
-    """
+    """Poll until the host reports ``pi-native`` ready; ``False`` on timeout. The
+    caller still asserts the user-visible outcome, so an unfixed host simply falls
+    through to the disabled picker row."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         row = host_row(client, host_id) or {}
@@ -199,13 +167,9 @@ def wait_runner_online(client: httpx.Client, session_id: str, *, timeout: float)
 def fresh_hosts_without_pi(
     live_server: str, mock_llm_server_url: str, tmp_path_factory: pytest.TempPathFactory
 ) -> Iterator[list[dict[str, Any]]]:
-    """Two real ``omnigent host`` daemons that have never had Pi installed.
-
-    Isolated ``HOME`` with a provider block for Pi, no ambient API keys, a
-    ``PATH`` on which ``pi`` does not resolve and whose ``npm`` is the offline
-    stand-in. Yields each host's ``/v1/hosts`` row (with the daemon's published
-    readiness) plus its ``home`` and a ``workspace`` directory sessions can use.
-    """
+    """Two real ``omnigent host`` daemons that have never had Pi installed: isolated
+    HOME with a Pi provider block, no ambient keys, ``pi`` off PATH, offline ``npm``.
+    Yields each ``/v1/hosts`` row plus its ``home`` and a ``workspace`` directory."""
     real_pi = shutil.which("pi")
     if real_pi is None:
         pytest.skip("pi CLI not installed on this runner")
@@ -304,9 +268,8 @@ async def _drive(base_url: str, hosts: list[dict[str, Any]], agent_id: str) -> N
     try:
         async with async_playwright() as pw, await pw.chromium.launch() as browser:
             for host in hosts:
-                # The host prepares Pi once it connects; wait for that flip
-                # before loading the picker, which reads readiness at render.
-                # On the unfixed host this times out and the row stays disabled.
+                # The picker reads readiness at render, so wait for the host's Pi
+                # flip first; on an unfixed host this times out and the row stays disabled.
                 with httpx.Client(base_url=base_url, trust_env=False) as client:
                     wait_pi_native_ready(client, host["host_id"], timeout=_PI_PREPARE_TIMEOUT_S)
                 async with async_user_page(

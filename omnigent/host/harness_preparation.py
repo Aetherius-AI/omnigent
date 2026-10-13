@@ -1,20 +1,6 @@
-"""Auto-prepare managed-sandbox harness CLIs so arclets need no manual setup.
-
-``omnigent host`` runs both on a developer's laptop and inside a managed sandbox
-(an "arclet"). On an arclet the owner should be able to start a Pi session
-without first installing the Pi CLI by hand on every fresh host. This module
-installs the missing Pi CLI in the background at host startup, reusing the same
-``npm install`` ``omni setup`` runs. The daemon's harness-readiness loop then
-publishes the flip from ``binary-missing`` to ready on its own, so the picker
-and the session-create gate stop blocking without any manual setup.
-
-Sandbox-only, mirroring :func:`omnigent.host.databricks_credential.configure_host_databricks`:
-silently ``npm install -g``-ing a coding CLI onto a laptop is an unwanted
-local-machine footprint, so the install is gated on ``IS_SANDBOX=1`` — baked
-into the managed host image and never set on a laptop. Best-effort and
-non-blocking: a missing ``npm`` or a failed install leaves readiness reporting
-the CLI missing, exactly as before.
-"""
+"""Background-install missing harness CLIs when ``omnigent host`` boots on a
+managed sandbox (``IS_SANDBOX=1``), so a fresh arclet offers Pi without manual
+setup. Laptops never set that flag; a silent global npm install is unwanted there."""
 
 from __future__ import annotations
 
@@ -31,10 +17,8 @@ from omnigent.onboarding.harness_install import (
 
 _logger = logging.getLogger(__name__)
 
-# Harness CLIs a managed sandbox prepares automatically. Only Pi today: it is
-# the harness arclet owners repeatedly install by hand, and auto-installing a
-# single CLI keeps the boot footprint bounded. Other npm/curl harnesses stay
-# behind explicit setup.
+# Only Pi today: it is the CLI arclet owners keep installing by hand, and one
+# auto-installed CLI keeps the boot footprint bounded.
 _MANAGED_HARNESS_KEYS: tuple[str, ...] = (PI_KEY,)
 
 
@@ -59,16 +43,9 @@ def _install_missing_harness(key: str) -> None:
 
 
 def prepare_host_harnesses() -> bool:
-    """Start background installs of missing managed-sandbox harness CLIs.
-
-    A no-op off a managed sandbox. For each managed harness that has an install
-    spec, spawns a daemon thread that installs it when missing. Non-blocking so
-    host registration isn't delayed by a multi-second install; the daemon's
-    readiness loop publishes the result once the binary resolves.
-
-    :returns: ``True`` when at least one background install thread was started;
-        ``False`` otherwise (not a managed sandbox).
-    """
+    """Start background installs of missing managed-sandbox harness CLIs; ``True``
+    when a thread was started, ``False`` off a managed sandbox. Non-blocking so
+    host registration isn't delayed by a multi-second install."""
     if not running_in_managed_sandbox():
         return False
     started = False
