@@ -2938,16 +2938,16 @@ class UsageReport(BaseModel):
     :param sessions_has_more: Whether more sessions exist beyond this page.
     :param sessions_last_id: ID of the last session in the page, for cursor
         pagination. ``None`` if the page is empty.
-    :param harness_breakdown: **All-time** cost aggregated by harness across
-        all user sessions (pre-computed, not date-filtered), for the breakdown
-        chart. Keys are harness names (e.g. ``"claude-sdk"``); values are total
-        USD cost. Sessions without a resolved harness are omitted. Shows the
-        user's overall cost distribution regardless of ``since``/``until`` filters.
-    :param model_breakdown: **All-time** cost aggregated by model across all
-        user sessions (pre-computed, not date-filtered), for the breakdown chart.
-        Keys are model IDs (e.g. ``"claude-opus-4-8"``); values are total USD cost.
-        Shows the user's overall cost distribution regardless of ``since``/``until``
-        filters.
+    :param harness_breakdown: Cost aggregated by harness over the sessions in
+        the selected ``since``/``until`` range (server-computed on the first
+        page), for the breakdown chart. Keys are harness names (e.g.
+        ``"claude-sdk"``); values are total USD cost. Sessions without a
+        resolved harness are bucketed under ``"Unknown"`` so their spend still
+        appears.
+    :param model_breakdown: Cost aggregated by model over the sessions in the
+        selected ``since``/``until`` range (server-computed on the first page),
+        for the breakdown chart. Keys are model IDs (e.g.
+        ``"claude-opus-4-8"``); values are total USD cost.
     """
 
     object: Literal["usage_report"] = "usage_report"

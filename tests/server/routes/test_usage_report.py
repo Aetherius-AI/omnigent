@@ -313,14 +313,81 @@ def test_build_usage_report_breakdowns_span_all_sessions_not_just_the_page(
         lambda _conv: "model-a",
     )
 
-    # One session fits on the page, but the all-time breakdowns still sum every
-    # session the account owns — the page no longer holds them to add up.
+    # One session fits on the page, but with no date filter the breakdowns still
+    # sum every session the account owns — the page no longer holds them to add
+    # up.
     report = _build_usage_report(store, None, include_page_details=True, limit=1)
 
     assert len(report.sessions) == 1
     assert report.sessions_has_more is True
     assert report.harness_breakdown == {"codex-native": 7.0}
     assert report.model_breakdown == {"model-a": 7.0}
+
+
+def test_build_usage_report_breakdowns_respect_date_range(
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    now = 1_700_000_000
+    _add_session(
+        store,
+        monkeypatch,
+        ts=now - 2 * _DAY,
+        cost=1.0,
+        by_model={"model-a": {"total_cost_usd": 1.0}},
+        title="old",
+    )
+    _add_session(
+        store,
+        monkeypatch,
+        ts=now,
+        cost=4.0,
+        by_model={"model-a": {"total_cost_usd": 4.0}},
+        title="new",
+    )
+    monkeypatch.setattr("omnigent.db.utils.now_epoch", lambda: now)
+    monkeypatch.setattr(
+        "omnigent.server.routes.usage._resolve_session_harness",
+        lambda _conv: "codex-native",
+    )
+
+    # The breakdowns follow the selected range: a window that excludes the older
+    # session sums only the in-window spend, matching the session list.
+    report = _build_usage_report(
+        store, None, include_page_details=True, limit=50, updated_at_min=now
+    )
+
+    assert [s.title for s in report.sessions] == ["new"]
+    assert report.harness_breakdown == {"codex-native": 4.0}
+    assert report.model_breakdown == {"model-a": 4.0}
+
+
+def test_build_usage_report_breakdowns_bucket_unknown_harness(
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    _add_session(
+        store,
+        monkeypatch,
+        ts=1_700_000_000,
+        cost=2.5,
+        by_model={"model-a": {"total_cost_usd": 2.5}},
+        title="no-harness",
+    )
+    monkeypatch.setattr("omnigent.db.utils.now_epoch", lambda: 1_700_000_000)
+    monkeypatch.setattr(
+        "omnigent.server.routes.usage._resolve_session_harness",
+        lambda _conv: None,
+    )
+
+    # A session with no resolved harness still contributes its spend under an
+    # "Unknown" bucket, so the chart total matches the account total.
+    report = _build_usage_report(store, None, include_page_details=True, limit=50)
+
+    assert report.harness_breakdown == {"Unknown": 2.5}
+    assert report.model_breakdown == {"model-a": 2.5}
 
 
 def test_build_usage_report_cursor_pages_skip_breakdowns(
@@ -493,3 +560,35 @@ def test_build_usage_report_unbounded_returns_every_session(
 
     assert len(report.sessions) == 3
     assert report.sessions_has_more is False
+
+
+def test_build_usage_report_unbounded_walk_restarts_on_stale_cursor(
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    now = 1_700_000_000
+    for i in range(3):
+        _add_session(store, monkeypatch, ts=now - i * _DAY, cost=1.0, by_model={}, title=f"s{i}")
+    monkeypatch.setattr("omnigent.db.utils.now_epoch", lambda: now)
+
+    from omnigent.server.routes import usage as usage_module
+
+    real_page = usage_module._list_conversation_page
+    calls = {"n": 0}
+
+    def flaky_page(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise StaleCursorError("conv_gone")
+        return real_page(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(usage_module, "_list_conversation_page", flaky_page)
+
+    # The unbounded legacy walk restarts on a cursor that vanished mid-walk
+    # instead of surfacing it, so the caller still gets every surviving session.
+    report = _build_usage_report(store, None)
+
+    assert len(report.sessions) == 3
+    assert report.sessions_has_more is False
+    assert calls["n"] >= 2  # the stale first attempt plus the restart

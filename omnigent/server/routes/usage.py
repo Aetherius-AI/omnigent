@@ -176,10 +176,13 @@ def _fetch_session_rows(
     """
     Return ``(rows, has_more, last_id)`` for the requested session window.
 
-    A positive *limit* returns exactly that cursor page. ``limit=None`` keeps
-    the endpoint's original unbounded contract for callers that never opt into
-    pagination (the pre-pagination CLI and any client that omits ``limit``):
-    every matching session is walked and ``has_more`` is always ``False``.
+    A positive *limit* returns exactly that cursor page; a stale *after*
+    surfaces as :class:`~omnigent.errors.StaleCursorError` (the API's 400
+    ``stale_cursor``) so the client restarts from the first page. ``limit=None``
+    keeps the endpoint's original unbounded contract for callers that never opt
+    into pagination (the pre-pagination CLI and any client that omits
+    ``limit``): every matching session is walked and ``has_more`` is always
+    ``False``.
     """
     if limit is not None:
         page = _list_conversation_page(
@@ -191,6 +194,31 @@ def _fetch_session_rows(
             updated_at_max=updated_at_max,
         )
         return list(page.data), page.has_more, page.last_id
+    return _fetch_all_session_rows(
+        conversation_store,
+        user_id,
+        after=after,
+        updated_at_min=updated_at_min,
+        updated_at_max=updated_at_max,
+    )
+
+
+@restart_on_stale_cursor
+def _fetch_all_session_rows(
+    conversation_store: ConversationStore,
+    user_id: str | None,
+    *,
+    after: str | None,
+    updated_at_min: int | None,
+    updated_at_max: int | None,
+) -> tuple[list[Conversation], bool, str | None]:
+    """
+    Walk every matching session for the unbounded legacy response.
+
+    A session deleted mid-walk invalidates the internal page cursor; the whole
+    walk restarts (via :func:`restart_on_stale_cursor`) so the result never
+    reflects a partial pass. ``has_more`` is always ``False``.
+    """
     rows: list[Conversation] = []
     cursor = after
     last_id: str | None = None
@@ -215,19 +243,26 @@ def _fetch_session_rows(
 def _compute_breakdowns(
     conversation_store: ConversationStore,
     user_id: str | None,
+    *,
+    updated_at_min: int | None,
+    updated_at_max: int | None,
 ) -> tuple[dict[str, float], dict[str, float]]:
     """
-    Sum every accessible session's subtree cost by primary harness and by model.
+    Sum each session's subtree cost by primary harness and by model.
 
-    The web Usage page shows all-time harness/model breakdowns, but it now
-    holds only one page of sessions, so these sums are computed server-side in
-    a single pass over the account's sessions instead of from the loaded page.
-    A session deleted mid-walk invalidates the page cursor; the whole walk
-    restarts (via :func:`restart_on_stale_cursor`) so the sums never reflect a
-    partial pass.
+    The web Usage page shows harness/model breakdowns for the selected date
+    range, but it now holds only one page of sessions, so these sums are
+    computed server-side in a single pass over the sessions last active within
+    ``[updated_at_min, updated_at_max]`` instead of from the loaded page.
+    Sessions with no resolved harness are bucketed under ``"Unknown"`` so their
+    spend still appears, matching the pre-pagination client charts. A session
+    deleted mid-walk invalidates the page cursor; the whole walk restarts (via
+    :func:`restart_on_stale_cursor`) so the sums never reflect a partial pass.
 
     :param conversation_store: Store to enumerate sessions from.
     :param user_id: The caller / ACL scope (``None`` in single-user mode).
+    :param updated_at_min: Inclusive lower bound on ``updated_at`` (epoch s).
+    :param updated_at_max: Inclusive upper bound on ``updated_at`` (epoch s).
     :returns: ``(harness_breakdown, model_breakdown)``.
     """
     harness_breakdown: dict[str, float] = {}
@@ -239,8 +274,8 @@ def _compute_breakdowns(
             user_id,
             limit=MAX_SESSION_PAGE_SIZE,
             after=after,
-            updated_at_min=None,
-            updated_at_max=None,
+            updated_at_min=updated_at_min,
+            updated_at_max=updated_at_max,
         )
         for conv in page.data:
             if conv.agent_id is None:
@@ -248,11 +283,8 @@ def _compute_breakdowns(
             usage = load_session_usage(
                 conv.id, conversation_store, root_conversation_id=conv.root_conversation_id
             )
-            harness = _resolve_session_harness(conv)
-            if harness:
-                harness_breakdown[harness] = harness_breakdown.get(harness, 0.0) + _session_cost(
-                    usage
-                )
+            harness = _resolve_session_harness(conv) or "Unknown"
+            harness_breakdown[harness] = harness_breakdown.get(harness, 0.0) + _session_cost(usage)
             for model, cost in _session_models(usage).items():
                 model_breakdown[model] = model_breakdown.get(model, 0.0) + cost
         if not page.has_more:
@@ -290,10 +322,11 @@ def _build_usage_report(
     :class:`~omnigent.errors.StaleCursorError`, which the API maps to a 400
     ``stale_cursor`` response so the client restarts from the first page.
 
-    The all-time harness and model breakdowns ride only the first page of a
-    report built for the release-gated web Usage page; they are computed by a
-    single server-side pass (:func:`_compute_breakdowns`) because the page no
-    longer holds every session to sum client-side.
+    The harness and model breakdowns for the selected range ride only the first
+    page of a report built for the release-gated web Usage page; they are
+    computed by a single server-side pass (:func:`_compute_breakdowns`) over the
+    in-range sessions because the page no longer holds them all to sum
+    client-side.
 
     :param conversation_store: Store to read the rollup and sessions from.
     :param user_id: The caller / ACL scope. ``None`` in single-user mode maps
@@ -365,12 +398,17 @@ def _build_usage_report(
             )
         )
 
-    # The web page reads the all-time breakdowns from its first page only, so
-    # cursor pages (and legacy unbounded callers) skip the server-side pass.
+    # The web page reads the breakdowns from its first page only, so cursor
+    # pages (and legacy unbounded callers) skip the server-side pass.
     harness_breakdown: dict[str, float] = {}
     model_breakdown: dict[str, float] = {}
     if include_page_details and after is None and limit is not None:
-        harness_breakdown, model_breakdown = _compute_breakdowns(conversation_store, user_id)
+        harness_breakdown, model_breakdown = _compute_breakdowns(
+            conversation_store,
+            user_id,
+            updated_at_min=updated_at_min,
+            updated_at_max=updated_at_max,
+        )
 
     daily_costs_raw = (
         conversation_store.list_daily_costs(rollup_user, _EPOCH_DAY)
