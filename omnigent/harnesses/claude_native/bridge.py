@@ -5376,14 +5376,10 @@ def _run_tmux(socket_path: str, *args: str) -> None:
 
 def _leave_tmux_mode(socket_path: str, tmux_target: str) -> None:
     """
-    Take the pane out of tmux copy mode (or any other mode) before sending keys.
+    Exit any tmux mode so injected keys reach the pane, not its mode key table.
 
-    Scrolling back in a native ``tmux attach`` (Page Up, mouse wheel) leaves
-    the pane in copy mode, where tmux routes ``send-keys`` through the
-    copy-mode key table instead of the pane program: the Escape leading a
-    CSI-u clearing key cancels the mode, the bound bytes after it fail with
-    "not in a mode", and a submit Enter is swallowed. ``copy-mode -q`` is a
-    no-op when the pane is not in a mode.
+    A native ``tmux attach`` scrolled back (Page Up, mouse wheel) leaves the
+    pane in copy mode. ``copy-mode -q`` succeeds even when no mode is active.
 
     :param socket_path: Absolute path to the tmux socket.
     :param tmux_target: tmux pane target string, e.g. ``"main"``.

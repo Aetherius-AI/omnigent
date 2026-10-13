@@ -4,7 +4,9 @@ Journey: a Claude-native session answers a first web message; from a shell on
 the runner host (opened from the session's workspace rail) the user attaches to
 the same terminal with the production ``tmux … attach`` command and scrolls back
 (Page Up, mouse wheel), which puts the pane into tmux copy mode; the next
-web-composer message must still be delivered and answered.
+web-composer message must still be delivered and answered. When Claude Code
+holds the alternate screen the gesture passes through to it, so the test falls
+back to tmux's own ``copy-mode`` command and logs which route it took.
 
 Runs against the real Claude Code CLI on the mock model. Pane state is read on
 the runner host and written to a file under a directory both the runner and
@@ -45,9 +47,6 @@ _PANE_STATE_TIMEOUT_S = 20.0
 _COPY_MODE_TIMEOUT_S = 4.0
 _COPY_MODE_ATTEMPTS = 3
 _SHARED_DIR_ENV = "OMNIGENT_E2E_SHARED_DIR"
-# Set to also send a follow-up message after a failed delivery and report
-# whether it is answered (the ticket's "next message delivered normally").
-_FOLLOW_UP_ENV = "OMNIGENT_E2E_COPY_MODE_FOLLOW_UP"
 
 
 def _claude_terminal_tmux(base_url: str, session_id: str) -> tuple[str, str]:
@@ -128,19 +127,22 @@ def _attach_from_runner_shell(
     :returns: The pane state observed once the attach is in place.
     """
     fmt = "#{pane_in_mode} #{history_size} #{alternate_on} #{session_attached}"
+    # tmux errors go to a sibling file so they cannot be parsed as pane fields.
+    err_file = state_file.with_suffix(".err")
     monitor = (
         f"( while :; do tmux -S '{socket}' display-message -p -t '{target}' '{fmt}' "
-        f"> '{state_file}.tmp' 2>&1; mv -f '{state_file}.tmp' '{state_file}'; sleep 0.3; done ) "
-        "> /dev/null 2>&1 &"
+        f"> '{state_file}.tmp' 2> '{err_file}'; mv -f '{state_file}.tmp' '{state_file}'; "
+        "sleep 0.3; done ) > /dev/null 2>&1 &"
     )
     attach = (
         f"env -u TMUX TERM=xterm-256color tmux -S '{socket}' -f /dev/null attach -t '{target}'"
     )
     _type_shell_command(page, shell, f"{monitor} {attach}")
     state = _wait_pane_state(page, state_file, _PANE_STATE_TIMEOUT_S, pane_in_mode="0")
+    tmux_error = err_file.read_text().strip() if err_file.exists() else ""
     assert state.get("pane_in_mode") == "0", (
-        f"pane state never arrived from the runner shell (state={state!r}); is "
-        f"{state_file.parent} shared with the runner host?"
+        f"pane state never arrived from the runner shell (state={state!r}, tmux stderr="
+        f"{tmux_error!r}); is {state_file.parent} shared with the runner host?"
     )
     # Give the nested client a moment to attach before sending it keys.
     page.wait_for_timeout(1_500)
@@ -208,8 +210,6 @@ def _read_error_pill(page: Page) -> str:
         detail = message.inner_text()
     except AssertionError:
         detail = "<no message content rendered>"
-    # Hold the expanded pill so a recording shows the text.
-    page.wait_for_timeout(2_000)
     return f"{headline} · {detail}"
 
 
@@ -273,32 +273,9 @@ def test_native_claude_composer_delivers_while_pane_in_copy_mode(
     outcome = _wait_for_reply_or_error(page, token)
     state_after = _pane_state(state_file)
     detail = _read_error_pill(page) if outcome == "error" else ""
-    follow_up = ""
-    if outcome == "error" and os.environ.get(_FOLLOW_UP_ENV):
-        next_token = f"ast-3-{nonce}"
-        set_fallback_mock_llm(mock_llm_server_url, "default", next_token)
-        set_fallback_mock_llm(mock_llm_server_url, _CLAUDE_MOCK_MODEL, next_token)
-        _send(page, _turn_prompt(3, f"usr-3-{nonce}", next_token))
-        next_reply = page.locator(_ASSISTANT, has_text=next_token).first
-        try:
-            expect(next_reply).to_be_visible(timeout=_MOCK_TURN_TIMEOUT_MS)
-            next_outcome = "reply"
-        except AssertionError:
-            next_outcome = "no reply"
-        headlines = page.locator(_ERROR_PILL).get_by_test_id("error-headline").all_inner_texts()
-        follow_up = (
-            f"; follow-up message outcome={next_outcome} pane state={_pane_state(state_file)} "
-            f"error pills on screen={headlines}"
-        )
-    _log.info(
-        "copy-mode send outcome=%s pane state after=%s %s%s",
-        outcome,
-        state_after,
-        detail,
-        follow_up,
-    )
+    _log.info("copy-mode send outcome=%s pane state after=%s %s", outcome, state_after, detail)
     assert outcome == "reply", (
         f"message sent while the pane was in copy mode ({route}) was not answered: "
-        f"outcome={outcome} pane state after={state_after!r}; error pill: {detail}{follow_up}"
+        f"outcome={outcome} pane state after={state_after!r}; error pill: {detail}"
     )
     expect(page.locator(_ERROR_PILL)).to_have_count(0)
