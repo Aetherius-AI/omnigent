@@ -56,11 +56,11 @@ Kiro's public docs describe `KIRO_ACP_RECORD_PATH` as a traffic recorder, not as
 - `accept`: `Enter`, because `Yes, single permission` is the default focused option.
 - `decline` / `cancel`: `Down`, `Down`, `Enter`, sent one key at a time with render gaps.
 
-Each web decision sends at most one Enter. The card stays pending with “Waiting for Kiro to confirm” until the recorder contains a response for that request. After five seconds without confirmation, it shows “Approval delivery unconfirmed”, a **Retry sending approval/rejection** button, and **Open terminal**. There is no automatic second Enter. The five-second wait covers prompt readiness and confirmation; a stalled tmux command can delay the update until that command returns.
+Each web decision sends at most one Enter. The card stays pending with “Waiting for Kiro to confirm” until the recorder contains a response for that request. After five seconds without confirmation, it shows “Approval delivery unconfirmed” and a **Retry sending approval/rejection** button. There is no automatic second Enter. The five-second wait covers prompt readiness and confirmation; a stalled tmux command can delay the update until that command returns.
 
 Retry preserves the original decision and rechecks the recorder, current command, and focused option before sending one more Enter. Each retry has its own attempt token so duplicate clicks or stale cards cannot start another attempt. A late recorder response removes the retry controls. Chat (including mobile and child-session cards), Inbox, and the standalone approval page share the delivery state. Refresh recovers it from the running server's pending-request index; it is not durable across a server restart.
 
-The terminal interface cannot prove that an earlier Enter is lost. A delayed key may still be buffered, so manual Retry carries a remaining risk of answering a subsequent prompt. The card warns that the previous attempt may still be pending. **Open terminal** lets the user inspect the live prompt.
+The terminal interface cannot prove that an earlier Enter is lost. A delayed key may still be buffered, so manual Retry carries a remaining risk of answering a subsequent prompt. The card warns that the previous attempt may still be pending. Users can inspect the live prompt using the session's existing terminal view toggle.
 
 The render gaps are required. A live probe showed that sending `Down Down Enter` as one burst could still select the default approval because the TUI had not processed the intermediate selection movement.
 

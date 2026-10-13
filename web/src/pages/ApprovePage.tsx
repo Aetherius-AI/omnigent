@@ -185,7 +185,6 @@ export function ApprovePage() {
       {state.kind === "pending" && state.data.native_delivery && (
         <ApprovalCard
           elicitationId={elicitationId!}
-          sessionId={sessionId}
           message={state.data.message ?? ""}
           phase={state.data.phase ?? ""}
           policyName={state.data.policy_name ?? ""}

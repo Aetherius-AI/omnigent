@@ -1744,7 +1744,6 @@ describe("ApprovalCard — gating message emphasis", () => {
 describe("Kiro approval delivery", () => {
   const props = {
     elicitationId: "kiro-request",
-    sessionId: "kiro-session",
     message: "Kiro wants approval for Running: pwd",
     phase: "pre_tool_use",
     policyName: "kiro_native_permission",
@@ -1769,10 +1768,6 @@ describe("Kiro approval delivery", () => {
     );
     expect(screen.getByText("Waiting for Kiro to confirm")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /retry/i })).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Open terminal" })).toHaveAttribute(
-      "href",
-      "/c/kiro-session?view=terminal",
-    );
     rerender(
       <MemoryRouter>
         <TooltipProvider>

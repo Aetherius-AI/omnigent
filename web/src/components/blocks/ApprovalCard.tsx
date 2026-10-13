@@ -149,7 +149,6 @@ function SubagentRequesterLine({ sessionId, ancestorSessionId }: SubagentRequest
 
 interface ApprovalCardProps {
   nativeDelivery?: NativePermissionDelivery;
-  sessionId?: string | null;
   elicitationId: string;
   message: string;
   phase: string;
@@ -242,7 +241,6 @@ const EMPTY_CODEX_PERSIST_MODES: CodexPersistMode[] = [];
 
 export function ApprovalCard({
   nativeDelivery,
-  sessionId,
   elicitationId,
   message,
   phase,
@@ -281,9 +279,6 @@ export function ApprovalCard({
         void store.submitApproval(id, action, content, meta);
       }
     });
-  const activeConversationId = useChatStore((s) => s.conversationId);
-  const deliverySessionId =
-    sessionId ?? scopedConversationId ?? requester?.sessionId ?? activeConversationId;
   const submit: SubmitApprovalFn = (...args) => {
     if (!nativeDelivery) return submitVerdict(...args);
     const [id, action, content, meta] = args;
@@ -552,8 +547,8 @@ export function ApprovalCard({
               {formattedPreview}
             </pre>
           )}
-          <div className="flex flex-wrap gap-2">
-            {unconfirmed && nativeDelivery.action && (
+          {unconfirmed && nativeDelivery.action && (
+            <div className="flex flex-wrap gap-2">
               <Button
                 size="sm"
                 onClick={() => submit(elicitationId, nativeDelivery.action!, undefined)}
@@ -561,18 +556,8 @@ export function ApprovalCard({
               >
                 Retry sending {nativeDelivery.action === "accept" ? "approval" : "rejection"}
               </Button>
-            )}
-            {deliverySessionId && (
-              <Button size="sm" variant="outline" asChild>
-                <Link
-                  to={`/c/${encodeURIComponent(deliverySessionId)}?view=terminal`}
-                  componentId="approval.open_terminal"
-                >
-                  Open terminal
-                </Link>
-              </Button>
-            )}
-          </div>
+            </div>
+          )}
         </AlertDescription>
       </Alert>
     );
@@ -877,7 +862,6 @@ export function ElicitationCard({
     <ApprovalCard
       elicitationId={item.elicitationId}
       nativeDelivery={item.nativeDelivery}
-      sessionId={item.targetSessionId}
       message={item.message}
       phase={item.phase}
       policyName={item.policyName}

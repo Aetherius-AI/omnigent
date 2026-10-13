@@ -246,7 +246,7 @@ Cross-harness journeys:
   (own environment, real browser/server/runner/tmux, fake Kiro) drops the first
   Enter and checks the five-second wait, refresh recovery, and one explicit retry
   from desktop/mobile chat, Inbox, and the standalone approval page. It also
-  checks rejection and the Open terminal fallback. Two identical commands have
+  checks rejection and answering through the existing terminal view toggle. Two identical commands have
   distinct request IDs; only the first may be answered.
   `tests/e2e_ui/messages/test_kiro_permission_retry.py::test_kiro_late_confirmation_removes_retry`
   delays input consumption with real elapsed time and checks that late

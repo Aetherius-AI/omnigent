@@ -391,7 +391,6 @@ export function InboxPage() {
                   }
                 : item.elicitation.nativeDelivery
             }
-            sessionId={item.resolveSessionId}
             status={verdict && !item.elicitation.nativeDelivery ? "responded" : "pending"}
             response={verdict ?? null}
             askUserQuestion={item.elicitation.askUserQuestion}

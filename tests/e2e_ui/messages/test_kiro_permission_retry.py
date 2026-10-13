@@ -21,7 +21,7 @@ from .test_kiro_concurrent_permissions import (
 from .test_kiro_concurrent_permissions import (
     kiro_shim_session as _kiro_shim_session,
 )
-from .test_message_render_parity import _ensure_chat_view, _send
+from .test_message_render_parity import _ensure_chat_view, _select_view_mode, _send
 
 kiro_shim_session = _kiro_shim_session
 
@@ -90,16 +90,14 @@ def test_kiro_manual_retry(
     expect(
         page.get_by_text("The previous attempt may still be pending.", exact=False)
     ).to_be_visible()
-    terminal = page.get_by_role("link", name="Open terminal")
-    expect(terminal).to_have_attribute("href", f"/c/{session_id}?view=terminal")
     page.screenshot(path=str(tmp_path / "delivery-unconfirmed.png"), full_page=True)
     if surface == "terminal":
-        terminal.click()
+        _select_view_mode(page, "Terminal")
         terminal_view = page.get_by_test_id("terminal-view").last
         expect(terminal_view).to_have_attribute("data-state", "connected", timeout=30_000)
         terminal_view.locator(".xterm-helper-textarea").focus()
         page.keyboard.press("Enter")
-        page.goto(f"{base_url}/c/{session_id}?view=chat")
+        _select_view_mode(page, "Chat")
     else:
         retry.click()
     _wait_for(lambda: first_id in _recorder_response_ids(record_file), timeout_s=15)
