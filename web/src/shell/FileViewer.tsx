@@ -171,11 +171,18 @@ export function classifyAndRemapComments(
       fileContent.length,
       c.start_index + c.anchor_content.length + SEARCH_WINDOW,
     );
-    const nearbyIdx = fileContent.indexOf(c.anchor_content, windowStart);
-    const idx =
-      nearbyIdx !== -1 && nearbyIdx <= windowEnd
-        ? nearbyIdx
-        : fileContent.indexOf(c.anchor_content);
+    let nearbyIdx = -1;
+    let nearbyDistance = Number.POSITIVE_INFINITY;
+    let from = fileContent.indexOf(c.anchor_content, windowStart);
+    while (from !== -1 && from <= windowEnd) {
+      const distance = Math.abs(from - c.start_index);
+      if (distance < nearbyDistance) {
+        nearbyIdx = from;
+        nearbyDistance = distance;
+      }
+      from = fileContent.indexOf(c.anchor_content, from + 1);
+    }
+    const idx = nearbyIdx !== -1 ? nearbyIdx : fileContent.indexOf(c.anchor_content);
     if (idx === -1) {
       // Anchor not found anywhere — keep at stored offsets rather than dropping.
       open.push(c);
@@ -612,6 +619,9 @@ function FileViewerBody({
 
   // Find-in-file state lifted here so the toolbar button can open it.
   const [searchOpen, setSearchOpen] = useState(false);
+  // Bumped on every Cmd+F so the Monaco surfaces re-run find (refocusing its
+  // input) when the widget is already open and `searchOpen` can't change.
+  const [searchFocusNonce, setSearchFocusNonce] = useState(0);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const openSearch = useCallback(() => {
     setSearchOpen((prev) => {
@@ -887,6 +897,7 @@ function FileViewerBody({
       e.preventDefault();
       e.stopPropagation();
       setSearchOpen(true);
+      setSearchFocusNonce((n) => n + 1);
     };
     // Capture phase so the embed claims Cmd+F ahead of the host page's own
     // listeners and the browser's native find (which would search the whole
@@ -1636,6 +1647,7 @@ function FileViewerBody({
                   onSetActiveSelection={handleSetActiveSelection}
                   pendingBodyRef={pendingBodyRef}
                   searchOpen={searchOpen}
+                  searchFocusNonce={searchFocusNonce}
                   onSearchHandled={handleSearchHandled}
                 />
               </Suspense>
@@ -1656,6 +1668,7 @@ function FileViewerBody({
               panelOpen={open}
               searchOpen={searchOpen}
               setSearchOpen={setSearchOpen}
+              searchFocusNonce={searchFocusNonce}
               searchInputRef={searchInputRef}
               viewMode={viewMode}
               tocOpen={tocOpen}
