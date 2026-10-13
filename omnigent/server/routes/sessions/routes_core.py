@@ -2721,12 +2721,9 @@ def register_core_routes(
                         and conv is not None
                         and conv.agent_id is not None
                     ):
-                        # The versioned payload's snapshot carries harness_override,
-                        # so a rebind after a cross-harness create initializes the
-                        # override harness — a bare body left the runner resolving
-                        # from the spec, and the recovery turn that executes seeded
-                        # initial_items ran on the spec's harness. Recovery stays
-                        # enabled: on rebind it is what runs the pending kickoff.
+                        # The snapshot carries harness_override so a rebind initializes
+                        # the override harness; recovery stays enabled because on rebind
+                        # it is what runs the pending kickoff.
                         try:
                             runner_init_resp = await _runner_client.post(
                                 "/v1/sessions",

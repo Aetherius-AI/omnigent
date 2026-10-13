@@ -6069,9 +6069,6 @@ async def _rollback_create_launch_worktree(
             else:
                 removed = await _remove_worktree(latest)
                 if removed:
-                    # The worktree is already gone, so unbinding is
-                    # best-effort: a concurrent delete may drop the row and
-                    # transient store errors must not fail create.
                     unbound = False
                     try:
                         # Compare-and-clear on the failed launch's runner: the
@@ -6121,8 +6118,6 @@ async def _rollback_create_launch_worktree(
                                 conversation_store.get_conversation, resp.id
                             )
                         except Exception:  # noqa: BLE001
-                            # Re-read also failed; keep the stored binding
-                            # best-effort for a later delete to reconcile.
                             _logger.warning(
                                 "Could not re-read session %s to reconcile "
                                 "its binding after a failed host-binding "
@@ -6140,6 +6135,8 @@ async def _rollback_create_launch_worktree(
                                 unbound = True
                             else:
                                 conv = reconciled
+                                bound_host_id = reconciled.host_id
+                                _reflect(reconciled)
                     if unbound:
                         resp.runner_id = None
                         resp.host_id = None
@@ -6168,8 +6165,6 @@ async def _rollback_create_launch_worktree(
                         if label_dropped:
                             resp.labels.pop(WORKTREE_ROOT_LABEL_KEY, None)
                 else:
-                    # Unconfirmed removal: keep the binding and root label
-                    # so an opt-in delete or archive can retry the cleanup.
                     _logger.warning(
                         "Worktree %s for session %s was not removed after its "
                         "launch failed; keeping the binding so a later delete "
@@ -6178,9 +6173,7 @@ async def _rollback_create_launch_worktree(
                         resp.id,
                     )
         except Exception:  # noqa: BLE001
-            # Cleanup-only work failed somewhere in the rollback. Leave the
-            # stored binding as it is, so a later delete or archive can
-            # reconcile the worktree whether or not it was already removed.
+            # Best-effort rollback failed; keep the stored binding for a later retry.
             _logger.warning(
                 "Launch-failure worktree rollback for session %s did not "
                 "complete; leaving the stored binding for a later delete or "
