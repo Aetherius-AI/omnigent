@@ -2352,9 +2352,17 @@ class TestSkillsFilterTranslation(unittest.TestCase):
 class TestBundleSkillsReachSdkOptions(unittest.TestCase):
     """The bundle on disk, not a hand-built list, feeds the ``"none"`` allowlist."""
 
-    def test_skills_none_options_allowlist_the_bundled_skills(self) -> None:
-        from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor
+    @staticmethod
+    def _write_bundle(root: str) -> Path:
+        bundle_dir = Path(root) / "bundle"
+        (bundle_dir / "skills" / "review").mkdir(parents=True)
+        (bundle_dir / "skills" / "review" / "SKILL.md").write_text(
+            "---\nname: review\ndescription: d\n---\nBody.\n"
+        )
+        return bundle_dir
 
+    def _sdk_options_for_one_turn(self, executor) -> dict[str, object]:
+        """Run one turn against a fake SDK and return the options it was built with."""
         captured: dict[str, object] = {}
 
         class _ResultMessage:
@@ -2377,10 +2385,7 @@ class TestBundleSkillsReachSdkOptions(unittest.TestCase):
                     for message in _FakeSDK.messages:
                         yield message
 
-        async def _t(bundle_dir: Path) -> None:
-            executor = ClaudeSDKExecutor(
-                bundle_dir=bundle_dir, agent_name="probe", skills_filter="none"
-            )
+        async def _t() -> None:
             with patch("omnigent.inner.claude_sdk_executor._ensure_sdk", return_value=_FakeSDK):
                 events = [
                     e
@@ -2390,36 +2395,38 @@ class TestBundleSkillsReachSdkOptions(unittest.TestCase):
                 ]
             self.assertIsInstance(events[-1], TurnComplete)
 
+        _run(_t())
+        return captured
+
+    def test_skills_none_options_allowlist_the_bundled_skills(self) -> None:
+        from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor
+
         with tempfile.TemporaryDirectory() as tmp:
-            bundle_dir = Path(tmp) / "bundle"
-            (bundle_dir / "skills" / "review").mkdir(parents=True)
-            (bundle_dir / "skills" / "review" / "SKILL.md").write_text(
-                "---\nname: review\ndescription: d\n---\nBody.\n"
+            bundle_dir = self._write_bundle(tmp)
+            executor = ClaudeSDKExecutor(
+                bundle_dir=bundle_dir, agent_name="probe", skills_filter="none"
             )
-            _run(_t(bundle_dir))
+            captured = self._sdk_options_for_one_turn(executor)
 
         self.assertEqual(captured["skills"], ["review"])
         self.assertEqual(captured["setting_sources"], [])
         self.assertEqual(captured["plugins"], [{"type": "local", "path": str(bundle_dir)}])
 
-    def test_bundled_skill_names_survive_a_failed_manifest_write(self) -> None:
+    def test_bundled_skills_stay_allowlisted_when_the_manifest_write_fails(self) -> None:
         from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor
 
         with tempfile.TemporaryDirectory() as tmp:
-            bundle_dir = Path(tmp) / "bundle"
-            (bundle_dir / "skills" / "review").mkdir(parents=True)
-            (bundle_dir / "skills" / "review" / "SKILL.md").write_text(
-                "---\nname: review\ndescription: d\n---\nBody.\n"
-            )
+            bundle_dir = self._write_bundle(tmp)
             # A file where the manifest directory belongs makes the write fail.
             (bundle_dir / ".claude-plugin").write_text("not a directory\n")
-            with self.assertLogs("omnigent.inner.claude_sdk_executor", level="WARNING") as logs:
+            with self.assertLogs("omnigent.inner.claude_sdk_executor", level="WARNING"):
                 executor = ClaudeSDKExecutor(
                     bundle_dir=bundle_dir, agent_name="probe", skills_filter="none"
                 )
+            captured = self._sdk_options_for_one_turn(executor)
 
-        self.assertEqual(executor._bundle_skill_names, ["review"])
-        self.assertTrue(any("bundle plugin" in line for line in logs.output))
+        self.assertEqual(captured["skills"], ["review"])
+        self.assertEqual(captured["setting_sources"], [])
 
 
 # ---------------------------------------------------------------------------
