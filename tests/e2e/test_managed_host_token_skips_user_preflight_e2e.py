@@ -79,7 +79,7 @@ class SeenRequest:
     method: str
     path: str
     has_authorization: bool
-    has_host_token: bool
+    host_token: str | None
 
 
 @dataclass
@@ -95,7 +95,7 @@ class DatabricksAppsEdge:
     def record(self, seen: SeenRequest) -> None:
         with self.lock:
             self.requests.append(seen)
-        if seen.path == TUNNEL_PATH and seen.has_host_token:
+        if seen.path == TUNNEL_PATH and seen.host_token:
             self.tunnel_dialed.set()
 
     def seen_requests(self) -> list[SeenRequest]:
@@ -124,10 +124,10 @@ class _EdgeHandler(BaseHTTPRequestHandler):
             method=self.command,
             path=self.path,
             has_authorization=bool(self.headers.get("Authorization")),
-            has_host_token=bool(self.headers.get(MANAGED_HOST_TOKEN_HEADER)),
+            host_token=self.headers.get(MANAGED_HOST_TOKEN_HEADER),
         )
         self.edge.record(seen)
-        if seen.has_host_token:
+        if seen.host_token:
             body = b"stub edge recorded the launch-token request"
             self.send_response(400)
             self.send_header("Content-Type", "text/plain")
@@ -258,8 +258,10 @@ def run_host_until_tunnel_or_exit(
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
-    # The process is dead here, so stdout reaches EOF and the drain completes.
-    reader.join()
+    # The process is dead here, so stdout reaches EOF unless a child kept the
+    # pipe open; the bounded join turns that into a diagnosable failure.
+    reader.join(timeout=30)
+    assert not reader.is_alive(), "host stdout stayed open after exit (a child kept the pipe)"
     return proc.returncode, "".join(chunks)
 
 
@@ -283,4 +285,6 @@ def test_launch_token_host_skips_user_sign_in_preflight(
         "no tunnel upgrade reached the edge; requests seen: "
         f"{databricks_apps_edge.seen_requests()}\n{output}"
     )
-    assert all(seen.has_host_token and not seen.has_authorization for seen in tunnel), tunnel
+    assert all(
+        seen.host_token == LAUNCH_TOKEN and not seen.has_authorization for seen in tunnel
+    ), tunnel

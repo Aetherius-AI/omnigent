@@ -3773,25 +3773,15 @@ def test_host_remote_preflight_skips_when_authenticated(
 @pytest.mark.parametrize(
     "entry_point", [["host", "--background"], ["start"]], ids=["host-background", "start"]
 )
-@pytest.mark.parametrize(
-    ("launch_token", "expected_preflight"),
-    [(None, [(_HOST_DATABRICKS_SERVER, True)]), ("launch-token", [])],
-    ids=["user-host", "launch-token-host"],
-)
-def test_background_host_preflight_follows_launch_token(
-    monkeypatch: pytest.MonkeyPatch,
-    entry_point: list[str],
-    launch_token: str | None,
-    expected_preflight: list[tuple[str, bool]],
+def test_background_host_with_launch_token_skips_user_preflight(
+    monkeypatch: pytest.MonkeyPatch, entry_point: list[str]
 ) -> None:
-    """The detached entry points run the sign-in pre-flight only for a user-credentialed host.
+    """``host --background`` and ``start`` spawn a launch-token host without the user pre-flight.
 
-    ``host --background`` and ``start`` authenticate in the foreground before
-    spawning the daemon; a launch-token host has no user credential to
-    establish and spawns at once.
+    The ordinary-host pre-flight on these entry points is covered by
+    ``tests/host/test_cli_host.py``.
     """
-    if launch_token is not None:
-        monkeypatch.setenv("OMNIGENT_HOST_TOKEN", launch_token)
+    monkeypatch.setenv("OMNIGENT_HOST_TOKEN", "launch-token")
     preflight = _capture_preflight(monkeypatch)
     monkeypatch.setattr(cli, "_load_effective_config", dict)
     spawned: list[str | None] = []
@@ -3805,7 +3795,7 @@ def test_background_host_preflight_follows_launch_token(
     )
 
     assert result.exit_code == 0, result.output
-    assert preflight == expected_preflight
+    assert preflight == []
     assert spawned == [_HOST_DATABRICKS_SERVER]
 
 
