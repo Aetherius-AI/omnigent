@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -27,11 +28,13 @@ kiro_shim_session = _kiro_shim_session
 
 
 def _shim(mode: str, *, dropped_enters: int = 1) -> str:
-    source = _FAKE_KIRO_SOURCE.replace(
-        'COMMANDS = ("alpha", "beta", "gamma")', 'COMMANDS = ("alpha", "alpha")'
-    )
+    commands_anchor = 'COMMANDS = ("alpha", "beta", "gamma")'
+    enter_anchor = "    def on_enter(self):\n        if self.active is not None:"
+    assert _FAKE_KIRO_SOURCE.count(commands_anchor) == 1
+    assert _FAKE_KIRO_SOURCE.count(enter_anchor) == 1
+    source = _FAKE_KIRO_SOURCE.replace(commands_anchor, 'COMMANDS = ("alpha", "alpha")')
     return source.replace(
-        "    def on_enter(self):\n        if self.active is not None:",
+        enter_anchor,
         f"""    def on_enter(self):
         if self.active is not None:
             with open(RECORD_PATH + ".enters", "a") as handle:
@@ -154,6 +157,41 @@ def test_kiro_late_confirmation_removes_retry(
 @pytest.mark.timeout(180)
 @pytest.mark.parametrize(
     "kiro_shim_session",
+    [
+        {
+            "source": _shim("delay"),
+            "server_checkout": os.environ.get("OMNIGENT_E2E_KIRO_LEGACY_SERVER_CHECKOUT"),
+        }
+    ],
+    indirect=True,
+    ids=["legacy-server-delayed-enter"],
+)
+def test_kiro_legacy_server_does_not_repeat_enter(
+    kiro_shim_session: tuple[str, str, Path], page: Page
+) -> None:
+    base_url, session_id, bridge_dir = kiro_shim_session
+    record_file = acp_record_path(bridge_dir)
+    page.goto(f"{base_url}/c/{session_id}")
+    _ensure_chat_view(page)
+    _send(page, "Run two identical commands requiring separate approvals.")
+    expect(page.get_by_role("button", name="Approve", exact=True)).to_be_visible(timeout=120_000)
+    snapshot = _pending_elicitations(base_url, session_id)
+    assert "native_delivery" not in snapshot[0]["params"], "requires a pre-delivery-state server"
+    page.get_by_role("button", name="Approve", exact=True).click()
+    _wait_for(lambda: "perm-req-1-1" in _recorder_response_ids(record_file), timeout_s=20)
+    page.wait_for_timeout(2_000)
+    assert _recorder_response_ids(record_file) == {"perm-req-1-1"}
+    assert record_file.with_suffix(record_file.suffix + ".enters").read_text().splitlines() == [
+        "perm-req-1-1"
+    ]
+    expect(page.get_by_role("button", name="Retry sending approval")).not_to_be_visible()
+    second_eid = kiro_permission_elicitation_id(session_id, "perm-req-1-2")
+    assert second_eid in json.dumps(_pending_elicitations(base_url, session_id))
+
+
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize(
+    "kiro_shim_session",
     [_shim("drop", dropped_enters=2)],
     indirect=True,
     ids=["two-lost-enters"],
@@ -186,8 +224,13 @@ def test_kiro_two_tabs_cannot_repeat_an_old_retry(
         expect(other_retry).to_be_visible()
         page.route(resolve_url, lambda route: held_requests.append(route))
         other.route(resolve_url, lambda route: held_requests.append(route))
-        retry.click()
-        other_retry.click()
+        with page.expect_request(resolve_url):
+            retry.click()
+        with other.expect_request(resolve_url):
+            other_retry.click()
+        deadline = time.monotonic() + 5
+        while len(held_requests) < 2 and time.monotonic() < deadline:
+            page.wait_for_timeout(10)
         expect(retry).not_to_be_visible()
         expect(other_retry).not_to_be_visible()
         assert len(held_requests) == 2

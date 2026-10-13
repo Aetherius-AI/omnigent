@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import httpx
 import pytest
@@ -75,7 +76,9 @@ async def test_kiro_delivery_stays_pending_and_retries_only_the_current_attempt(
             client.post(resolve_url, json=verdict),
         )
         assert all(response.status_code == 202 for response in responses)
-        assert (await retry).json()["action"] == "accept"
+        retried = (await retry).json()
+        assert retried["action"] == "accept"
+        assert retried["native_delivery_attempt"] == "second"
         await _wait_for_state(eid, "sending")
     finally:
         retry.cancel()
@@ -136,9 +139,13 @@ async def test_kiro_terminal_receipt_cancels_a_waiting_retry(client: httpx.Async
         await asyncio.gather(task, return_exceptions=True)
 
 
+@pytest.mark.parametrize("receipt", [True, False], ids=["confirmed", "abandoned"])
 async def test_kiro_child_delivery_stays_pending_in_parent_until_receipt(
-    client: httpx.AsyncClient, db_uri: str
+    client: httpx.AsyncClient, db_uri: str, monkeypatch: pytest.MonkeyPatch, receipt: bool
 ) -> None:
+    from omnigent.server.routes import sessions
+
+    monkeypatch.setattr(sessions, "_HARNESS_ELICITATION_REPARK_GRACE_S", 0.2)
     agent = await create_test_agent(client, "kiro-child-delivery")
     parent = await create_session_for_agent(client, agent["id"])
     child = (
@@ -188,12 +195,16 @@ async def test_kiro_child_delivery_stays_pending_in_parent_until_receipt(
         assert response.status_code == 202
         assert (await hook).json()["action"] == "accept"
         assert (await parent_delivery("sending"))["params"]["target_session_id"] == child
-        await client.post(
-            f"/v1/sessions/{child}/events",
-            json={"type": "external_elicitation_resolved", "data": {"elicitation_id": eid}},
-        )
+        if receipt:
+            await client.post(
+                f"/v1/sessions/{child}/events",
+                json={"type": "external_elicitation_resolved", "data": {"elicitation_id": eid}},
+            )
+        await asyncio.gather(*sessions._deferred_elicitation_clear_tasks)
         snapshot = (await client.get(f"/v1/sessions/{parent}")).json()
         assert snapshot["pending_elicitations"] == []
+        assert pending_elicitations.count_for(parent) == 0
+        assert pending_elicitations.count_for(child) == 0
     finally:
         hook.cancel()
         await asyncio.gather(hook, return_exceptions=True)
@@ -216,9 +227,178 @@ async def test_invalid_kiro_delivery_metadata_is_rejected(
     response = await client.post(
         f"/v1/sessions/{sid}/hooks/native-permission-request",
         json={
+            "elicitation_id": f"elicit_kiro_{sid}",
             "agent": "Kiro",
             "policy_name": "kiro_native_permission",
             "native_delivery": delivery,
         },
     )
     assert response.status_code == 400
+
+
+@pytest.mark.parametrize("ending", ["disconnect", "sending", "repark", "receipt", "new_attempt"])
+async def test_kiro_abandoned_wait_cleanup(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch, ending: str
+) -> None:
+    from omnigent.server.routes import sessions
+
+    monkeypatch.setattr(sessions, "_HARNESS_ELICITATION_REPARK_GRACE_S", 0.1)
+    agent = await create_test_agent(client, "kiro-cleanup")
+    sid = await create_session_for_agent(client, agent["id"])
+    eid = f"elicit_kiro_{sid}"
+    hook_url = f"/v1/sessions/{sid}/hooks/native-permission-request"
+    payload = {
+        "elicitation_id": eid,
+        "policy_name": "kiro_native_permission",
+        "native_delivery": {"state": "ready", "attempt": "first"},
+    }
+    hook = asyncio.create_task(client.post(hook_url, json=payload))
+    retry = None
+    try:
+        await _wait_for_state(eid, "ready")
+        existing_clears = set(sessions._deferred_elicitation_clear_tasks)
+        if ending == "sending":
+            response = await client.post(
+                f"/v1/sessions/{sid}/elicitations/{eid}/resolve", json={"action": "accept"}
+            )
+            assert response.status_code == 202
+            assert (await hook).json()["native_delivery_attempt"] == "first"
+            await _wait_for_state(eid, "sending")
+        else:
+            hook.cancel()
+            await asyncio.gather(hook, return_exceptions=True)
+        clears = set(sessions._deferred_elicitation_clear_tasks) - existing_clears
+        assert len(clears) == 1
+        assert pending_elicitations.count_for(sid) == 1
+        if ending in ("repark", "new_attempt"):
+            if ending == "new_attempt":
+                payload["native_delivery"] = {"state": "ready", "attempt": "second"}
+            retry = asyncio.create_task(client.post(hook_url, json=payload))
+            async with asyncio.timeout(5):
+                while eid not in sessions._harness_elicitation_registry:
+                    await asyncio.sleep(0.001)
+            if ending == "new_attempt":
+                await client.post(
+                    f"/v1/sessions/{sid}/elicitations/{eid}/resolve", json={"action": "accept"}
+                )
+                await retry
+                newer_clears = (
+                    set(sessions._deferred_elicitation_clear_tasks) - clears - existing_clears
+                )
+                for task in newer_clears:
+                    task.cancel()
+                await asyncio.gather(*newer_clears, return_exceptions=True)
+        elif ending == "receipt":
+            await client.post(
+                f"/v1/sessions/{sid}/events",
+                json={"type": "external_elicitation_resolved", "data": {"elicitation_id": eid}},
+            )
+        await asyncio.gather(*clears)
+        survives = ending in ("repark", "new_attempt")
+        snapshot = (await client.get(f"/v1/sessions/{sid}")).json()
+        assert bool(snapshot["pending_elicitations"]) == survives
+        assert pending_elicitations.count_for(sid) == int(survives)
+    finally:
+        if retry is not None:
+            await client.post(
+                f"/v1/sessions/{sid}/events",
+                json={"type": "external_elicitation_resolved", "data": {"elicitation_id": eid}},
+            )
+            retry.cancel()
+            await asyncio.gather(retry, return_exceptions=True)
+        hook.cancel()
+        await asyncio.gather(hook, return_exceptions=True)
+
+
+@pytest.mark.parametrize("verdict", [{"action": "bogus"}, {"action": "accept", "content": []}])
+async def test_kiro_malformed_approval_event_keeps_request_pending(
+    client: httpx.AsyncClient, verdict: dict
+) -> None:
+    agent = await create_test_agent(client, "kiro-malformed-verdict")
+    sid = await create_session_for_agent(client, agent["id"])
+    eid = f"elicit_kiro_{sid}"
+    task = asyncio.create_task(
+        client.post(
+            f"/v1/sessions/{sid}/hooks/native-permission-request",
+            json={
+                "elicitation_id": eid,
+                "policy_name": "kiro_native_permission",
+                "native_delivery": {"state": "ready", "attempt": "first"},
+            },
+        )
+    )
+    try:
+        await _wait_for_state(eid, "ready")
+        response = await client.post(
+            f"/v1/sessions/{sid}/events",
+            json={"type": "approval", "data": {"elicitation_id": eid, **verdict}},
+        )
+        assert response.status_code == 400
+        assert not task.done()
+        await _wait_for_state(eid, "ready")
+    finally:
+        await client.post(
+            f"/v1/sessions/{sid}/events",
+            json={"type": "external_elicitation_resolved", "data": {"elicitation_id": eid}},
+        )
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_new_kiro_worker_does_not_replay_legacy_server_verdict(
+    client: httpx.AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omnigent.harnesses.kiro_native import permissions as knp
+    from omnigent.server.routes import sessions
+
+    monkeypatch.setattr(knp, "_DELIVERY_CONFIRM_TIMEOUT_S", 0.02)
+    monkeypatch.setattr(knp, "_POLL_INTERVAL_S", 0.001)
+    sent = []
+    monkeypatch.setattr(
+        knp, "send_kiro_permission_verdict", lambda *a, **kw: sent.append(kw["action"])
+    )
+    agent = await create_test_agent(client, "kiro-legacy-server")
+    sid = await create_session_for_agent(client, agent["id"])
+    eid = f"elicit_kiro_{sid}"
+    requests = []
+
+    class LegacyHookClient:
+        async def post(self, url, *, json, **kwargs):
+            # Older hooks ignore delivery metadata. Exercise the production
+            # legacy hook and its verdict tombstone, not a canned response.
+            payload = {k: v for k, v in json.items() if k != "native_delivery"}
+            requests.append((url, payload))
+            return await client.post(url, json=payload, **kwargs)
+
+    worker = asyncio.create_task(
+        knp._run_one_permission(
+            LegacyHookClient(),
+            session_id=sid,
+            bridge_dir=tmp_path,
+            permission=knp.KiroPermissionRequest(
+                "request-1", "tool-1", "Running: pwd", "yes", "no"
+            ),
+            elicitation_id=eid,
+            record_offset=0,
+        )
+    )
+    try:
+        async with asyncio.timeout(5):
+            while eid not in sessions._harness_elicitation_registry:
+                await asyncio.sleep(0.001)
+        await client.post(
+            f"/v1/sessions/{sid}/elicitations/{eid}/resolve", json={"action": "accept"}
+        )
+        async with asyncio.timeout(5):
+            await worker
+        await asyncio.sleep(0.05)
+        assert sent == ["accept"]
+        assert len(requests) == 1
+        url, payload = requests[0]
+        async with asyncio.timeout(5):
+            replay = await client.post(url, json=payload)
+        assert replay.json()["action"] == "accept"
+        assert "native_delivery_attempt" not in replay.json()
+    finally:
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)

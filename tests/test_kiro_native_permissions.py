@@ -204,6 +204,7 @@ async def test_run_one_permission_posts_then_delivers_verdict(
         bridge_dir=tmp_path,
         permission=req,
         elicitation_id="elic_1",
+        record_offset=0,
     )
 
     url, body = client.posts[0]
@@ -281,6 +282,7 @@ async def test_expired_hook_wait_reconnects_without_sending_a_key(
             bridge_dir=tmp_path,
             permission=permission,
             elicitation_id="elic_1",
+            record_offset=0,
         )
     assert len(attempts) == 2
     assert attempts[0] == attempts[1]
@@ -288,11 +290,16 @@ async def test_expired_hook_wait_reconnects_without_sending_a_key(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("receipt_unavailable", [False, True])
 async def test_supervise_mirror_parks_then_releases_on_permission_response(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    receipt_unavailable: bool,
 ) -> None:
     created: list[object] = []
+    finalized = asyncio.Event()
+    second_started = asyncio.Event()
+    monkeypatch.setattr(knp, "_POLL_INTERVAL_S", 0.01)
 
     class _FakeAsyncClient:
         def __init__(self, **_kw: object) -> None:
@@ -306,8 +313,11 @@ async def test_supervise_mirror_parks_then_releases_on_permission_response(
             return False
 
         async def post(self, url: str, *, json: dict, **_kw: object) -> httpx.Response:
+            assert cancelled.is_set() and finalized.is_set()
             self.posts.append((url, json))
-            return httpx.Response(200, request=httpx.Request("POST", url))
+            return httpx.Response(
+                503 if receipt_unavailable else 200, request=httpx.Request("POST", url)
+            )
 
     monkeypatch.setattr(knp.httpx, "AsyncClient", _FakeAsyncClient)
 
@@ -316,11 +326,15 @@ async def test_supervise_mirror_parks_then_releases_on_permission_response(
     cancelled = asyncio.Event()
 
     async def _fake_run_one(_client: object, **_kw: object) -> None:
+        if started.is_set():
+            second_started.set()
         started.set()
         try:
             await release.wait()
         except asyncio.CancelledError:
             cancelled.set()
+            await asyncio.sleep(0.01)
+            finalized.set()
             raise
 
     monkeypatch.setattr(knp, "_run_one_permission", _fake_run_one)
@@ -353,6 +367,9 @@ async def test_supervise_mirror_parks_then_releases_on_permission_response(
         assert body["type"] == "external_elicitation_resolved"
         assert body["data"]["elicitation_id"] == kiro_permission_elicitation_id("conv_3", "req-1")
         await asyncio.wait_for(cancelled.wait(), 2.0)
+        with record_file.open("ab") as handle:
+            handle.write(_record_bytes(_permission_msg("req-2")))
+        await asyncio.wait_for(second_started.wait(), 2.0)
     finally:
         release.set()
         task.cancel()
@@ -638,7 +655,10 @@ async def test_delivery_waits_for_explicit_retry_before_sending_again(
             assert delivery["action"] == "accept"
             asked_to_retry.set()
             await user_retries.wait()
-        return httpx.Response(200, json={"action": "accept"})
+        return httpx.Response(
+            200,
+            json={"action": "accept", "native_delivery_attempt": delivery["attempt"]},
+        )
 
     def send(bridge_dir: Path, *, action: str, **kwargs: object) -> None:
         sent.append(action)
@@ -658,6 +678,7 @@ async def test_delivery_waits_for_explicit_retry_before_sending_again(
                 bridge_dir=tmp_path,
                 permission=permission,
                 elicitation_id="elicitation",
+                record_offset=0,
             )
         )
         try:
@@ -673,3 +694,48 @@ async def test_delivery_waits_for_explicit_retry_before_sending_again(
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["terminal_exited", "wrong_attempt", "missing_retry_ack"])
+async def test_delivery_stops_on_terminal_exit_or_unacknowledged_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    monkeypatch.setattr(knp, "_DELIVERY_CONFIRM_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(knp, "_POLL_INTERVAL_S", 0.001)
+    hooks = []
+    sent = []
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        delivery = json.loads(request.content)["native_delivery"]
+        hooks.append(delivery)
+        result = {"action": "accept", "native_delivery_attempt": delivery["attempt"]}
+        if failure == "wrong_attempt":
+            result["native_delivery_attempt"] = "stale"
+        elif failure == "missing_retry_ack" and len(hooks) > 1:
+            del result["native_delivery_attempt"]
+        assert len(hooks) <= 2
+        return httpx.Response(200, json=result)
+
+    def send(*args, **kwargs):
+        sent.append(kwargs["action"])
+        if failure == "terminal_exited":
+            raise knp.KiroTerminalExited("kiro terminal is no longer running")
+
+    monkeypatch.setattr(knp, "send_kiro_permission_verdict", send)
+    permission = parse_permission_request(_permission_msg())
+    assert permission is not None
+    async with httpx.AsyncClient(
+        base_url="http://test", transport=httpx.MockTransport(handle)
+    ) as client:
+        async with asyncio.timeout(2):
+            await knp._run_one_permission(
+                client,
+                session_id="session",
+                bridge_dir=tmp_path,
+                permission=permission,
+                elicitation_id="eid",
+                record_offset=0,
+            )
+    assert len(hooks) == (2 if failure == "missing_retry_ack" else 1)
+    assert sent == ([] if failure == "wrong_attempt" else ["accept"])

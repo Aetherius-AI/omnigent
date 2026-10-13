@@ -1519,8 +1519,11 @@ def register_hooks_routes(
                 get_server_runner_router(),
                 {"type": "interrupt"},
             )
+        result_payload = result.model_dump(exclude_none=True)
+        if native_delivery is not None:
+            result_payload["native_delivery_attempt"] = native_delivery["attempt"]
         return Response(
-            content=json.dumps(result.model_dump(exclude_none=True)),
+            content=json.dumps(result_payload),
             media_type="application/json",
         )
 

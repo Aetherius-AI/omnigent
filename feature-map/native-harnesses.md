@@ -246,8 +246,8 @@ Cross-harness journeys:
   (own environment, real browser/server/runner/tmux, fake Kiro) drops the first
   Enter and checks the five-second wait, refresh recovery, and one explicit retry
   from desktop/mobile chat, Inbox, and the standalone approval page. It also
-  checks rejection and answering through the existing terminal view toggle. Two identical commands have
-  distinct request IDs; only the first may be answered.
+  checks rejection and answering through the existing terminal view toggle. Two
+  identical commands have distinct request IDs; only the first may be answered.
   `tests/e2e_ui/messages/test_kiro_permission_retry.py::test_kiro_late_confirmation_removes_retry`
   delays input consumption with real elapsed time and checks that late
   confirmation removes Retry without sending another Enter, including when the
@@ -255,8 +255,14 @@ Cross-harness journeys:
   `tests/e2e_ui/messages/test_kiro_permission_retry.py::test_kiro_two_tabs_cannot_repeat_an_old_retry`
   checks simultaneous retries from chat and a standalone tab, rejection of a
   stale retry after another attempt, and recovery after refreshing the stale tab.
+  `tests/e2e_ui/messages/test_kiro_permission_retry.py::test_kiro_legacy_server_does_not_repeat_enter`
+  runs the current runner with an older server checkout named by
+  `OMNIGENT_E2E_KIRO_LEGACY_SERVER_CHECKOUT`. With a nine-second input delay,
+  one approval must send just one Enter; the next identical request stays
+  unanswered. The fixture uses the current built SPA and logs the server's
+  import path. Without the older checkout, this mixed-version case is skipped.
   Child-session routing uses the shared approval card; server ownership and
-  receipt races are covered by
+  receipt races, abandoned-hook cleanup, and legacy verdict replay are covered by
   `tests/server/integration/test_kiro_permission_delivery.py`.
   These tests do not verify a signed-in vendor Kiro CLI.
 - **`resume`, bare picker scoped to this host:**

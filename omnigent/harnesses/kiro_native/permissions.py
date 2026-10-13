@@ -15,7 +15,11 @@ from pathlib import Path
 
 import httpx
 
-from omnigent.harnesses.kiro_native.bridge import acp_record_path, send_kiro_permission_verdict
+from omnigent.harnesses.kiro_native.bridge import (
+    KiroTerminalExited,
+    acp_record_path,
+    send_kiro_permission_verdict,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -206,6 +210,7 @@ async def supervise_kiro_permission_mirror(
     except OSError:
         offset = 0
     pending: dict[str, _PendingPermission] = {}
+    receipts: set[asyncio.Task[None]] = set()
     queued: dict[str, tuple[KiroPermissionRequest, int]] = {}
     timeout = httpx.Timeout(_POST_TIMEOUT_S, connect=10.0)
     from omnigent.cli_auth import open_server_client
@@ -243,9 +248,14 @@ async def supervise_kiro_permission_mirror(
                             if not entry.task.done():
                                 entry.task.cancel()
                                 await asyncio.gather(entry.task, return_exceptions=True)
-                                await _post_external_elicitation_resolved(
-                                    client, session_id, entry.elicitation_id
+                                receipt = asyncio.create_task(
+                                    _post_external_elicitation_resolved(
+                                        client, session_id, entry.elicitation_id
+                                    )
                                 )
+                                receipts.add(receipt)
+                                receipt.add_done_callback(receipts.discard)
+                                receipt.add_done_callback(_consume_task_result)
                     if not pending and queued:
                         request_id = next(iter(queued))
                         permission, record_offset = queued.pop(request_id)
@@ -275,8 +285,10 @@ async def supervise_kiro_permission_mirror(
         finally:
             for entry in pending.values():
                 entry.task.cancel()
+            for receipt in receipts:
+                receipt.cancel()
             await asyncio.gather(
-                *(entry.task for entry in pending.values()), return_exceptions=True
+                *(entry.task for entry in pending.values()), *receipts, return_exceptions=True
             )
 
 
@@ -307,12 +319,13 @@ async def _run_one_permission(
     bridge_dir: Path,
     permission: KiroPermissionRequest,
     elicitation_id: str,
-    record_offset: int = 0,
+    record_offset: int,
 ) -> None:
     """Keep the card pending until Kiro answers; retry only on a new user decision."""
     probe = _VerdictDeliveryProbe(
         acp_record_path(bridge_dir), permission.request_id, record_offset
     )
+    delivery = {"state": "ready", "attempt": secrets.token_hex(16)}
     payload = {
         "elicitation_id": elicitation_id,
         "agent": "Kiro",
@@ -320,7 +333,7 @@ async def _run_one_permission(
         "operation_type": "tool",
         "message": f"Kiro wants approval for {permission.preview}",
         "content_preview": permission.preview,
-        "native_delivery": {"state": "ready", "attempt": secrets.token_hex(16)},
+        "native_delivery": delivery,
     }
     try:
         while not await asyncio.to_thread(probe.is_resolved):
@@ -349,8 +362,17 @@ async def _run_one_permission(
             action = result.get("action") if isinstance(result, dict) else None
             if action not in ("accept", "decline", "cancel"):
                 return
+            attempt = delivery["attempt"]
+            acknowledged_attempt = result.get("native_delivery_attempt")
+            supports_retry = acknowledged_attempt == attempt
+            if (
+                acknowledged_attempt is not None or delivery["state"] != "ready"
+            ) and not supports_retry:
+                _logger.warning("kiro permission hook did not acknowledge the current attempt")
+                return
             if await asyncio.to_thread(probe.is_resolved):
                 break
+            # One five-second budget covers readiness and recorder confirmation.
             started = time.monotonic()
             try:
                 await asyncio.to_thread(
@@ -361,23 +383,31 @@ async def _run_one_permission(
                     timeout_s=_DELIVERY_CONFIRM_TIMEOUT_S,
                     verdict_recorded=probe.is_resolved,
                 )
+            except KiroTerminalExited:
+                _logger.warning("kiro permission terminal exited; session=%s", session_id)
+                return
             except RuntimeError:
                 _logger.exception(
                     "failed to deliver kiro permission verdict for %s; session=%s",
                     permission.request_id,
                     session_id,
                 )
+            if not supports_retry:
+                # Older servers can replay a verdict tombstone on every repost.
+                # Keep their single-shot contract; a replay is not a new decision.
+                return
             while time.monotonic() - started < _DELIVERY_CONFIRM_TIMEOUT_S:
                 if await asyncio.to_thread(probe.is_resolved):
                     break
                 await asyncio.sleep(_POLL_INTERVAL_S)
             if await asyncio.to_thread(probe.is_resolved):
                 break
-            payload["native_delivery"] = {
+            delivery = {
                 "state": "unconfirmed",
                 "action": action,
                 "attempt": secrets.token_hex(16),
             }
+            payload["native_delivery"] = delivery
         if probe.recorded:
             await _post_external_elicitation_resolved(client, session_id, elicitation_id)
     finally:

@@ -471,6 +471,14 @@ def _kiro_permission_focus_on_reject(pane: str) -> bool:
     return any(line.strip().startswith("❯ No (Tab to edit)") for line in pane.splitlines())
 
 
+def _kiro_permission_focus_on_trust(pane: str) -> bool:
+    """Recognize the intermediate row left by an interrupted rejection."""
+    return any(
+        line.strip().startswith("❯ Trust, always allow in this session")
+        for line in pane.splitlines()
+    )
+
+
 def _kiro_active_permission_tool_line(pane: str) -> str:
     """Return the tool line associated with the active approval panel."""
     lines = pane.splitlines()
@@ -531,7 +539,13 @@ def _wait_for_kiro_permission_prompt(
             _kiro_permission_prompt_active(pane)
             and (
                 _kiro_permission_focus_on_one_time_allow(pane)
-                or (action != "accept" and _kiro_permission_focus_on_reject(pane))
+                or (
+                    action != "accept"
+                    and (
+                        _kiro_permission_focus_on_reject(pane)
+                        or _kiro_permission_focus_on_trust(pane)
+                    )
+                )
             )
             and _kiro_permission_prompt_matches_title(pane, expected_title)
         ):
@@ -726,6 +740,10 @@ def kill_session(bridge_dir: Path, *, timeout_s: float = _TMUX_READY_TIMEOUT_S) 
     _run_tmux(info["socket_path"], "kill-session", "-t", info["tmux_target"])
 
 
+class KiroTerminalExited(RuntimeError):
+    """The native terminal cannot receive another permission decision."""
+
+
 def send_kiro_permission_verdict(
     bridge_dir: Path,
     *,
@@ -754,7 +772,7 @@ def send_kiro_permission_verdict(
     socket_path = info["socket_path"]
     tmux_target = info["tmux_target"]
     if not _session_alive(socket_path, tmux_target):
-        raise RuntimeError(
+        raise KiroTerminalExited(
             "kiro terminal is no longer running (the TUI exited); restart the session"
         )
     _wait_for_kiro_permission_prompt(
@@ -782,12 +800,24 @@ def send_kiro_permission_verdict(
         time.sleep(_PERMISSION_KEY_INTERVAL_S)
         return
     pane = _capture_pane(socket_path, tmux_target, join_wrapped=True)
-    if not _kiro_permission_focus_on_reject(pane):
-        for key in ("Down", "Down"):
-            if stop_delivery():
-                return
-            _run_tmux(socket_path, "send-keys", "-t", tmux_target, key)
-            time.sleep(_PERMISSION_KEY_INTERVAL_S)
+    if not (
+        _kiro_permission_prompt_active(pane)
+        and _kiro_permission_prompt_matches_title(pane, expected_title)
+    ):
+        raise RuntimeError("kiro-native permission prompt changed before rejection")
+    if _kiro_permission_focus_on_one_time_allow(pane):
+        steps = 2
+    elif _kiro_permission_focus_on_trust(pane):
+        steps = 1
+    elif _kiro_permission_focus_on_reject(pane):
+        steps = 0
+    else:
+        raise RuntimeError("kiro-native reject option was not safely focused before delivery")
+    for _ in range(steps):
+        if stop_delivery():
+            return
+        _run_tmux(socket_path, "send-keys", "-t", tmux_target, "Down")
+        time.sleep(_PERMISSION_KEY_INTERVAL_S)
     time.sleep(_PERMISSION_ENTER_SETTLE_S)
     pane = _capture_pane(socket_path, tmux_target, join_wrapped=True)
     if not (

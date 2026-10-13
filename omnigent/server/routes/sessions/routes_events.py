@@ -1879,6 +1879,7 @@ def register_events_routes(
                 and entry[0] == session_id
                 and entry[1].get("params", {}).get("native_delivery") is not None
             ):
+                # The attempted web verdict may differ from the terminal's answer.
                 _publish_elicitation_resolved(session_id, elicitation_id)
                 await asyncio.to_thread(
                     _publish_elicitation_resolved_to_ancestors,

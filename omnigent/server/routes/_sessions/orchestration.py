@@ -596,16 +596,17 @@ async def _publish_and_wait_for_harness_elicitation(
             _harness_elicitation_owners.pop(elicitation_id, None)
         if _harness_parked_elicitations.get(elicitation_id) is parked:
             _harness_parked_elicitations.pop(elicitation_id, None)
-        delivery_pending = getattr(params, "native_delivery", None) is not None
-        if delivery_pending and (settled_action is not None or not settled):
-            pass  # Only a native response completes a delivery-confirmed card.
-        elif published_request and not settled:
-            # Severed without an answer — defer the clear (scheduled
-            # before any await so handler cancellation can't skip it).
+        delivery = getattr(params, "native_delivery", None)
+        if published_request and (
+            not settled or (delivery is not None and settled_action is not None)
+        ):
+            # Retain the card during reconnect or native delivery. Abandoned
+            # waits expire if no new hook arrives within the grace period.
             _schedule_deferred_elicitation_clear(
                 session_id,
                 elicitation_id,
                 conversation_store,
+                native_delivery_attempt=delivery["attempt"] if delivery is not None else None,
             )
         elif published_request:
             _publish_elicitation_resolved(session_id, elicitation_id, action=settled_action)
@@ -623,6 +624,8 @@ def _schedule_deferred_elicitation_clear(
     session_id: str,
     elicitation_id: str,
     conversation_store: ConversationStore | None,
+    *,
+    native_delivery_attempt: str | None = None,
 ) -> None:
     """
     Clear one elicitation's approval card after the re-park grace, unless
@@ -642,6 +645,8 @@ def _schedule_deferred_elicitation_clear(
         e.g. ``"elicit_claude_0f3a..."``.
     :param conversation_store: Store used to mirror the clear into
         ancestor streams, or ``None`` to keep it session-local.
+    :param native_delivery_attempt: Only expire this delivery attempt, never
+        a newer attempt or a card already confirmed by the recorder.
     """
 
     async def _clear_after_grace() -> None:
@@ -658,6 +663,15 @@ def _schedule_deferred_elicitation_clear(
         if elicitation_id in _harness_elicitation_registry:
             # Re-parked — the new wait owns the eventual clear.
             return
+        if native_delivery_attempt is not None:
+            entry = pending_elicitations.lookup(elicitation_id)
+            if (
+                entry is None
+                or entry[0] != session_id
+                or entry[1].get("params", {}).get("native_delivery", {}).get("attempt")
+                != native_delivery_attempt
+            ):
+                return  # A receipt or a newer delivery attempt superseded this wait.
         _publish_elicitation_resolved(session_id, elicitation_id, reason="unanswered")
         if conversation_store is not None:
             await asyncio.to_thread(
@@ -2233,9 +2247,12 @@ async def _resolve_native_delivery(
                 "This delivery attempt changed. Refresh the approval before retrying.",
                 code=ErrorCode.INVALID_INPUT,
             )
-    result = ElicitationResult.model_validate(
-        {k: v for k, v in data.items() if k != "elicitation_id"}
-    )
+    try:
+        result = ElicitationResult.model_validate(
+            {k: v for k, v in data.items() if k != "elicitation_id"}
+        )
+    except ValidationError as err:
+        raise OmnigentError("Invalid approval payload.", code=ErrorCode.INVALID_INPUT) from err
     future = _harness_elicitation_registry.get(elicitation_id)
     if future is not None:
         if _harness_elicitation_owners.get(elicitation_id) != session_id or future.done():

@@ -54,11 +54,15 @@ A terminal-side resolution is a JSON-RPC response with the same `id` and a selec
 Kiro's public docs describe `KIRO_ACP_RECORD_PATH` as a traffic recorder, not as a writable control channel. This implementation therefore does not write ACP responses. It delivers web verdicts to the active visible TUI prompt through tmux keystrokes:
 
 - `accept`: `Enter`, because `Yes, single permission` is the default focused option.
-- `decline` / `cancel`: `Down`, `Down`, `Enter`, sent one key at a time with render gaps.
+- `decline` / `cancel`: move down from the detected row to `No`, then `Enter`, sent one key at a time with render gaps. A retry can resume from the intermediate `Trust` row without selecting it.
 
 Each web decision sends at most one Enter. The card stays pending with “Waiting for Kiro to confirm” until the recorder contains a response for that request. After five seconds without confirmation, it shows “Approval delivery unconfirmed” and a **Retry sending approval/rejection** button. There is no automatic second Enter. The five-second wait covers prompt readiness and confirmation; a stalled tmux command can delay the update until that command returns.
 
 Retry preserves the original decision and rechecks the recorder, current command, and focused option before sending one more Enter. Each retry has its own attempt token so duplicate clicks or stale cards cannot start another attempt. A late recorder response removes the retry controls. Chat (including mobile and child-session cards), Inbox, and the standalone approval page share the delivery state. Refresh recovers it from the running server's pending-request index; it is not durable across a server restart.
+
+The server acknowledges each attempt in its hook response before the runner enables retries. Older servers do not send that acknowledgement, so the runner sends only the initial decision and does not repost it. This prevents an older server's cached verdict from causing an automatic second Enter. Manual retry requires an updated server and runner.
+
+If the runner disconnects or exits, the pending card expires after the existing 30-second hook grace period unless the runner reconnects. The grace also covers a verdict awaiting native confirmation; an older cleanup cannot clear a newer attempt or a confirmed card. Receipt-reporting retries run independently of recorder polling, so an unavailable server does not block the next native request.
 
 The terminal interface cannot prove that an earlier Enter is lost. A delayed key may still be buffered, so manual Retry carries a remaining risk of answering a subsequent prompt. The card warns that the previous attempt may still be pending. Users can inspect the live prompt using the session's existing terminal view toggle.
 
