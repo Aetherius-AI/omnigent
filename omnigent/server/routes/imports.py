@@ -1321,7 +1321,7 @@ def create_imports_router(
                 host_id=body.host_id,
                 replace_conversation_id=existing.id if existing is not None else None,
             )
-        except OmnigentError:
+        except (OmnigentError, HTTPException):
             # Already a deliberate response (e.g. an unknown project).
             raise
         except Exception as exc:

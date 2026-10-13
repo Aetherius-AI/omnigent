@@ -447,7 +447,7 @@ async def test_closing_the_stream_early_cancels_the_host_import() -> None:
     await host
     sent = conn.outbound_queue.get_nowait()
     assert sent is not None
-    assert isinstance(decode_host_frame(sent), HostImportLocalCancelFrame)
+    assert isinstance(decode_host_frame(sent.data), HostImportLocalCancelFrame)
     assert conn.pending_import_local == {}
 
 
@@ -469,7 +469,9 @@ async def test_failed_chunked_session_does_not_reset_the_total(
     app = imports_app(FakeConversationStore(), host_registry=pair.registry, host=host_record())
 
     async def scripted_host() -> None:
-        request = decode_host_frame(await pair.conn.outbound_queue.get() or "")
+        frame = await pair.conn.outbound_queue.get()
+        assert frame is not None
+        request = decode_host_frame(frame.data)
         assert isinstance(request, HostImportLocalFrame)
         request_id = request.request_id
         session = HostImportedLocalSession(

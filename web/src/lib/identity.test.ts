@@ -500,6 +500,7 @@ describe("authenticatedFetch", () => {
         getOmnigentHostConfig: vi.fn(() => ({ fetcher: () => fetch })),
         hostFetch: fetchMock,
         isDatabricksWorkspace: vi.fn(() => true),
+        isHostRoutingEnabled: vi.fn(() => true),
       }));
       const { authenticatedFetch } = await import("./identity");
       const response = await authenticatedFetch("/v1/imports/local/stream", {
@@ -553,6 +554,7 @@ describe("authenticatedFetch", () => {
         getOmnigentHostConfig: vi.fn(() => ({ fetcher: () => fetch })),
         hostFetch: fetchMock,
         isDatabricksWorkspace: vi.fn(() => true),
+        isHostRoutingEnabled: vi.fn(() => true),
       }));
       fetchMock.mockResolvedValueOnce(wrongReplica());
       fetchMock.mockResolvedValueOnce(wrongReplica());

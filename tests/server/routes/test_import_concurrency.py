@@ -180,8 +180,9 @@ class ScriptedHost:
 
     async def serve(self, script: list[tuple[str, Any]]) -> None:
         """Answer the import request with ``script`` (``("sleep", s)`` pauses)."""
-        text = await self.conn.outbound_queue.get()
-        request = decode_host_frame(text or "")
+        frame = await self.conn.outbound_queue.get()
+        assert frame is not None
+        request = decode_host_frame(frame.data)
         assert isinstance(request, HostImportLocalFrame)
         self.sent.append(request)
         queue = self.conn.pending_import_local[request.request_id]
@@ -193,9 +194,9 @@ class ScriptedHost:
 
     def cancel_frames(self) -> list[HostImportLocalCancelFrame]:
         while not self.conn.outbound_queue.empty():
-            text = self.conn.outbound_queue.get_nowait()
-            if text is not None:
-                self.sent.append(decode_host_frame(text))
+            frame = self.conn.outbound_queue.get_nowait()
+            if frame is not None:
+                self.sent.append(decode_host_frame(frame.data))
         return [frame for frame in self.sent if isinstance(frame, HostImportLocalCancelFrame)]
 
 

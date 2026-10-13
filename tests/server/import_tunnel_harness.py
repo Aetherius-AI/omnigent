@@ -289,9 +289,10 @@ class TunnelPair:
 
     async def _pump_to_host(self) -> None:
         while True:
-            text = await self.conn.outbound_queue.get()
-            if text is None:
+            frame = await self.conn.outbound_queue.get()
+            if frame is None:
                 return
+            text = frame.data
             with contextlib.suppress(ValueError):
                 self.to_host.append(decode_host_frame(text))
             if self.legacy_host:

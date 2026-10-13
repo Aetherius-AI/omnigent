@@ -2789,7 +2789,8 @@ class HostProcess:
             # Only a server that asked for heartbeats gets them; an older one
             # would log every unknown frame as malformed.
             if frame.progress:
-                await ws.send(
+                await self._send_text(
+                    ws,
                     encode_host_frame(
                         HostImportLocalProgressFrame(
                             request_id=frame.request_id,
@@ -2797,7 +2798,7 @@ class HostProcess:
                             total=progress_total,
                             skipped=progress_skipped,
                         )
-                    )
+                    ),
                 )
 
         async def _heartbeat() -> None:
