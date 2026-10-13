@@ -290,19 +290,14 @@ async def test_auto_create_pi_terminal_launches_required_terminal(
 async def test_auto_create_repl_terminal_keeps_tmux_alive_after_exit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """
-    The runner-hosted SDK REPL terminal (``tui:main``) must survive its process
-    exiting.
+    """The runner-hosted SDK REPL terminal (``tui:main``) must survive its exit.
 
     The embedded ``omnigent attach`` REPL is the sole process in a private
-    single-pane tmux server. Without ``keep_alive_after_exit`` the pane is
-    launched on tmux defaults (``exit-empty on`` + ``remain-on-exit off``), so
-    the instant the REPL exits — ``/quit``, ``/exit``, a crash, or any early
-    exit — tmux reaps the lone-pane server: ``tui:main`` disappears and the idle
-    watcher logs ``tmux unavailable after N consecutive probes for terminal
-    tui:main``. The claude-/codex-/pi-native terminals all launch
-    with ``keep_alive_after_exit=True``; the REPL must do the same so its exit
-    leaves a diagnosable dead pane instead of vanishing.
+    single-pane tmux server. Without ``keep_alive_after_exit`` tmux reaps the
+    lone-pane server the instant the REPL exits, so ``tui:main`` vanishes and
+    the idle watcher logs ``tmux unavailable``. Like the other native terminals,
+    the REPL must launch with ``keep_alive_after_exit=True`` so its exit leaves
+    a diagnosable dead pane instead.
     """
     monkeypatch.setenv("OMNIGENT_RUNNER_WORKSPACE", str(tmp_path))
     monkeypatch.setenv("RUNNER_SERVER_URL", "http://127.0.0.1:8000")

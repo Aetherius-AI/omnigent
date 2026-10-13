@@ -877,13 +877,15 @@ def register_resource_routes(
         if resource_registry is None or resource_registry.terminal_registry is None:
             return None
         registry = resource_registry.terminal_registry
+        # Never rebuild the pane for a session being torn down. Checking before
+        # the lock avoids re-adding a lock entry that teardown has popped.
+        if not _session_is_live(session_id):
+            return None
         lock = _repl_terminal_ensure_locks.setdefault(session_id, asyncio.Lock())
         async with lock:
-            # Teardown can finish during the exit's await window; never rebuild
-            # the pane for a session being deleted, and drop the lock this call
-            # just resurrected via setdefault.
+            # Teardown can finish during the exit's await window; recheck under
+            # the lock so a session deleted mid-recreate aborts.
             if not _session_is_live(session_id):
-                _repl_terminal_ensure_locks.pop(session_id, None)
                 return None
             existing = registry.get(session_id, _REPL_TERMINAL_NAME, _REPL_TERMINAL_SESSION_KEY)
             if existing is None or not existing.running or not await existing.is_alive():

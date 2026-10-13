@@ -58,9 +58,15 @@ def _session_status(base_url: str, session_id: str) -> str:
 
 
 def _tmux(socket_path: str, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["tmux", "-S", socket_path, *args], capture_output=True, text=True, timeout=10
-    )
+    try:
+        return subprocess.run(
+            ["tmux", "-S", socket_path, *args], capture_output=True, text=True, timeout=10
+        )
+    except subprocess.TimeoutExpired as exc:
+        # A hung probe must surface as a failed command, not an opaque crash.
+        return subprocess.CompletedProcess(
+            exc.cmd, returncode=124, stdout=exc.stdout or "", stderr=exc.stderr or ""
+        )
 
 
 def _wait_for_pane_output(socket_path: str, timeout_s: float = 30.0) -> str:
@@ -142,17 +148,20 @@ def _runner_log_offsets() -> dict[Path, int]:
     return {path: path.stat().st_size for path in process_log_dir("runner").glob("runner*.log")}
 
 
-def _runner_logs_since(offsets: dict[Path, int]) -> str:
-    """Read what the spawned runner logged after ``offsets`` was taken.
+def _runner_logs_since(offsets: dict[Path, int], session_id: str) -> str:
+    """Read what the spawned runner logged for ``session_id`` after ``offsets``.
 
-    Only the files captured in ``offsets`` are read, so a sibling worker's
-    later runner log cannot leak unrelated lines into the assertion.
+    Workers share the runner log directory under one HOME. Only chunks whose
+    new content mentions this session are returned, kept whole because the
+    tmux-unavailable line is not itself session-tagged.
     """
     chunks = []
     for path in sorted(offsets):
         with path.open(encoding="utf-8", errors="replace") as handle:
             handle.seek(offsets[path])
-            chunks.append(handle.read())
+            chunk = handle.read()
+        if session_id in chunk:
+            chunks.append(chunk)
     return "\n".join(chunks)
 
 
@@ -299,7 +308,7 @@ def test_repl_terminal_survives_repl_quit(
     expect(fallback).to_have_count(0)
     assert _session_status(base_url, session_id) == "idle"
 
-    logs = _runner_logs_since(log_offsets)
+    logs = _runner_logs_since(log_offsets, session_id)
     assert f"Terminal exit observed: session={session_id} terminal=tui:main" in logs, (
         f"the runner's process log did not record the REPL exit:\n{logs[-2000:]}"
     )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import sys
@@ -4986,6 +4987,213 @@ async def test_auxiliary_repl_exit_skips_rebuild_when_session_torn_down_mid_reco
     assert [
         event["pending"] for event in events if event.get("type") == "session.terminal_pending"
     ] == [True]
+
+
+@pytest.mark.asyncio
+async def test_auxiliary_repl_exit_skips_rebuild_during_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A REPL exit while the runner is shutting down must not rebuild the pane.
+
+    Stopping the runner tears down tmux with the process group, so the idle
+    watcher sees ``tui:main`` exit. Rebuilding then would race teardown and
+    leak a tmux server for a session the runner is about to drop, so the
+    recover path is gated on the shutdown flag like the required-exit path.
+    """
+    from omnigent.runner.app import _session_event_queues_ref
+    from omnigent.runner.resource_registry import TerminalExitEvent, TerminalLifecycle
+
+    conv_id = uuid.uuid4().hex
+    recreated: list[str] = []
+
+    async def _fake_auto_create_repl_terminal(session_id: str, *args: Any, **kwargs: Any) -> None:
+        recreated.append(session_id)
+
+    monkeypatch.setattr(
+        "omnigent.runner.resource_routes._auto_create_repl_terminal",
+        _fake_auto_create_repl_terminal,
+    )
+    pm = _FakeProcessManager(_ScriptedHarnessClient([]))
+    pm._sessions.add(conv_id)
+    app = create_runner_app(
+        process_manager=pm,  # type: ignore[arg-type]
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+        terminal_registry=TerminalRegistry(),
+    )
+    app.state.shutting_down.set()
+    publish_exit = app.state.session_resource_registry._terminal_exit_publisher
+    assert callable(publish_exit)
+
+    try:
+        publish_exit(
+            TerminalExitEvent(
+                session_id=conv_id,
+                terminal_id="terminal_tui_main",
+                terminal_name="tui",
+                session_key="main",
+                lifecycle=TerminalLifecycle.AUXILIARY,
+            )
+        )
+        await _await_repl_terminal_recover(conv_id)
+        events = _drain_session_event_queue(_session_event_queues_ref.get(conv_id))
+    finally:
+        _session_event_queues_ref.pop(conv_id, None)
+
+    # The stale resource is still deleted, but no rebuild is claimed and no
+    # spinner toggles while the runner is going away.
+    assert recreated == []
+    lifecycle_events = [
+        (event["type"], event.get("pending"), event.get("resource_id"))
+        for event in events
+        if event.get("type") in {"session.resource.deleted", "session.terminal_pending"}
+    ]
+    assert lifecycle_events == [
+        ("session.resource.deleted", None, "terminal_tui_main"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_auxiliary_repl_exit_failed_rebuild_retains_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed REPL rebuild keeps the role so a later attach can retry.
+
+    When the recreate fails on a still-live session, the exit already popped
+    the REPL role; leaving it popped would make the pane unrecoverable. The
+    recover path restores it so an attach-driven recreate rebuilds on demand.
+    """
+    from omnigent.runner.app import _session_event_queues_ref
+    from omnigent.runner.resource_registry import (
+        OMNIGENT_REPL_TERMINAL_ROLE,
+        TerminalExitEvent,
+        TerminalLifecycle,
+    )
+
+    conv_id = uuid.uuid4().hex
+
+    async def _failing_auto_create_repl_terminal(
+        session_id: str, *args: Any, **kwargs: Any
+    ) -> None:
+        raise RuntimeError("recreate failed")
+
+    monkeypatch.setattr(
+        "omnigent.runner.resource_routes._auto_create_repl_terminal",
+        _failing_auto_create_repl_terminal,
+    )
+    pm = _FakeProcessManager(_ScriptedHarnessClient([]))
+    pm._sessions.add(conv_id)
+    app = create_runner_app(
+        process_manager=pm,  # type: ignore[arg-type]
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+        terminal_registry=TerminalRegistry(),
+    )
+    publish_exit = app.state.session_resource_registry._terminal_exit_publisher
+    assert callable(publish_exit)
+
+    try:
+        publish_exit(
+            TerminalExitEvent(
+                session_id=conv_id,
+                terminal_id="terminal_tui_main",
+                terminal_name="tui",
+                session_key="main",
+                lifecycle=TerminalLifecycle.AUXILIARY,
+            )
+        )
+        await _await_repl_terminal_recover(conv_id)
+    finally:
+        _session_event_queues_ref.pop(conv_id, None)
+
+    # The rebuild raised but the session is still live, so the role is restored
+    # for an attach-driven retry rather than left popped and unrecoverable.
+    assert (
+        app.state.session_resource_registry.terminal_resource_role(conv_id, "terminal_tui_main")
+        == OMNIGENT_REPL_TERMINAL_ROLE
+    )
+
+
+@pytest.mark.parametrize(
+    ("http_method", "path_suffix"),
+    [
+        ("DELETE", ""),
+        ("DELETE", "/resources"),
+        ("POST", "/reset-state"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_teardown_routes_mark_session_tearing_down(
+    monkeypatch: pytest.MonkeyPatch, http_method: str, path_suffix: str
+) -> None:
+    """Session teardown routes exclude the session from REPL recovery.
+
+    Each teardown tears the REPL terminal down, which can publish an exit that
+    races the recover path. The teardown must mark the session while its
+    cleanup runs so a racing rebuild refuses, then clear the marker so a
+    later same-id session is recoverable again.
+    """
+    from omnigent.runner.app import _sessions_tearing_down_ref
+
+    conv_id = uuid.uuid4().hex
+    pm = _FakeProcessManager(_ScriptedHarnessClient([]))
+    pm._sessions.add(conv_id)
+    app = create_runner_app(
+        process_manager=pm,  # type: ignore[arg-type]
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+        terminal_registry=TerminalRegistry(),
+    )
+    marked_during: list[str] = []
+
+    async def _recording_cleanup(session_id: str) -> None:
+        if session_id in _sessions_tearing_down_ref:
+            marked_during.append(session_id)
+
+    monkeypatch.setattr(app.state.session_resource_registry, "cleanup_session", _recording_cleanup)
+
+    async with _runner_client(app) as client:
+        resp = await client.request(http_method, f"/v1/sessions/{conv_id}{path_suffix}")
+
+    assert resp.status_code == 200, resp.text
+    assert marked_during == [conv_id]
+    assert conv_id not in _sessions_tearing_down_ref
+
+
+@pytest.mark.asyncio
+async def test_delete_session_clears_teardown_marker_when_cleanup_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failing teardown still clears the session's tearing-down marker.
+
+    The marker is added before teardown's awaits; if one raises it must not
+    strand the session marked forever, which would permanently block a
+    same-id session's REPL recovery.
+    """
+    from omnigent.runner.app import _sessions_tearing_down_ref
+
+    conv_id = uuid.uuid4().hex
+    pm = _FakeProcessManager(_ScriptedHarnessClient([]))
+    pm._sessions.add(conv_id)
+    app = create_runner_app(
+        process_manager=pm,  # type: ignore[arg-type]
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+        terminal_registry=TerminalRegistry(),
+    )
+    marked_during: list[str] = []
+
+    async def _failing_cleanup(session_id: str) -> None:
+        if session_id in _sessions_tearing_down_ref:
+            marked_during.append(session_id)
+        raise RuntimeError("cleanup failed")
+
+    monkeypatch.setattr(app.state.session_resource_registry, "cleanup_session", _failing_cleanup)
+
+    async with _runner_client(app) as client:
+        with contextlib.suppress(RuntimeError):
+            await client.delete(f"/v1/sessions/{conv_id}")
+
+    # The teardown raised while the session was marked, yet the marker is
+    # discarded so a future same-id session is not permanently unrecoverable.
+    assert marked_during == [conv_id]
+    assert conv_id not in _sessions_tearing_down_ref
 
 
 @pytest.mark.parametrize("terminal_name", ["qwen", "antigravity"])

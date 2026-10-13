@@ -21,7 +21,7 @@ import tempfile
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -1110,12 +1110,25 @@ _session_histories_ref: dict[str, list[_JsonObject]] = {}
 # ``/stream`` endpoint just to assert on emitted events).
 _session_event_queues_ref: dict[str, asyncio.Queue[_JsonObject | None]] = {}
 
-# Module-level ref to the set of sessions whose ``delete_session`` has begun.
-# Teardown pops ``_session_start_cache`` only after its cleanup awaits, so an
-# exit-driven REPL rebuild could otherwise read a still-"live" session and
-# recreate the pane after cleanup ran. Marking teardown before its first await
-# excludes the session from recovery; tests inspect it to drive the race.
+# Sessions whose teardown has begun; excluded from REPL recovery so an
+# exit-driven rebuild never resurrects a session mid-teardown.
 _sessions_tearing_down_ref: set[str] = set()
+
+
+@contextlib.contextmanager
+def _session_teardown_marker(session_id: str) -> Iterator[None]:
+    """Exclude ``session_id`` from REPL recovery while its teardown runs.
+
+    Teardown pops ``_session_start_cache`` only after its cleanup awaits, so an
+    exit-driven rebuild could otherwise read the session as live and recreate
+    the pane after cleanup ran. Discarding in ``finally`` keeps the exclusion
+    exact even when a teardown await raises.
+    """
+    _sessions_tearing_down_ref.add(session_id)
+    try:
+        yield
+    finally:
+        _sessions_tearing_down_ref.discard(session_id)
 
 
 def get_session_agent_id(session_id: str) -> str | None:
@@ -1799,9 +1812,6 @@ def create_runner_app(
         start cache, so an exit-driven rebuild can skip an already-deleted one.
         """
         if session_id in _sessions_tearing_down:
-            # The start cache is popped only after teardown's cleanup awaits, so
-            # a rebuild claimed before cleanup could still read the session as
-            # live; the teardown marker excludes it for the whole delete.
             return False
         return (
             process_manager is not None and process_manager.has_session(session_id)
@@ -1870,10 +1880,12 @@ def create_runner_app(
         """
 
         async def _recover() -> None:
+            recovered = False
             try:
                 entry = await _resource_routes.recreate_repl_terminal(
                     event.session_id, event.terminal_id
                 )
+                recovered = entry is not None
                 if entry is None:
                     if _runner_session_is_live(event.session_id):
                         _logger.error(
@@ -1896,6 +1908,12 @@ def create_runner_app(
                 # A teardown finishing mid-recover already dropped the event
                 # queue; clearing the spinner now would resurrect a dead queue.
                 if _runner_session_is_live(event.session_id):
+                    if not recovered and resource_registry is not None:
+                        # A failed rebuild left the REPL role popped; restore it
+                        # so a later attach can retry it on demand.
+                        resource_registry.retain_terminal_role(
+                            event.session_id, event.terminal_id, OMNIGENT_REPL_TERMINAL_ROLE
+                        )
                     _publish_terminal_pending(_publish_event, event.session_id, False)
 
         task = asyncio.create_task(
@@ -1913,6 +1931,7 @@ def create_runner_app(
             event.lifecycle != TerminalLifecycle.REQUIRED
             and event.terminal_name == _REPL_TERMINAL_NAME
             and event.session_key == _REPL_TERMINAL_SESSION_KEY
+            and not _shutting_down.is_set()
             and _runner_session_is_live(event.session_id)
         ):
             # Claims a rate-limit slot and publishes terminal_pending=True
@@ -3428,9 +3447,10 @@ def create_runner_app(
 
     @app.delete("/v1/sessions/{session_id}")
     async def delete_session(session_id: str) -> JSONResponse:
-        # Mark teardown before the first await so an exit-driven REPL rebuild
-        # racing this delete sees the session as gone and never resurrects it.
-        _sessions_tearing_down.add(session_id)
+        with _session_teardown_marker(session_id):
+            return await _delete_session_impl(session_id)
+
+    async def _delete_session_impl(session_id: str) -> JSONResponse:
         resource_registry.note_terminal_control_request(session_id, "delete_session")
         _cancel_claude_prompt_waiter(session_id)
         _session_message_buffers.pop(session_id, None)
@@ -3572,8 +3592,6 @@ def create_runner_app(
         stale_resp_ids = [rid for rid, cid in _resp_to_conv.items() if cid == session_id]
         for rid in stale_resp_ids:
             _resp_to_conv.pop(rid, None)
-        _sessions_tearing_down.discard(session_id)
-
         return JSONResponse(
             status_code=200,
             content={
@@ -7529,6 +7547,10 @@ def create_runner_app(
     async def cleanup_session_resources(
         session_id: str,
     ) -> JSONResponse:
+        with _session_teardown_marker(session_id):
+            return await _cleanup_session_resources_impl(session_id)
+
+    async def _cleanup_session_resources_impl(session_id: str) -> JSONResponse:
         _required_terminal_exit_errors.pop(session_id, None)
         _codex_terminal_ensure_locks.pop(session_id, None)
         _claude_terminal_ensure_locks.pop(session_id, None)
@@ -7560,6 +7582,10 @@ def create_runner_app(
 
     @app.post("/v1/sessions/{session_id}/reset-state")
     async def reset_session_state(session_id: str) -> JSONResponse:
+        with _session_teardown_marker(session_id):
+            return await _reset_session_state_impl(session_id)
+
+    async def _reset_session_state_impl(session_id: str) -> JSONResponse:
         _required_terminal_exit_errors.pop(session_id, None)
         _codex_terminal_ensure_locks.pop(session_id, None)
         _claude_terminal_ensure_locks.pop(session_id, None)
