@@ -167,6 +167,7 @@ from omnigent.server.routes._sessions.helpers import (
     _validated_cost_control_mode_override,
     _validated_subagent_routing_override,
     reconcile_orphaned_running_status,
+    relaunch_lock_for,
 )
 from omnigent.server.routes._sessions.orchestration import (
     _best_effort_stop,
@@ -549,15 +550,17 @@ def register_core_routes(
         sends the ``host.launch_runner`` frame and waits for the host's
         verdict.
 
-        Lenient on every launch failure: the picker's readiness data can
-        be stale (the user may have run ``omnigent setup`` since the host
-        last connected), so the create is never blocked. The session
-        keeps the binding; the first message drives the real runner
-        start, and if the host still refuses there, that path consults
-        the daemon and persists a transcript error (see post_event's
-        relaunch branch). No create-time harness gating. The JSON
-        create path rolls back a newly created worktree after launch
-        failure (see ``_rollback_create_launch_worktree``).
+        Lenient on launch failure: the picker's readiness data can be
+        stale (the user may have run ``omnigent setup`` since the host
+        last connected), so the create is never blocked. A session
+        without a newly created worktree keeps the binding; the first
+        message drives the real runner start, and if the host still
+        refuses there, that path consults the daemon and persists a
+        transcript error (see post_event's relaunch branch). The JSON
+        create path instead rolls back a worktree it just created and
+        unbinds the session once the host confirms the removal (see
+        ``_rollback_create_launch_worktree``). No create-time harness
+        gating.
 
         :param request: The create request (for ``app.state`` lookups).
         :param user_id: Authenticated caller, or ``None`` when auth is
@@ -2642,7 +2645,10 @@ def register_core_routes(
             # used by /clear and /switch to move the runner between sessions.
             if body.runner_id == "":
                 try:
-                    await asyncio.to_thread(conversation_store.clear_runner_id, session_id)
+                    # Binding writes share the relaunch lock, so the launch-failure
+                    # rollback and relaunch re-read a settled binding.
+                    async with relaunch_lock_for(session_id):
+                        await asyncio.to_thread(conversation_store.clear_runner_id, session_id)
                 except ConversationNotFoundError as exc:
                     raise _session_not_found() from exc
                 _logger.info(
@@ -2675,9 +2681,10 @@ def register_core_routes(
                     runner_router, body.runner_id, user_id=user_id
                 )
                 try:
-                    await asyncio.to_thread(
-                        conversation_store.replace_runner_id, session_id, runner_id
-                    )
+                    async with relaunch_lock_for(session_id):
+                        await asyncio.to_thread(
+                            conversation_store.replace_runner_id, session_id, runner_id
+                        )
                 except ConversationNotFoundError as exc:
                     raise _session_not_found() from exc
                 set_current_runner_id(runner_id)

@@ -6002,17 +6002,40 @@ async def _rollback_create_launch_worktree(
     """
     session_vanished = False
     bound_host_id: str | None = launch_host_id
+
+    async def _remove_worktree(row: Conversation) -> bool:
+        # The helper resolves the recorded root and spares directories other
+        # sessions use, so a removal the delete path already made is skipped.
+        assert row.workspace is not None and row.git_branch is not None
+        return await _remove_session_worktree_best_effort(
+            host_id=launch_host_id,
+            worktree_path=row.workspace,
+            branch=row.git_branch,
+            # Never -D a pre-existing branch the user checked out.
+            delete_branch=not keep_branch,
+            host_registry=host_registry,
+            reason="create-launch-failure",
+            conversation_store=conversation_store,
+            exclude_conversation_id=resp.id,
+            expected_root_fingerprint=row.labels.get(WORKTREE_ROOT_LABEL_KEY),
+        )
+
     async with relaunch_lock_for(resp.id):
         try:
             latest = await asyncio.to_thread(conversation_store.get_conversation, resp.id)
             if latest is None:
                 _logger.warning(
-                    "Session %s vanished before its launch-failure worktree rollback",
+                    "Session %s vanished before its launch-failure worktree rollback; "
+                    "removing the worktree it created",
                     resp.id,
                 )
-                # The row is gone; report it vanished so the
-                # caller skips the default-public grant for a
-                # session that no longer exists.
+                # Nothing references the directory once the row is gone, so
+                # remove it from the pre-launch snapshot instead of leaving it
+                # behind with no record to retry from.
+                if conv is not None and conv.workspace is not None and conv.git_branch is not None:
+                    await _remove_worktree(conv)
+                # Report the row vanished so the caller skips the default-public
+                # grant for a session that no longer exists.
                 conv = None
                 session_vanished = True
             elif latest.runner_id != runner_id:
@@ -6031,20 +6054,8 @@ async def _rollback_create_launch_worktree(
                 )
             else:
                 # Nothing reaps worktrees, so roll back the one this create
-                # made, as the bind and delete paths do; the helper resolves
-                # the recorded root and spares directories other sessions use.
-                removed = await _remove_session_worktree_best_effort(
-                    host_id=launch_host_id,
-                    worktree_path=latest.workspace,
-                    branch=latest.git_branch,
-                    # Never -D a pre-existing branch the user checked out.
-                    delete_branch=not keep_branch,
-                    host_registry=host_registry,
-                    reason="create-launch-failure",
-                    conversation_store=conversation_store,
-                    exclude_conversation_id=resp.id,
-                    expected_root_fingerprint=latest.labels.get(WORKTREE_ROOT_LABEL_KEY),
-                )
+                # made, as the bind and delete paths do.
+                removed = await _remove_worktree(latest)
                 if removed:
                     # The worktree is already gone, so unbinding is
                     # best-effort: a concurrent delete may drop the row and
@@ -6142,13 +6153,13 @@ async def _rollback_create_launch_worktree(
                         resp.id,
                     )
         except Exception:  # noqa: BLE001
-            # A cleanup-only read or the shared-worktree guard
-            # failed; treat removal as unconfirmed and keep the
-            # binding and root label for a later delete or archive.
+            # Cleanup-only work failed somewhere in the rollback. Leave the
+            # stored binding as it is, so a later delete or archive can
+            # reconcile the worktree whether or not it was already removed.
             _logger.warning(
-                "Launch-failure worktree rollback for session %s "
-                "could not complete; keeping the binding so a later "
-                "delete or archive can retry",
+                "Launch-failure worktree rollback for session %s did not "
+                "complete; leaving the stored binding for a later delete or "
+                "archive to reconcile",
                 resp.id,
                 exc_info=True,
             )
