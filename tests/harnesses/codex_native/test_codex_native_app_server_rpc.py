@@ -104,9 +104,12 @@ _MODEL_PAGES = (
 @contextlib.asynccontextmanager
 async def _connected_model_list_client(
     stall_on_page: int,
+    *,
+    page_delay_s: float = 0.0,
 ) -> AsyncIterator[CodexAppServerClient]:
     """Connect to an app-server serving ``model/list`` in two cursor pages;
-    ``stall_on_page`` (1 or 2) withholds that page's reply with the socket open.
+    ``stall_on_page`` (1 or 2) withholds that page's reply with the socket open,
+    and ``page_delay_s`` delays every served page.
     """
 
     async def handle(websocket: ServerConnection) -> None:
@@ -123,6 +126,7 @@ async def _connected_model_list_client(
                     "data": _MODEL_PAGES[page - 1],
                     "nextCursor": "page2" if page == 1 else None,
                 }
+                await asyncio.sleep(page_delay_s)
                 await websocket.send(json.dumps({"id": message["id"], "result": result}))
 
     async with serve(handle, "127.0.0.1", 0) as server:
@@ -168,3 +172,12 @@ async def test_model_list_budget_covers_every_page_and_discards_partial_rows(
         elapsed = time.monotonic() - started
         assert elapsed < 5, f"model/list deadline did not fire; raised after {elapsed:.1f}s"
         assert client._pending_requests == {}
+
+
+async def test_model_list_budget_is_cumulative_across_pages() -> None:
+    """Pages that each answer within the budget still time out once their total exceeds it."""
+    async with _connected_model_list_client(0, page_delay_s=0.3) as client:
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(list_codex_model_options(client, timeout_s=0.5), timeout=10)
+        rows = await asyncio.wait_for(list_codex_model_options(client, timeout_s=3.0), timeout=10)
+    assert [row["id"] for row in rows] == [row["id"] for page in _MODEL_PAGES for row in page]
