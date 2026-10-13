@@ -1104,9 +1104,7 @@ export function ChatPage() {
       isWorking={isWorking}
       showsWorking={showsWorking}
       runnerOnline={runnerOnline}
-      lastTaskError={
-        activeSession?.status === "failed" ? (activeSession.lastTaskError ?? null) : null
-      }
+      lastTaskError={failedSessionLastError(activeSession)}
       liveness={liveness}
       agentsError={agentsError}
       disabled={!agentId || agentsError !== null}
@@ -1313,6 +1311,17 @@ interface MainAgentSurfaceProps {
   subAgentLabel: string | null;
   /** The session's ``omnigent.wrapper`` label; see ``ComposerProps``. */
   wrapperLabel: string | null;
+}
+
+/**
+ * The failure cause to surface on a session's terminal/stopped UI, or null.
+ * Only a failed session exposes it, mirroring the chat error pill; a stale
+ * error left on a session that has since recovered stays hidden.
+ */
+export function failedSessionLastError(
+  session: Pick<Session, "status" | "lastTaskError"> | null | undefined,
+): Session["lastTaskError"] | null {
+  return session?.status === "failed" ? (session.lastTaskError ?? null) : null;
 }
 
 /**
