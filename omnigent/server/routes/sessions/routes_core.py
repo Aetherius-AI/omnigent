@@ -867,11 +867,9 @@ def register_core_routes(
                 ):
                     from omnigent.server.routes._host_worktree import WORKTREE_ROOT_LABEL_KEY
 
-                    # A concurrent first-message relaunch (post_event) can rebind
-                    # and boot a new runner on this same session between the failed
-                    # launch and here. Re-read the row and only roll back while our
-                    # failed launch's runner is still bound, so we never delete a
-                    # worktree a live runner uses or wipe its fresh binding.
+                    # Re-read first: a concurrent first-message relaunch can rebind
+                    # a new runner on this session, so skip the rollback unless our
+                    # failed launch's runner is still the bound one.
                     latest = await asyncio.to_thread(conversation_store.get_conversation, resp.id)
                     if latest is None or latest.runner_id != runner_id:
                         _logger.info(
