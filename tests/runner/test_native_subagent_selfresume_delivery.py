@@ -34,6 +34,7 @@ _REGISTRY_MAPS = (
     (subagent_work, "_child_session_parents"),
     (subagent_work, "_drained_delivered_subagent_children"),
     (subagent_work, "_drained_subagent_dispatches"),
+    (subagent_work, "_in_flight_send_locks"),
     (subagent_work, "_subagent_recovery_done"),
     (subagent_work, "_subagent_recovery_locks"),
 )
@@ -1751,6 +1752,14 @@ async def test_a_follow_up_whose_stamp_fails_keeps_the_receipted_id(
             "the entry took an id the child never received"
         )
         assert server.labels[subagent_work.SUBAGENT_DISPATCH_ID_LABEL_KEY] == work_id
+        assert not live.rearmed, (
+            "the parent's follow-up confirms the turn; it is no longer provisional"
+        )
+        # A stale idle read must not schedule a settle against the steered turn.
+        publish_pane_status(CHILD_SESSION_ID, "idle", None)
+        await _let_settle_run()
+        assert not app.state.rearm_settle_tasks
+        assert subagent_work.get_subagent_work(CHILD_SESSION_ID) is live
 
         r2 = await _post_status(
             client,
@@ -1768,3 +1777,192 @@ async def test_a_follow_up_whose_stamp_fails_keeps_the_receipted_id(
         )
 
     assert subagent_work.undelivered_subagent_dispatch_id(server.labels) is None
+
+
+class _BlockingStampServerClient(_RecordingServerClient):
+    """Hold every dispatch-id stamp until the test releases it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.release_stamps = asyncio.Event()
+
+    async def patch(self, url: str, **kwargs: Any) -> Any:
+        body = kwargs.get("json") or {}
+        if subagent_work.SUBAGENT_DISPATCH_ID_LABEL_KEY in (body.get("labels") or {}):
+            await self.release_stamps.wait()
+        return await super().patch(url, **kwargs)
+
+
+def _wake_posts(server: _RecordingServerClient) -> list[Any]:
+    """The orchestrator wake notices the runner posted."""
+    return [
+        body
+        for url, body in server.posts
+        if url.endswith(f"/v1/sessions/{PARENT_SESSION_ID}/events")
+        and isinstance(body, dict)
+        and body.get("type") == "message"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_terminal_stamp_racing_rearm_settle_delivers_once(
+    _clean_subagent_registry: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The grace window ending while the Stop's stamp is in flight must not lose the result.
+
+    The settle takes the same per-child lock as the report, so it runs either
+    before the report (which then rebuilds the entry it owes) or after it (and
+    finds the turn confirmed); it can no longer tombstone the live entry between
+    the stamp and the record and leave the report answered "already delivered".
+    """
+    held = _HeldSleep()
+    monkeypatch.setattr(subagent_work, "_wake_retry_sleep", held)
+    server = _BlockingStampServerClient()
+    app, inbox, work_id = _dispatch_worker(server)
+    publish_pane_status = _pane_status_publisher(app)
+
+    async with _runner_client(app) as client:
+        await _deliver_and_drain_round_one(client, inbox, server)
+        # The orchestrator acted on round one's wake notice; a new result wakes it again.
+        app.state.subagent_wake_pending.discard(PARENT_SESSION_ID)
+        wakes_before = len(_wake_posts(server))
+        publish_pane_status(CHILD_SESSION_ID, "running", None)
+        publish_pane_status(CHILD_SESSION_ID, "idle", None)
+        await _let_settle_run()
+        assert held.calls == [runner_app._SUBAGENT_REARM_SETTLE_GRACE_S]
+
+        stop = asyncio.create_task(
+            _post_status(
+                client,
+                status="idle",
+                output="round two: should I open the PR?",
+                turn_completed=True,
+                response_id="resp_round_two",
+            )
+        )
+        await asyncio.sleep(0.05)
+        assert not stop.done(), "the Stop should be waiting on its stamp"
+        # The grace window ends while the stamp is still in flight.
+        held.release.set()
+        await asyncio.sleep(0.05)
+        server.release_stamps.set()
+        r2 = await stop
+        assert r2.status_code == 204
+        await _await_settle(app, CHILD_SESSION_ID)
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+        _assert_fresh_result(_drain_queue(inbox), server=server, dispatched_id=work_id)
+        assert len(_wake_posts(server)) == wakes_before + 1, "the orchestrator was not woken once"
+
+    live = subagent_work.get_subagent_work(CHILD_SESSION_ID)
+    assert live is not None and live.status == "completed" and live.delivered
+    assert CHILD_SESSION_ID not in subagent_work._drained_delivered_subagent_children
+
+
+@pytest.mark.asyncio
+async def test_follow_up_restamp_racing_rearm_settle_keeps_the_turn(
+    _clean_subagent_registry: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The grace window ending during a follow-up's stamp must not revert the steered turn.
+
+    The follow-up holds the per-child lock across its stamp, the settle waits
+    for it, and by then the follow-up has confirmed the turn, so the settle
+    finds nothing provisional to undo.
+    """
+    held = _HeldSleep()
+    monkeypatch.setattr(subagent_work, "_wake_retry_sleep", held)
+    server = _BlockingStampServerClient()
+    app, inbox, work_id = _dispatch_worker(server)
+    server.labels[subagent_work.SUBAGENT_DISPATCH_ID_LABEL_KEY] = work_id
+    publish_pane_status = _pane_status_publisher(app)
+
+    async with _runner_client(app) as client:
+        await _deliver_and_drain_round_one(client, inbox, server)
+        publish_pane_status(CHILD_SESSION_ID, "running", None)
+        publish_pane_status(CHILD_SESSION_ID, "idle", None)
+        await _let_settle_run()
+
+        follow_up = asyncio.create_task(
+            tool_dispatch._send_to_in_flight_child(
+                CHILD_SESSION_ID,
+                "also check the tests",
+                server_client=server,  # type: ignore[arg-type]
+                conversation_id=PARENT_SESSION_ID,
+                agent="reviewer",
+                title="review the diff",
+                child_display_title="reviewer:review",
+                wrapper_label=None,
+            )
+        )
+        await asyncio.sleep(0.05)
+        assert not follow_up.done(), "the follow-up should be waiting on its stamp"
+        held.release.set()
+        await asyncio.sleep(0.05)
+        server.release_stamps.set()
+        assert json.loads(await follow_up)["status"] == "running"
+        await _await_settle(app, CHILD_SESSION_ID)
+
+        live = subagent_work.get_subagent_work(CHILD_SESSION_ID)
+        assert live is not None and live.status == "running" and not live.rearmed, (
+            "the settle reverted a turn the orchestrator had just steered"
+        )
+        assert live.work_id == server.labels[subagent_work.SUBAGENT_DISPATCH_ID_LABEL_KEY]
+        assert live.work_id != work_id
+        assert CHILD_SESSION_ID not in subagent_work._drained_delivered_subagent_children
+
+        r2 = await _post_status(
+            client,
+            status="idle",
+            output="round two: tests pass too",
+            turn_completed=True,
+            response_id="resp_round_two",
+        )
+        assert r2.status_code == 204
+        [second] = _drain_queue(inbox)
+        assert second["work_id"] == live.work_id
+
+
+@pytest.mark.asyncio
+async def test_unregistering_a_child_keeps_a_send_lock_someone_holds(
+    _clean_subagent_registry: None,
+) -> None:
+    """A held per-child send lock survives the drain's cleanup so no second lock is minted.
+
+    The holder forgets the lock once it is free and the child has no dispatch left.
+    """
+    subagent_work.register_subagent_work(
+        parent_session_id=PARENT_SESSION_ID,
+        child_session_id=CHILD_SESSION_ID,
+        agent="reviewer",
+        title="review the diff",
+    )
+    lock = subagent_work.in_flight_send_lock(CHILD_SESSION_ID)
+    await lock.acquire()
+    subagent_work.unregister_subagent_work(CHILD_SESSION_ID)
+    assert subagent_work.in_flight_send_lock(CHILD_SESSION_ID) is lock, (
+        "the cleanup minted a second lock while the first was held"
+    )
+    subagent_work.drop_unused_in_flight_send_lock(CHILD_SESSION_ID)
+    assert subagent_work.in_flight_send_lock(CHILD_SESSION_ID) is lock, "still held"
+    lock.release()
+    subagent_work.drop_unused_in_flight_send_lock(CHILD_SESSION_ID)
+    assert CHILD_SESSION_ID not in subagent_work._in_flight_send_locks
+
+
+@pytest.mark.asyncio
+async def test_deleting_the_parent_forgets_its_children_s_failure_details(
+    _clean_subagent_registry: None,
+) -> None:
+    """The per-child failure memo does not outlive a parent torn down with its children."""
+    server = _ChildSnapshotServerClient()
+    app, _inbox, _work_id = _dispatch_worker(server)
+
+    async with _runner_client(app) as client:
+        r = await _post_status(client, status="failed", failure_detail="API Error: 500")
+        assert r.status_code == 204
+        assert CHILD_SESSION_ID in app.state.native_pane_failures
+        r = await client.delete(f"/v1/sessions/{PARENT_SESSION_ID}")
+        assert r.status_code < 300, r.text
+
+    assert CHILD_SESSION_ID not in app.state.native_pane_failures

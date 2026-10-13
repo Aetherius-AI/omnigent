@@ -188,6 +188,7 @@ from omnigent.runner.subagent_work import (
     _SubagentDeliveryAck,
     _SubagentWorkEntry,
     _truncate_child_preview,
+    drop_unused_in_flight_send_lock,
     get_subagent_work,
     in_flight_send_lock,
     is_codex_native_subagent_wrapper,
@@ -1409,6 +1410,7 @@ def create_runner_app(
     _sign_in_watchers: dict[str, asyncio.Task[None]] = {}
     _subagent_recovery_tasks: dict[str, asyncio.Task[None]] = {}
     _subagent_wake_pending: set[str] = set()
+    app.state.subagent_wake_pending = _subagent_wake_pending
     _last_rewake_notice: dict[str, str] = {}
     # Parents whose wake POST exhausted its bounded retries while their inbox
     # still held a sub-agent result (typically: the server was down when the
@@ -1635,6 +1637,7 @@ def create_runner_app(
     # Child -> the error its forwarded StopFailure carried, so a settled stale
     # replay can restore the failure with its detail, not just its status.
     _native_pane_failures: dict[str, dict[str, str]] = {}
+    app.state.native_pane_failures = _native_pane_failures
 
     def _cancel_subagent_rearm_settle(child_id: str) -> None:
         task = _rearm_settle_tasks.pop(child_id, None)
@@ -1680,9 +1683,13 @@ def create_runner_app(
 
         async def _settle() -> None:
             await _subagent_work._wake_retry_sleep(_SUBAGENT_REARM_SETTLE_GRACE_S)
-            if get_subagent_work(child_id) is not entry:
-                return
-            reverted = settle_spurious_subagent_rearm(child_id)
+            # Serialized with a terminal report's check-stamp-record step, so the
+            # settle cannot remove the entry a report is about to confirm.
+            async with in_flight_send_lock(child_id):
+                if get_subagent_work(child_id) is not entry:
+                    return
+                reverted = settle_spurious_subagent_rearm(child_id)
+            drop_unused_in_flight_send_lock(child_id)
             if reverted is None:
                 return
             if reverted.rearmed_over is not None and reverted.rearmed_over.status == "failed":
@@ -1731,9 +1738,10 @@ def create_runner_app(
         if status in ("running", "waiting", "idle") and (
             _session_harness_name(session_id) == "claude-native"
         ):
-            # Only Claude's status-file poller publishes a child's ``running`` here
-            # (never on ``/events``) and only its stale ``busy`` needs settling;
-            # other harnesses' pane repaints neither mark nor end a turn.
+            # A claude-native child's ``running`` arrives here (never on ``/events``):
+            # from the status-file poller, or from the pane watcher while the file
+            # is unresolved. Either may be stale, and the settle undoes it the same
+            # way; other harnesses' pane repaints neither mark nor end a turn.
             if status == "idle":
                 _settle_subagent_rearm_later(session_id)
             else:
@@ -3528,6 +3536,7 @@ def create_runner_app(
         _cancel_subagent_rearm_settle(session_id)
         for _child_id in list(_subagent_work_by_parent.get(session_id, set())):
             _cancel_subagent_rearm_settle(_child_id)
+            _native_pane_failures.pop(_child_id, None)
         unregister_child_session(session_id)
         unregister_subagent_work_for_session(session_id)
         if filesystem_registry is not None:
@@ -4652,20 +4661,20 @@ def create_runner_app(
     ) -> _SubagentDeliveryAck:
         """Record a forwarded terminal report, giving a confirmed re-armed turn its own id.
 
-        The re-arm runs under the drained turn's id, whose receipt is already on
-        the child, so a restart before the parent drains the new result would
-        skip it. A report that confirms the turn mints a fresh dispatch id and
-        stamps it on the child before the result enters the inbox; the registry
-        applies it when it records the report. When the stamp fails the entry
-        keeps the receipted id, so the result is still delivered live and its
-        drain receipt stays consistent with the child's label, but a restart
-        cannot recover it. Check, stamp and record run under the child's
-        in-flight send lock, so neither a follow-up's re-stamp nor a concurrent
-        report can stamp another id.
+        The fresh dispatch id is written to the child before the result enters
+        the inbox, so restart recovery can tell it from the drained turn's
+        receipt (see ``note_subagent_child_activity``). A rejected stamp keeps
+        the receipted id on both sides: live delivery and the drain receipt stay
+        consistent, only restart recovery of this turn is lost. Check, stamp and
+        record run under the child's in-flight send lock, shared with the settle
+        and a follow-up's re-stamp, so no two of them act on the entry at once.
         """
         from omnigent.runner.tool_dispatch import _patch_subagent_label
 
         async with in_flight_send_lock(child_id):
+            # A settle that ran while this report waited for the lock has put the
+            # dispatch back to its finished state; rebuild the entry it owes.
+            await _ensure_subagent_work_entry(child_id, report_response_id=response_id)
             confirmed_work_id: str | None = None
             if rearmed_turn_confirmed_by(child_id, response_id=response_id):
                 work_id = new_subagent_work_id()
@@ -4682,7 +4691,7 @@ def create_runner_app(
                         stamp_error,
                         extra={"session_id": child_id},
                     )
-            return _mark_subagent_terminal_and_wake(
+            ack = _mark_subagent_terminal_and_wake(
                 child_id,
                 status=status,
                 output=output,
@@ -4690,6 +4699,8 @@ def create_runner_app(
                 response_id=response_id,
                 confirmed_work_id=confirmed_work_id,
             )
+        drop_unused_in_flight_send_lock(child_id)
+        return ack
 
     # Seam for the entrypoint's launch reaper (and tests): terminal delivery
     # that also schedules the parent wake POST, not just the inbox insert.

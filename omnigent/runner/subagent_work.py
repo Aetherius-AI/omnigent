@@ -293,6 +293,26 @@ def in_flight_send_lock(child_session_id: str) -> asyncio.Lock:
     return lock
 
 
+def _drop_in_flight_send_lock(child_session_id: str) -> None:
+    """Forget a child's send lock unless a holder still relies on it being the only one."""
+    lock = _in_flight_send_locks.get(child_session_id)
+    if lock is not None and not lock.locked():
+        _in_flight_send_locks.pop(child_session_id, None)
+
+
+def drop_unused_in_flight_send_lock(child_session_id: str) -> None:
+    """
+    Forget a child's send lock once it is free and no dispatch is left to guard.
+
+    A holder calls this after its critical section: a drain that unregistered the
+    child while the lock was held had to leave the lock in place.
+
+    :param child_session_id: Child session id, e.g. ``"conv_child456"``.
+    """
+    if child_session_id not in _subagent_work_by_child:
+        _drop_in_flight_send_lock(child_session_id)
+
+
 def register_subagent_work(
     *,
     parent_session_id: str,
@@ -501,11 +521,9 @@ def note_subagent_child_activity(child_session_id: str) -> _SubagentWorkEntry | 
     the parent's turn end counts the child as running and the turn's terminal
     edge is delivered instead of deduplicated against the old result. A
     finished result the parent has not received yet is left in place; the next
-    terminal report replaces it. The turn runs under that id, whose delivery
-    receipt is already on the child, until a terminal report confirms it
-    (``mark_subagent_work_terminal``'s ``confirmed_work_id``) or an explicit
-    follow-up re-stamps it (:func:`restamp_rearmed_subagent_work`), so a
-    restart before the parent drains the new result can still recover it.
+    terminal report replaces it. The entry is provisional (``rearmed``) until a
+    terminal report or an explicit follow-up confirms the turn and gives it a
+    dispatch id of its own on the child.
 
     :param child_session_id: Child session id, e.g. ``"conv_child456"``.
     :returns: The re-armed entry, or ``None`` when this edge did not restart a
@@ -621,7 +639,7 @@ def unregister_subagent_work(
             rearmed=entry.rearmed,
         )
     _subagent_work_by_child.pop(child_session_id, None)
-    _in_flight_send_locks.pop(child_session_id, None)
+    _drop_in_flight_send_lock(child_session_id)
     children = _subagent_work_by_parent.get(entry.parent_session_id)
     if children is None:
         return
@@ -645,12 +663,12 @@ def unregister_subagent_work_for_session(session_id: str) -> None:
     unregister_subagent_work(session_id)
     _drained_delivered_subagent_children.discard(session_id)
     _drained_subagent_dispatches.pop(session_id, None)
-    _in_flight_send_locks.pop(session_id, None)
+    _drop_in_flight_send_lock(session_id)
     for child_id in list(_subagent_work_by_parent.get(session_id, set())):
         _subagent_work_by_child.pop(child_id, None)
         _drained_delivered_subagent_children.discard(child_id)
         _drained_subagent_dispatches.pop(child_id, None)
-        _in_flight_send_locks.pop(child_id, None)
+        _drop_in_flight_send_lock(child_id)
     _subagent_work_by_parent.pop(session_id, None)
 
 

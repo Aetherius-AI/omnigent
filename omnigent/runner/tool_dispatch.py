@@ -1670,7 +1670,10 @@ async def _send_to_in_flight_child(
             if stamp_error is None:
                 _subagent_work.restamp_rearmed_subagent_work(live, work_id=work_id)
             else:
+                # The parent's follow-up confirms the turn: keep the receipted id
+                # but drop the provisional re-arm so a settle cannot revert it.
                 work_id = live.work_id
+                _subagent_work.restamp_rearmed_subagent_work(live, work_id=work_id)
                 _logger.warning(
                     "steered self-resumed sub-agent %s: dispatch-id stamp failed (%s); the "
                     "turn keeps its receipted id and a restart cannot recover its result",
