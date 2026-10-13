@@ -5419,6 +5419,18 @@ describe("NewChatLandingScreen", () => {
       "Loading models…",
     );
 
+    // The config submenu can open under a resting cursor; the browser then
+    // reports the pointer leaving the Other... row toward it.
+    fireEvent.pointerLeave(other, {
+      pointerType: "mouse",
+      relatedTarget: screen.getByTestId("new-chat-landing-agent-models"),
+    });
+    expect(other).toHaveAttribute("data-state", "open");
+    expect(otherMenu).toBeInTheDocument();
+    expect(screen.getByTestId("new-chat-landing-agent-models")).toHaveTextContent(
+      "Loading models…",
+    );
+
     piModels = {
       ...SUCCESS_QUERY_STATE,
       data: [{ id: "example/model-a", model: "example/model-a", displayName: "Model A" }],

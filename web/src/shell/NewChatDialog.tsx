@@ -6,6 +6,7 @@ import {
   HarnessPickerEntry,
   HarnessPickerConfigPage,
   HarnessPickerSubContent,
+  ignorePointerLeaveIntoSubmenu,
 } from "@/components/composer/HarnessPicker";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "@/lib/routing";
@@ -1994,16 +1995,7 @@ export function AgentHarnessPicker({
                     <DropdownMenuSubTrigger
                       data-testid="new-chat-landing-harness-more"
                       className="cursor-pointer items-center"
-                      onPointerLeave={(event) => {
-                        const target = event.relatedTarget;
-                        if (
-                          target instanceof Element &&
-                          target.closest('[role="menu"]')?.getAttribute("aria-labelledby") ===
-                            event.currentTarget.id
-                        ) {
-                          event.preventDefault();
-                        }
-                      }}
+                      onPointerLeave={ignorePointerLeaveIntoSubmenu}
                     >
                       <HarnessMenuNavigationLabel>{otherHarnessLabel}</HarnessMenuNavigationLabel>
                     </DropdownMenuSubTrigger>
@@ -2046,6 +2038,7 @@ export function AgentHarnessPicker({
                 <DropdownMenuSubTrigger
                   data-testid="new-chat-landing-custom-agents"
                   className="cursor-pointer items-center"
+                  onPointerLeave={ignorePointerLeaveIntoSubmenu}
                 >
                   <HarnessMenuNavigationLabel>Other...</HarnessMenuNavigationLabel>
                 </DropdownMenuSubTrigger>
