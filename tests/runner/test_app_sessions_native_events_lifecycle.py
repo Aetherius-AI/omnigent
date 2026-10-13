@@ -4701,10 +4701,6 @@ async def test_auxiliary_codex_tui_exit_preserves_app_server(
     assert not [event for event in events if event.get("type") == "session.status"]
 
 
-# Mirrors the runner's exit-driven recreate cap for the embedded REPL terminal.
-_REPL_RECREATE_LIMIT = 3
-
-
 async def _await_repl_terminal_recover(conv_id: str) -> None:
     """Await the runner's named REPL-recover task for ``conv_id``, if any."""
     for _ in range(10):
@@ -4797,8 +4793,17 @@ async def test_auxiliary_repl_exit_recreate_is_rate_limited(
     loop must stop after the cap instead of spinning forever; a fresh terminal
     attach still recreates the pane on demand.
     """
-    from omnigent.runner.app import _session_event_queues_ref
-    from omnigent.runner.resource_registry import TerminalExitEvent, TerminalLifecycle
+    from omnigent.runner.app import (
+        _REPL_TERMINAL_AUTO_RECREATE_LIMIT as _REPL_RECREATE_LIMIT,
+    )
+    from omnigent.runner.app import (
+        _session_event_queues_ref,
+    )
+    from omnigent.runner.resource_registry import (
+        OMNIGENT_REPL_TERMINAL_ROLE,
+        TerminalExitEvent,
+        TerminalLifecycle,
+    )
 
     conv_id = uuid.uuid4().hex
     recreated: list[str] = []
@@ -4845,6 +4850,12 @@ async def test_auxiliary_repl_exit_recreate_is_rate_limited(
     assert (
         len([event for event in events if event.get("type") == "session.resource.deleted"])
         == _REPL_RECREATE_LIMIT + 1
+    )
+    # The capped exit restores the REPL role the exit popped, so a user attach
+    # can still rebuild the pane on demand (the warning's recovery path).
+    assert (
+        app.state.session_resource_registry.terminal_resource_role(conv_id, "terminal_tui_main")
+        == OMNIGENT_REPL_TERMINAL_ROLE
     )
 
 
@@ -4914,14 +4925,16 @@ async def test_auxiliary_repl_exit_skips_rebuild_when_session_is_gone(
 async def test_auxiliary_repl_exit_skips_rebuild_when_session_torn_down_mid_recover(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A teardown finishing after the exit publishes still blocks the rebuild.
+    """Teardown in progress blocks the rebuild even while the session is cache-live.
 
     The session is live when the exit publishes (so recovery is claimed and the
-    spinner shows), but ``delete_session`` finishes before the deferred recover
-    task runs. The under-lock liveness re-check in the recreate path must then
-    refuse to rebuild, so no leaked terminal is created.
+    spinner shows). ``delete_session`` then begins and marks the session as
+    tearing down, but pops ``_session_start_cache`` only after its cleanup
+    awaits, so the process manager still reports the session while the deferred
+    recover task runs. The teardown marker, not the cache removal, is what
+    excludes it: the under-lock recreate must refuse so no terminal leaks.
     """
-    from omnigent.runner.app import _session_event_queues_ref
+    from omnigent.runner.app import _session_event_queues_ref, _sessions_tearing_down_ref
     from omnigent.runner.resource_registry import TerminalExitEvent, TerminalLifecycle
 
     conv_id = uuid.uuid4().hex
@@ -4955,19 +4968,24 @@ async def test_auxiliary_repl_exit_skips_rebuild_when_session_torn_down_mid_reco
                 lifecycle=TerminalLifecycle.AUXILIARY,
             )
         )
-        # The session is deleted before the deferred recover task runs.
-        pm._sessions.discard(conv_id)
+        # delete_session has begun and marked teardown, but has not yet popped
+        # the start cache; pm still reports conv_id, so only the marker tells the
+        # deferred recover task the session is gone.
+        _sessions_tearing_down_ref.add(conv_id)
+        assert pm.has_session(conv_id)
         await _await_repl_terminal_recover(conv_id)
         events = _drain_session_event_queue(_session_event_queues_ref.get(conv_id))
     finally:
         _session_event_queues_ref.pop(conv_id, None)
+        _sessions_tearing_down_ref.discard(conv_id)
 
-    # The spinner was announced and cleared, but the under-lock guard refused
-    # to recreate the pane for the now-deleted session.
+    # Recovery was announced while live, but once teardown was marked the guard
+    # refused both to recreate the pane and to clear the spinner into the
+    # soon-to-be-dropped event queue, even though pm still reports the session.
     assert recreated == []
     assert [
         event["pending"] for event in events if event.get("type") == "session.terminal_pending"
-    ] == [True, False]
+    ] == [True]
 
 
 @pytest.mark.parametrize("terminal_name", ["qwen", "antigravity"])

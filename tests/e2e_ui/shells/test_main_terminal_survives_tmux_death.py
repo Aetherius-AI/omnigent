@@ -40,6 +40,9 @@ _RUNNER_VERDICT_TIMEOUT_S = 60.0
 _TMUX_UNAVAILABLE_SIGNATURE = re.compile(
     r"tmux unavailable after \d+ consecutive probes for terminal tui:main"
 )
+# The REPL status line reports ``ready`` as a standalone word; match on a word
+# boundary so prose such as "already" never satisfies the prompt check.
+_READY_PROMPT = re.compile(r"\bready\b")
 
 
 def _repl_terminal(base_url: str, session_id: str) -> dict[str, Any] | None:
@@ -82,6 +85,22 @@ def _wait_for_pane_contains(socket_path: str, needle: str, timeout_s: float = 60
         time.sleep(0.5)
 
 
+def _wait_for_pane_matches(
+    socket_path: str, pattern: re.Pattern[str], timeout_s: float = 60.0
+) -> str:
+    deadline = time.monotonic() + timeout_s
+    text = ""
+    while True:
+        captured = _tmux(socket_path, "capture-pane", "-p")
+        text = captured.stdout if captured.returncode == 0 else ""
+        if pattern.search(text):
+            return text
+        assert time.monotonic() < deadline, (
+            f"pane never matched {pattern.pattern!r}; last frame:\n{text}"
+        )
+        time.sleep(0.5)
+
+
 def _reach_repl_prompt(page: Page, helper: Any, socket_path: str) -> None:
     """Advance past the first-launch theme picker to the live REPL prompt.
 
@@ -93,12 +112,12 @@ def _reach_repl_prompt(page: Page, helper: Any, socket_path: str) -> None:
     deadline = time.monotonic() + 60.0
     while True:
         pane = _tmux(socket_path, "capture-pane", "-p").stdout
-        if "ready" in pane:
+        if _READY_PROMPT.search(pane):
             return
         if "Choose your theme" in pane:
             helper.focus()
             page.keyboard.press("Enter")
-            _wait_for_pane_contains(socket_path, "ready")
+            _wait_for_pane_matches(socket_path, _READY_PROMPT)
             return
         assert time.monotonic() < deadline, f"REPL never reached a prompt:\n{pane}"
         time.sleep(0.5)
@@ -124,11 +143,15 @@ def _runner_log_offsets() -> dict[Path, int]:
 
 
 def _runner_logs_since(offsets: dict[Path, int]) -> str:
-    """Read what the spawned runner logged after ``offsets`` was taken."""
+    """Read what the spawned runner logged after ``offsets`` was taken.
+
+    Only the files captured in ``offsets`` are read, so a sibling worker's
+    later runner log cannot leak unrelated lines into the assertion.
+    """
     chunks = []
-    for path in sorted(process_log_dir("runner").glob("runner*.log")):
+    for path in sorted(offsets):
         with path.open(encoding="utf-8", errors="replace") as handle:
-            handle.seek(offsets.get(path, 0))
+            handle.seek(offsets[path])
             chunks.append(handle.read())
     return "\n".join(chunks)
 
@@ -172,10 +195,9 @@ def test_repl_terminal_survives_tmux_server_death(
     assert killed.returncode == 0, killed.stderr
     assert _tmux(socket_path, "has-session").returncode != 0
 
-    # Wait for the runner's verdict: either the misleading resume fallback
-    # appears, or the Terminal view is connected to a live tmux pane again.
-    # The inventory may lack tui:main for a moment while it is rebuilt, so a
-    # transient miss is not a verdict.
+    # Poll for the runner's verdict: the misleading fallback appears, or the view
+    # reconnects to a live tmux pane; a transient inventory miss during the
+    # rebuild is not a verdict.
     fallback = main_terminal.get_by_text(_FALLBACK, exact=True)
     deadline = time.monotonic() + _RUNNER_VERDICT_TIMEOUT_S
     while time.monotonic() < deadline:
@@ -192,7 +214,7 @@ def test_repl_terminal_survives_tmux_server_death(
 
     after = _repl_terminal(base_url, session_id)
     assert after is not None, "runner dropped tui:main from the session's terminal inventory"
-    expect(fallback).to_have_count(0)
+    assert fallback.count() == 0, f"Terminal view fell back to {_FALLBACK!r}"
     expect(terminal).to_have_attribute("data-state", "connected", timeout=60_000)
     assert _tmux(str(after["metadata"]["tmux_socket"]), "has-session").returncode == 0, (
         "tui:main is listed but its tmux server is not running"

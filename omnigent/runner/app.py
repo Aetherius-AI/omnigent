@@ -147,6 +147,7 @@ from omnigent.runner.native_controls import build_native_controls
 from omnigent.runner.policy_proxy import _evaluate_policy_via_omnigent
 from omnigent.runner.proxy_mcp_manager import ProxyMcpManager
 from omnigent.runner.resource_registry import (
+    OMNIGENT_REPL_TERMINAL_ROLE,
     SessionResourceRegistry,
     TerminalExitEvent,
     TerminalLifecycle,
@@ -1109,6 +1110,13 @@ _session_histories_ref: dict[str, list[_JsonObject]] = {}
 # ``/stream`` endpoint just to assert on emitted events).
 _session_event_queues_ref: dict[str, asyncio.Queue[_JsonObject | None]] = {}
 
+# Module-level ref to the set of sessions whose ``delete_session`` has begun.
+# Teardown pops ``_session_start_cache`` only after its cleanup awaits, so an
+# exit-driven REPL rebuild could otherwise read a still-"live" session and
+# recreate the pane after cleanup ran. Marking teardown before its first await
+# excludes the session from recovery; tests inspect it to drive the race.
+_sessions_tearing_down_ref: set[str] = set()
+
 
 def get_session_agent_id(session_id: str) -> str | None:
     """
@@ -1421,6 +1429,7 @@ def create_runner_app(
     _last_server_item_id: dict[str, str] = {}
     _session_event_queues = _session_event_queues_ref
     app.state.session_event_queues = _session_event_queues
+    _sessions_tearing_down = _sessions_tearing_down_ref
     _session_inboxes = _session_inboxes_ref
     _session_async_tasks: dict[str, dict[str, tuple[asyncio.Task[str], asyncio.Event]]] = {}
 
@@ -1789,6 +1798,11 @@ def create_runner_app(
         """Whether this runner still hosts ``session_id``; teardown pops the
         start cache, so an exit-driven rebuild can skip an already-deleted one.
         """
+        if session_id in _sessions_tearing_down:
+            # The start cache is popped only after teardown's cleanup awaits, so
+            # a rebuild claimed before cleanup could still read the session as
+            # live; the teardown marker excludes it for the whole delete.
+            return False
         return (
             process_manager is not None and process_manager.has_session(session_id)
         ) or session_id in _session_start_cache
@@ -1827,6 +1841,13 @@ def create_runner_app(
             published.
         """
         if not _claim_repl_terminal_auto_recreate(event.session_id):
+            # The exit popped this terminal's REPL role. Keep auto-recreation
+            # capped, but restore the role so a user re-attach can still rebuild
+            # the pane on demand (attach-driven recreate is not rate-limited).
+            if resource_registry is not None:
+                resource_registry.retain_terminal_role(
+                    event.session_id, event.terminal_id, OMNIGENT_REPL_TERMINAL_ROLE
+                )
             _logger.warning(
                 "REPL terminal %s keeps exiting for %s; not auto-recreating "
                 "again (max %d per %.0fs). A fresh terminal attach still "
@@ -1854,11 +1875,17 @@ def create_runner_app(
                     event.session_id, event.terminal_id
                 )
                 if entry is None:
-                    _logger.error(
-                        "Could not recover REPL terminal %s for %s after its tmux backing died",
-                        event.terminal_name,
-                        event.session_id,
-                    )
+                    if _runner_session_is_live(event.session_id):
+                        _logger.error(
+                            "Could not recover REPL terminal %s for %s after its tmux died",
+                            event.terminal_name,
+                            event.session_id,
+                        )
+                    else:
+                        _logger.debug(
+                            "Skipped REPL terminal recovery for %s; session already torn down",
+                            event.session_id,
+                        )
             except Exception:
                 _logger.exception(
                     "Unexpected error recovering REPL terminal %s for %s",
@@ -1866,7 +1893,10 @@ def create_runner_app(
                     event.session_id,
                 )
             finally:
-                _publish_terminal_pending(_publish_event, event.session_id, False)
+                # A teardown finishing mid-recover already dropped the event
+                # queue; clearing the spinner now would resurrect a dead queue.
+                if _runner_session_is_live(event.session_id):
+                    _publish_terminal_pending(_publish_event, event.session_id, False)
 
         task = asyncio.create_task(
             _recover(),
@@ -1878,13 +1908,16 @@ def create_runner_app(
     def _publish_terminal_exit(event: TerminalExitEvent) -> None:
         # The embedded REPL terminal is the one auxiliary pane a live SDK
         # session cannot lose, so its unexpected death triggers a rebuild.
-        rebuild_repl = (
+        rebuild_repl = False
+        if (
             event.lifecycle != TerminalLifecycle.REQUIRED
             and event.terminal_name == _REPL_TERMINAL_NAME
             and event.session_key == _REPL_TERMINAL_SESSION_KEY
             and _runner_session_is_live(event.session_id)
-            and _begin_repl_terminal_recovery(event)
-        )
+        ):
+            # Claims a rate-limit slot and publishes terminal_pending=True
+            # before the deletion event below.
+            rebuild_repl = _begin_repl_terminal_recovery(event)
         _publish_event(
             event.session_id,
             {
@@ -3395,6 +3428,9 @@ def create_runner_app(
 
     @app.delete("/v1/sessions/{session_id}")
     async def delete_session(session_id: str) -> JSONResponse:
+        # Mark teardown before the first await so an exit-driven REPL rebuild
+        # racing this delete sees the session as gone and never resurrects it.
+        _sessions_tearing_down.add(session_id)
         resource_registry.note_terminal_control_request(session_id, "delete_session")
         _cancel_claude_prompt_waiter(session_id)
         _session_message_buffers.pop(session_id, None)
@@ -3536,6 +3572,7 @@ def create_runner_app(
         stale_resp_ids = [rid for rid, cid in _resp_to_conv.items() if cid == session_id]
         for rid in stale_resp_ids:
             _resp_to_conv.pop(rid, None)
+        _sessions_tearing_down.discard(session_id)
 
         return JSONResponse(
             status_code=200,

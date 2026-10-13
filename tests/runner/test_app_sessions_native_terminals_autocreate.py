@@ -300,7 +300,7 @@ async def test_auto_create_repl_terminal_keeps_tmux_alive_after_exit(
     the instant the REPL exits — ``/quit``, ``/exit``, a crash, or any early
     exit — tmux reaps the lone-pane server: ``tui:main`` disappears and the idle
     watcher logs ``tmux unavailable after N consecutive probes for terminal
-    tui:main`` (OMNI-7102). The claude-/codex-/pi-native terminals all launch
+    tui:main``. The claude-/codex-/pi-native terminals all launch
     with ``keep_alive_after_exit=True``; the REPL must do the same so its exit
     leaves a diagnosable dead pane instead of vanishing.
     """

@@ -33,6 +33,7 @@ from omnigent.runner.resource_registry import (
     SessionResourceRegistry,
 )
 from omnigent.terminals import TerminalRegistry
+from tests.runner.conftest import _FakeProcessManager, _ScriptedHarnessClient
 from tests.runner.helpers import NullServerClient, make_test_terminal_instance
 
 
@@ -270,10 +271,16 @@ def test_runner_resource_attach_recreates_dead_repl_terminal(
         OMNIGENT_REPL_TERMINAL_ROLE
     )
 
+    # An attach always targets a live session; register it so the
+    # recreate guard permits rebuilding the dead REPL pane.
+    process_manager = _FakeProcessManager(_ScriptedHarnessClient([]))
+    process_manager._sessions.add("conv_abc")
+
     app = create_runner_app(
         terminal_registry=registry,
         resource_registry=resource_registry,
         server_client=NullServerClient(),  # type: ignore[arg-type]
+        process_manager=process_manager,  # type: ignore[arg-type]
     )
 
     # The recreated pane: same (tui, main) key, distinct socket path so
