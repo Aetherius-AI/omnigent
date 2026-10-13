@@ -59,6 +59,7 @@ def loopback_json_stub(body: bytes) -> Iterator[LoopbackStub]:
             stub.paths.append(self.path)
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
 
@@ -67,8 +68,8 @@ def loopback_json_stub(body: bytes) -> Iterator[LoopbackStub]:
 
     httpd = socketserver.TCPServer(("127.0.0.1", 0), _Handler)
     stub = LoopbackStub(port=httpd.server_address[1])
-    threading.Thread(target=httpd.serve_forever, daemon=True).start()
     try:
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
         yield stub
     finally:
         httpd.shutdown()

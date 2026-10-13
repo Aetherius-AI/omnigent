@@ -467,3 +467,22 @@ async def test_wait_until_ready_bypasses_proxy_env_for_loopback(
         server = _server(monkeypatch, tmp_path)
         server.port = stub.port
         await server._wait_until_ready(attempts=5, delay=0.05)
+
+
+async def test_wait_until_ready_keeps_proxy_env_for_remote_server(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A remote server is still probed through the configured proxy: the stub
+    # plays the proxy and must receive the absolute-form readiness request.
+    monkeypatch.setattr(appsrv.shutil, "which", lambda name: f"/usr/bin/{name}")
+    server = OpenCodeNativeServer(
+        bridge_dir=tmp_path,
+        workspace=tmp_path,
+        hostname="opencode.internal.test",
+        port=4096,
+        verify_version=False,
+    )
+    with loopback_json_stub(b"[]") as proxy:
+        set_proxy_env(monkeypatch, proxy.url)
+        await server._wait_until_ready(attempts=1, delay=0)
+    assert proxy.paths == ["http://opencode.internal.test:4096/session"]
