@@ -1698,16 +1698,14 @@ class ClaudeSDKExecutor(Executor):
         self._bundle_dir = bundle_dir
         self._agent_name = agent_name
         self._skills_filter = skills_filter
-        # Write the bundle's plugin manifest now (idempotent) so that
-        # ``--plugin-dir <bundle>`` produces clean
-        # ``<agent-name>:<skill-name>`` labels in Claude's skill
-        # listing instead of the auto-derived tmpdir basename, and
-        # record the bundled skill names ``skills: none`` must allow.
+        # Record the skill names ``skills: none`` must allow, then write the
+        # plugin manifest (idempotent) so ``--plugin-dir`` yields clean
+        # ``<agent-name>:<skill-name>`` labels instead of the tmpdir basename.
         self._bundle_skill_names: list[str] = []
         if self._bundle_dir is not None:
             try:
-                ensure_bundle_plugin_manifest(self._bundle_dir, self._agent_name)
                 self._bundle_skill_names = bundle_skill_names(self._bundle_dir)
+                ensure_bundle_plugin_manifest(self._bundle_dir, self._agent_name)
             except OSError as exc:
                 logger.warning(
                     "could not prepare bundle plugin skills at %s: %s",
@@ -2683,14 +2681,9 @@ class ClaudeSDKExecutor(Executor):
             "extra_args": {"no-session-persistence": None},
             "max_buffer_size": 10 * 1024 * 1024,
         }
-        # Only forward ``setting_sources`` when explicitly set.
-        # ``None`` lets the SDK apply its default
-        # (``["user", "project"]`` when ``skills`` is non-None).
-        # An empty list — produced by ``"none"`` — is forwarded
-        # verbatim so the SDK doesn't auto-default it back to
-        # ``["user", "project"]``, which would re-load host
-        # skills into the model's system prompt (the live
-        # regression that prompted this branch).
+        # Forward ``setting_sources`` only when set: the empty list from
+        # ``"none"`` must reach the SDK verbatim, or it auto-defaults to
+        # ``["user", "project"]`` and re-loads host skills.
         if resolved.setting_sources is not None:
             options_kwargs["setting_sources"] = resolved.setting_sources
         try:

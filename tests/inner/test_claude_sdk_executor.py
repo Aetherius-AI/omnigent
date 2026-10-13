@@ -2283,11 +2283,11 @@ class TestSkillsFilterTranslation(unittest.TestCase):
         Claim: setting_sources is ``None`` (not ``[]``), letting
         the SDK fill it in. A regression that hardcoded an
         explicit list here would freeze the default and miss
-        future SDK changes.
+        future SDK changes. Bundled skill names do not narrow it.
         """
         from omnigent.inner.claude_sdk_executor import _resolve_skills_option
 
-        result = _resolve_skills_option("all")
+        result = _resolve_skills_option("all", ["review"])
         assert result is not None
         self.assertEqual(result.skills, "all")
         self.assertIsNone(result.setting_sources)
@@ -2328,21 +2328,11 @@ class TestSkillsFilterTranslation(unittest.TestCase):
         self.assertEqual(result.skills, ["brainstorm", "review"])
         self.assertEqual(result.setting_sources, [])
 
-    def test_bundled_skills_leave_all_and_list_filters_unchanged(self) -> None:
-        """Only ``"none"`` consults the bundle; the other filters keep their mapping."""
-        from omnigent.inner.claude_sdk_executor import _resolve_skills_option
-
-        all_result = _resolve_skills_option("all", ["review"])
-        list_result = _resolve_skills_option(["foo"], ["review"])
-        assert all_result is not None and list_result is not None
-        self.assertEqual(all_result.skills, "all")
-        self.assertEqual(list_result.skills, ["foo"])
-
     def test_list_lets_sdk_default_setting_sources(self) -> None:
-        """A list of names round-trips and uses the SDK default."""
+        """A list of names round-trips unchanged by bundled skills and uses the SDK default."""
         from omnigent.inner.claude_sdk_executor import _resolve_skills_option
 
-        result = _resolve_skills_option(["foo", "bar:baz"])
+        result = _resolve_skills_option(["foo", "bar:baz"], ["review"])
         assert result is not None
         self.assertEqual(result.skills, ["foo", "bar:baz"])
         self.assertIsNone(result.setting_sources)
@@ -2411,6 +2401,25 @@ class TestBundleSkillsReachSdkOptions(unittest.TestCase):
         self.assertEqual(captured["skills"], ["review"])
         self.assertEqual(captured["setting_sources"], [])
         self.assertEqual(captured["plugins"], [{"type": "local", "path": str(bundle_dir)}])
+
+    def test_bundled_skill_names_survive_a_failed_manifest_write(self) -> None:
+        from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle_dir = Path(tmp) / "bundle"
+            (bundle_dir / "skills" / "review").mkdir(parents=True)
+            (bundle_dir / "skills" / "review" / "SKILL.md").write_text(
+                "---\nname: review\ndescription: d\n---\nBody.\n"
+            )
+            # A file where the manifest directory belongs makes the write fail.
+            (bundle_dir / ".claude-plugin").write_text("not a directory\n")
+            with self.assertLogs("omnigent.inner.claude_sdk_executor", level="WARNING") as logs:
+                executor = ClaudeSDKExecutor(
+                    bundle_dir=bundle_dir, agent_name="probe", skills_filter="none"
+                )
+
+        self.assertEqual(executor._bundle_skill_names, ["review"])
+        self.assertTrue(any("bundle plugin" in line for line in logs.output))
 
 
 # ---------------------------------------------------------------------------
