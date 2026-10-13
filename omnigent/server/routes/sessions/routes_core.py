@@ -586,7 +586,11 @@ def register_core_routes(
             encode_host_frame,
         )
         from omnigent.runner.identity import token_bound_runner_id
-        from omnigent.server.routes._host_launch import resolve_host_launch
+        from omnigent.server.routes._host_launch import (
+            LAUNCH_TIMEOUT_ENV_VAR,
+            resolve_host_launch,
+            resolve_launch_timeout_s,
+        )
 
         with creation_stage("create_acl_ms"):
             target = await asyncio.to_thread(
@@ -653,13 +657,20 @@ def register_core_routes(
                 ),
             )
         )
+        launch_timeout_s = resolve_launch_timeout_s()
         try:
             host_registry.send_text(conn, launch_frame)
-            launch_result = await asyncio.wait_for(future, timeout=30.0)
+            launch_result = await asyncio.wait_for(future, timeout=launch_timeout_s)
         except ConnectionError as exc:
             launch_result = {"status": "failed", "error": str(exc)}
         except asyncio.TimeoutError:
-            launch_result = {"status": "failed", "error": "host launch timed out"}
+            launch_result = {
+                "status": "failed",
+                "error": (
+                    f"host launch timed out after {launch_timeout_s:g}s "
+                    f"(raise {LAUNCH_TIMEOUT_ENV_VAR} if this launch needs longer)"
+                ),
+            }
         finally:
             conn.pending_launches.pop(request_id, None)
             if not future.done():
@@ -2778,8 +2789,8 @@ def register_core_routes(
                 request, conv, conversation_store, runner_router
             )
 
-        updated = await asyncio.to_thread(
-            conversation_store.update_conversation,
+        update_result = await asyncio.to_thread(
+            conversation_store.update_conversation_with_changes,
             session_id,
             title=body.title,
             reasoning_effort=None if clear_effort else effort,
@@ -2798,8 +2809,10 @@ def register_core_routes(
             terminal_launch_args=terminal_launch_args,
             archived=body.archived,
         )
-        if updated is None:
+        if update_result is None:
             raise _session_not_found()
+        updated = update_result.conversation
+        effort_changed = update_result.reasoning_effort_changed
         saved = live_change.position() if live_change is not None else 0
         if body.silent:
             # An active live change orders this write against its own when refused.
@@ -2850,7 +2863,11 @@ def register_core_routes(
         negotiation: dict[str, object] = {"rollback_on_refusal": True} if codex_native else {}
         combined_model_forward = False
         _model_forward = None
-        if live_forward and (effort is not None or clear_effort):
+        if (
+            live_forward
+            and (effort is not None or clear_effort)
+            and (effort_changed or (live_model_change and codex_native))
+        ):
             effort_event: dict[str, object] = {
                 "type": "effort_change",
                 "effort": updated.reasoning_effort,

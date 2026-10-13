@@ -63,6 +63,7 @@ from omnigent.runner.transports.ws_tunnel.frames import (
 )
 from omnigent.runtime import (
     inflight_text,
+    pending_inputs,
     session_stream,
 )
 from omnigent.runtime.agent_cache import AgentCache
@@ -336,9 +337,8 @@ def _is_batchable_external_item(event: SessionEventInput) -> bool:
     Whether a batch entry can skip :func:`_post_event_impl` and be appended
     with its neighbors, which is the shape the claude-native forwarder posts.
 
-    For an external item that is not a user message (pending-input drain) or a
-    slash command (title seeding), the per-entry path only authorizes, persists
-    and broadcasts. Entries carrying ``created_by`` or ``tools`` also stay
+    User messages and shell inputs need pending-input settlement; slash commands
+    need title seeding. Entries carrying ``created_by`` or ``tools`` also stay
     per-entry so their validation is not duplicated here.
     """
     if (
@@ -352,7 +352,12 @@ def _is_batchable_external_item(event: SessionEventInput) -> bool:
     is_user_message = (
         item_type == "message" and isinstance(item_data, dict) and item_data.get("role") == "user"
     )
-    return item_type != "slash_command" and not is_user_message
+    is_shell_input = (
+        item_type == "terminal_command"
+        and isinstance(item_data, dict)
+        and item_data.get("kind") == "input"
+    )
+    return item_type != "slash_command" and not is_user_message and not is_shell_input
 
 
 def _event_body_too_large() -> HTTPException:
@@ -645,6 +650,10 @@ async def _retry_session_single_flight(
     return await asyncio.shield(task)
 
 
+class _RunnerNotBoundError(OmnigentError):
+    """A runner sent events for a session that is now bound to another runner."""
+
+
 @dataclass(frozen=True)
 class _RunnerEventContext:
     """Authenticated tunnel identity for runner-originated external events."""
@@ -719,7 +728,9 @@ def register_events_routes(
             if conv is None:
                 raise _session_not_found()
         if isinstance(request, _RunnerEventContext) and conv.runner_id != request.runner_id:
-            raise OmnigentError("session is not bound to this runner", code=ErrorCode.FORBIDDEN)
+            raise _RunnerNotBoundError(
+                "session is not bound to this runner", code=ErrorCode.FORBIDDEN
+            )
         return user_id, conv
 
     @event_router.post(
@@ -816,6 +827,24 @@ def register_events_routes(
             try:
                 body = SessionEventInput.model_validate(payload)
                 await _post_event_impl(request, batch.session_id, body)
+            except _RunnerNotBoundError:
+                # The session moved to another runner, which mirrors its own
+                # transcript. Acknowledge this runner's late events as handled:
+                # older runners turn any rejection into a session failure.
+                _logger.info(
+                    "Discarding events for session %s from runner %s it was moved off",
+                    batch.session_id,
+                    runner_id,
+                    extra=debug_event(
+                        "runner_event_batch_superseded",
+                        session_id=batch.session_id,
+                        runner_id=runner_id,
+                        batch_id=batch.id,
+                        batch_size=len(batch.events),
+                        event_type=event_type,
+                    ),
+                )
+                return EventAckFrame(batch.id, len(batch.events))
             except OmnigentError as exc:
                 return EventAckFrame(
                     batch.id,
@@ -1409,6 +1438,7 @@ def register_events_routes(
             interrupt_payload: dict[str, Any] = {"type": "interrupt"}
             codex_child = conv.kind == "sub_agent" and _is_codex_native_subagent(conv)
             response_id = None
+            queued_pending_ids: list[str] = []
             if codex_child:
                 # Native child boundaries come from the Codex forwarder.
                 child_thread_id = (conv.labels or {}).get(
@@ -1451,6 +1481,9 @@ def register_events_routes(
                 _publish_interrupted(session_id)
                 # Fence the cancelled turn (see _interrupt_fenced_sessions).
                 _interrupt_fenced_sessions.add(session_id)
+                # Read before the forward so a message sent after Stop stays live;
+                # marked only if the interrupt lands, else the turn may still run them.
+                queued_pending_ids = pending_inputs.pending_ids(session_id)
             runner_client = await _get_runner_client(
                 target_session_id,
                 runner_router,
@@ -1479,6 +1512,8 @@ def register_events_routes(
                 # The turn keeps running and nothing else lifts the fence —
                 # remove it so the turn's remaining output isn't dropped.
                 _interrupt_fenced_sessions.discard(session_id)
+            elif not codex_child:
+                pending_inputs.mark_interrupted(session_id, queued_pending_ids)
             if stop_codex_side_chat:
                 await asyncio.to_thread(
                     conversation_store.set_labels,
@@ -1954,6 +1989,7 @@ def register_events_routes(
                     session_id,
                     status_error,
                     conversation_store,
+                    owner_runner_id=conv.runner_id,
                     agent_name=failed_agent_name,
                 )
             elif status == "running":
@@ -2598,6 +2634,22 @@ def register_events_routes(
                     and not relaunched_launch_refused
                     and await _session_host_offline(conv, request.app.state)
                 )
+                if (
+                    conv.host_id is not None
+                    and conv.kind != "sub_agent"
+                    and not exit_cause
+                    and not host_offline
+                    and not relaunched_launch_acknowledged
+                    and not relaunched_launch_refused
+                ):
+                    # A connected host that never took the launch shows no runner failed
+                    # to start. Refuse the send so the client keeps the message, as for a
+                    # dropped tunnel, instead of consuming it into a failed turn.
+                    raise OmnigentError(
+                        "The host for this session is not responding. "
+                        "Wait for it to reconnect and send the message again.",
+                        code=ErrorCode.RUNNER_UNAVAILABLE,
+                    )
                 if exit_cause:
                     failure_message = exit_cause
                 elif host_offline:
