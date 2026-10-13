@@ -1589,22 +1589,30 @@ async def test_codex_native_model_options_query_model_list(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stall_on_page", [1, 2], ids=["first-request", "later-page"])
 async def test_codex_native_model_options_stalled_model_list_fails_retryably(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    stall_on_page: int,
 ) -> None:
-    """Page one served, page two never answered: the route still ends in a
-    retryable 503 within its budget and schedules no write-back of partial rows.
+    """A connected app-server that withholds a model/list page must not hold the
+    live picker request open forever: the model-options route stays bounded,
+    answers a retryable 503, and schedules no write-back of partial rows.
     """
     from omnigent.harnesses.codex_native import app_server as codex_native_app_server
     from omnigent.runner import native_controls as native_controls_module
 
     monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setattr(
-        "omnigent.runtime.workflow._resolve_provider_for_build", lambda *_args, **_kwargs: None
+        "omnigent.runtime.workflow._resolve_provider_for_build",
+        lambda *_args, **_kwargs: None,
     )
+    # Keeps a bounded route fast; the current unbounded route never reads it.
     monkeypatch.setattr(
-        native_controls_module, "_CODEX_NATIVE_MODEL_OPTIONS_TIMEOUT_S", 0.5
+        native_controls_module,
+        "_CODEX_NATIVE_MODEL_OPTIONS_TIMEOUT_S",
+        0.5,
+        raising=False,
     )
     conv_id = "5b1e6d0c9f3a4e7b8c2d1f0a9e8b7c6d"
     monkeypatch.setattr(codex_native_bridge, "_BRIDGE_ROOT", tmp_path / "codex-bridge")
@@ -1617,6 +1625,7 @@ async def test_codex_native_model_options_stalled_model_list_fails_retryably(
         publish_event: Any,
         **kwargs: Any,
     ) -> SessionResourceView:
+        """Stand in for the codex launch, leaving the seeded bridge dir alone."""
         del resource_registry, publish_event, kwargs
         return SessionResourceView(
             id="terminal_codex_main",
@@ -1641,20 +1650,25 @@ async def test_codex_native_model_options_stalled_model_list_fails_retryably(
         ),
     )
 
-    class _StallingAfterFirstPage(_RecordingCodexAppServerClient):
+    class _StallingClient(_RecordingCodexAppServerClient):
+        """Serve model/list pages but withhold ``stall_on_page`` with the socket open."""
+
         async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
             self.requests.append((method, params))
-            if params.get("cursor") is None:
+            page = 1 if params.get("cursor") is None else 2
+            if page == stall_on_page:
+                await asyncio.Event().wait()
+                raise AssertionError("unreachable")
+            if page == 1:
                 return {
                     "result": {
                         "data": [{"id": "gpt-5.5", "isDefault": True}],
                         "nextCursor": "next-page",
                     }
                 }
-            await asyncio.Event().wait()
-            raise AssertionError("unreachable")
+            return {"result": {"data": [{"id": "gpt-5.4-mini"}], "nextCursor": None}}
 
-    fake_client = _StallingAfterFirstPage(
+    fake_client = _StallingClient(
         transport="ws://127.0.0.1:43210",
         client_name="omnigent-codex-native-runner",
     )
@@ -1672,21 +1686,9 @@ async def test_codex_native_model_options_stalled_model_list_fails_retryably(
         "client_for_transport",
         _fake_client_for_transport,
     )
-    codex_native_spec = AgentSpec(
-        spec_version=1,
-        name="t",
-        executor=ExecutorSpec(type="omnigent", config={"harness": "codex-native"}),
-    )
 
-    async def _resolver(agent_id: str, session_id: str | None = None) -> AgentSpec:
-        del agent_id, session_id
-        return codex_native_spec
+    app, _ = await _build_app_for_spec(_harness_spec("codex-native"))
 
-    app = create_runner_app(
-        process_manager=_FakeProcessManager(_ScriptedHarnessClient([])),  # type: ignore[arg-type]
-        spec_resolver=_resolver,
-        server_client=NullServerClient(),  # type: ignore[arg-type]
-    )
     async with _runner_client(app) as client:
         create_resp = await client.post(
             "/v1/sessions",
@@ -1695,10 +1697,13 @@ async def test_codex_native_model_options_stalled_model_list_fails_retryably(
         assert create_resp.status_code == 201, create_resp.text
         try:
             resp = await asyncio.wait_for(
-                client.get(f"/v1/sessions/{conv_id}/codex-model-options"), timeout=10
+                client.get(f"/v1/sessions/{conv_id}/codex-model-options"), timeout=8
             )
-        except TimeoutError:
-            pytest.fail("codex-model-options stayed pending while model/list stalled")
+        except (TimeoutError, asyncio.TimeoutError):
+            pytest.fail(
+                "codex-model-options stayed pending while the app-server stalled "
+                f"model/list (page {stall_on_page}); the route has no end-to-end deadline"
+            )
         write_backs = [
             task
             for task in asyncio.all_tasks()
@@ -1707,7 +1712,10 @@ async def test_codex_native_model_options_stalled_model_list_fails_retryably(
 
     assert resp.status_code == 503, resp.text
     assert resp.json()["error"] == "codex_native_model_options_failed"
-    assert [method for method, _params in fake_client.requests] == ["model/list", "model/list"]
+    model_list_calls = [
+        method for method, _params in fake_client.requests if method == "model/list"
+    ]
+    assert len(model_list_calls) == stall_on_page
     assert fake_client.closed
     assert write_backs == []
 
