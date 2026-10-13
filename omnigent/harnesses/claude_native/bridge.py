@@ -311,6 +311,10 @@ _COMPOSER_KILL_TO_LINE_START = "\x1b[117;5u"
 # The box shows only a window of a draft taller than it (seven rows in a
 # 24-row terminal), so clearing repeats per window until this budget runs out.
 _COMPOSER_CLEAR_TIMEOUT_S = 2.0
+# Bursts a one-row box may keep its text through before that text is taken for
+# a hint the empty box displays: a draft line goes on the first burst, so text
+# the keys leave untouched is not editable text.
+_COMPOSER_CLEAR_SINGLE_ROW_BURSTS = 2
 # How long to wait for the pasted draft to visibly land in Claude's
 # input box before sending the submit Enter. Claude Code coalesces
 # rapid stdin bursts into a paste, so an Enter sent while the TUI is
@@ -4680,10 +4684,9 @@ def inject_slash_command(
         raise ClaudeUserPromptPending(
             "Answer the pending Claude question or permission request before changing settings."
         )
-    # Clear any draft the user is mid-typing; otherwise the command below
-    # concatenates with their text and Enter submits
-    # ``<their-draft>/effort high`` as a turn. Unlike Escape it does
-    # not interrupt an in-flight generation.
+    # Clear any mid-typed draft so the command does not concatenate with it
+    # and submit as a turn; unlike Escape this does not interrupt an
+    # in-flight generation.
     _clear_composer(socket_path, tmux_target)
     # ``-l`` pastes ``/`` and spaces literally; trailing Enter submits.
     _run_tmux(socket_path, "send-keys", "-l", "-t", tmux_target, command)
@@ -5893,29 +5896,52 @@ def _clear_composer(socket_path: str, tmux_target: str) -> None:
     while presses beyond the draft do nothing. Clearing only the cursor's
     line would leave the rest of a multi-line draft to be submitted with the
     next message. The box shows at most a window of a tall draft, so a round
-    only clears the rows on screen; rounds repeat until the box is down to
-    one row or :data:`_COMPOSER_CLEAR_TIMEOUT_S` runs out, so a surface that
-    never empties cannot stall delivery.
+    only clears the rows on screen; rounds repeat until a frame captured
+    after a burst shows the box empty. A torn capture is re-polled rather
+    than read as an empty box, and a one-row text the bursts leave untouched
+    is taken for a hint of the empty box. Anything else still in the box
+    when :data:`_COMPOSER_CLEAR_TIMEOUT_S` runs out fails the injection,
+    since submitting would send the person's unsent draft to the model.
 
     :param socket_path: Absolute path to the tmux socket.
     :param tmux_target: tmux pane target string, e.g. ``"main"``.
+    :raises ClaudeTerminalDialog: If the box could not be read or emptied in
+        time; nothing was pasted or submitted.
     :raises RuntimeError: If a ``tmux`` invocation fails.
     """
     deadline = time.monotonic() + _COMPOSER_CLEAR_TIMEOUT_S
+    bursts = 0
+    unchanged_text: str | None = None
+    unchanged_bursts = 0
     while True:
-        rows = _composer_box_rows(_capture_pane(socket_path, tmux_target))
-        presses = 2 * len(rows) if rows else 2
-        keys = _COMPOSER_KILL_TO_LINE_END * presses + _COMPOSER_KILL_TO_LINE_START * presses
-        _run_tmux(socket_path, "send-keys", "-l", "-t", tmux_target, keys)
-        if rows is None or len(rows) <= 1:
-            return
+        pane = _capture_pane(socket_path, tmux_target)
+        rows = _composer_box_rows(pane) if pane.strip() else None
+        if rows is not None and len(rows) == 1:
+            # The row's text follows its composer glyph.
+            text = rows[0].strip()[1:].strip()
+            if bursts and not text:
+                return
+            if text == unchanged_text:
+                unchanged_bursts += 1
+                if unchanged_bursts >= _COMPOSER_CLEAR_SINGLE_ROW_BURSTS:
+                    return
+            else:
+                unchanged_text, unchanged_bursts = text, 0
         if time.monotonic() >= deadline:
-            _logger.warning(
-                "claude-native: input box still shows %d rows after %.1fs of clearing",
-                len(rows),
-                _COMPOSER_CLEAR_TIMEOUT_S,
+            if rows is None:
+                raise ClaudeTerminalDialog(
+                    "Claude Code's input box could not be read, so nothing was sent. "
+                    "Open the terminal and retry."
+                )
+            raise ClaudeTerminalDialog(
+                "Claude Code's input box still holds a draft that could not be cleared, "
+                "so nothing was sent. Open the terminal, clear it, then retry."
             )
-            return
+        if rows is not None:
+            presses = 2 * len(rows)
+            keys = _COMPOSER_KILL_TO_LINE_END * presses + _COMPOSER_KILL_TO_LINE_START * presses
+            _run_tmux(socket_path, "send-keys", "-l", "-t", tmux_target, keys)
+            bursts += 1
         time.sleep(_CLAUDE_READY_POLL_INTERVAL_S)
 
 

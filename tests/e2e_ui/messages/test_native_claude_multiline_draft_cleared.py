@@ -55,6 +55,9 @@ _TURN_TIMEOUT_MS = 90_000
 # The slash-command path waits out its draft-visibility and dialog budgets
 # before anything observable happens, so give the outcome room to land.
 _EFFORT_OUTCOME_TIMEOUT_S = 60.0
+# Claude Code's own acknowledgement that the command was applied, not prompted.
+_EFFORT_ACK = "Set effort level to high"
+_EFFORT_ACK_TIMEOUT_S = 20.0
 _PATCH_TIMEOUT_MS = 120_000
 _EVIDENCE_DIR_ENV = "OMNIGENT_E2E_EVIDENCE_DIR"
 
@@ -316,7 +319,12 @@ def test_web_effort_change_replaces_multi_line_tui_draft(
     expect(page.locator(_WORKING)).to_have_count(0, timeout=_TURN_TIMEOUT_MS)
     _show_terminal_outcome(page)
 
-    _save_evidence("effort-screen-after-change.txt", screen.text())
+    deadline = time.monotonic() + _EFFORT_ACK_TIMEOUT_S
+    screen_text = screen.text()
+    while _EFFORT_ACK not in screen_text and time.monotonic() < deadline:
+        page.wait_for_timeout(500)
+        screen_text = screen.text()
+    _save_evidence("effort-screen-after-change.txt", screen_text)
     session = httpx.get(f"{base_url}/v1/sessions/{session_id}", timeout=15.0).json()
     _save_evidence(
         "effort-session-after-change.json",
@@ -328,6 +336,9 @@ def test_web_effort_change_replaces_multi_line_tui_draft(
     _save_evidence("effort-transcript-user-items.json", json.dumps(user_texts, indent=2))
 
     assert status == 200, f"effort change failed: HTTP {status} {body}"
+    assert _EFFORT_ACK in screen_text, (
+        f"Claude Code never acknowledged the effort change; screen was:\n{screen_text}"
+    )
     for prompt in prompts:
         assert "/effort" not in prompt and not any(line in prompt for line in _DRAFT_LINES), (
             f"the effort change was submitted to the model as prompt text: {prompt!r}"

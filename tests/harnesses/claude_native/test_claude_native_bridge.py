@@ -17,7 +17,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from http.client import BadStatusLine, RemoteDisconnected
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -5320,7 +5320,7 @@ def test_inject_slash_command_clears_draft_pastes_literal_then_enter(
     C-u kills any draft the user is mid-typing — otherwise the paste
     concatenates and Enter submits ``<draft>/effort high``. ``-l`` is
     required so tmux pastes ``/`` and spaces literally; Enter submits.
-    Every capture here is blank, so this also pins the fail-soft path:
+    Every capture shows an empty box, so this also pins the fail-soft path:
     a never-identifiable draft still gets the single blind submit.
     """
     bridge_dir = tmp_path / "bridge"
@@ -5332,18 +5332,13 @@ def test_inject_slash_command_clears_draft_pastes_literal_then_enter(
 
     captured: list[list[str]] = []
 
-    class _FakeCompleted:
-        """Fake CompletedProcess returned by the patched subprocess.run."""
-
-        returncode = 0
-        stdout = ""
-        stderr = ""
-
-    def _fake_run(cmd: list[str], **kwargs: object) -> _FakeCompleted:
-        """Record one tmux invocation; return rc=0."""
+    def _fake_run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
+        """Record one tmux invocation; captures show an empty input box."""
         del kwargs
+        if "capture-pane" in cmd:
+            return SimpleNamespace(returncode=0, stdout=_composer_pane(), stderr="")
         captured.append(cmd)
-        return _FakeCompleted()
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr("subprocess.run", _fake_run)
     monkeypatch.setattr(claude_native_bridge, "time", _VirtualClock())
@@ -5438,6 +5433,7 @@ def test_tmux_injections_are_serialized_per_bridge(
         claude_native_bridge, "_wait_for_claude_prompt_ready", lambda *_a, **_k: None
     )
     monkeypatch.setattr(claude_native_bridge, "_paste_and_submit", lambda *_a, **_k: None)
+    monkeypatch.setattr(claude_native_bridge, "_clear_composer", lambda *_a: None)
     monkeypatch.setattr(claude_native_bridge, "_run_tmux", lambda *_args: None)
     monkeypatch.setattr(claude_native_bridge, "_capture_pane", lambda *_args: "")
     monkeypatch.setattr(claude_native_bridge, "_PASTE_COMMIT_TIMEOUT_S", 0.0)
@@ -10499,13 +10495,7 @@ def test_inject_user_message_clears_a_draft_taller_than_the_input_box(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """
-    A draft the box shows only part of is still cleared completely.
-
-    The box shows seven rows of a thirty-line draft, so a round of clearing
-    sized from the visible rows removes seven lines. Giving up after a fixed
-    few rounds left the draft's first lines to be submitted with the message.
-    """
+    """Clearing repeats until the draft lines above the visible window are removed."""
     bridge_dir = _picker_bridge_dir(tmp_path)
     composer = _EditableComposer(_TALL_DRAFT, cursor=len(_TALL_DRAFT), visible_rows=7)
     composer.install(monkeypatch)
@@ -10525,11 +10515,10 @@ class _StuckComposer(_EditableComposer):
         pass
 
 
-def test_clearing_a_box_that_never_empties_gives_up_in_time(
+def test_clearing_a_box_that_never_empties_fails_in_time(
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A surface the clearing keys do not shrink is abandoned instead of retried forever."""
+    """A box the clearing keys do not shrink fails the injection once the budget runs out."""
     composer = _StuckComposer("stuck\nstuck", cursor=0)
     composer.install(monkeypatch)
     rounds: list[str] = []
@@ -10541,13 +10530,88 @@ def test_clearing_a_box_that_never_empties_gives_up_in_time(
 
     monkeypatch.setattr(claude_native_bridge, "_run_tmux", counting_run_tmux)
 
-    claude_native_bridge._clear_composer("/tmp/example/tmux.sock", "claude:0.0")
+    with pytest.raises(claude_native_bridge.ClaudeTerminalDialog, match="could not be cleared"):
+        claude_native_bridge._clear_composer("/tmp/example/tmux.sock", "claude:0.0")
 
     budget = claude_native_bridge._COMPOSER_CLEAR_TIMEOUT_S
     assert claude_native_bridge.time.monotonic() >= budget
-    # One round per poll interval until the budget runs out, then one last round.
-    assert 2 <= len(rounds) <= budget / claude_native_bridge._CLAUDE_READY_POLL_INTERVAL_S + 2
-    assert "input box still shows 2 rows" in caplog.text
+    # One round per poll interval until the budget runs out.
+    assert 2 <= len(rounds) <= budget / claude_native_bridge._CLAUDE_READY_POLL_INTERVAL_S + 1
+
+
+@pytest.mark.parametrize(
+    "inject",
+    [
+        lambda bridge_dir: inject_user_message(bridge_dir, content="hello from the web"),
+        lambda bridge_dir: claude_native_bridge.inject_slash_command(
+            bridge_dir, command="/effort high"
+        ),
+    ],
+    ids=["message", "slash-command"],
+)
+def test_an_unsuccessful_clear_sends_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    inject: Callable[[Path], None],
+) -> None:
+    """Neither injection path pastes or submits while a draft it could not clear remains."""
+    bridge_dir = _picker_bridge_dir(tmp_path)
+    composer = _StuckComposer("stuck\nstuck", cursor=0)
+    composer.install(monkeypatch)
+
+    with pytest.raises(claude_native_bridge.ClaudeTerminalDialog):
+        inject(bridge_dir)
+
+    assert composer.submitted == []
+    assert composer.text == "stuck\nstuck"
+
+
+class _TornCaptureComposer(_EditableComposer):
+    """A box whose next captures come back as torn, empty frames."""
+
+    def __init__(self, draft: str, *, cursor: int, torn_frames: int) -> None:
+        super().__init__(draft, cursor=cursor)
+        self.torn_frames = torn_frames
+
+    def _capture_pane(self, socket_path: str, tmux_target: str) -> str:
+        if self.torn_frames:
+            self.torn_frames -= 1
+            return ""
+        return super()._capture_pane(socket_path, tmux_target)
+
+
+def test_clearing_re_polls_a_torn_capture_instead_of_reading_it_as_no_box(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty capture says nothing about the draft, so the whole draft still goes."""
+    composer = _TornCaptureComposer(_STALE_MULTILINE_DRAFT, cursor=3, torn_frames=2)
+    composer.install(monkeypatch)
+
+    claude_native_bridge._clear_composer("/tmp/example/tmux.sock", "claude:0.0")
+
+    assert composer.text == ""
+
+
+def test_clearing_stops_after_two_bursts_at_a_one_row_box_that_keeps_its_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hint the empty box displays is retried once, not chased until the budget runs out."""
+    composer = _StuckComposer("Try asking a question", cursor=0)
+    composer.install(monkeypatch)
+    bursts: list[str] = []
+    run_tmux = composer._run_tmux
+
+    def counting_run_tmux(socket_path: str, *args: str) -> None:
+        bursts.append(args[-1])
+        run_tmux(socket_path, *args)
+
+    monkeypatch.setattr(claude_native_bridge, "_run_tmux", counting_run_tmux)
+
+    claude_native_bridge._clear_composer("/tmp/example/tmux.sock", "claude:0.0")
+
+    expected = claude_native_bridge._COMPOSER_CLEAR_SINGLE_ROW_BURSTS
+    assert bursts == [_CLEAR_ONE_ROW_COMPOSER] * expected
+    assert claude_native_bridge.time.monotonic() < claude_native_bridge._COMPOSER_CLEAR_TIMEOUT_S
 
 
 @pytest.mark.parametrize(
