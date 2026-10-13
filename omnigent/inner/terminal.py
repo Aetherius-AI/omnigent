@@ -2775,7 +2775,8 @@ class TerminalInstance:
         """Whether the recorded private tmux server process is still running.
 
         Confirms the recorded start time so a recycled pid is never mistaken
-        for the original server.
+        for the original server, and fails closed when the identity cannot be
+        read so an unverifiable process is never signalled.
         """
         pid = self._tmux_server_pid
         create_time = self._tmux_server_create_time
@@ -2786,17 +2787,20 @@ class TerminalInstance:
             if proc.create_time() != create_time:
                 return False
             return proc.status() != psutil.STATUS_ZOMBIE
-        except psutil.NoSuchProcess:
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
             return False
-        except psutil.AccessDenied:
-            return True
 
-    def _begin_socket_recovery(self) -> bool:
-        """Rebuild the socket dir and ask the live server to recreate its socket.
+    def _recover_private_socket(self) -> bool:
+        """Rebuild the socket dir and wait for the live server to recreate it.
 
-        :returns: ``True`` when the socket is already present or the recorded
-            server was signalled to recreate it; ``False`` when there is no live
-            server to recover (a genuine exit the caller still reports).
+        Serialised so concurrent synchronous and asynchronous callers join one
+        recovery attempt and observe the same socket readiness: a later caller
+        sees the socket an earlier one restored instead of racing to recreate
+        the private dir and reporting a false exit for a server still alive.
+
+        :returns: ``True`` when the socket is present again (already there, or
+            the recorded server recreated it after SIGUSR1); ``False`` when
+            there is no live server to recover or the socket never returned.
         """
         with self._recovery_lock:
             if self.socket_path.exists():
@@ -2804,10 +2808,16 @@ class TerminalInstance:
             if not self._tmux_server_process_alive():
                 return False
             try:
-                # Recreate the reaped dir with a bare mkdir: it fails on any
-                # existing path, so a symlink pre-claimed at the predictable name
-                # on a shared /tmp is never followed into another user's dir.
-                os.mkdir(self.private_dir, 0o700)
+                # Reuse the dir when a per-file sweep reaped only the socket,
+                # but never follow a symlink or adopt another user's dir left
+                # at the predictable name on a shared /tmp.
+                if self.private_dir.is_symlink():
+                    return False
+                if self.private_dir.is_dir():
+                    if os.stat(self.private_dir).st_uid != os.geteuid():
+                        return False
+                else:
+                    os.mkdir(self.private_dir, 0o700)
                 os.chmod(self.private_dir, 0o700)
                 # The orphan sweep qualifies ownership from this file; the
                 # cleaner removed it with the dir, so re-establish it.
@@ -2826,29 +2836,24 @@ class TerminalInstance:
                 self.session_key,
                 self._tmux_server_pid,
             )
+            deadline = time.monotonic() + _SOCKET_RECOVERY_WAIT_SECONDS
+            while not self.socket_path.exists():
+                if time.monotonic() >= deadline:
+                    return False
+                time.sleep(_SOCKET_RECOVERY_POLL_SECONDS)
             return True
 
     def _recover_private_socket_sync(self) -> bool:
         """Restore a reaped private socket for the threaded watcher's probes."""
-        if not self._begin_socket_recovery():
-            return False
-        deadline = time.monotonic() + _SOCKET_RECOVERY_WAIT_SECONDS
-        while not self.socket_path.exists():
-            if time.monotonic() >= deadline:
-                return False
-            time.sleep(_SOCKET_RECOVERY_POLL_SECONDS)
-        return True
+        return self._recover_private_socket()
 
     async def _recover_private_socket_async(self) -> bool:
-        """Restore a reaped private socket for asyncio probes without blocking."""
-        if not self._begin_socket_recovery():
-            return False
-        deadline = time.monotonic() + _SOCKET_RECOVERY_WAIT_SECONDS
-        while not self.socket_path.exists():
-            if time.monotonic() >= deadline:
-                return False
-            await asyncio.sleep(_SOCKET_RECOVERY_POLL_SECONDS)
-        return True
+        """Restore a reaped private socket for asyncio probes without blocking.
+
+        Runs the blocking, lock-guarded recovery in a worker thread so the
+        event loop keeps serving other probes while it waits for the socket.
+        """
+        return await asyncio.to_thread(self._recover_private_socket)
 
 
 @dataclass(frozen=True)
