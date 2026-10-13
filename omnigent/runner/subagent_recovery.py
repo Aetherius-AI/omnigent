@@ -110,10 +110,9 @@ def build_subagent_recovery(
             and report_response_id == drained.response_id
         ):
             return None
-        # A child re-armed after a drain keeps its stamped dispatch id, so the
-        # receipt written when this result is drained matches the child's label.
-        # Registering the entry clears the drain memory, so a rebuild that fails
-        # here keeps the replay guard above for the retried report.
+        # Keep the stamped dispatch id so the drain receipt matches the child's
+        # label; a rebuild that fails here leaves the drain memory, and so the
+        # replay guard above, intact for the retried report.
         work_id = drained.work_id if drained is not None else None
         # The runner's own child record is authoritative; the server snapshot
         # is the fallback for a child adopted after a restart.

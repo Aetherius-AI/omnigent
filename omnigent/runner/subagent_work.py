@@ -451,17 +451,27 @@ def restamp_rearmed_subagent_work(entry: _SubagentWorkEntry, *, work_id: str) ->
     _confirm_subagent_rearm(entry)
 
 
+def _replays_finished_report(entry: _SubagentWorkEntry, response_id: str | None) -> bool:
+    """Whether a report naming *response_id* repeats the finished turn a re-arm replaced."""
+    return (
+        response_id is not None
+        and entry.rearmed_over is not None
+        and response_id == entry.rearmed_over.response_id
+    )
+
+
 def _rearm_confirmed_by(entry: _SubagentWorkEntry, response_id: str | None) -> bool:
     """Whether a terminal report naming *response_id* confirms *entry*'s re-armed turn.
 
-    A live re-armed entry is confirmed by any report. A finished entry a settle
+    A live re-armed entry is confirmed by any report but a replay of the finished
+    turn's own (the forwarder re-sending its ``Stop``). A finished entry a settle
     restored still awaits the anticipated turn's report: any report but a replay
     of its own (the same ``response_id``) confirms it.
     """
     if not entry.rearmed:
         return False
     if entry.status not in _SUBAGENT_TERMINAL_STATUSES:
-        return True
+        return not _replays_finished_report(entry, response_id)
     return response_id is None or response_id != entry.response_id
 
 
@@ -928,6 +938,19 @@ def mark_subagent_work_terminal(
             delivered=False,
             delivered_now=False,
             reason=_SUBAGENT_DELIVERY_SUPERSEDED_DISPATCH,
+        )
+    if (
+        entry.rearmed
+        and entry.status not in _SUBAGENT_TERMINAL_STATUSES
+        and _replays_finished_report(entry, response_id)
+    ):
+        # The forwarder re-sent the finished turn's Stop while the re-arm is
+        # live: already delivered, and not the result the re-arm awaits.
+        return _SubagentDeliveryAck(
+            entry=entry,
+            delivered=True,
+            delivered_now=False,
+            reason=_SUBAGENT_DELIVERY_ALREADY_DELIVERED,
         )
     if entry.status in _SUBAGENT_TERMINAL_STATUSES:
         if _rearm_confirmed_by(entry, response_id):

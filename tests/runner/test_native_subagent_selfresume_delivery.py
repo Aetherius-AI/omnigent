@@ -1463,3 +1463,181 @@ async def test_a_forgotten_drain_still_absorbs_a_replay_of_its_own_report(
     rebuilt = await ensure(CHILD_SESSION_ID, report_response_id="resp_round_two")
     assert rebuilt is not None and rebuilt.work_id == "subagent_round_one"
     assert rebuilt.rearmed, "the report must be able to stamp the new turn's own id"
+
+
+@pytest.mark.asyncio
+async def test_a_replay_of_the_drained_turn_does_not_confirm_a_live_rearm(
+    _clean_subagent_registry: None,
+) -> None:
+    """Round one's own ``Stop`` re-sent while the re-arm is live is not the new result.
+
+    The forwarder retries a ``Stop`` whose acknowledgement was lost. Landing
+    inside a live re-arm it must stay a duplicate: delivering it would hand the
+    orchestrator round one twice and mark the re-arm delivered, so the real
+    self-resumed result would then be answered "already delivered".
+    """
+    server = _RecordingServerClient()
+    app, inbox, work_id = _dispatch_worker(server)
+    publish_pane_status = _pane_status_publisher(app)
+
+    async with _runner_client(app) as client:
+        r1 = await _post_status(
+            client,
+            status="idle",
+            output="round one: found the bug",
+            turn_completed=True,
+            response_id="resp_round_one",
+        )
+        assert r1.status_code == 204
+        await tool_dispatch._drain_inbox(
+            inbox,
+            server_client=server,  # type: ignore[arg-type]
+            conversation_id=PARENT_SESSION_ID,
+        )
+        publish_pane_status(CHILD_SESSION_ID, "running", None)
+
+        replay = await _post_status(
+            client,
+            status="idle",
+            output="round one: found the bug",
+            turn_completed=True,
+            response_id="resp_round_one",
+        )
+        assert replay.status_code == 204
+        assert inbox.empty(), "the replayed Stop was delivered as the re-armed turn's result"
+        live = subagent_work.get_subagent_work(CHILD_SESSION_ID)
+        assert live is not None and live.status == "running" and live.rearmed
+        assert subagent_work.SUBAGENT_DISPATCH_ID_LABEL_KEY not in server.labels
+
+        r2 = await _post_status(
+            client,
+            status="idle",
+            output="round two: should I open the PR?",
+            turn_completed=True,
+            response_id="resp_round_two",
+        )
+        assert r2.status_code == 204
+        _assert_fresh_result(_drain_queue(inbox), server=server, dispatched_id=work_id)
+
+
+class _StampFailingServerClient(_RecordingServerClient):
+    """Reject dispatch-id stamps while still receipting drains."""
+
+    class _Rejected:
+        status_code = 503
+        text = "label store unavailable"
+
+    async def patch(self, url: str, **kwargs: Any) -> Any:
+        body = kwargs.get("json") or {}
+        if subagent_work.SUBAGENT_DISPATCH_ID_LABEL_KEY in (body.get("labels") or {}):
+            return self._Rejected()
+        return await super().patch(url, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_dispatch_stamp_keeps_the_receipted_id(
+    _clean_subagent_registry: None,
+) -> None:
+    """When the fresh id cannot be stamped, the result keeps the id the child carries.
+
+    Delivering under an id the child never received would leave
+    ``dispatch_id != delivered_id`` after the drain and make restart recovery
+    re-queue the drained result; keeping the receipted id loses only the
+    pre-drain recovery of this one turn, which the stamp failure lost anyway.
+    """
+    server = _StampFailingServerClient()
+    app, inbox, work_id = _dispatch_worker(server)
+    server.labels[subagent_work.SUBAGENT_DISPATCH_ID_LABEL_KEY] = work_id
+    publish_pane_status = _pane_status_publisher(app)
+
+    async with _runner_client(app) as client:
+        await _deliver_and_drain_round_one(client, inbox, server)
+        publish_pane_status(CHILD_SESSION_ID, "running", None)
+        r2 = await _post_status(
+            client,
+            status="idle",
+            output="round two: should I open the PR?",
+            turn_completed=True,
+            response_id="resp_round_two",
+        )
+        assert r2.status_code == 204
+        [second] = _drain_queue(inbox)
+        assert second["work_id"] == work_id
+        assert server.labels[subagent_work.SUBAGENT_DISPATCH_ID_LABEL_KEY] == work_id
+        await tool_dispatch._cleanup_drained_subagent_work(
+            second,
+            server_client=server,  # type: ignore[arg-type]
+        )
+
+    assert server.labels[subagent_work.SUBAGENT_DELIVERED_ID_LABEL_KEY] == work_id
+    assert subagent_work.undelivered_subagent_dispatch_id(server.labels) is None, (
+        "a restart would re-queue the drained result"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_confirmation_stamp_waits_for_a_follow_up_holding_the_send_lock(
+    _clean_subagent_registry: None,
+) -> None:
+    """The confirming ``Stop`` and a follow-up ``sys_session_send`` cannot stamp different ids.
+
+    Both decide the re-armed entry's identity, so the Stop's check-and-stamp runs
+    under the same per-child send lock the follow-up holds while it classifies
+    and re-stamps the entry.
+    """
+    server = _RecordingServerClient()
+    app, inbox, work_id = _dispatch_worker(server)
+    server.labels[subagent_work.SUBAGENT_DISPATCH_ID_LABEL_KEY] = work_id
+    publish_pane_status = _pane_status_publisher(app)
+
+    async with _runner_client(app) as client:
+        await _deliver_and_drain_round_one(client, inbox, server)
+        publish_pane_status(CHILD_SESSION_ID, "running", None)
+
+        lock = subagent_work.in_flight_send_lock(CHILD_SESSION_ID)
+        await lock.acquire()
+        stop = asyncio.create_task(
+            _post_status(
+                client,
+                status="idle",
+                output="round two: should I open the PR?",
+                turn_completed=True,
+                response_id="resp_round_two",
+            )
+        )
+        await asyncio.sleep(0.05)
+        assert not stop.done()
+        assert server.labels[subagent_work.SUBAGENT_DISPATCH_ID_LABEL_KEY] == work_id, (
+            "the Stop stamped the child while a follow-up held the send lock"
+        )
+        assert inbox.empty()
+        lock.release()
+        r2 = await stop
+        assert r2.status_code == 204
+        _assert_fresh_result(_drain_queue(inbox), server=server, dispatched_id=work_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("deleted", [CHILD_SESSION_ID, PARENT_SESSION_ID])
+async def test_deleting_a_session_cancels_its_pending_rearm_settles(
+    _clean_subagent_registry: None, monkeypatch: pytest.MonkeyPatch, deleted: str
+) -> None:
+    """Tearing down the child or its parent drops the child's pending settle task."""
+    held = _HeldSleep()
+    monkeypatch.setattr(subagent_work, "_wake_retry_sleep", held)
+    server = _ChildSnapshotServerClient()
+    app, inbox, _work_id = _dispatch_worker(server)
+    publish_pane_status = _pane_status_publisher(app)
+
+    async with _runner_client(app) as client:
+        await _deliver_and_drain_round_one(client, inbox, server)
+        publish_pane_status(CHILD_SESSION_ID, "running", None)
+        publish_pane_status(CHILD_SESSION_ID, "idle", None)
+        await _let_settle_run()
+        pending = app.state.rearm_settle_tasks[CHILD_SESSION_ID]
+
+        r = await client.delete(f"/v1/sessions/{deleted}")
+        assert r.status_code < 300, r.text
+        await asyncio.sleep(0)
+        assert pending.cancelled(), "the settle task outlived the session"
+        assert CHILD_SESSION_ID not in app.state.rearm_settle_tasks

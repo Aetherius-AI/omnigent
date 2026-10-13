@@ -189,6 +189,7 @@ from omnigent.runner.subagent_work import (
     _SubagentWorkEntry,
     _truncate_child_preview,
     get_subagent_work,
+    in_flight_send_lock,
     is_codex_native_subagent_wrapper,
     list_subagent_work,
     mark_subagent_work_started,
@@ -3516,6 +3517,9 @@ def create_runner_app(
         _stranded_wake_parents.discard(session_id)
         _last_rewake_notice.pop(session_id, None)
         _session_sub_agent_names.pop(session_id, None)
+        _cancel_subagent_rearm_settle(session_id)
+        for _child_id in list(_subagent_work_by_parent.get(session_id, set())):
+            _cancel_subagent_rearm_settle(_child_id)
         unregister_child_session(session_id)
         unregister_subagent_work_for_session(session_id)
         if filesystem_registry is not None:
@@ -4637,27 +4641,32 @@ def create_runner_app(
         the child, so a restart before the parent drains the new result would
         skip it. A terminal report that confirms the turn mints a fresh id and
         stamps it on the child first; the registry applies it when it records
-        that report. Best effort: a failed stamp degrades restart recovery of
-        this one turn, never its live delivery.
+        that report. When the stamp fails the entry keeps the receipted id, so
+        the result is still delivered live and its drain receipt stays consistent
+        with the child's label, but a restart before the drain cannot recover it.
 
-        :returns: The stamped id, or ``None`` when the report confirms no re-arm.
+        :returns: The stamped id, or ``None`` when nothing was stamped.
         """
-        if not rearmed_turn_confirmed_by(child_id, response_id=response_id):
-            return None
         from omnigent.runner.tool_dispatch import _patch_subagent_label
 
-        work_id = new_subagent_work_id()
-        stamp_error = await _patch_subagent_label(
-            server_client, child_id, SUBAGENT_DISPATCH_ID_LABEL_KEY, work_id
-        )
+        # Serialized with a follow-up's classify-and-stamp step, so the two can
+        # never stamp different ids on the child.
+        async with in_flight_send_lock(child_id):
+            if not rearmed_turn_confirmed_by(child_id, response_id=response_id):
+                return None
+            work_id = new_subagent_work_id()
+            stamp_error = await _patch_subagent_label(
+                server_client, child_id, SUBAGENT_DISPATCH_ID_LABEL_KEY, work_id
+            )
         if stamp_error is not None:
             _logger.warning(
-                "self-resumed sub-agent %s: dispatch-id stamp failed (%s); restart "
-                "recovery for this turn is degraded",
+                "self-resumed sub-agent %s: dispatch-id stamp failed (%s); the result is "
+                "delivered under the receipted id and a restart cannot recover it",
                 child_id,
                 stamp_error,
                 extra={"session_id": child_id},
             )
+            return None
         return work_id
 
     # Seam for the entrypoint's launch reaper (and tests): terminal delivery
