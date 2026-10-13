@@ -12,7 +12,6 @@ from omnigent.errors import StaleCursorError
 from omnigent.server.auth import RESERVED_USER_LOCAL
 from omnigent.server.feature_flags import FeatureFlags
 from omnigent.server.routes.usage import (
-    DEFAULT_SESSION_PAGE_SIZE,
     MAX_SESSION_PAGE_SIZE,
     _build_usage_report,
     _day_offset,
@@ -259,7 +258,7 @@ def test_build_usage_report_unpriced_session(
     assert bare.models == {}
 
 
-def test_build_usage_report_first_page_rebuilds_and_caches_breakdowns(
+def test_build_usage_report_first_page_computes_breakdowns(
     db_uri: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -282,35 +281,29 @@ def test_build_usage_report_first_page_rebuilds_and_caches_breakdowns(
         lambda _conv: "model-a",
     )
 
-    assert store.get_usage_summary(RESERVED_USER_LOCAL) is None
-    report = _build_usage_report(store, None, include_page_details=True)
+    # The web page always requests a bounded first page; the breakdowns ride it.
+    report = _build_usage_report(store, None, include_page_details=True, limit=50)
 
     assert report.harness_breakdown == {"codex-native": 1.25}
     assert report.model_breakdown == {"model-a": 1.25}
-    # The rebuild is persisted, so the next first-page read is a cache hit.
-    assert store.get_usage_summary(RESERVED_USER_LOCAL) == (
-        {"codex-native": 1.25},
-        {"model-a": 1.25},
-    )
 
 
-def test_build_usage_report_serves_cached_breakdowns(
+def test_build_usage_report_breakdowns_span_all_sessions_not_just_the_page(
     db_uri: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = SqlAlchemyConversationStore(db_uri)
-    # A fresh cached summary is served verbatim — no rebuild pass that would
-    # recompute (and overwrite) it from the session below.
-    store.set_usage_summary(RESERVED_USER_LOCAL, {"cached-harness": 9.0}, {"cached-model": 9.0}, 1)
-    _add_session(
-        store,
-        monkeypatch,
-        ts=1_700_000_000,
-        cost=1.0,
-        by_model={"model-a": {"total_cost_usd": 1.0}},
-        title="s1",
-    )
-    monkeypatch.setattr("omnigent.db.utils.now_epoch", lambda: 1_700_000_000)
+    now = 1_700_000_000
+    for i, cost in enumerate((1.0, 2.0, 4.0)):
+        _add_session(
+            store,
+            monkeypatch,
+            ts=now - i * _DAY,
+            cost=cost,
+            by_model={"model-a": {"total_cost_usd": cost}},
+            title=f"s{i}",
+        )
+    monkeypatch.setattr("omnigent.db.utils.now_epoch", lambda: now)
     monkeypatch.setattr(
         "omnigent.server.routes.usage._resolve_session_harness",
         lambda _conv: "codex-native",
@@ -320,10 +313,14 @@ def test_build_usage_report_serves_cached_breakdowns(
         lambda _conv: "model-a",
     )
 
-    report = _build_usage_report(store, None, include_page_details=True)
+    # One session fits on the page, but the all-time breakdowns still sum every
+    # session the account owns — the page no longer holds them to add up.
+    report = _build_usage_report(store, None, include_page_details=True, limit=1)
 
-    assert report.harness_breakdown == {"cached-harness": 9.0}
-    assert report.model_breakdown == {"cached-model": 9.0}
+    assert len(report.sessions) == 1
+    assert report.sessions_has_more is True
+    assert report.harness_breakdown == {"codex-native": 7.0}
+    assert report.model_breakdown == {"model-a": 7.0}
 
 
 def test_build_usage_report_cursor_pages_skip_breakdowns(
@@ -360,20 +357,17 @@ def test_build_usage_report_cursor_pages_skip_breakdowns(
 
     first = _build_usage_report(store, None, include_page_details=True, limit=1)
     assert first.sessions_has_more
-    # Wipe the cache the first page just rebuilt so a cursor-page rebuild
-    # (the wasted-work regression this guards against) would be visible.
-    store.mark_usage_summary_stale(RESERVED_USER_LOCAL)
+    assert first.harness_breakdown == {"codex-native": 3.0}
 
     second = _build_usage_report(
         store, None, include_page_details=True, limit=1, after=first.sessions_last_id
     )
 
     # Cursor pages carry sessions only: the web UI reads breakdowns from the
-    # first page, so later pages neither return nor rebuild them.
+    # first page, so later pages neither recompute nor return them.
     assert [s.title for s in second.sessions] == ["older"]
     assert second.harness_breakdown == {}
     assert second.model_breakdown == {}
-    assert store.get_usage_summary(RESERVED_USER_LOCAL) is None
 
 
 def test_sum_daily_cost_range(db_uri: str) -> None:
@@ -441,7 +435,8 @@ def test_get_usage_clamps_limit_and_converts_date_bounds(monkeypatch: pytest.Mon
     assert client.get("/v1/usage?limit=1000&after=conv_x").status_code == 200
     assert client.get("/v1/usage?limit=0&since=2026-07-01&until=2026-07-02").status_code == 200
 
-    assert calls[0]["limit"] == DEFAULT_SESSION_PAGE_SIZE
+    # No ``limit`` keeps the unbounded legacy contract; the web page opts in.
+    assert calls[0]["limit"] is None
     assert calls[0]["after"] is None
     assert calls[1]["limit"] == MAX_SESSION_PAGE_SIZE
     assert calls[1]["after"] == "conv_x"
@@ -481,3 +476,20 @@ def test_build_usage_report_stale_client_cursor_raises(
     # it surfaces as the API's stale_cursor error instead of an empty page.
     with pytest.raises(StaleCursorError):
         _build_usage_report(store, None, limit=1, after=newest)
+
+
+def test_build_usage_report_unbounded_returns_every_session(
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    now = 1_700_000_000
+    for i in range(3):
+        _add_session(store, monkeypatch, ts=now - i * _DAY, cost=1.0, by_model={}, title=f"s{i}")
+    monkeypatch.setattr("omnigent.db.utils.now_epoch", lambda: now)
+
+    # No ``limit`` keeps the pre-pagination contract: every session, one report.
+    report = _build_usage_report(store, None)
+
+    assert len(report.sessions) == 3
+    assert report.sessions_has_more is False

@@ -16547,14 +16547,20 @@
         "operationId": "get_usage_v1_usage_get",
         "parameters": [
           {
-            "description": "Sessions per page, clamped to `[1, MAX_SESSION_PAGE_SIZE]`.",
+            "description": "Sessions per page, clamped to `[1, MAX_SESSION_PAGE_SIZE]`. Omit for the unbounded legacy response; the web page requests one bounded page at a time.",
             "in": "query",
             "name": "limit",
             "required": false,
             "schema": {
-              "default": 50,
-              "title": "Limit",
-              "type": "integer"
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
             }
           },
           {
@@ -16619,6 +16625,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The `after`/`before` cursor names an item that no longer exists (it was deleted, or archived out of the filtered set) so the keyset bound cannot be resolved. The `error.code` is `stale_cursor`. Enumeration cannot continue from this cursor: restart from the first page, without a cursor."
           },
           "422": {
             "content": {

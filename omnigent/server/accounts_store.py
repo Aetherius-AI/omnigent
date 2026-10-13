@@ -36,7 +36,6 @@ from omnigent.db.db_models import (
     SqlSessionPermission,
     SqlUser,
     SqlUserDailyCost,
-    SqlUserUsageSummary,
     current_workspace_id,
 )
 from omnigent.db.enum_codecs import (
@@ -86,12 +85,6 @@ def _revoke_durable_authority(session: Session, user_id: str, *, now: int) -> No
         delete(SqlUserDailyCost).where(
             SqlUserDailyCost.workspace_id == workspace_id,
             SqlUserDailyCost.user_id == user_id,
-        )
-    )
-    session.execute(
-        delete(SqlUserUsageSummary).where(
-            SqlUserUsageSummary.workspace_id == workspace_id,
-            SqlUserUsageSummary.user_id == user_id,
         )
     )
     session.execute(

@@ -99,14 +99,12 @@ export function UsagePage() {
     };
   }, [firstPage]);
 
-  const totalCost = useMemo(() => {
-    const rolledUp = filteredCosts.reduce((sum, d) => sum + d.costUsd, 0);
-    // The daily rollup is authoritative; sum the loaded sessions only when it has nothing.
-    if (rolledUp === 0 && allSessions.length > 0) {
-      return allSessions.reduce((sum, s) => sum + s.costUsd, 0);
-    }
-    return rolledUp;
-  }, [filteredCosts, allSessions]);
+  // The daily rollup is the authoritative spend ledger for the window, so the
+  // total stays fixed no matter how many session pages have been loaded.
+  const totalCost = useMemo(
+    () => filteredCosts.reduce((sum, d) => sum + d.costUsd, 0),
+    [filteredCosts],
+  );
 
   return (
     <PageScroll>

@@ -1673,9 +1673,6 @@ def test_delete_user_revokes_durable_authority(accounts_app: TestClient, tmp_pat
     import uuid
 
     from omnigent.server.device_grant_store import DeviceGrantStore, hash_secret
-    from omnigent.stores.conversation_store.sqlalchemy_store import (
-        SqlAlchemyConversationStore,
-    )
     from omnigent.stores.host_store import HostStore
     from omnigent.stores.scheduled_task_store.sqlalchemy_store import (
         SqlAlchemyScheduledTaskStore,
@@ -1708,15 +1705,9 @@ def test_delete_user_revokes_durable_authority(accounts_app: TestClient, tmp_pat
     grants = DeviceGrantStore(db_url)
     grant = grants.get_by_refresh_hash(hash_secret(refresh_token, cookie_secret))
     assert grant is not None and grant.user_id == "alice"
-    conversations = SqlAlchemyConversationStore(db_url)
-    conversations.set_usage_summary("alice", {"claude-sdk": 1.0}, {"model-a": 1.0}, 1)
-    assert conversations.get_usage_summary("alice") is not None
 
     resp = admin.delete("/auth/users/alice")
     assert resp.status_code == 204, resp.text
-
-    # A re-registered "alice" must not be served the old account's breakdowns.
-    assert conversations.get_usage_summary("alice") is None
 
     got = tasks.get(task.id)
     assert got is not None and got.state == "deleted"

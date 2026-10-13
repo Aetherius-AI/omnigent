@@ -6908,32 +6908,9 @@ def usage(limit: int, server: str | None, as_json: bool) -> None:
         timeout=60.0,
         trust_env=_trust_env_for(base_url),
     ) as client:
-        resp = client.get("/v1/usage", params={"limit": 200})
+        resp = client.get("/v1/usage")
         resp.raise_for_status()
         report = resp.json()
-        sessions = list(report.get("sessions", []))
-        page = report
-        while page.get("sessions_has_more") and page.get("sessions_last_id"):
-            resp = client.get(
-                "/v1/usage", params={"limit": 200, "after": page["sessions_last_id"]}
-            )
-            resp.raise_for_status()
-            page = resp.json()
-            sessions.extend(page.get("sessions", []))
-
-    # Paging on a mutable sort key can repeat a session updated between two
-    # pages; keep its first occurrence.
-    seen_ids: set[str] = set()
-    report["sessions"] = []
-    for session in sessions:
-        session_id = session.get("id")
-        if session_id and session_id not in seen_ids:
-            seen_ids.add(session_id)
-            report["sessions"].append(session)
-    # --json keeps the pre-pagination shape: every session, without page
-    # cursors or the breakdowns only the web Usage page requests.
-    for key in ("sessions_has_more", "sessions_last_id", "harness_breakdown", "model_breakdown"):
-        report.pop(key, None)
 
     if as_json:
         click.echo(json.dumps(report, indent=2))
