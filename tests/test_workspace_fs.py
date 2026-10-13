@@ -627,3 +627,76 @@ def test_search_from_filesystem_root_keeps_paths_intact(monkeypatch: pytest.Monk
     paths = [e["path"] for e in result["data"]]
     assert "etc" in paths, paths
     assert all((Path("/") / p).exists() for p in paths), paths
+
+
+# ── Workspace root holding a repository ───────────────────────────────
+
+
+def _home_with_repo(root: Path, *, tracked: int) -> Path:
+    """A non-git root (a home directory) holding a hidden cache and a committed repo.
+
+    ``root/.cache`` has six files named after the repo's untracked directory;
+    ``root/monorepo`` commits ``tracked`` files under ``aaa/`` and then gains the
+    untracked ``experimental/FINDINGS.md``.
+    """
+    hidden = root / ".cache"
+    hidden.mkdir()
+    for i in range(6):
+        (hidden / f"experimental_{i}.whl").write_text("x")
+    repo = root / "monorepo"
+    (repo / "aaa").mkdir(parents=True)
+    for i in range(tracked):
+        (repo / "aaa" / f"f{i:03d}.txt").write_text("x")
+    _git_repo(repo)
+    env = _git_env()
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True, env=env)
+    subprocess.run(
+        ["git", "commit", "-m", "tracked"], cwd=repo, check=True, capture_output=True, env=env
+    )
+    (repo / "experimental").mkdir()
+    (repo / "experimental" / "FINDINGS.md").write_text("# Findings\n")
+    return repo
+
+
+def test_changes_lists_untracked_file_of_repo_inside_root(tmp_path: Path) -> None:
+    """The session is rooted at the home directory, the checkout one level down.
+
+    ``git status`` on the host lists the new directory, so the Changes tab
+    served from this root must list its file as created.
+    """
+    _home_with_repo(tmp_path, tracked=3)
+    reader = WorkspaceReader(tmp_path)
+
+    result = reader.changes("conv")
+
+    assert [(e["path"], e["status"]) for e in result["data"]] == [
+        ("monorepo/experimental/FINDINGS.md", "created")
+    ], result
+
+
+def test_search_finds_untracked_file_of_repo_inside_root_past_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A checkout larger than the walk budget, nested under the panel root:
+    once the Changes tab has run ``git status``, the untracked file must still
+    be found by name."""
+    _home_with_repo(tmp_path, tracked=60)
+    monkeypatch.setattr("omnigent.workspace_fs._SEARCH_SCAN_BUDGET", 10)
+    reader = WorkspaceReader(tmp_path)
+
+    reader.changes("conv")
+    result = reader.search("FINDINGS.md")
+
+    assert [e["path"] for e in result["data"]] == ["monorepo/experimental/FINDINGS.md"], result
+
+
+def test_search_surfaces_visible_directory_past_hidden_matches(tmp_path: Path) -> None:
+    """More hidden-directory name matches than the result cap must not push the
+    visible directory of the same name out of the results."""
+    _home_with_repo(tmp_path, tracked=3)
+    reader = WorkspaceReader(tmp_path)
+
+    result = reader.search("experimental", limit=5)
+
+    entries = [(e["path"], e["type"]) for e in result["data"]]
+    assert ("monorepo/experimental", "directory") in entries, result

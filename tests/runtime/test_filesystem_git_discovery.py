@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from omnigent.runtime.filesystem_registry import (
-    AgentEditFilesystemRegistry,
+    NestedGitFilesystemRegistry,
     create_filesystem_registry,
 )
 
@@ -41,7 +41,7 @@ def test_inaccessible_ancestor_git_metadata_preserves_file_tracking(
     monkeypatch.setattr(Path, probe_method, inaccessible_probe)
 
     registry = create_filesystem_registry(workspace)
-    assert isinstance(registry, AgentEditFilesystemRegistry)
+    assert isinstance(registry, NestedGitFilesystemRegistry)
     registry.record_change("sample.txt", "created", "synthetic-session")
     changes = registry.list_changed_files("synthetic-session", limit=10)
     assert [entry["path"] for entry in changes] == ["sample.txt"]

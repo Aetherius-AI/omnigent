@@ -23,6 +23,7 @@ from omnigent.runtime.filesystem_registry import (
     AgentEditFilesystemRegistry,
     GitFilesystemRegistry,
     GitStatusUnavailable,
+    NestedGitFilesystemRegistry,
     _git_timeout_seconds,
     _normalize_path,
     _parse_git_porcelain_line,
@@ -1149,13 +1150,13 @@ def test_create_filesystem_registry_git_workspace(tmp_path: Path) -> None:
 
 
 def test_create_filesystem_registry_plain_dir(tmp_path: Path) -> None:
-    """A plain directory (no .git) yields :class:`AgentEditFilesystemRegistry`.
+    """A plain directory (no .git) yields :class:`NestedGitFilesystemRegistry`.
 
     Failure means the factory is incorrectly treating non-git workspaces as git.
     """
     registry = create_filesystem_registry(tmp_path)
-    assert isinstance(registry, AgentEditFilesystemRegistry), (
-        f"Expected AgentEditFilesystemRegistry for a plain dir, got {type(registry).__name__}. "
+    assert isinstance(registry, NestedGitFilesystemRegistry), (
+        f"Expected NestedGitFilesystemRegistry for a plain dir, got {type(registry).__name__}. "
         "The factory may be finding a .git directory it shouldn't."
     )
 
@@ -1195,8 +1196,8 @@ def test_create_filesystem_registry_bogus_git_dir(tmp_path: Path) -> None:
     workspace = bogus_home / "project"
     workspace.mkdir()
     registry = create_filesystem_registry(workspace)
-    assert isinstance(registry, AgentEditFilesystemRegistry), (
-        f"Expected AgentEditFilesystemRegistry under a bogus .git ancestor, "
+    assert isinstance(registry, NestedGitFilesystemRegistry), (
+        f"Expected NestedGitFilesystemRegistry under a bogus .git ancestor, "
         f"got {type(registry).__name__}. "
         "_find_git_root may be treating any .git directory as a repository."
     )
@@ -1232,8 +1233,8 @@ def test_create_filesystem_registry_broken_gitlink(tmp_path: Path) -> None:
     """
     (tmp_path / ".git").write_text("gitdir: /nonexistent/gitdir\n", encoding="utf-8")
     registry = create_filesystem_registry(tmp_path)
-    assert isinstance(registry, AgentEditFilesystemRegistry), (
-        f"Expected AgentEditFilesystemRegistry for a broken gitlink, "
+    assert isinstance(registry, NestedGitFilesystemRegistry), (
+        f"Expected NestedGitFilesystemRegistry for a broken gitlink, "
         f"got {type(registry).__name__}. "
         "_find_git_root may be accepting gitlinks without validating the target."
     )
@@ -1581,3 +1582,171 @@ def test_git_list_tracked_files_never_runs_a_nested_repositorys_hooks(tmp_path: 
     assert reg.list_tracked_files("sub") == ["a.txt"]
     assert reg.list_tracked_files() == ["sub/a.txt", "top.txt"]
     assert not marker.exists(), "git discovered the nested repository and ran its hook"
+
+
+# ── NestedGitFilesystemRegistry: a non-git root holding repositories ─────────────
+
+
+def _commit_repo(repo: Path, *files: str) -> None:
+    """``git init`` *repo* and commit *files* (relative paths) with content ``"base\\n"``."""
+    env = _git_env()
+    repo.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True, capture_output=True, env=env)
+    for rel in files:
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text("base\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True, env=env)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "init"], cwd=repo, check=True, capture_output=True, env=env
+    )
+
+
+def test_nested_registry_without_repositories_tracks_agent_edits_only(tmp_path: Path) -> None:
+    """A plain folder keeps the agent-edit behaviour: no index or status snapshot
+    for search, and only this session's tool-call edits in the changed list."""
+    reg = create_filesystem_registry(tmp_path)
+    assert isinstance(reg, NestedGitFilesystemRegistry)
+    assert reg.list_tracked_files() is None
+    assert reg.last_changed_files() is None
+    assert reg.list_changed_files("conv", limit=10) == []
+
+    (tmp_path / "note.md").write_text("new")
+    reg.seed_snapshot("note.md", "old", session_id="conv")
+    reg.record_change("note.md", "modified", "conv")
+
+    assert [r["path"] for r in reg.list_changed_files("conv", limit=10)] == ["note.md"]
+    assert (reg.get_changed_file("conv", "note.md") or {}).get("status") == "modified"
+    assert reg.get_baseline("note.md") == "old"
+    assert reg.list_changed_files("other", limit=10) == []
+    reg.unregister_conversation("conv")
+    assert reg.list_changed_files("conv", limit=10) == []
+
+
+def test_nested_registry_reports_changes_of_repositories_below_the_root(tmp_path: Path) -> None:
+    """Checkouts one and two levels below a home-like root contribute their
+    ``git status`` with workspace-relative paths. Deeper, hidden, dependency and
+    symlinked directories are not scanned, and an agent edit inside a repository
+    is listed once, by git."""
+    _commit_repo(tmp_path / "mono", "src/app.py")
+    _commit_repo(tmp_path / "code" / "lib", "lib.py")
+    _commit_repo(tmp_path / "deep" / "er" / "repo", "far.py")
+    _commit_repo(tmp_path / ".config" / "nvim", "init.lua")
+    _commit_repo(tmp_path / "node_modules" / "pkg", "index.js")
+    for repo in ("mono", "code/lib", "deep/er/repo", ".config/nvim", "node_modules/pkg"):
+        (tmp_path / repo / "new.txt").write_text("untracked\n")
+    (tmp_path / "link").symlink_to(tmp_path / "deep" / "er" / "repo", target_is_directory=True)
+    (tmp_path / "mono" / "src" / "app.py").write_text("edited\n")
+    (tmp_path / "notes.md").write_text("plain\n")
+    reg = create_filesystem_registry(tmp_path)
+    reg.record_change("notes.md", "created", "conv")
+    reg.record_change("mono/new.txt", "created", "conv")
+
+    records = {r["path"]: r["status"] for r in reg.list_changed_files("conv", limit=100)}
+
+    assert records == {
+        "mono/new.txt": "created",
+        "mono/src/app.py": "modified",
+        "code/lib/new.txt": "created",
+        "notes.md": "created",
+    }
+    assert sorted(reg.last_changed_files() or []) == [
+        "code/lib/new.txt",
+        "mono/new.txt",
+        "mono/src/app.py",
+    ]
+
+
+def test_nested_registry_scan_budget_keeps_shallow_repositories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Discovery lists a bounded number of directories, breadth first, so a huge
+    home directory stays cheap and its direct checkouts are still found."""
+    _commit_repo(tmp_path / "mono", "a.py")
+    _commit_repo(tmp_path / "code" / "lib", "b.py")
+    monkeypatch.setattr("omnigent.runtime.filesystem_registry._NESTED_REPO_SCAN_BUDGET", 1)
+
+    reg = create_filesystem_registry(tmp_path)
+
+    assert reg.list_tracked_files() == ["mono/a.py"]
+
+
+def test_nested_registry_indexes_repositories_below_the_root(tmp_path: Path) -> None:
+    """Search's index read unions the nested repositories' tracked files and
+    re-roots them under a scoped directory the way the walk reports paths."""
+    _commit_repo(tmp_path / "mono", "src/app.py", "README.md")
+    _commit_repo(tmp_path / "code" / "lib", "lib.py")
+    (tmp_path / "mono" / "untracked.txt").write_text("u")
+    reg = create_filesystem_registry(tmp_path)
+
+    assert reg.list_tracked_files() == ["code/lib/lib.py", "mono/README.md", "mono/src/app.py"]
+    assert reg.list_tracked_files("mono") == ["README.md", "src/app.py"]
+    assert reg.list_tracked_files("mono/src") == ["app.py"]
+    assert reg.list_tracked_files("code") == ["lib/lib.py"]
+    assert reg.list_tracked_files("elsewhere") == []
+
+
+def test_nested_registry_routes_diff_reads_to_the_owning_repository(tmp_path: Path) -> None:
+    """The diff endpoint's single-file status and HEAD baseline come from the
+    repository holding the path, reported workspace-relative."""
+    _commit_repo(tmp_path / "mono", "src/app.py", "docs/readme.md")
+    (tmp_path / "mono" / "src" / "app.py").write_text("edited\n")
+    reg = create_filesystem_registry(tmp_path)
+
+    record = reg.get_changed_file("conv", "mono/src/app.py")
+
+    assert record is not None
+    assert (record["path"], record["status"]) == ("mono/src/app.py", "modified")
+    assert reg.get_baseline("mono/src/app.py") == "base\n"
+    assert reg.get_changed_file("conv", "mono/docs/readme.md") is None
+    assert reg.get_baseline("mono/docs/readme.md") == "base\n"
+    assert reg.get_changed_file("conv", "mono") is None
+    assert reg.get_baseline("outside.txt") is None
+
+
+def test_nested_registry_picks_up_a_repository_cloned_mid_session(tmp_path: Path) -> None:
+    """A checkout created after the registry was built appears on the next
+    changed-files listing, and search sees its index and snapshot from then on."""
+    reg = create_filesystem_registry(tmp_path)
+    assert reg.list_tracked_files() is None
+    _commit_repo(tmp_path / "fresh", "a.py")
+    (tmp_path / "fresh" / "b.py").write_text("b")
+
+    assert [r["path"] for r in reg.list_changed_files("conv", limit=10)] == ["fresh/b.py"]
+
+    assert reg.list_tracked_files() == ["fresh/a.py"]
+    assert reg.last_changed_files() == ["fresh/b.py"]
+
+
+def test_nested_registry_names_the_repository_whose_git_status_failed(tmp_path: Path) -> None:
+    """A git failure in one checkout surfaces as an error naming it, like a
+    single-repository workspace, rather than an incomplete list."""
+    _commit_repo(tmp_path / "mono", "a.py")
+    _commit_repo(tmp_path / "ok", "b.py")
+    reg = create_filesystem_registry(tmp_path)
+    (tmp_path / "mono" / ".git" / "index").write_bytes(b"garbage")
+
+    with pytest.raises(GitStatusUnavailable, match=r"^mono: git status exited"):
+        reg.list_changed_files("conv", limit=10)
+
+
+def test_nested_registry_index_read_never_runs_a_nested_repositorys_hooks(tmp_path: Path) -> None:
+    """Below a non-git root a sandboxed agent can create a repository and point its
+    ``core.fsmonitor`` at any command; the index read in this unsandboxed process
+    must not run it."""
+    env = _git_env()
+    _commit_repo(tmp_path / "sub", "a.txt")
+    marker = tmp_path / "hook_ran"
+    hook = tmp_path / "hook.sh"
+    hook.write_text(f"#!/bin/sh\ntouch {marker}\n")
+    hook.chmod(0o755)
+    subprocess.run(
+        ["git", "config", "core.fsmonitor", str(hook)],
+        cwd=tmp_path / "sub",
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+    reg = create_filesystem_registry(tmp_path)
+
+    assert reg.list_tracked_files() == ["sub/a.txt"]
+    assert not marker.exists(), "the nested repository's fsmonitor hook ran"

@@ -26,8 +26,10 @@ and diff baselines come from ``git status`` / ``git show`` and are fully
 reconstructable from disk, so the host serves them exactly like the
 runner.  In a **non-git** workspace the runner tracks changes from the
 live agent's tool calls (in-memory), which the host does not have — so
-the host returns an empty changed-files list there.  Directory browse,
-search, and file content work identically in both modes.
+the host returns an empty changed-files list there, apart from the
+``git status`` of repositories nested below the root (a session rooted
+at a home directory).  Directory browse, search, and file content work
+identically in both modes.
 """
 
 from __future__ import annotations
@@ -94,7 +96,8 @@ class WorkspaceReader:
         self._root = Path(root).resolve()
         # The change registry (git or edit-tracking) is chosen the same
         # way the runner chooses it, so git workspaces get git-status
-        # semantics and everything else degrades to an empty list.
+        # semantics, repositories nested below a non-git root still report
+        # theirs, and everything else degrades to an empty list.
         self._registry = create_filesystem_registry(self._root)
         self._registry.start()
 
@@ -388,6 +391,12 @@ class WorkspaceReader:
                 )
             )
 
+        def deferred_dir(name: str) -> bool:
+            # Dependency caches and hidden directories (`.cache`, `.npm`) walk
+            # last: at a home-like root they sort first and can hold more
+            # entries than the budget, starving the visible tree.
+            return name in _DEFAULT_DEPRIORITIZED_DIRS or name.startswith(".")
+
         def scan(root: str, defer: bool) -> None:
             # A query matching little or nothing never fills the result cap, so
             # the walk needs its own bound. Counted per entry: a per-directory
@@ -404,7 +413,7 @@ class WorkspaceReader:
                     dp = rel(dirpath, d)
                     if any(r.match(dp) for r in exc):
                         continue
-                    if defer and d in _DEFAULT_DEPRIORITIZED_DIRS:
+                    if defer and deferred_dir(d):
                         # Match the dir now, but walk its subtree later (pass 2)
                         # so it can't starve the real tree of scan budget. Never
                         # defer a symlinked dir: os.walk(root) follows a top-level
@@ -415,7 +424,7 @@ class WorkspaceReader:
                         if not os.path.islink(full):
                             deferred.append(full)
                     kept.append(d)
-                dirnames[:] = [d for d in kept if not (defer and d in _DEFAULT_DEPRIORITIZED_DIRS)]
+                dirnames[:] = [d for d in kept if not (defer and deferred_dir(d))]
                 for dname in kept:
                     # Count then check `> budget`, not `>= budget`: a tree of
                     # exactly `budget` entries is fully enumerable and must not
@@ -482,8 +491,9 @@ class WorkspaceReader:
         """List changed files, mirroring ``list_filesystem_changes``.
 
         Git workspaces report the working-tree diff (``git status``);
-        non-git workspaces report an empty list because the host has no
-        access to the live agent's in-memory edit history.
+        non-git workspaces report only the repositories nested below the
+        root, because the host has no access to the live agent's in-memory
+        edit history.
 
         :param session_id: Session id (used only by the edit-tracking
             registry; ignored in git mode).

@@ -2074,6 +2074,39 @@ async def test_search_defers_deep_noise_subtree_to_reach_later_real_dir(
 
 
 @pytest.mark.asyncio
+async def test_search_defers_hidden_subtrees_to_reach_the_visible_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """At a home-like root, hidden directories sort first and can outnumber both
+    the scan budget and the result cap, so they walk after the visible tree: the
+    matches under ``.cache`` must neither keep the walk from reaching
+    ``repo/experimental`` nor push it out of a capped result."""
+    cache = tmp_path / ".cache" / "pip"
+    cache.mkdir(parents=True)
+    for i in range(40):
+        (cache / f"experimental_{i}.whl").write_text("x")
+    (tmp_path / "repo" / "experimental").mkdir(parents=True)
+    (tmp_path / "repo" / "experimental" / "FINDINGS.md").write_text("y")
+    monkeypatch.setattr("omnigent.runner.environment_filesystem._SEARCH_SCAN_BUDGET", 20)
+    fs = CallerProcessFilesystem(
+        create_os_environment(
+            OSEnvSpec(
+                type="caller_process",
+                cwd=str(tmp_path),
+                sandbox=OSEnvSandboxSpec(type="none"),
+            )
+        )
+    )
+
+    entries, truncated = await fs.search_files("experimental", limit=5)
+
+    paths = [e.path for e in entries]
+    assert "repo/experimental" in paths and "repo/experimental/FINDINGS.md" in paths, paths
+    assert len(paths) == 5 and truncated is False, (paths, truncated)
+
+
+@pytest.mark.asyncio
 async def test_search_does_not_follow_symlinked_deprioritized_dir(
     tmp_path: Path,
 ) -> None:

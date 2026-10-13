@@ -1,6 +1,6 @@
 """Per-conversation filesystem-change registry.
 
-Two concrete implementations are provided:
+Three concrete implementations are provided:
 
 - :class:`GitFilesystemRegistry` — used when the workspace lives inside a git
   repository.  Baseline content is read via ``git show HEAD:<path>``.  Changed
@@ -8,16 +8,21 @@ Two concrete implementations are provided:
   working-tree changes (from any process, not just agent tool calls).  Results
   are not scoped to a session.
 
-- :class:`AgentEditFilesystemRegistry` — used for workspaces that are **not**
-  inside a git repository.  Changed files are tracked only when the agent calls
-  :meth:`record_change` through a file-write or file-edit tool call.  No
+- :class:`AgentEditFilesystemRegistry` — tracks only the files the agent
+  writes or edits through tool calls (:meth:`record_change`).  No
   filesystem-watcher thread is started.  Events are not persisted and are lost
   on server restart.
+
+- :class:`NestedGitFilesystemRegistry` — used for workspaces that are **not**
+  inside a git repository.  Tracks agent edits like
+  :class:`AgentEditFilesystemRegistry` and adds the ``git status`` and index
+  of repositories found up to two levels below the root (a session rooted at
+  a home directory holding checkouts), with paths re-rooted at the workspace.
 
 Use :func:`create_filesystem_registry` to obtain the correct implementation
 for a given workspace path.
 
-Both classes share the :class:`FilesystemRegistry` abstract base class, which
+All classes share the :class:`FilesystemRegistry` abstract base class, which
 defines the full public interface.
 """
 
@@ -32,6 +37,7 @@ import subprocess
 import threading
 import time
 from abc import ABC, abstractmethod
+from collections import deque
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -300,6 +306,52 @@ def detect_git_root(path: Path) -> Path | None:
         return None
 
 
+# A non-git workspace root is scanned this many levels down for repositories
+# (``~/project`` and ``~/code/project``), listing at most this many
+# directories, so a home directory stays cheap to scan.
+_NESTED_REPO_MAX_DEPTH = 2
+_NESTED_REPO_SCAN_BUDGET = 1000
+
+
+def find_nested_git_roots(root: Path) -> list[Path]:
+    """Return the repositories up to :data:`_NESTED_REPO_MAX_DEPTH` levels below *root*.
+
+    Hidden directories and :data:`_SKIP_DIRS` are not entered, symlinks are
+    not followed, and a repository is not descended into. The scan lists at
+    most :data:`_NESTED_REPO_SCAN_BUDGET` directories breadth first, so
+    shallow repositories win when it runs out.
+
+    :param root: Resolved workspace root that is not itself inside a repository.
+    :returns: Repository roots in breadth-first, name-sorted order.
+    """
+    found: list[Path] = []
+    queue: deque[tuple[Path, int]] = deque([(root, 0)])
+    listed = 0
+    while queue and listed < _NESTED_REPO_SCAN_BUDGET:
+        current, depth = queue.popleft()
+        listed += 1
+        try:
+            with os.scandir(current) as it:
+                entries = sorted(it, key=lambda e: e.name)
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.name.startswith(".") or entry.name in _SKIP_DIRS:
+                continue
+            child = Path(entry.path)
+            try:
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+                if _is_git_repo(child):
+                    found.append(child)
+                    continue
+            except OSError:
+                continue
+            if depth + 1 < _NESTED_REPO_MAX_DEPTH:
+                queue.append((child, depth + 1))
+    return found
+
+
 def _is_git_repo(git_root: Path) -> bool:
     """Return True when *git_root*'s ``.git`` entry forms a working repository.
 
@@ -513,7 +565,9 @@ class FilesystemRegistry(ABC):
     - :class:`GitFilesystemRegistry` — git-backed baseline; reports all working-tree
       changes via ``git status``, regardless of which process wrote them.
     - :class:`AgentEditFilesystemRegistry` — snapshot-backed baseline; tracks only
-      files the agent explicitly writes or edits via tool calls; for non-git workspaces.
+      files the agent explicitly writes or edits via tool calls.
+    - :class:`NestedGitFilesystemRegistry` — for non-git workspaces: agent edits
+      plus the git status and index of repositories nested below the root.
 
     Use :func:`create_filesystem_registry` to obtain the correct implementation.
     """
@@ -603,7 +657,8 @@ class FilesystemRegistry(ABC):
         """Return every path the workspace's index knows about under *subdir*.
 
         ``None`` means there is no index to consult, so callers must walk the
-        filesystem instead. Only :class:`GitFilesystemRegistry` has one.
+        filesystem instead. :class:`GitFilesystemRegistry` reads git's index;
+        :class:`NestedGitFilesystemRegistry` unions its repositories'.
 
         :param subdir: Directory relative to the workspace root, e.g.
             ``"src/app"``; ``""`` for the whole workspace.
@@ -1419,6 +1474,152 @@ class GitFilesystemRegistry(FilesystemRegistry):
         return counts
 
 
+# ── Non-git root holding repositories ────────────────────────────────────────
+
+
+class NestedGitFilesystemRegistry(FilesystemRegistry):
+    """Registry for a workspace that is not inside a git repository.
+
+    A session rooted at a home directory still holds its checkouts a level or
+    two down. Agent tool-call edits are tracked exactly as
+    :class:`AgentEditFilesystemRegistry` does, and every repository
+    :func:`find_nested_git_roots` finds contributes its ``git status``,
+    baselines and index with paths re-rooted at the workspace. Repositories
+    are rediscovered on each changed-files listing, so a checkout cloned
+    mid-session shows up on the next refresh; without any, this behaves as
+    the plain agent-edit registry.
+
+    :param watch_path: The workspace directory, e.g. ``Path("/home/alice")``.
+    """
+
+    def __init__(self, watch_path: Path) -> None:
+        super().__init__(watch_path)
+        self._edits = AgentEditFilesystemRegistry(watch_path)
+        self._repos: dict[str, GitFilesystemRegistry] = {}
+        self._repos_lock = threading.Lock()
+        self._started = False
+        self._discover()
+
+    def _discover(self) -> dict[str, GitFilesystemRegistry]:
+        """Refresh the nested repositories, keyed by workspace-relative prefix."""
+        roots = find_nested_git_roots(self._cwd)
+        with self._repos_lock:
+            repos: dict[str, GitFilesystemRegistry] = {}
+            for repo_root in roots:
+                prefix = repo_root.relative_to(self._cwd).as_posix()
+                registry = self._repos.get(prefix)
+                if registry is None:
+                    registry = GitFilesystemRegistry(repo_root, repo_root)
+                    if self._started:
+                        registry.start()
+                repos[prefix] = registry
+            self._repos = repos
+            return dict(repos)
+
+    def _known_repos(self) -> dict[str, GitFilesystemRegistry]:
+        with self._repos_lock:
+            return dict(self._repos)
+
+    def _owner(self, norm: str) -> tuple[GitFilesystemRegistry, str] | None:
+        """The repository holding workspace-relative *norm*, and the path within it."""
+        posix = norm.replace(os.sep, "/")
+        for prefix, registry in self._known_repos().items():
+            if posix == prefix or posix.startswith(prefix + "/"):
+                return registry, posix[len(prefix) + 1 :]
+        return None
+
+    def start(self) -> None:
+        with self._repos_lock:
+            self._started = True
+            repos = list(self._repos.values())
+        for registry in repos:
+            registry.start()
+
+    def stop(self) -> None:
+        for registry in self._known_repos().values():
+            registry.stop()
+
+    def record_change(self, path: str, operation: str, session_id: str) -> None:
+        self._edits.record_change(path, operation, session_id)
+
+    def seed_snapshot(self, path: str, content: str, *, session_id: str | None = None) -> None:
+        self._edits.seed_snapshot(path, content, session_id=session_id)
+
+    def unregister_conversation(self, conversation_id: str) -> None:
+        self._edits.unregister_conversation(conversation_id)
+
+    def list_tracked_files(self, subdir: str = "") -> list[str] | None:
+        repos = self._known_repos()
+        if not repos:
+            return None
+        scope = subdir.replace(os.sep, "/").strip("/")
+        paths: list[str] = []
+        for prefix, registry in sorted(repos.items()):
+            if not scope:
+                inner, out = "", prefix + "/"
+            elif scope == prefix or scope.startswith(prefix + "/"):
+                inner, out = scope[len(prefix) + 1 :], ""
+            elif prefix.startswith(scope + "/"):
+                inner, out = "", prefix[len(scope) + 1 :] + "/"
+            else:
+                continue
+            tracked = registry.list_tracked_files(inner)
+            if tracked is None:
+                return None
+            paths.extend(out + p for p in tracked)
+        return paths
+
+    def last_changed_files(self) -> list[str] | None:
+        snapshots = [
+            (prefix, paths)
+            for prefix, registry in self._known_repos().items()
+            if (paths := registry.last_changed_files()) is not None
+        ]
+        if not snapshots:
+            return None
+        return [f"{prefix}/{path}" for prefix, paths in snapshots for path in paths]
+
+    def list_changed_files(self, conversation_id: str, *, limit: int) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        for prefix, registry in sorted(self._discover().items()):
+            try:
+                changed = registry.list_changed_files(conversation_id, limit=limit)
+            except GitStatusUnavailable as exc:
+                raise GitStatusUnavailable(f"{prefix}: {exc.reason}") from exc
+            records.extend({**rec, "path": f"{prefix}/{rec['path']}"} for rec in changed)
+        # git status already covers agent edits inside a repository.
+        records.extend(
+            rec
+            for rec in self._edits.list_changed_files(conversation_id, limit=limit)
+            if self._owner(rec["path"]) is None
+        )
+        records.sort(key=lambda r: (r["modified_at"] or 0, r["path"]), reverse=True)
+        return records[:limit]
+
+    def get_changed_file(self, session_id: str, path: str) -> dict[str, Any] | None:
+        norm = _normalize_path(path, self._cwd)
+        if norm is None:
+            return None
+        owner = self._owner(norm)
+        if owner is None:
+            return self._edits.get_changed_file(session_id, norm)
+        registry, inner = owner
+        if not inner:
+            return None
+        record = registry.get_changed_file(session_id, inner)
+        return None if record is None else {**record, "path": norm}
+
+    def get_baseline(self, path: str) -> str | None:
+        norm = _normalize_path(path, self._cwd)
+        if norm is None:
+            return None
+        owner = self._owner(norm)
+        if owner is None:
+            return self._edits.get_baseline(norm)
+        registry, inner = owner
+        return registry.get_baseline(inner) if inner else None
+
+
 # ── Factory ───────────────────────────────────────────────────────────────────
 
 
@@ -1429,7 +1630,8 @@ def create_filesystem_registry(watch_path: Path) -> FilesystemRegistry:
 
     - :class:`GitFilesystemRegistry` when a ``.git`` entry is found at or
       above *watch_path*.
-    - :class:`AgentEditFilesystemRegistry` otherwise.
+    - :class:`NestedGitFilesystemRegistry` otherwise, covering agent edits and
+      any repositories nested below *watch_path*.
 
     :param watch_path: The workspace root to track.
     :returns: A :class:`FilesystemRegistry` instance ready to be used.
@@ -1447,4 +1649,4 @@ def create_filesystem_registry(watch_path: Path) -> FilesystemRegistry:
         git_root = None
     if git_root is not None:
         return GitFilesystemRegistry(watch_path, git_root)
-    return AgentEditFilesystemRegistry(watch_path)
+    return NestedGitFilesystemRegistry(watch_path)

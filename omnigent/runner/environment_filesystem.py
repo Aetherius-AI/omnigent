@@ -1008,6 +1008,13 @@ def match(dirpath, name, is_dir):
         results.append({'n': name, 'p': p, 's': None, 'm': None, 'd': is_dir})
 
 
+def deferred_dir(name):
+    # Dependency caches and hidden directories ('.cache', '.npm') walk last: at
+    # a home-like root they sort first and can hold more entries than the
+    # budget, starving the visible tree.
+    return name in depri or name.startswith('.')
+
+
 def scan(walk_root, defer):
     # A query matching little or nothing never trips the result cap, so the walk
     # needs its own bound. Counted per entry: per-directory would let one huge
@@ -1022,7 +1029,7 @@ def scan(walk_root, defer):
                 continue
             if any(r.match(rel(dirpath, d)) for r in exc):
                 continue
-            if defer and d in depri:
+            if defer and deferred_dir(d):
                 # Match the dir itself now, but walk its subtree later (pass 2)
                 # so it can't starve the real tree of scan budget. Never defer a
                 # symlinked dir: os.walk(root) follows a top-level symlink, so a
@@ -1033,7 +1040,7 @@ def scan(walk_root, defer):
                 if not os.path.islink(full):
                     deferred.append(full)
             kept.append(d)
-        dirnames[:] = [d for d in kept if not (defer and d in depri)]
+        dirnames[:] = [d for d in kept if not (defer and deferred_dir(d))]
         for dname in kept:
             # Count then check `> budget`, not `>= budget`: a tree of exactly
             # `budget` entries is fully enumerable and must not report truncated.
