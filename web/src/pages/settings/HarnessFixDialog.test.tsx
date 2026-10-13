@@ -391,6 +391,15 @@ describe("HarnessFixDialog", () => {
     expect(screen.queryByRole("radio", { name: /Personal subscription/ })).not.toBeInTheDocument();
   });
 
+  it("does not offer credential forms before installing a harness", () => {
+    renderDialog({ mode: "install", harness: "pi-native", harnessLabel: "Pi" });
+
+    expect(screen.getByRole("radio", { name: /Isaac/ })).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Use an API key or gateway URL instead" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("keeps API key and gateway forms reachable through the secondary link", async () => {
     vi.mocked(authenticatedFetch).mockImplementation(async (input) => {
       const url = String(input);
@@ -531,6 +540,8 @@ describe("HarnessFixDialog", () => {
         credentialKind: undefined,
       }),
     );
+    expect(showToast).toHaveBeenCalledTimes(1);
+    expect(showToast).toHaveBeenCalledWith("Codex is ready on Local laptop.");
     expect(
       vi
         .mocked(authenticatedFetch)

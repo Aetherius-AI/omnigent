@@ -23,6 +23,7 @@ import { useHarnessSetupSteps } from "@/lib/agentLabels";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { copyText } from "@/lib/clipboard";
 import { harnessAuthableOnHost, harnessCredentialFamily, isCodexHarness } from "@/lib/harnessSetup";
+import { canonicalNativeHarness } from "@/lib/nativeHarnessModes";
 import { ApiError } from "@/lib/sessionsApi";
 import { cn } from "@/lib/utils";
 import { HarnessCredentialForm } from "@/shell/HarnessCredentialForm";
@@ -50,13 +51,6 @@ type CredentialChoice = "isaac" | "personal";
 type Phase =
   "install" | "choose" | "progress" | "isaac" | "personal" | "credentials" | "setup" | "error";
 
-function canonicalCredentialHarness(harness: string): string {
-  if (harness === "native-claude") return "claude-native";
-  if (harness === "native-codex") return "codex-native";
-  if (harness === "native-pi") return "pi-native";
-  return harness;
-}
-
 export function HarnessFixDialog(props: HarnessFixDialogProps) {
   const { open, onOpenChange, mode, host, harness, harnessLabel, onFixed } = props;
   const hostId = host.host_id;
@@ -64,7 +58,7 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
   const queryClient = useQueryClient();
   const info = useServerInfo();
   const setupSteps = useHarnessSetupSteps();
-  const canonicalHarness = canonicalCredentialHarness(harness);
+  const canonicalHarness = canonicalNativeHarness(harness);
   const credentialFamily = harnessCredentialFamily(harness);
   const loginCommand = useMemo(() => {
     if (isCodexHarness(harness)) return "codex login --device-auth";
@@ -101,13 +95,16 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
       configuredHarnesses: Record<string, boolean | string>,
       credentialKind?: HarnessCredentialKind,
       version?: string | null,
+      announce = true,
     ) => {
       onFixed({
         configuredHarnesses,
         credentialKind,
         ...(version ? { version } : {}),
       });
-      showToast(`${harnessLabel}${version ? ` ${version}` : ""} is ready on ${hostName}`);
+      if (announce) {
+        showToast(`${harnessLabel}${version ? ` ${version}` : ""} is ready on ${hostName}`);
+      }
       onOpenChange(false);
     },
     [harnessLabel, hostName, onFixed, onOpenChange],
@@ -235,7 +232,7 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
   };
 
   const onCredentialStored = (result: StoreCredentialResult) => {
-    finish(result.configured_harnesses);
+    finish(result.configured_harnesses, undefined, undefined, false);
   };
 
   return (
@@ -263,7 +260,7 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
               harnessLabel={harnessLabel}
               isaacSupported={isaacSupported}
               personalSupported={personalSupported}
-              canUseCredentialForm={canUseCredentialForm}
+              canUseCredentialForm={mode !== "install" && canUseCredentialForm}
               onUseCredentialForm={() => setPhase("credentials")}
             />
           ) : phase === "error" ? (
@@ -590,7 +587,7 @@ function CredentialForms({
   );
 }
 
-function Steps({ rows }: { rows: [string, "done" | "active" | "pending"][] }) {
+function Steps({ rows }: { rows: [string, "active" | "pending"][] }) {
   return (
     <div className="flex flex-col gap-2.5">
       {rows.map(([label, status]) => (
@@ -601,9 +598,7 @@ function Steps({ rows }: { rows: [string, "done" | "active" | "pending"][] }) {
             status === "pending" && "text-muted-foreground",
           )}
         >
-          {status === "done" ? (
-            <CheckIcon className="size-4 text-success" />
-          ) : status === "active" ? (
+          {status === "active" ? (
             <Loader2Icon aria-label="In progress" className="size-4 animate-spin" />
           ) : (
             <CircleIcon className="size-3 fill-muted text-muted" />

@@ -121,7 +121,6 @@ export const SettingsHarnessesSection = () => {
   );
   const selectedHost =
     onlineHosts.find((h) => h.host_id === selectedHostId) ?? onlineHosts[0] ?? null;
-  const host = selectedHost;
 
   // Capture the selected host when the fix opens so a later host change cannot
   // redirect an in-progress install or credential write to another machine.
@@ -137,10 +136,10 @@ export const SettingsHarnessesSection = () => {
     const q = query.trim().toLowerCase();
     return HARNESS_ENTRIES.filter(
       (h) =>
-        (!installedOnly || harnessStatus(h.harness, host).ready) &&
+        (!installedOnly || harnessStatus(h.harness, selectedHost).ready) &&
         (!q || h.name.toLowerCase().includes(q) || h.description.toLowerCase().includes(q)),
     );
-  }, [query, installedOnly, host]);
+  }, [query, installedOnly, selectedHost]);
 
   const detail = HARNESS_ENTRIES.find((entry) => entry.harness === harness);
 
@@ -150,23 +149,25 @@ export const SettingsHarnessesSection = () => {
         <HarnessDetail
           key={detail.harness}
           entry={detail}
-          host={host}
+          host={selectedHost}
           canSetup={canSetup}
-          credentialKind={host ? credentialKinds[`${host.host_id}:${detail.harness}`] : undefined}
+          credentialKind={
+            selectedHost ? credentialKinds[`${selectedHost.host_id}:${detail.harness}`] : undefined
+          }
           readyNotice={
             readyNotice !== null &&
-            readyNotice.hostId === host?.host_id &&
+            readyNotice.hostId === selectedHost?.host_id &&
             readyNotice.harness === detail.harness
               ? readyNotice
               : null
           }
-          onFix={(mode) => host && openFix(detail, host, mode)}
+          onFix={(mode) => selectedHost && openFix(detail, selectedHost, mode)}
         />
       ) : (
         <>
           <div className="flex flex-wrap items-center justify-between gap-4 pb-6">
             <h1 className="settings-page-title text-2xl font-semibold">Harnesses</h1>
-            <HostSelect hosts={sortedHosts} selected={host} onSelect={setSelectedHostId} />
+            <HostSelect hosts={sortedHosts} selected={selectedHost} onSelect={setSelectedHostId} />
           </div>
           <div className="mb-6 flex items-center gap-2">
             <div className="flex h-8 flex-1 items-center gap-2 rounded-lg border border-border px-2.5">
@@ -193,7 +194,7 @@ export const SettingsHarnessesSection = () => {
               </TabsList>
             </Tabs>
           </div>
-          {!host && <NoHostNotice />}
+          {!selectedHost && <NoHostNotice />}
           {filtered.length === 0 && (
             <p className="text-ui text-muted-foreground">
               {query.trim() ? `No harnesses match “${query}”.` : "No installed harnesses."}
@@ -203,19 +204,21 @@ export const SettingsHarnessesSection = () => {
             className={cn(
               "grid grid-cols-1 gap-3 @[520px]:grid-cols-2",
               // No host to resolve status against — dim the catalog to read as inactive.
-              !host && "opacity-50",
+              !selectedHost && "opacity-50",
             )}
           >
             {filtered.map((entry) => (
               <HarnessCard
                 key={entry.harness}
                 entry={entry}
-                host={host}
+                host={selectedHost}
                 canSetup={canSetup}
                 credentialKind={
-                  host ? credentialKinds[`${host.host_id}:${entry.harness}`] : undefined
+                  selectedHost
+                    ? credentialKinds[`${selectedHost.host_id}:${entry.harness}`]
+                    : undefined
                 }
-                onFix={(mode) => host && openFix(entry, host, mode)}
+                onFix={(mode) => selectedHost && openFix(entry, selectedHost, mode)}
               />
             ))}
           </div>
