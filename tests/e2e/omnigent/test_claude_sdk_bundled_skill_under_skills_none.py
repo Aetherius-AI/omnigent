@@ -13,12 +13,11 @@ import uuid
 from pathlib import Path
 
 import claude_agent_sdk
-import httpx
 import pytest
 
 from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor, _find_system_claude
 from omnigent.inner.executor import ToolCallComplete, ToolCallStatus
-from tests.e2e.conftest import configure_mock_llm, reset_mock_llm
+from tests.e2e.conftest import configure_mock_llm, get_mock_requests, reset_mock_llm
 
 _AGENT_NAME = "probe-agent"
 _TURN_TIMEOUT_SEC = 120
@@ -102,12 +101,11 @@ def _run_skill_turn(
 
 def _turn_request(mock_llm_server_url: str, token: str) -> str:
     """The JSON of the first model request for this turn that offers the ``Skill`` tool."""
-    captured = httpx.get(f"{mock_llm_server_url}/mock/requests", timeout=10.0).json()
-    bodies = captured.get("requests", []) if isinstance(captured, dict) else captured
-    for body in bodies:
-        tools = body.get("tools") or [] if isinstance(body, dict) else []
+    for body in get_mock_requests(mock_llm_server_url):
         dumped = json.dumps(body, default=str)
-        if token in dumped and any(tool.get("name") == "Skill" for tool in tools):
+        if token in dumped and any(
+            tool.get("name") == "Skill" for tool in body.get("tools") or []
+        ):
             return dumped
     raise AssertionError("no provider request carried the turn with the Skill tool")
 

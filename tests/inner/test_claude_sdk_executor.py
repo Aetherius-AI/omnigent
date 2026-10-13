@@ -2292,21 +2292,15 @@ class TestSkillsFilterTranslation(unittest.TestCase):
         self.assertEqual(result.skills, "all")
         self.assertIsNone(result.setting_sources)
 
-    def test_none_zeros_skills_and_setting_sources(self) -> None:
+    def test_none_without_bundle_skills_zeros_skills_and_setting_sources(self) -> None:
         """
-        ``"none"`` → SDK ``skills=[]`` AND
+        ``"none"`` with no bundled skills → SDK ``skills=[]`` AND
         ``setting_sources=[]``.
 
-        BOTH must be set to truly suppress host skills. The SDK's
-        ``_apply_skills_defaults`` auto-fills
-        ``setting_sources=["user","project"]`` when ``skills`` is
-        non-None — including when ``skills=[]``. That auto-default
-        loads ``~/.claude/skills/`` into the system prompt
-        listing even though the ``Skill`` tool itself is hidden.
-        Forcing ``setting_sources=[]`` is what actually keeps the
-        listing empty. The user-reported regression: with only
-        ``skills=[]`` set, ``skills: none`` in YAML still showed
-        every host skill in the model's output.
+        Both must be set: the SDK's ``_apply_skills_defaults`` auto-fills
+        ``setting_sources=["user","project"]`` whenever ``skills`` is
+        non-None, which would load ``~/.claude/skills/`` into the system
+        prompt listing even though nothing is allowlisted.
         """
         from omnigent.inner.claude_sdk_executor import _resolve_skills_option
 
