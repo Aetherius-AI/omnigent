@@ -78,6 +78,7 @@ from omnigent.server.host_registry import (
     HostRegistry,
     RunnerExitReports,
 )
+from omnigent.server.tunnel_handshake import receive_tunnel_hello
 from omnigent.stores.host_store import HostStore
 
 _logger = logging.getLogger(__name__)
@@ -312,7 +313,9 @@ def create_host_tunnel_router(
         host_persisted = False
         stage = "hello"
         try:
-            raw = await ws.receive_text()
+            raw = await receive_tunnel_hello(ws, peer_kind="host", peer_id=host_id)
+            if raw is None:
+                return
             frame = decode_host_frame(raw)
             if not isinstance(frame, HostHelloFrame):
                 error = "expected host.hello frame"
@@ -704,7 +707,9 @@ async def _receive_loop(
             # the cause so the runner status endpoint can answer "offline, and
             # here is why" to the client still waiting for the runner to connect.
             if runner_exit_reports is not None:
-                runner_exit_reports.record(frame.runner_id, frame.error, conn.owner)
+                runner_exit_reports.record(
+                    frame.runner_id, frame.error, conn.owner, had_connected=frame.had_connected
+                )
             if on_runner_exited is None:
                 log_runner_exited(host_id, frame.runner_id, frame.error)
             else:

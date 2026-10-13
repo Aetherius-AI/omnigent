@@ -319,7 +319,7 @@ interface FileViewerProps {
    * when the viewer is embedded inside the inline right panel.
    */
   frameless?: boolean;
-  /** Only the viewer for the active layout synchronizes the URL. */
+  /** Only the active viewport mounts the diff editor and synchronizes the URL. */
   viewport?: "desktop" | "mobile";
   /** Called when the user presses Escape to close the active file tab. */
   onCloseTab?: () => void;
@@ -371,7 +371,7 @@ function FileViewerBody({
   const canEdit = permissionLevel == null || permissionLevel >= 2;
   const [searchParams, setSearchParams] = useSearchParams();
   const isMobile = useIsMobileViewport();
-  const ownsUrl = viewport === undefined || (viewport === "mobile") === isMobile;
+  const isActiveViewport = viewport === undefined || (viewport === "mobile") === isMobile;
   // Capture URL params once on open — we don't want re-renders caused by our own
   // param writes to re-run the initialization logic.
   const initialDiffRef = useRef(searchParams.get("diff") === "1");
@@ -619,6 +619,9 @@ function FileViewerBody({
 
   // Find-in-file state lifted here so the toolbar button can open it.
   const [searchOpen, setSearchOpen] = useState(false);
+  // Bumped on every Cmd+F so the Monaco surfaces re-run find (refocusing its
+  // input) when the widget is already open and `searchOpen` can't change.
+  const [searchFocusNonce, setSearchFocusNonce] = useState(0);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const openSearch = useCallback(() => {
     setSearchOpen((prev) => {
@@ -894,6 +897,7 @@ function FileViewerBody({
       e.preventDefault();
       e.stopPropagation();
       setSearchOpen(true);
+      setSearchFocusNonce((n) => n + 1);
     };
     // Capture phase so the embed claims Cmd+F ahead of the host page's own
     // listeners and the browser's native find (which would search the whole
@@ -951,7 +955,7 @@ function FileViewerBody({
   // that AppShell writes (React Router v7 BrowserRouter defers via startTransition,
   // so stale searchParams seen here could emit a navigate("?") that strips it).
   useEffect(() => {
-    if (!open || !ownsUrl) return;
+    if (!open || !isActiveViewport) return;
     const wantDiff = diffActive && isDiffAvailable;
     const hasDiff = searchParams.has("diff");
     if (wantDiff === hasDiff) return; // already in sync — no navigate needed
@@ -967,7 +971,7 @@ function FileViewerBody({
       },
       { replace: true },
     );
-  }, [diffActive, isDiffAvailable, open, ownsUrl, searchParams, setSearchParams]);
+  }, [diffActive, isDiffAvailable, open, isActiveViewport, searchParams, setSearchParams]);
 
   // Toolbar actions, declared once and rendered two ways: inline icon buttons
   // when there's room, or rows in an overflow ("⋯") menu when there isn't.
@@ -1619,33 +1623,37 @@ function FileViewerBody({
                 Loading diff…
               </div>
             ) : (
-              <Suspense
-                fallback={
-                  <div className="flex items-center justify-center p-8 text-muted-foreground text-ui">
-                    Loading diff…
-                  </div>
-                }
-              >
-                {/* key={path} remounts per file so onMount re-runs (EOL + comment
+              // Keep viewer state on resize without computing the CSS-hidden copy's diff.
+              isActiveViewport && (
+                <Suspense
+                  fallback={
+                    <div className="flex items-center justify-center p-8 text-muted-foreground text-ui">
+                      Loading diff…
+                    </div>
+                  }
+                >
+                  {/* key={path} remounts per file so onMount re-runs (EOL + comment
                   wiring re-applied) and `ready` resets while the new grammar loads. */}
-                <MonacoDiffViewer
-                  position={filePosition}
-                  key={path}
-                  before={diffQuery.data.before}
-                  after={diffQuery.data.after}
-                  path={path}
-                  layout={diffLayout}
-                  hideWhitespace={hideWhitespace}
-                  wrapLines={wrapLines}
-                  conversationId={conversationId}
-                  comments={openComments}
-                  activeSelection={activeSelection}
-                  onSetActiveSelection={handleSetActiveSelection}
-                  pendingBodyRef={pendingBodyRef}
-                  searchOpen={searchOpen}
-                  onSearchHandled={handleSearchHandled}
-                />
-              </Suspense>
+                  <MonacoDiffViewer
+                    position={filePosition}
+                    key={path}
+                    before={diffQuery.data.before}
+                    after={diffQuery.data.after}
+                    path={path}
+                    layout={diffLayout}
+                    hideWhitespace={hideWhitespace}
+                    wrapLines={wrapLines}
+                    conversationId={conversationId}
+                    comments={openComments}
+                    activeSelection={activeSelection}
+                    onSetActiveSelection={handleSetActiveSelection}
+                    pendingBodyRef={pendingBodyRef}
+                    searchOpen={searchOpen}
+                    searchFocusNonce={searchFocusNonce}
+                    onSearchHandled={handleSearchHandled}
+                  />
+                </Suspense>
+              )
             )
           ) : (
             <CodeViewer
@@ -1663,6 +1671,7 @@ function FileViewerBody({
               panelOpen={open}
               searchOpen={searchOpen}
               setSearchOpen={setSearchOpen}
+              searchFocusNonce={searchFocusNonce}
               searchInputRef={searchInputRef}
               viewMode={viewMode}
               tocOpen={tocOpen}
