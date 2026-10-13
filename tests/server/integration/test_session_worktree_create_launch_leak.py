@@ -18,6 +18,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 
+from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.host.frames import (
     HostCreateWorktreeFrame,
     HostHelloFrame,
@@ -700,19 +701,22 @@ async def test_inline_create_launch_failure_skips_grant_when_session_vanished(
 
 async def test_inline_create_launch_failure_holds_relaunch_lock_across_rollback(
     register_worktree_launch_host: RegisterHost,
+    app: FastAPI,
     client: httpx.AsyncClient,
     db_uri: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The rollback runs under the per-conversation relaunch lock across the
-    ownership check, worktree removal, and binding clear, so a concurrent
-    first-message relaunch cannot rebind a new runner mid-rollback and have its
-    fresh worktree removed."""
+    ownership check, worktree removal, and binding clear. A production relaunch
+    that raced the failed launch therefore waits, re-reads the row the rollback
+    has just unbound, and is refused by host admission: no runner is launched
+    into the removed worktree and the persisted binding stays cleared."""
+    from omnigent.server.routes._sessions import helpers as sessions_helpers
     from omnigent.server.routes._sessions.helpers import relaunch_lock_for
-    from omnigent.server.routes.sessions import routes_core
 
     cap = register_worktree_launch_host(launch_status="failed")
     agent = await create_test_agent(client, name="wt-lock-agent")
+    store = SqlAlchemyConversationStore(db_uri)
 
     in_removal = asyncio.Event()
     proceed = asyncio.Event()
@@ -723,63 +727,84 @@ async def test_inline_create_launch_failure_holds_relaunch_lock_across_rollback(
         conv_id = kwargs["exclude_conversation_id"]
         observed["conv_id"] = conv_id
         observed["locked_at_removal"] = relaunch_lock_for(conv_id).locked()
+        # The row as a racing first-message relaunch would have snapshotted it:
+        # still bound to the failed launch's runner and worktree.
+        observed["snapshot"] = store.get_conversation(conv_id)
         in_removal.set()
         await proceed.wait()
         return True
 
-    monkeypatch.setattr(routes_core, "_remove_session_worktree_best_effort", _barrier_remove)
+    monkeypatch.setattr(sessions_helpers, "_remove_session_worktree_best_effort", _barrier_remove)
 
     create = asyncio.create_task(
         _create_git_session(
             client, agent["id"], {"branch_name": "feature/lock", "base_branch": "main"}
         )
     )
-    got_lock = asyncio.Event()
-    waiter_started = asyncio.Event()
-    waiter: asyncio.Task[None] | None = None
+    relaunch_started = asyncio.Event()
+    relaunch_outcome: dict[str, Any] = {}
+    relaunch: asyncio.Task[None] | None = None
     try:
         await asyncio.wait_for(in_removal.wait(), timeout=5)
         conv_id = observed["conv_id"]
+        snapshot = observed["snapshot"]
         assert observed["locked_at_removal"] is True, "rollback must hold the relaunch lock"
         assert relaunch_lock_for(conv_id).locked() is True
+        assert snapshot is not None and snapshot.host_id == _HOST_ID, snapshot
+        host_conn = app.state.host_registry.get(_HOST_ID)
+        assert host_conn is not None
 
-        async def _relaunch_waiter() -> None:
-            # Signal before blocking so the probe below cannot pass vacuously.
-            waiter_started.set()
-            async with relaunch_lock_for(conv_id):
-                got_lock.set()
+        async def _production_relaunch() -> None:
+            # The real single-flight relaunch: it must wait on the lock, then
+            # re-read the row instead of launching from the stale snapshot.
+            relaunch_started.set()
+            try:
+                relaunch_outcome["attempt"] = await sessions_helpers._launch_runner_on_host_impl(
+                    snapshot, store, app.state.host_registry, host_conn
+                )
+            except OmnigentError as exc:
+                relaunch_outcome["error"] = exc
 
-        waiter = asyncio.create_task(_relaunch_waiter())
-        await asyncio.wait_for(waiter_started.wait(), timeout=5)
+        relaunch = asyncio.create_task(_production_relaunch())
+        await asyncio.wait_for(relaunch_started.wait(), timeout=5)
         await asyncio.sleep(0.05)
-        # The rollback still holds the lock here, so the waiter is deterministically
+        # The rollback still holds the lock here, so the relaunch is deterministically
         # excluded; the sleep only gives a buggy, lock-free rollback time to slip.
         assert relaunch_lock_for(conv_id).locked(), (
             "rollback released the relaunch lock mid-removal"
         )
-        assert not got_lock.is_set(), "a concurrent relaunch acquired the lock during the rollback"
+        assert not relaunch.done(), "a concurrent relaunch ran during the rollback"
+        assert len(cap.launch) == 1, (
+            f"a relaunch sent a launch frame mid-rollback; unexpected={cap.unexpected}"
+        )
 
         proceed.set()
         resp = await asyncio.wait_for(create, timeout=5)
-        await asyncio.wait_for(got_lock.wait(), timeout=5)
-        await waiter
+        await asyncio.wait_for(relaunch, timeout=5)
 
         assert resp.status_code == 201, resp.text
         body = resp.json()
         assert body["host_id"] is None and body["runner_id"] is None, body
+        # The relaunch re-read the unbound row and host admission refused it, so
+        # no runner was bound or launched into the removed worktree.
+        assert "attempt" not in relaunch_outcome, relaunch_outcome
+        error = relaunch_outcome.get("error")
+        assert isinstance(error, OmnigentError) and error.code == ErrorCode.UNAUTHORIZED, error
         assert len(cap.launch) == 1, (
-            f"expected one launch_runner frame; unexpected={cap.unexpected}"
+            f"expected only the failed launch frame; unexpected={cap.unexpected}"
         )
         assert cap.remove == [], f"the barrier stands in for real removal: {cap.remove}"
 
-        conv = SqlAlchemyConversationStore(db_uri).get_conversation(body["id"])
+        conv = store.get_conversation(body["id"])
         assert conv is not None
         assert conv.host_id is None and conv.workspace is None and conv.git_branch is None
+        assert conv.runner_id is None, conv.runner_id
+        assert WORKTREE_ROOT_LABEL_KEY not in conv.labels
     finally:
         # Unblock and drain the background tasks so a failed assertion above
         # surfaces cleanly, not as a destroyed-pending-task warning.
         proceed.set()
-        for task in (create, waiter):
+        for task in (create, relaunch):
             if task is not None and not task.done():
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -815,89 +840,64 @@ async def test_inline_create_launch_timeout_cleans_up_worktree(
     assert WORKTREE_ROOT_LABEL_KEY not in conv.labels
 
 
-async def test_inline_create_launch_failure_tolerates_reread_error(
+@pytest.mark.parametrize("fault", ["reread", "shared_check"])
+async def test_inline_create_launch_failure_tolerates_pre_removal_store_error(
     register_worktree_launch_host: RegisterHost,
     client: httpx.AsyncClient,
     db_uri: str,
     monkeypatch: pytest.MonkeyPatch,
+    fault: str,
 ) -> None:
-    """A transient store error on the rollback's re-read must not 500 the create.
-    The removal never runs, so the response and the persisted row keep reporting
-    the binding and the root label for a later delete or archive to retry."""
+    """A transient store error before the host round-trip, on the rollback's
+    re-read or in the shared-worktree guard inside the removal helper, must not
+    500 the create. No removal runs, so the response and the persisted row keep
+    reporting the binding and the root label for a later delete or archive."""
     cap = register_worktree_launch_host(launch_status="failed")
-    agent = await create_test_agent(client, name="wt-rereaderr-agent")
-
-    original_get = SqlAlchemyConversationStore.get_conversation
+    agent = await create_test_agent(client, name=f"wt-{fault}-err-agent")
     raised = {"done": False}
 
-    def _raising_get(self: SqlAlchemyConversationStore, conversation_id: str) -> Any:
-        conv = original_get(self, conversation_id)
-        # Raise once, on the rollback's re-read after the failed launch, standing
-        # in for a transient store error reading the row back.
-        if not raised["done"] and cap.launch and conv is not None and conv.runner_id is not None:
+    if fault == "reread":
+        original_get = SqlAlchemyConversationStore.get_conversation
+
+        def _raising_get(self: SqlAlchemyConversationStore, conversation_id: str) -> Any:
+            conv = original_get(self, conversation_id)
+            # Raise once, on the rollback's re-read after the failed launch.
+            if (
+                not raised["done"]
+                and cap.launch
+                and conv is not None
+                and conv.runner_id is not None
+            ):
+                raised["done"] = True
+                raise RuntimeError("transient store error")
+            return conv
+
+        monkeypatch.setattr(SqlAlchemyConversationStore, "get_conversation", _raising_get)
+    else:
+
+        def _shared_boom(self: SqlAlchemyConversationStore, **kwargs: Any) -> bool:
             raised["done"] = True
             raise RuntimeError("transient store error")
-        return conv
 
-    monkeypatch.setattr(SqlAlchemyConversationStore, "get_conversation", _raising_get)
+        monkeypatch.setattr(
+            SqlAlchemyConversationStore, "has_other_live_session_in_workspace", _shared_boom
+        )
 
+    branch = f"feature/{fault}-err"
     resp = await _create_git_session(
-        client, agent["id"], {"branch_name": "feature/rereaderr", "base_branch": "main"}
+        client, agent["id"], {"branch_name": branch, "base_branch": "main"}
     )
     assert resp.status_code == 201, resp.text
-    assert raised["done"], "the rollback never re-read the row, so the failure was not exercised"
+    assert raised["done"], f"the {fault} fault was never hit, so the failure was not exercised"
     assert cap.remove == [], (
-        f"the re-read failed before any removal, so none must be sent: {cap.remove}; "
-        f"unexpected={cap.unexpected}"
-    )
-    worktree_path = f"{_SOURCE_REPO}-worktrees/feature-rereaderr"
-    body = resp.json()
-    # The re-read failed, so the binding and root label stay for a later retry.
-    assert body["host_id"] == _HOST_ID and body["runner_id"] is not None, body
-    assert body["workspace"] == worktree_path and body["git_branch"] == "feature/rereaderr", body
-    assert body["labels"].get(WORKTREE_ROOT_LABEL_KEY) == worktree_root_fingerprint(
-        worktree_path
-    ), body
-
-    conv = SqlAlchemyConversationStore(db_uri).get_conversation(body["id"])
-    assert conv is not None
-    assert conv.host_id == _HOST_ID and conv.runner_id is not None
-    assert conv.workspace == worktree_path and conv.git_branch == "feature/rereaderr"
-    assert conv.labels.get(WORKTREE_ROOT_LABEL_KEY) == worktree_root_fingerprint(worktree_path)
-
-
-async def test_inline_create_launch_failure_tolerates_shared_worktree_check_error(
-    register_worktree_launch_host: RegisterHost,
-    client: httpx.AsyncClient,
-    db_uri: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A transient store error in the shared-worktree guard, which runs inside the
-    removal helper before the host round-trip, must not 500 the create. Removal is
-    unconfirmed, so the binding and root label stay for a later delete or archive."""
-    cap = register_worktree_launch_host(launch_status="failed")
-    agent = await create_test_agent(client, name="wt-sharederr-agent")
-
-    def _shared_boom(self: SqlAlchemyConversationStore, **kwargs: Any) -> bool:
-        raise RuntimeError("transient store error")
-
-    monkeypatch.setattr(
-        SqlAlchemyConversationStore, "has_other_live_session_in_workspace", _shared_boom
-    )
-
-    resp = await _create_git_session(
-        client, agent["id"], {"branch_name": "feature/sharederr", "base_branch": "main"}
-    )
-    assert resp.status_code == 201, resp.text
-    assert cap.remove == [], (
-        f"the guard failed before the host round-trip, so no removal must be sent: "
+        f"the {fault} fault precedes the host round-trip, so no removal must be sent: "
         f"{cap.remove}; unexpected={cap.unexpected}"
     )
-    worktree_path = f"{_SOURCE_REPO}-worktrees/feature-sharederr"
+    worktree_path = f"{_SOURCE_REPO}-worktrees/feature-{fault}-err"
     body = resp.json()
-    # The guard failed, so removal is unconfirmed and the binding and label stay.
+    # Removal is unconfirmed, so the binding and root label stay for a later retry.
     assert body["host_id"] == _HOST_ID and body["runner_id"] is not None, body
-    assert body["workspace"] == worktree_path and body["git_branch"] == "feature/sharederr", body
+    assert body["workspace"] == worktree_path and body["git_branch"] == branch, body
     assert body["labels"].get(WORKTREE_ROOT_LABEL_KEY) == worktree_root_fingerprint(
         worktree_path
     ), body
@@ -905,7 +905,7 @@ async def test_inline_create_launch_failure_tolerates_shared_worktree_check_erro
     conv = SqlAlchemyConversationStore(db_uri).get_conversation(body["id"])
     assert conv is not None
     assert conv.host_id == _HOST_ID and conv.runner_id is not None
-    assert conv.workspace == worktree_path and conv.git_branch == "feature/sharederr"
+    assert conv.workspace == worktree_path and conv.git_branch == branch
     assert conv.labels.get(WORKTREE_ROOT_LABEL_KEY) == worktree_root_fingerprint(worktree_path)
 
 
