@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import logging
 import posixpath
 import tarfile
 import tempfile
@@ -23,6 +24,8 @@ if TYPE_CHECKING:
     from omnigent.entities import Agent
     from omnigent.stores.agent_store import AgentStore
     from omnigent.stores.artifact_store import ArtifactStore
+
+_logger = logging.getLogger(__name__)
 
 
 def _is_dotted_callable_path(path: str) -> bool:
@@ -187,8 +190,22 @@ def agent_needs_own_copy(agent: Agent, user_id: str | None) -> bool:
 
 
 def copy_agent_bundle(artifact_store: ArtifactStore, location: str, new_agent_id: str) -> str:
-    """Store a copy of the bundle at *location* under *new_agent_id*; return its location."""
-    data = artifact_store.get(location)
+    """Store a copy of the bundle at *location* under *new_agent_id*; return its location.
+
+    :raises OmnigentError: ``session_agent_missing`` when the artifact store no
+        longer holds the bundle at *location*, so the caller can offer another agent.
+    """
+    try:
+        data = artifact_store.get(location)
+    except KeyError as exc:
+        _logger.warning(
+            "agent bundle %s is missing from the artifact store; cannot copy it", location
+        )
+        raise OmnigentError(
+            "This agent's bundle no longer exists, so it cannot be copied. "
+            "Choose another agent to continue.",
+            code=ErrorCode.SESSION_AGENT_MISSING,
+        ) from exc
     new_location = bundle_location(new_agent_id, data)
     artifact_store.put(new_location, data)
     return new_location
