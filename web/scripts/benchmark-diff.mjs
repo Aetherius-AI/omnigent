@@ -71,7 +71,10 @@ for (const { name, before, after } of fixtures) {
       reconstructed.splice(
         change.original.startLineNumber - 1,
         change.original.length,
-        ...after.slice(change.modified.startLineNumber - 1, change.modified.endLineNumberExclusive - 1),
+        ...after.slice(
+          change.modified.startLineNumber - 1,
+          change.modified.endLineNumberExclusive - 1,
+        ),
       );
     }
     assert.deepEqual(reconstructed, after, `${name}: diff omitted changed content`);
@@ -84,7 +87,10 @@ for (const { name, before, after } of fixtures) {
         durationMs: Math.round(durationMs * 10) / 10,
         hitTimeout: diff.hitTimeout,
         hunks: diff.changes.length,
-        innerChanges: diff.changes.reduce((sum, change) => sum + (change.innerChanges?.length ?? 0), 0),
+        innerChanges: diff.changes.reduce(
+          (sum, change) => sum + (change.innerChanges?.length ?? 0),
+          0,
+        ),
         hunksWithoutInnerChanges: diff.changes.filter((change) => !change.innerChanges).length,
       }),
     );
