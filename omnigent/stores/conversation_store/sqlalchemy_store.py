@@ -36,6 +36,7 @@ from omnigent.db.compression import encode as compress_text
 from omnigent.db.converters import sql_agent_to_entity
 from omnigent.db.db_models import (
     LABEL_VALUE_MAX_LEN,
+    RUNNER_ID_MAX_LENGTH,
     SqlAgent,
     SqlComment,
     SqlConversation,
@@ -3739,7 +3740,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         """
         if not runner_ids:
             return
-        from sqlalchemy import update
+        from sqlalchemy import case, update
 
         def write(session: Session) -> None:
             session.execute(
@@ -3749,7 +3750,16 @@ class SqlAlchemyConversationStore(ConversationStore):
                     SqlConversationMetadata.runner_id.in_(runner_ids),
                 )
                 .values(
-                    runner_last_seen=now, runner_connected_id=SqlConversationMetadata.runner_id
+                    runner_last_seen=now,
+                    # SQLite does not enforce String(n): leave the marker unset for
+                    # an oversized legacy id rather than store an unbounded value.
+                    runner_connected_id=case(
+                        (
+                            func.length(SqlConversationMetadata.runner_id) <= RUNNER_ID_MAX_LENGTH,
+                            SqlConversationMetadata.runner_id,
+                        ),
+                        else_=None,
+                    ),
                 )
             )
 

@@ -15,6 +15,7 @@ from sqlalchemy import event, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
+from omnigent.db.db_models import RUNNER_ID_MAX_LENGTH
 from omnigent.db.utils import get_or_create_engine
 from omnigent.entities import (
     CompactionData,
@@ -7101,6 +7102,27 @@ def test_runner_connection_history_tracks_the_binding(
     assert connected is not None and connected.runner_has_connected
     assert connected.runner_connected_id == "runner-new"
     assert connected.runner_last_seen == 3
+
+    conversation_store.replace_runner_id(conv.id, "runner-replacement")
+    conversation_store.touch_runner_liveness(["runner-new"], now=4)
+    replaced = conversation_store.get_conversation(conv.id)
+    assert replaced is not None
+    assert not replaced.runner_has_connected
+    assert replaced.runner_connected_id == "runner-new"
+    assert replaced.runner_last_seen == 3
+
+
+def test_runner_connection_history_skips_oversized_runner_ids(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    oversized = "runner_" + "x" * RUNNER_ID_MAX_LENGTH
+    conv = conversation_store.create_conversation(runner_id=oversized)
+    conversation_store.touch_runner_liveness([oversized], now=1)
+    refreshed = conversation_store.get_conversation(conv.id)
+    assert refreshed is not None
+    assert refreshed.runner_last_seen == 1
+    assert refreshed.runner_connected_id is None
+    assert not refreshed.runner_has_connected
 
 
 def test_live_state_columns_round_trip_without_bumping_updated_at(

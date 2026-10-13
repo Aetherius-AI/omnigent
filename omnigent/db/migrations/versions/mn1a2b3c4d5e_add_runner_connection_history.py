@@ -1,4 +1,22 @@
-"""Retain connection evidence for the runner bound to a session."""
+"""Retain connection evidence for the runner bound to a session.
+
+Revision ID: mn1a2b3c4d5e
+Revises: mm1a2b3c4d5e
+Create Date: 2026-10-13 00:00:00.000000
+
+Adds ``runner_connected_id`` (nullable String(64)) to
+``omnigent_conversation_metadata``: the bound ``runner_id`` whose tunnel
+heartbeat was persisted, kept when the live ``runner_last_seen`` stamp is
+cleared on disconnect. Existing rows stay NULL; connection history is not
+inferred from old heartbeats.
+
+Deployment: the column is additive and nullable, so the schema can ship
+ahead of the application change that reads it. The server runs
+``alembic upgrade head`` at startup, so the column exists before the new
+reader starts. Older servers ignore it (the ORM selects only mapped
+columns), so rolling the application back needs no schema change; run the
+downgrade only once no deployed server maps the column.
+"""
 
 from __future__ import annotations
 

@@ -636,6 +636,10 @@ class SqlSessionPermission(OmnigentBase):
     )
 
 
+# Bound shared by ``runner_id`` and the connection marker copied from it.
+RUNNER_ID_MAX_LENGTH = 64
+
+
 class SqlConversationMetadata(OmnigentBase):
     """
     SQLAlchemy model for the ``omnigent_conversation_metadata`` table.
@@ -658,7 +662,7 @@ class SqlConversationMetadata(OmnigentBase):
     id: Mapped[str] = mapped_column(Uuid16(), primary_key=True)
     # Enum stored as a stable int code (CONVERSATION_KIND: default=1, sub_agent=2).
     kind: Mapped[int] = mapped_column(SmallInteger, default=1)
-    runner_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    runner_id: Mapped[str | None] = mapped_column(String(RUNNER_ID_MAX_LENGTH), nullable=True)
     # No FK: host records are managed outside this table.
     host_id: Mapped[str | None] = mapped_column(Uuid16(), nullable=True)
     sub_agent_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -681,7 +685,9 @@ class SqlConversationMetadata(OmnigentBase):
     # runner_online is derived from freshness (like host_is_live).
     runner_last_seen: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # The binding whose heartbeat was observed; retained while offline.
-    runner_connected_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    runner_connected_id: Mapped[str | None] = mapped_column(
+        String(RUNNER_ID_MAX_LENGTH), nullable=True
+    )
     # Last relay-observed turn status (enum_codecs.SESSION_LIVE_STATUS);
     # NULL means no relay has ever reported on this session.
     live_status: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
