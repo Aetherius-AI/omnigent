@@ -89,7 +89,8 @@ class _MockGemini:
                 body = json.loads(self.rfile.read(length) or b"{}")
                 with mock._lock:
                     mock.requests.append(body)
-                payload = mock._respond(self.path, body)
+                    index = len(mock.requests)
+                payload = mock._respond(self.path, body, index)
                 self.send_response(200)
                 content_type = (
                     "text/event-stream" if "alt=sse" in self.path else "application/json"
@@ -106,7 +107,7 @@ class _MockGemini:
         self.url = f"http://127.0.0.1:{self._httpd.server_address[1]}"
         threading.Thread(target=self._httpd.serve_forever, daemon=True).start()
 
-    def _respond(self, path: str, body: dict[str, Any]) -> bytes:
+    def _respond(self, path: str, body: dict[str, Any], index: int) -> bytes:
         if ":countTokens" in path:
             return json.dumps({"totalTokens": 16}).encode()
         contents = body.get("contents") or []
@@ -137,7 +138,7 @@ class _MockGemini:
                 "totalTokenCount": 40,
             },
             "modelVersion": "gemini-2.5-flash",
-            "responseId": f"e2e-{len(self.requests)}",
+            "responseId": f"e2e-{index}",
         }
         data = json.dumps(chunk).encode()
         if "alt=sse" in path:

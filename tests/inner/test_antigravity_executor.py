@@ -1596,33 +1596,18 @@ async def test_user_denied_run_command_is_a_tool_error_not_a_turn_failure(
     assert not any(isinstance(e, ExecutorError) for e in events)
 
 
+async def _broken_bridge(tool_name: str, tool_input: dict[str, Any]) -> bool:
+    raise RuntimeError("elicitation transport down")
+
+
+@pytest.mark.parametrize(
+    "bridge", [None, _broken_bridge], ids=["no-elicitation-handler", "bridge-raises"]
+)
 @pytest.mark.asyncio
-async def test_run_command_confirmation_fails_closed_without_elicitation_handler(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_run_command_confirmation_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, bridge: Any
 ) -> None:
-    """With no approval bridge wired, the confirmation fails closed and the turn completes."""
-    script: list[_TurnAction] = [
-        _ConfirmRunCommand(_RUN_COMMAND),
-        _denied_tool_step(_RUN_COMMAND_DENIAL),
-        _text_step("ok"),
-    ]
-    captured = _install_fake_sdk(monkeypatch, scripts=[script])
-    executor = AntigravityExecutor()  # _elicitation_handler stays None
-
-    events = await _drain(executor, [{"role": "user", "content": "run ls", "session_id": "s1"}])
-
-    assert captured["agents"][0].conversation.confirmations == [("run_command", False)]
-    completes = [e for e in events if isinstance(e, ToolCallComplete)]
-    assert len(completes) == 1 and completes[0].status == ToolCallStatus.ERROR
-    assert any(isinstance(e, TurnComplete) for e in events)
-    assert not any(isinstance(e, ExecutorError) for e in events)
-
-
-@pytest.mark.asyncio
-async def test_run_command_confirmation_fails_closed_when_approval_raises(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An approval bridge that raises denies the command rather than crashing the SDK hook."""
+    """Without a working approval bridge the confirmation denies and the turn still completes."""
     script: list[_TurnAction] = [
         _ConfirmRunCommand(_RUN_COMMAND),
         _denied_tool_step(_RUN_COMMAND_DENIAL),
@@ -1630,17 +1615,14 @@ async def test_run_command_confirmation_fails_closed_when_approval_raises(
     ]
     captured = _install_fake_sdk(monkeypatch, scripts=[script])
     executor = AntigravityExecutor()
-
-    async def _broken(tool_name: str, tool_input: dict[str, Any]) -> bool:
-        raise RuntimeError("elicitation transport down")
-
-    executor._elicitation_handler = _broken
+    executor._elicitation_handler = bridge
 
     events = await _drain(executor, [{"role": "user", "content": "run ls", "session_id": "s1"}])
 
     assert captured["agents"][0].conversation.confirmations == [("run_command", False)]
     completes = [e for e in events if isinstance(e, ToolCallComplete)]
     assert len(completes) == 1 and completes[0].status == ToolCallStatus.ERROR
+    assert any(isinstance(e, TurnComplete) for e in events)
     assert not any(isinstance(e, ExecutorError) for e in events)
 
 

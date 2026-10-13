@@ -29,8 +29,10 @@ Streaming model:
   outright, so ``LocalAgentConfig.policies`` is set to
   ``policy.confirm_run_command(handler)`` with a handler that routes the
   request through Omnigent's elicitation handler (the approval card). A denied
-  call comes back from the harness as an ``ERROR`` step; it is surfaced as a
-  failed tool call, not a turn failure.
+  call comes back from the harness as an ``ERROR`` step and is surfaced as a
+  failed tool call rather than a turn failure. The adapter's decline path
+  cancels the turn after a user rejection, so that mapping mostly covers
+  fail-closed refusals (no bridge wired, or the bridge raised).
 - Cancellation: :meth:`interrupt_session` -> ``conversation.cancel()``, which
   surfaces ``TurnCancelled``.
 
