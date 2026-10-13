@@ -349,20 +349,27 @@ def test_resolve_harness_ignores_prefetched_agent_of_another_conversation() -> N
 
 
 @pytest.mark.asyncio
-async def test_load_acp_model_options_forwards_prefetched_agent() -> None:
-    """A prefetched agent row reaches the spec loader; without one the call is unchanged."""
-    conv = _conv()
+@pytest.mark.parametrize("prefetched", [True, False])
+async def test_load_acp_model_options_reads_the_agent_only_without_a_prefetched_row(
+    prefetched: bool,
+) -> None:
+    """Options resolve either way; a prefetched row for conv's agent skips the store read."""
+    from omnigent.server.routes._sessions import helpers
+
     store = MagicMock()
-    row = _agent_row("agent_1")
+    store.get.return_value = _agent_row("agent_1")
+    curated = ("gpt-5.4", "claude-fable-5")
     with (
-        patch.object(orch, "_load_agent_spec_for_session", return_value=None) as mock_load,
+        patch.object(helpers, "get_agent_cache", return_value=_acp_cache()),
+        patch("omnigent.models.model_catalog.acp_curated_models", return_value=curated),
+        patch("omnigent.models.model_catalog._acp_launch_model", return_value=curated[0]),
         patch.object(orch, "_publish_model_options"),
     ):
-        assert await orch._load_acp_model_options("conv_acp", conv, store, agent=row) == []
-        mock_load.assert_called_once_with(conv, store, agent=row)
-        mock_load.reset_mock()
-        assert await orch._load_acp_model_options("conv_acp", conv, store) == []
-        mock_load.assert_called_once_with(conv, store)
+        options = await orch._load_acp_model_options(
+            "conv_acp", _conv(), store, agent=_agent_row("agent_1") if prefetched else None
+        )
+    assert [option["id"] for option in options] == list(curated)
+    assert store.get.call_count == (0 if prefetched else 1)
 
 
 @pytest.mark.parametrize(("prefetched_id", "store_reads"), [("agent_1", 0), ("agent_other", 1)])

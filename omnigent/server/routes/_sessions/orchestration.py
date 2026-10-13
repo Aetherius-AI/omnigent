@@ -26,7 +26,6 @@ from fastapi import (
 )
 from fastapi.responses import Response
 from pydantic import ValidationError
-from sqlalchemy.exc import SQLAlchemyError
 
 from omnigent.cli_invocation import cli_invocation
 from omnigent.db.utils import (
@@ -12782,9 +12781,8 @@ def _read_session_snapshot_inputs(
         if conv.agent_id is not None:
             try:
                 agent = agent_store.get(conv.agent_id)
-            except SQLAlchemyError:
-                # Enrichment only: the snapshot retries best-effort. Roll the shared
-                # session back so the reads above still commit cleanly.
+            except Exception:  # noqa: BLE001 - enrichment only; the snapshot retries best-effort
+                # Roll the shared session back so the reads above still commit cleanly.
                 rollback_shared_reads()
                 _logger.debug(
                     "Agent row read failed on snapshot build for session=%s",

@@ -1294,7 +1294,7 @@ def test_rollback_shared_reads_recovers_the_scope_after_a_failed_read(db_uri: st
     assert _shared_read_sessions.get() is None
 
 
-def test_rollback_shared_reads_is_a_noop_outside_a_scope(db_uri: str) -> None:
+def test_rollback_shared_reads_is_a_noop_outside_a_scope() -> None:
     rollback_shared_reads()
     assert _shared_read_sessions.get() is None
 
