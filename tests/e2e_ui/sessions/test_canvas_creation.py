@@ -204,7 +204,11 @@ def test_canvas_plus_creates_session_on_the_selected_board(
             created = response.json()
             created_ids.append(created["id"])
             bind_session_runner(
-                httpx.patch, base_url, created["id"], source["runner_id"], timeout=10
+                httpx.patch,
+                base_url,
+                created["id"],
+                source["runner_id"],
+                timeout=httpx.Timeout(10.0, read=30.0),
             )
             route.fulfill(status=response.status_code, json=created)
         except Exception as error:
