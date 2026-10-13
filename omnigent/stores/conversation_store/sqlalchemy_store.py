@@ -101,7 +101,6 @@ from omnigent.stores.conversation_store import (
     FORK_SOURCE_LABEL_KEY,
     PINNED_LABEL_KEY,
     PROJECT_LABEL_KEY,
-    SWITCH_PREVIOUS_BUILTIN_LABEL_KEY,
     CompactionStats,
     ConversationAlreadyExistsError,
     ConversationNotFoundError,
