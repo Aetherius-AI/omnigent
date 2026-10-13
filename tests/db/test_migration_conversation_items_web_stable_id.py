@@ -9,6 +9,7 @@ pending index. These tests drive the real SQLite migration path
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -26,11 +27,13 @@ from omnigent.db.utils import (
     clear_engine_cache,
 )
 
-# Revision one step before ``mm1a2b3c4d5e`` (which adds ``web_stable_id``).
-_REVISION_BEFORE = "ll1a2b3c4d5e"
+# The agents index from main must survive the web-stable-id upgrade and downgrade.
+_REVISION_BEFORE = "mm1a2b3c4d5e"
+_REVISION = "8e914c88dbfb"
 
 _ITEMS_TABLE = "conversation_items"
 _INDEX = "ix_conversation_items_web_stable_id"
+_AGENTS_INDEX = "ix_agents_kind_owner_created"
 
 
 def _stamp_at_revision(uri: str, revision: str) -> Engine:
@@ -63,28 +66,49 @@ def _clean_engine_cache() -> Iterator[None]:
         clear_engine_cache()
 
 
-def test_upgrade_adds_web_stable_id_column_and_index(tmp_path: Path) -> None:
+@pytest.mark.parametrize("prior_revision", ["ll1a2b3c4d5e", _REVISION_BEFORE])
+def test_upgrade_adds_web_stable_id_column_and_index(tmp_path: Path, prior_revision: str) -> None:
     """The startup upgrade path adds the nullable column and its index."""
     uri = f"sqlite:///{tmp_path / 'chat.db'}"
-    engine = _stamp_at_revision(uri, _REVISION_BEFORE)
+    engine = _stamp_at_revision(uri, prior_revision)
     assert not _column_present(engine), "precondition: column absent pre-upgrade"
+
+    # Reflect the old schema: the current ORM already expects the new column.
+    items = sa.Table(_ITEMS_TABLE, sa.MetaData(), autoload_with=engine)
+    with engine.begin() as conn:
+        conn.execute(
+            items.insert().values(
+                workspace_id=0,
+                conversation_id=uuid.uuid4().bytes,
+                id=uuid.uuid4().bytes,
+                response_id="before-upgrade",
+                created_at=1,
+                position=0,
+                type=1,
+                status=1,
+                data='{"role":"user","content":[]}',
+                search_text="existing message",
+            )
+        )
+        before = dict(conn.execute(sa.select(items)).mappings().one())
 
     _initialize_or_verify_schema(engine, uri)
 
     assert _get_current_db_revision(engine) == _get_head_db_revision(uri)
     assert _column_present(engine)
     assert _index_present(engine)
+    assert _AGENTS_INDEX in {ix["name"] for ix in sa.inspect(engine).get_indexes("agents")}
 
-    # Pre-existing rows read back with a NULL mapping — the column must not
-    # disturb them (it is only written for new native mirrors).
+    items = sa.Table(_ITEMS_TABLE, sa.MetaData(), autoload_with=engine)
     with engine.connect() as conn:
-        assert conn.execute(sa.text(f"SELECT COUNT(*) FROM {_ITEMS_TABLE}")).scalar_one() == 0
+        after = dict(conn.execute(sa.select(items)).mappings().one())
+    assert after == {**before, "web_stable_id": None}
 
 
 def test_downgrade_drops_web_stable_id_column_and_index(tmp_path: Path) -> None:
     """The batch-mode downgrade removes the column and index cleanly."""
     uri = f"sqlite:///{tmp_path / 'chat.db'}"
-    engine = _stamp_at_revision(uri, "mm1a2b3c4d5e")
+    engine = _stamp_at_revision(uri, _REVISION)
     assert _column_present(engine)
     assert _index_present(engine)
 
@@ -96,3 +120,4 @@ def test_downgrade_drops_web_stable_id_column_and_index(tmp_path: Path) -> None:
     assert _get_current_db_revision(engine) == _REVISION_BEFORE
     assert not _column_present(engine)
     assert not _index_present(engine)
+    assert _AGENTS_INDEX in {ix["name"] for ix in sa.inspect(engine).get_indexes("agents")}

@@ -1,7 +1,7 @@
 """Add ``web_stable_id`` to ``conversation_items``.
 
-Revision ID: mm1a2b3c4d5e
-Revises: ll1a2b3c4d5e
+Revision ID: 8e914c88dbfb
+Revises: mm1a2b3c4d5e
 Create Date: 2026-09-24 00:00:00.000000
 
 A native-terminal web message is mirrored back by the transcript forwarder
@@ -25,8 +25,8 @@ from alembic import op
 
 from omnigent.db.db_models import Uuid16
 
-revision: str = "mm1a2b3c4d5e"
-down_revision: str | None = "ll1a2b3c4d5e"
+revision: str = "8e914c88dbfb"
+down_revision: str | None = "mm1a2b3c4d5e"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
