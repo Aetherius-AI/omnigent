@@ -586,14 +586,73 @@ async def test_inline_create_launch_failure_tolerates_binding_cleanup_error(
     assert conv.labels.get(WORKTREE_ROOT_LABEL_KEY) == worktree_root_fingerprint(worktree_path)
 
 
+async def test_inline_create_launch_failure_reports_unbound_when_label_delete_fails(
+    register_worktree_launch_host: RegisterHost,
+    client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unbinding is the success criterion: once ``clear_host_binding`` commits,
+    a later failure to drop the root label must not revert the response to the
+    old binding. The POST, a follow-up GET, and the stored row then agree the
+    session is unbound, leaving only the orphaned label for a later retry."""
+    cap = register_worktree_launch_host(launch_status="failed")
+    agent = await create_test_agent(client, name="wt-labelerr-agent")
+
+    def _label_boom(self: SqlAlchemyConversationStore, conversation_id: str, key: str) -> None:
+        if key == WORKTREE_ROOT_LABEL_KEY:
+            raise RuntimeError("transient store error")
+
+    monkeypatch.setattr(SqlAlchemyConversationStore, "delete_label", _label_boom)
+
+    resp = await _create_git_session(
+        client, agent["id"], {"branch_name": "feature/labelerr", "base_branch": "main"}
+    )
+    assert resp.status_code == 201, resp.text
+    assert len(cap.remove) == 1, (
+        f"the worktree must still be removed before the label delete failed: "
+        f"{cap.remove}; unexpected={cap.unexpected}"
+    )
+    worktree_path = f"{_SOURCE_REPO}-worktrees/feature-labelerr"
+    body = resp.json()
+    # clear_host_binding committed, so the response reports the session unbound
+    # even though the label delete failed; the stale label stays visible.
+    assert body["host_id"] is None and body["runner_id"] is None, body
+    assert body["workspace"] is None and body["git_branch"] is None, body
+    assert body["labels"].get(WORKTREE_ROOT_LABEL_KEY) == worktree_root_fingerprint(
+        worktree_path
+    ), body
+
+    snapshot = (
+        await client.get(
+            f"/v1/sessions/{body['id']}",
+            params={
+                "include_items": "false",
+                "include_liveness": "false",
+                "include_usage": "false",
+            },
+        )
+    ).json()
+    assert snapshot["host_id"] is None and snapshot["runner_id"] is None, snapshot
+    assert snapshot["workspace"] is None and snapshot["git_branch"] is None, snapshot
+
+    conv = SqlAlchemyConversationStore(db_uri).get_conversation(body["id"])
+    assert conv is not None
+    assert conv.host_id is None and conv.runner_id is None
+    assert conv.workspace is None and conv.git_branch is None
+    # The label delete failed, so the orphaned root label persists for a retry.
+    assert conv.labels.get(WORKTREE_ROOT_LABEL_KEY) == worktree_root_fingerprint(worktree_path)
+
+
 async def test_inline_create_launch_failure_skips_grant_when_session_vanished(
     register_worktree_launch_host: RegisterHost,
     client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A concurrent delete can drop the row during the rollback's re-read. The
-    create must then skip both the worktree removal and the default-public
-    grant, instead of leaving a public grant behind for a vanished session."""
+    """When the rollback's re-read finds the row gone, the create must skip both
+    the worktree removal and the default-public grant, instead of leaving a
+    public grant behind for a session that no longer exists. The re-read is
+    stubbed to return ``None`` once, standing in for a concurrent delete."""
     cap = register_worktree_launch_host(launch_status="failed")
     agent = await create_test_agent(client, name="wt-vanish-agent")
 
@@ -602,8 +661,8 @@ async def test_inline_create_launch_failure_skips_grant_when_session_vanished(
 
     def _vanishing_get(self: SqlAlchemyConversationStore, conversation_id: str) -> Any:
         conv = original_get(self, conversation_id)
-        # Drop the row once, on the rollback's re-read after the failed launch,
-        # to mimic a DELETE landing mid-create.
+        # Return None once, on the rollback's re-read after the failed launch,
+        # standing in for a concurrent delete that dropped the row.
         if not vanished["done"] and cap.launch and conv is not None and conv.runner_id is not None:
             vanished["done"] = True
             return None

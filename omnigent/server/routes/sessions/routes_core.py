@@ -917,20 +917,15 @@ def register_core_routes(
                                 ),
                             )
                             if removed:
-                                # The worktree is already gone, so clearing the binding
-                                # is best-effort: a concurrent delete may have dropped
-                                # the row and transient store errors must not fail create.
-                                cleared = False
+                                # The worktree is already gone, so unbinding is
+                                # best-effort: a concurrent delete may drop the row and
+                                # transient store errors must not fail create.
+                                unbound = False
                                 try:
                                     conv = await asyncio.to_thread(
                                         conversation_store.clear_host_binding, resp.id
                                     )
-                                    await asyncio.to_thread(
-                                        conversation_store.delete_label,
-                                        resp.id,
-                                        WORKTREE_ROOT_LABEL_KEY,
-                                    )
-                                    cleared = True
+                                    unbound = True
                                 except ConversationNotFoundError:
                                     _logger.warning(
                                         "Session %s vanished while clearing its host "
@@ -940,25 +935,48 @@ def register_core_routes(
                                     # The row is gone; report it unbound and skip the grant.
                                     conv = None
                                     session_vanished = True
-                                    cleared = True
+                                    unbound = True
                                 except Exception:
-                                    # The worktree is gone but the binding persists; keep the
-                                    # response honest and leave the root label so a later
-                                    # delete or archive can reconcile the row.
+                                    # Unbinding failed, so the stored session still
+                                    # references the removed worktree; keep the response
+                                    # honest and leave the root label for later reconcile.
                                     _logger.warning(
-                                        "Best-effort binding cleanup failed for session %s "
-                                        "after its launch-failure worktree rollback; the stored "
-                                        "session still references the removed worktree",
+                                        "Best-effort host-binding cleanup failed for "
+                                        "session %s after its launch-failure worktree "
+                                        "rollback; the stored session still references "
+                                        "the removed worktree",
                                         resp.id,
                                         exc_info=True,
                                     )
-                                if cleared:
+                                if unbound:
                                     resp.runner_id = None
                                     resp.host_id = None
                                     resp.workspace = None
                                     resp.git_branch = None
-                                    resp.labels.pop(WORKTREE_ROOT_LABEL_KEY, None)
                                     launch_host_id = None
+                                    label_dropped = session_vanished
+                                    if not session_vanished:
+                                        try:
+                                            await asyncio.to_thread(
+                                                conversation_store.delete_label,
+                                                resp.id,
+                                                WORKTREE_ROOT_LABEL_KEY,
+                                            )
+                                            label_dropped = True
+                                        except Exception:
+                                            # The binding is already cleared; a stale root
+                                            # label is harmless and a later delete or
+                                            # archive reconciles it.
+                                            _logger.warning(
+                                                "Failed to drop the worktree-root label "
+                                                "for session %s after clearing its "
+                                                "launch-failure binding; the orphaned "
+                                                "label will be reconciled later",
+                                                resp.id,
+                                                exc_info=True,
+                                            )
+                                    if label_dropped:
+                                        resp.labels.pop(WORKTREE_ROOT_LABEL_KEY, None)
                             else:
                                 # Unconfirmed removal: keep the binding and root label
                                 # so an opt-in delete or archive can retry the cleanup.
