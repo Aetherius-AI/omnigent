@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pytest
 
+from omnigent.host.identity import HOST_TOKEN_ENV_VAR
+
 
 @pytest.fixture(autouse=True)
 def _no_ambient_host(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -32,4 +34,4 @@ def _no_ambient_host(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.delenv("OMNIGENT_RUNNER_SLICE_KEY", raising=False)
     monkeypatch.delenv("OMNIGENT_HOST_SLICE_KEY_ENABLED", raising=False)
-    monkeypatch.delenv("OMNIGENT_HOST_TOKEN", raising=False)
+    monkeypatch.delenv(HOST_TOKEN_ENV_VAR, raising=False)

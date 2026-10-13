@@ -18,6 +18,7 @@ from click.testing import CliRunner
 
 from omnigent import cli as cli_module
 from omnigent.cli import _add_daemon_host_status, _ensure_host_daemon, _host_daemon_alive, cli
+from omnigent.host.identity import HOST_TOKEN_ENV_VAR
 from omnigent.host.local_server import LocalServerStartup
 
 
@@ -51,7 +52,7 @@ def _no_ambient_launch_token(monkeypatch: pytest.MonkeyPatch) -> None:
     With ``OMNIGENT_HOST_TOKEN`` set, the host-start commands skip the user
     sign-in pre-flight; tests that want a launch-token host set it themselves.
     """
-    monkeypatch.delenv("OMNIGENT_HOST_TOKEN", raising=False)
+    monkeypatch.delenv(HOST_TOKEN_ENV_VAR, raising=False)
 
 
 def _persist_fake_daemon_claim(
@@ -370,7 +371,7 @@ def test_host_enable_preflight_follows_launch_token(
 
     server = "https://myapp-1234.aws.databricksapps.com"
     if launch_token is not None:
-        monkeypatch.setenv("OMNIGENT_HOST_TOKEN", launch_token)
+        monkeypatch.setenv(HOST_TOKEN_ENV_VAR, launch_token)
     preflight: list[tuple[str, bool]] = []
 
     def _capture(server_url: str, *, non_interactive: bool = False) -> None:

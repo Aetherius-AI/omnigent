@@ -3812,6 +3812,11 @@ def _ensure_host_server_auth(server: str, *, non_interactive: bool) -> None:
     from omnigent.host.identity import HOST_TOKEN_ENV_VAR
 
     if os.environ.get(HOST_TOKEN_ENV_VAR):
+        click.echo(
+            f"{HOST_TOKEN_ENV_VAR} is set; connecting with the launch token "
+            "instead of a user sign-in.",
+            err=True,
+        )
         return
     _ensure_databricks_server_auth(server, non_interactive=non_interactive)
 

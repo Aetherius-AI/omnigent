@@ -110,16 +110,7 @@ class _EdgeHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     edge: DatabricksAppsEdge
 
-    def _drain_body(self) -> None:
-        length = int(self.headers.get("Content-Length") or 0)
-        while length > 0:
-            chunk = self.rfile.read(min(length, 65536))
-            if not chunk:
-                break
-            length -= len(chunk)
-
-    def _answer(self) -> None:
-        self._drain_body()
+    def do_GET(self) -> None:
         seen = SeenRequest(
             method=self.command,
             path=self.path,
@@ -143,12 +134,6 @@ class _EdgeHandler(BaseHTTPRequestHandler):
         self.end_headers()
         if body:
             self.wfile.write(body)
-
-    do_GET = _answer
-    do_POST = _answer
-    do_PATCH = _answer
-    do_PUT = _answer
-    do_DELETE = _answer
 
     def log_message(self, fmt: str, *args: object) -> None:
         pass
@@ -279,6 +264,10 @@ def test_launch_token_host_skips_user_sign_in_preflight(
     )
     assert f"Connecting to {databricks_apps_edge.url} as {HOST_NAME!r} ({HOST_ID})" in output, (
         f"host never reached the connect step (exit {returncode}):\n{output}"
+    )
+    seen = databricks_apps_edge.seen_requests()
+    assert all(request.path != "/v1/me" for request in seen), (
+        f"the user sign-in probe still reached the edge: {seen}"
     )
     tunnel = databricks_apps_edge.tunnel_requests()
     assert tunnel, (

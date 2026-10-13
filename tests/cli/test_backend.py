@@ -46,6 +46,7 @@ from omnigent.cli import (
 from omnigent.cli import (
     cli as cli_group,
 )
+from omnigent.host.identity import HOST_TOKEN_ENV_VAR
 from omnigent.host.local_server import LocalServerStartup
 
 
@@ -3137,7 +3138,7 @@ def test_ensure_backend_databricks_preflight_ignores_launch_token(
     Executors inside a managed sandbox see ``OMNIGENT_HOST_TOKEN``, but the
     launch token only authenticates the host tunnel, not session creation.
     """
-    monkeypatch.setenv("OMNIGENT_HOST_TOKEN", "launch-token")
+    monkeypatch.setenv(HOST_TOKEN_ENV_VAR, "launch-token")
     login_calls = _patch_auth_preflight(monkeypatch, probe_status=302, tty=False)
     monkeypatch.setattr(cli, "_ensure_host_daemon", lambda server: False)
 
@@ -3431,7 +3432,7 @@ def test_host_with_launch_token_skips_user_preflight(
     alone and hold no user credentials, so a Databricks-fronted server's
     sign-in redirect on the unauthenticated probe must not abort the start.
     """
-    monkeypatch.setenv("OMNIGENT_HOST_TOKEN", "launch-token")
+    monkeypatch.setenv(HOST_TOKEN_ENV_VAR, "launch-token")
     login_calls = _patch_auth_preflight(monkeypatch, probe_status=302, tty=False)
     user_credential_lookups: list[str | None] = []
 
@@ -3781,7 +3782,7 @@ def test_background_host_with_launch_token_skips_user_preflight(
     The ordinary-host pre-flight on these entry points is covered by
     ``tests/host/test_cli_host.py``.
     """
-    monkeypatch.setenv("OMNIGENT_HOST_TOKEN", "launch-token")
+    monkeypatch.setenv(HOST_TOKEN_ENV_VAR, "launch-token")
     preflight = _capture_preflight(monkeypatch)
     monkeypatch.setattr(cli, "_load_effective_config", dict)
     spawned: list[str | None] = []
