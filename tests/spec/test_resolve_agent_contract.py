@@ -339,7 +339,11 @@ def test_absence_claims_need_a_watch_over_the_whole_transition() -> None:
 
     assert "cannot see a transient state" in audit
     assert "must watch continuously" in coverage
+    assert "a poll supports only a claim qualified by its interval" in coverage
     assert 'does not support a "never" claim' in coverage
     for section in (recording, review, handoff):
         assert "needs continuous observation through the whole transition" in section
     assert '"Finishing a clip" in `dev/recording-lanes.md`' in recording
+    assert (
+        "when the clip shows the state even briefly, the caption and PR text say so" in recording
+    )
