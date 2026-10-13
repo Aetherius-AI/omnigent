@@ -84,7 +84,7 @@ the header menu), and each place is a separate entry point.
 ## How to get to it (user POV)
 
 **Sidebar row:** hover a row and open its menu, or right-click the row. Both
-offer pin, rename, archive or unarchive, and delete.
+offer pin, fork, rename, archive or unarchive, and delete.
 
 **Pinned section drag:** drag a pinned row onto another pinned row to reorder
 the Pinned section, or drop an unpinned row onto a pinned row to pin it into
@@ -262,8 +262,10 @@ plain `uv run pytest`, which starts a private server for the test.
   `tests/e2e_ui/sessions/test_sidebar_context_menu.py::test_right_click_opens_session_actions_menu`
 - **`fork`, message cutoff:**
   `tests/e2e_ui/fork_session/test_fork_from_middle.py::test_fork_from_middle_truncates_history`,
-  plus agent switching:
-  `tests/e2e_ui/fork_session/test_fork_switch_agent.py::test_fork_switch_agent_carries_history`
+  plus agent switching (own environment):
+  `tests/e2e_ui/fork_session/test_fork_switch_agent.py::test_fork_switch_agent_carries_history`.
+  Its SDK-to-SDK target is a built-in agent that only the test's own server
+  loads; run it with plain `uv run pytest` so that target is available.
 - **`workspace-recovery`, desktop and mobile conversation, Canvas, and side-chat cards:**
   `tests/browser_ui/chat/test_workspace_missing_recovery.py::test_continue_missing_workspace_in_another_directory`
   runs without a repro instance using `uv run pytest <test>
@@ -324,8 +326,9 @@ plain `uv run pytest`, which starts a private server for the test.
   Supported host-switch UI coverage:
   `tests/e2e_ui/sessions/test_host_badge.py::test_host_badge_switches_the_session_to_another_host`
   checks the release/launch requests with stubbed host APIs.
-- **`reconnect`, spinner:**
+- **`reconnect`, spinner (own environment):**
   `tests/e2e_ui/chat/test_reconnecting_spinner.py::test_reconnecting_state_shows_spinner`
+  seeds an error item directly into the spawned server's database.
 - **`reconnect`, offline-host cause (own environment):**
   `tests/e2e_ui/sessions/test_session_host_offline.py::test_offline_native_host_preserves_failed_turn_and_retry`
   creates Claude/Codex native-wrapper sessions on a real disposable host, stops
@@ -483,6 +486,12 @@ plain `uv run pytest`, which starts a private server for the test.
   `tests/e2e_ui/sessions/test_canvas_workspace.py::test_canvas_controls_clear_the_macos_titlebar`.
   This Chromium journey emulates the macOS preload bridge and user agent; it
   verifies the app's layout around the title bar, not native traffic-light rendering.
+  `web/src/embed.test.tsx` checks that the compiled Canvas clearance selector
+  matches the embedded app's Mac scope root. For an embedded desktop build,
+  enable Canvas only in the isolated test host, enter through the sidebar and a
+  Canvas deep link, then collapse/preview/reopen navigation and focus/restore a
+  session. Check that the Canvas heading and restore control stay below the
+  native title bar at 14px/16px host roots and 80%, 100%, 110%, and 125% page zoom.
   `web/src/shell/ChatHeader.test.tsx` checks the shared toggle's desktop/mobile
   icons, peek cancellation, and hover/keyboard tooltip behavior.
 - **`canvas-create` (Main/project plus button, desktop/mobile):**
