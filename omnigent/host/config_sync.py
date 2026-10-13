@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,6 +32,8 @@ from omnigent.host.frames import HostConfigSyncFrame, HostConfigUpdateFrame
 _logger = logging.getLogger(__name__)
 
 CONFIG_SYNC_STATE_FILENAME = "config-sync.json"
+# Last cause logged per sidecar, so a broken file is reported once rather than every poll.
+_UNREADABLE_STATE_WARNED: dict[Path, str] = {}
 
 
 @dataclass(frozen=True)
@@ -64,7 +67,7 @@ def load_sync_state(server_url: str, config_path: Path | None = None) -> ConfigS
     except FileNotFoundError:
         return None
     except (OSError, ValueError) as exc:
-        _logger.warning("Ignoring unreadable %s: %s", path, exc)
+        _warn_unreadable(path, exc)
         return None
     if not isinstance(raw, dict) or raw.get("server_url") != server_url:
         return None
@@ -72,10 +75,21 @@ def load_sync_state(server_url: str, config_path: Path | None = None) -> ConfigS
         revision = raw.get("revision")
         if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
             raise ValueError("revision must be a non-negative int")
-        return ConfigSyncState(server_url, revision, validate_synced_settings(raw.get("settings")))
+        state = ConfigSyncState(
+            server_url, revision, validate_synced_settings(raw.get("settings"))
+        )
     except ValueError as exc:
-        _logger.warning("Ignoring unreadable %s: %s", path, exc)
+        _warn_unreadable(path, exc)
         return None
+    _UNREADABLE_STATE_WARNED.pop(path, None)
+    return state
+
+
+def _warn_unreadable(path: Path, exc: Exception) -> None:
+    cause = f"{type(exc).__name__}: {exc}"
+    if _UNREADABLE_STATE_WARNED.get(path) != cause:
+        _UNREADABLE_STATE_WARNED[path] = cause
+        _logger.warning("Ignoring unreadable %s: %s", path, exc)
 
 
 def save_sync_state(state: ConfigSyncState, config_path: Path | None = None) -> None:
@@ -87,11 +101,13 @@ def save_sync_state(state: ConfigSyncState, config_path: Path | None = None) -> 
         "revision": state.revision,
         "settings": state.settings,
     }
-    tmp = path.with_name(path.name + ".tmp")
+    handle, tmp_name = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp = Path(tmp_name)
     try:
-        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        with os.fdopen(handle, "w", encoding="utf-8") as state_file:
+            state_file.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
         os.replace(tmp, path)
-    except OSError:
+    except BaseException:
         tmp.unlink(missing_ok=True)
         raise
 

@@ -15,8 +15,12 @@ import yaml
 
 try:
     import fcntl
-except ImportError:  # Windows has no advisory file locks; writers stay atomic but unserialized.
+except ImportError:  # Windows: fall back to msvcrt below.
     fcntl = None  # type: ignore[assignment]
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None  # type: ignore[assignment]
 
 _log = logging.getLogger(__name__)
 _cwd_missing_warned = False
@@ -165,14 +169,24 @@ def global_config_lock(path: Path | None = None) -> Iterator[None]:
     """
     resolved = path or global_config_path()
     resolved.parent.mkdir(parents=True, exist_ok=True)
-    with resolved.with_name(resolved.name + ".lock").open("a") as lock_file:
+    with resolved.with_name(resolved.name + ".lock").open("a+") as lock_file:
         if fcntl is not None:
             fcntl.flock(lock_file, fcntl.LOCK_EX)
+        elif msvcrt is not None:
+            # msvcrt locks a byte range; the file is otherwise empty, so lock its first byte.
+            while True:
+                try:
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)  # pyrefly: ignore[missing-attribute]
+                    break
+                except OSError:  # LK_LOCK gives up after ten seconds; keep waiting.
+                    continue
         try:
             yield
         finally:
             if fcntl is not None:
                 fcntl.flock(lock_file, fcntl.LOCK_UN)
+            elif msvcrt is not None:
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)  # pyrefly: ignore[missing-attribute]
 
 
 def write_global_config(cfg: Mapping[str, object], path: Path | None = None) -> None:
@@ -192,7 +206,7 @@ def write_global_config(cfg: Mapping[str, object], path: Path | None = None) -> 
     try:
         with os.fdopen(handle, "w") as config_file:
             yaml.safe_dump(dict(cfg), config_file, default_flow_style=False, sort_keys=True)
-        if resolved.exists():
+        with contextlib.suppress(FileNotFoundError):
             os.chmod(tmp, stat.S_IMODE(resolved.stat().st_mode))
         os.replace(tmp, resolved)
     except BaseException:

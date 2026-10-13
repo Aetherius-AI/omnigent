@@ -23,8 +23,8 @@ import asyncio
 import logging
 import threading
 import time
-from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -48,6 +48,7 @@ from omnigent.host.frames import (
     HostSkillsResultFrame,
 )
 from omnigent.host.harness_startup import HarnessStartup
+from omnigent.runner.transports.ws_tunnel.diagnostics import OutboundFrame, TunnelDiagnostics
 
 _logger = logging.getLogger(__name__)
 
@@ -192,6 +193,14 @@ def _fail_pending_mcp_servers(conn: HostConnection) -> None:
 # invalidation — the TTL is purely a memory bound.
 _EXIT_REPORT_TTL_S = 600.0
 _EXIT_REPORT_MAX_ENTRIES = 1024
+
+
+@dataclass
+class _ConfigSyncLock:
+    """A user's reconcile lock and how many reconciles currently reference it."""
+
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    users: int = 0
 
 
 @dataclass
@@ -413,9 +422,14 @@ class HostConnection:
     ws: WebSocketLike
     hello: HostHelloFrame
     owner: str | None
-    outbound_queue: asyncio.Queue[str | None]
+    outbound_queue: asyncio.Queue[OutboundFrame | None]
     connected_at: float
     last_frame_at: float
+    diagnostics: TunnelDiagnostics = field(default_factory=TunnelDiagnostics)
+    retirement_reason: str | None = None
+    sender_end_reason: str | None = None
+    close_requested_code: int | None = None
+    close_requested_reason: str | None = None
     account_generation: str | None = None
     # True when this tunnel authenticated with a valid managed-sandbox launch
     # token, i.e. a server-provisioned sandbox proving itself on connect — not a
@@ -492,6 +506,19 @@ class HostConnection:
     pending_import_local: dict[str, asyncio.Queue[tuple[str, dict[str, Any]]]] = field(
         default_factory=dict,
     )
+    # This host's settings reports reconcile in order on a background chain, so a
+    # wait for another host's reconcile never stalls this tunnel's other frames.
+    config_sync_task: asyncio.Task[None] | None = None
+
+    def enqueue(self, data: str, *, app_ping_ts: int | None = None) -> None:
+        """Queue a frame on the socket loop, retaining local timing metadata."""
+        queued_at = self.diagnostics.timestamp()
+        frame = OutboundFrame(data, queued_at=queued_at, app_ping_ts=app_ping_ts)
+        self.outbound_queue.put_nowait(frame)
+        try:
+            self.diagnostics.enqueued(frame, self.outbound_queue.qsize(), queued_at)
+        except Exception:
+            _logger.exception("Host %s outbound queue diagnostics failed", self.host_id)
 
 
 class HostRegistry:
@@ -517,8 +544,8 @@ class HostRegistry:
         self._gateway_inference: dict[str, dict[str, bool]] = {}
         self._interactive_shells: dict[str, list[str]] = {}
         # One lock per (workspace, owner) serializes a user's settings reconciliation on
-        # this replica; dropped once their last connection is gone and nothing holds it.
-        self._config_sync_locks: dict[tuple[int, str | None], asyncio.Lock] = {}
+        # this replica; dropped once their last connection is gone and no reconcile uses it.
+        self._config_sync_locks: dict[tuple[int, str | None], _ConfigSyncLock] = {}
         self.launch_authorizer: (
             Callable[[str, str, str | None, str | None, bool, str | None], None] | None
         ) = None
@@ -584,6 +611,7 @@ class HostRegistry:
                     ws_id,
                     host_id,
                 )
+                old.retirement_reason = "replaced"
                 old.outbound_queue.put_nowait(None)
                 _fail_pending_imports(old)
                 _fail_pending_harness_startup(old)
@@ -632,6 +660,7 @@ class HostRegistry:
             removed = self._hosts.pop(key)
         # Without this the route handler's loops keep running and its ping loop
         # keeps the host row online, even though the host is now unreachable.
+        removed.retirement_reason = "deregistered"
         removed.outbound_queue.put_nowait(None)
         _fail_pending_imports(removed)
         _fail_pending_harness_startup(removed)
@@ -640,31 +669,48 @@ class HostRegistry:
         _fail_pending_mcp_tools(removed)
         _fail_pending_skills(removed)
         _fail_pending_mcp_servers(removed)
-        self._release_config_sync_lock(removed)
+        self._maybe_release_config_sync_lock((removed.workspace_id, removed.owner))
         return True
 
-    def config_sync_lock(self, owner: str | None, workspace_id: int | None = None) -> asyncio.Lock:
-        """Return the lock that serializes one user's settings reconciliation here.
+    @asynccontextmanager
+    async def reconcile_config_sync(
+        self, owner: str | None, workspace_id: int | None = None
+    ) -> AsyncIterator[None]:
+        """Hold the lock that serializes one user's settings reconciliation here.
+
+        Every reconcile for the same owner and workspace shares one lock while
+        any of their hosts is connected or a reconcile is in progress.
 
         :param owner: Authenticated owner, or ``None`` on a single-user server.
         :param workspace_id: Tenant partition; defaults to
             :func:`current_workspace_id`.
-        :returns: The same lock for every call with the same owner and workspace
-            while any of their hosts is connected.
         """
-        ws_id = current_workspace_id() if workspace_id is None else workspace_id
+        key = (current_workspace_id() if workspace_id is None else workspace_id, owner)
         with self._lock:
-            return self._config_sync_locks.setdefault((ws_id, owner), asyncio.Lock())
+            entry = self._config_sync_locks.setdefault(key, _ConfigSyncLock())
+            entry.users += 1
+        try:
+            async with entry.lock:
+                yield
+        finally:
+            with self._lock:
+                entry.users -= 1
+            self._maybe_release_config_sync_lock(key)
 
-    def _release_config_sync_lock(self, removed: HostConnection) -> None:
-        """Drop the owner's reconcile lock once no connection of theirs remains."""
-        key = (removed.workspace_id, removed.owner)
+    def config_sync_lock_count(self) -> int:
+        """Return how many owners currently hold a reconcile lock entry."""
         with self._lock:
+            return len(self._config_sync_locks)
+
+    def _maybe_release_config_sync_lock(self, key: tuple[int, str | None]) -> None:
+        """Drop an owner's reconcile lock once no connection or reconcile of theirs remains."""
+        with self._lock:
+            entry = self._config_sync_locks.get(key)
+            if entry is None or entry.users:
+                return
             if any((conn.workspace_id, conn.owner) == key for conn in self._hosts.values()):
                 return
-            lock = self._config_sync_locks.get(key)
-            if lock is not None and not lock.locked():
-                del self._config_sync_locks[key]
+            del self._config_sync_locks[key]
 
     def mark_frame_seen(self, conn: HostConnection) -> bool:
         """Record that a frame arrived for ``conn``.
@@ -844,7 +890,7 @@ class HostRegistry:
         without a lock. Every current caller (REST handlers, the WS
         receive loop, the ping loop) runs on the uvicorn event loop,
         so the call below is safe. A caller on another thread must use
-        ``loop.call_soon_threadsafe(queue.put_nowait, data)`` instead.
+        ``loop.call_soon_threadsafe(conn.enqueue, data)`` instead.
 
         :param conn: The target host connection.
         :param data: JSON-encoded frame text.
@@ -871,4 +917,4 @@ class HostRegistry:
             if current is not conn:
                 raise ConnectionError(f"host {conn.host_id!r} connection was replaced")
 
-        conn.outbound_queue.put_nowait(data)
+        conn.enqueue(data)

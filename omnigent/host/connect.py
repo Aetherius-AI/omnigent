@@ -20,6 +20,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
@@ -174,6 +175,7 @@ from omnigent.runner.identity import (
     RUNNER_WORKSPACE_ENV_VAR,
     token_bound_runner_id,
 )
+from omnigent.runner.transports.ws_tunnel.diagnostics import TunnelDiagnostics
 from omnigent.runner.transports.ws_tunnel.frames import (
     PingFrame,
     PongFrame,
@@ -186,6 +188,7 @@ from omnigent.runtime.harnesses.paths import (
     resolve_harness_tmp_parent,
 )
 from omnigent.runtime.websocket_metrics import (
+    classify_disconnect_reason,
     record_websocket_connected,
     record_websocket_disconnected,
     websocket_close_code,
@@ -1263,6 +1266,9 @@ class HostProcess:
         # Live tunnel connection, set by _serve_frames for the watcher
         # tasks (which outlive any single connection) to report on.
         self._ws: websockets.asyncio.client.ClientConnection | None = None
+        self._tunnel_diagnostics: (
+            tuple[websockets.asyncio.client.ClientConnection, TunnelDiagnostics] | None
+        ) = None
         # runner_id → exit report for exits that could not be sent
         # (tunnel down at the time). Flushed after the next hello.
         self._unreported_exits: dict[str, HostRunnerExitedFrame] = {}
@@ -1273,6 +1279,8 @@ class HostProcess:
         # threads; interleaving them could report stale settings as a local edit.
         self._config_sync_lock = threading.Lock()
         self._config_sync_report_error: str | None = None
+        # Updates are applied in arrival order even though each frame runs on its own task.
+        self._config_update_order = asyncio.Lock()
         # Strong refs to per-runner watcher tasks; asyncio only keeps
         # weak refs, so an unreferenced task can be GC'd mid-flight.
         self._watcher_tasks: set[asyncio.Task[None]] = set()
@@ -2563,7 +2571,7 @@ class HostProcess:
         ws = self._ws
         if ws is not None:
             try:
-                await ws.send(encode_host_frame(report))
+                await self._send_text(ws, encode_host_frame(report))
                 return
             except Exception:  # noqa: BLE001 — any send failure parks the report
                 _logger.debug(
@@ -2723,12 +2731,13 @@ class HostProcess:
         try:
             targets, enum_error = await asyncio.to_thread(_targets)
             if enum_error is not None:
-                await ws.send(
+                await self._send_text(
+                    ws,
                     encode_host_frame(
                         HostImportLocalDoneFrame(
                             request_id=frame.request_id, status="failed", error=enum_error
                         )
-                    )
+                    ),
                 )
                 return
 
@@ -2760,7 +2769,7 @@ class HostProcess:
                         session,
                         allow_chunks=frame.allow_session_chunks,
                     ):
-                        await ws.send(text)
+                        await self._send_text(ws, text)
                 except ImportSessionChunkingUnsupportedError:
                     failures.append(
                         {
@@ -2792,7 +2801,8 @@ class HostProcess:
                         }
                     )
                     continue
-            await ws.send(
+            await self._send_text(
+                ws,
                 encode_host_frame(
                     HostImportLocalDoneFrame(
                         request_id=frame.request_id,
@@ -2800,7 +2810,7 @@ class HostProcess:
                         failed=len(failures),
                         failures=failures,
                     )
-                )
+                ),
             )
         except ConnectionClosed:
             raise  # tunnel died mid-stream; _run_frame_handler owns recovery
@@ -2809,12 +2819,13 @@ class HostProcess:
             # out its per-frame timeout on an unanswered request.
             _logger.exception("import_local handler failed for source=%r", frame.source)
             with contextlib.suppress(Exception):
-                await ws.send(
+                await self._send_text(
+                    ws,
                     encode_host_frame(
                         HostImportLocalDoneFrame(
                             request_id=frame.request_id, status="failed", error=str(exc)
                         )
-                    )
+                    ),
                 )
 
     def _handle_list_dir(self, frame: HostListDirFrame) -> HostListDirResultFrame:
@@ -4438,21 +4449,95 @@ class HostProcess:
         # prompt reconnect is wanted again.
         self._recycle_streak = 0
         record_websocket_connected("host", reconnect=reconnect)
+        connection_id = uuid.uuid4().hex
+        connected_at = time.monotonic()
+        diagnostics = TunnelDiagnostics()
+        diagnostics.settings.update(
+            tunnel_side="host",
+            protocol_ping_interval_s=getattr(ws, "ping_interval", None),
+            protocol_ping_timeout_s=getattr(ws, "ping_timeout", None),
+            protocol_keepalive_source="websockets_connection",
+        )
+        self._tunnel_diagnostics = (ws, diagnostics)
+
+        def report_diagnostics() -> None:
+            _logger.warning(
+                "Host tunnel scheduling or send delay",
+                extra=debug_event(
+                    "host_tunnel_health",
+                    host_id=self._identity.host_id,
+                    connection_id=connection_id,
+                    connection_age_s=round(time.monotonic() - connected_at, 3),
+                    **diagnostics.snapshot(),
+                ),
+            )
+
         disconnect_error: BaseException | None = None
         try:
-            await self._ensure_owner_user_id(headers=headers)
-            await self._serve_frames(ws)
+            async with diagnostics.monitoring(report_diagnostics, connection_id=connection_id):
+                await self._ensure_owner_user_id(headers=headers)
+                _logger.info(
+                    "Host tunnel connected",
+                    extra=debug_event(
+                        "host_tunnel",
+                        phase="connected",
+                        host_id=self._identity.host_id,
+                        connection_id=connection_id,
+                        reconnect=reconnect,
+                        pid=os.getpid(),
+                        **diagnostics.snapshot(),
+                    ),
+                )
+                await self._serve_frames(ws, connection_id=connection_id)
         except BaseException as exc:
             disconnect_error = exc
             raise
         finally:
+            protocol = getattr(ws, "protocol", None)
+            received_close = (
+                disconnect_error.rcvd
+                if isinstance(disconnect_error, ConnectionClosed)
+                else getattr(protocol, "close_rcvd", None)
+            )
+            sent_close = (
+                disconnect_error.sent
+                if isinstance(disconnect_error, ConnectionClosed)
+                else getattr(protocol, "close_sent", None)
+            )
+            local_shutdown = (
+                isinstance(disconnect_error, asyncio.CancelledError | KeyboardInterrupt)
+                or self._lifecycle_lost.is_set()
+            )
+            _logger.info(
+                "Host tunnel disconnected",
+                extra=debug_event(
+                    "host_tunnel",
+                    phase="disconnected",
+                    host_id=self._identity.host_id,
+                    connection_id=connection_id,
+                    pid=os.getpid(),
+                    connection_age_s=round(time.monotonic() - connected_at, 3),
+                    error_type=type(disconnect_error).__name__ if disconnect_error else None,
+                    disconnect_reason=classify_disconnect_reason(
+                        disconnect_error,
+                        local_shutdown=local_shutdown,
+                        resumed_from_suspend=self._woke_from_suspend,
+                    ),
+                    close_code=websocket_close_code(disconnect_error),
+                    close_reason=websocket_close_reason(disconnect_error),
+                    close_rcvd_code=getattr(received_close, "code", None),
+                    close_rcvd_reason=getattr(received_close, "reason", None),
+                    close_sent_code=getattr(sent_close, "code", None),
+                    close_sent_reason=getattr(sent_close, "reason", None),
+                    transport_close_code=getattr(ws, "close_code", None),
+                    **diagnostics.snapshot(),
+                ),
+            )
+            self._tunnel_diagnostics = None
             record_websocket_disconnected(
                 "host",
                 disconnect_error,
-                local_shutdown=(
-                    isinstance(disconnect_error, asyncio.CancelledError | KeyboardInterrupt)
-                    or self._lifecycle_lost.is_set()
-                ),
+                local_shutdown=local_shutdown,
                 resumed_from_suspend=self._woke_from_suspend,
             )
             # Drop the watcher tasks' send target — exit reports raised
@@ -4580,7 +4665,24 @@ class HostProcess:
             _logger.debug("Could not obtain auth token", exc_info=True)
         return None
 
-    async def _serve_frames(self, ws: websockets.asyncio.client.ClientConnection) -> None:
+    def _diagnostics_for(
+        self, ws: websockets.asyncio.client.ClientConnection
+    ) -> TunnelDiagnostics | None:
+        # Detached handlers from a previous socket must not observe the new one.
+        if self._tunnel_diagnostics is not None and self._tunnel_diagnostics[0] is ws:
+            return self._tunnel_diagnostics[1]
+        return None
+
+    async def _send_text(self, ws: websockets.asyncio.client.ClientConnection, data: str) -> None:
+        diagnostics = self._diagnostics_for(ws)
+        if diagnostics is None:
+            await ws.send(data)
+        else:
+            await diagnostics.send(ws.send, data)
+
+    async def _serve_frames(
+        self, ws: websockets.asyncio.client.ClientConnection, *, connection_id: str | None = None
+    ) -> None:
         """Wait for bounded startup discovery, register, then service the connection."""
         self._start_capability_discovery()
         if self._capability_init_task is not None:
@@ -4611,12 +4713,13 @@ class HostProcess:
             telemetry_opt_out=_tel_opt_out,
             installation_id=_tel_install_id,
             capabilities=list(HOST_CAPABILITIES),
+            connection_id=connection_id,
         )
         try:
             encoded_hello = encode_host_frame(hello)
         except Exception as exc:
             raise HostConnectError(f"Could not encode host.hello: {exc}") from exc
-        await ws.send(encoded_hello)
+        await self._send_text(ws, encoded_hello)
         # A completed failed boot probe gets another best-effort chance only
         # after registration reaches the server. Keeping this out of the outer
         # connection-attempt loop avoids repeatedly spawning native probes while
@@ -4638,7 +4741,7 @@ class HostProcess:
             # the socket, then watched for local changes off this loop.
             config_report = await asyncio.to_thread(self._build_config_sync_report)
             if config_report is not None:
-                await ws.send(encode_host_frame(config_report))
+                await self._send_text(ws, encode_host_frame(config_report))
             config_sync_task = asyncio.create_task(self._config_sync_loop(ws, config_report))
             print(
                 f"✓ Connected as {self._identity.name!r} "
@@ -4654,6 +4757,8 @@ class HostProcess:
             # with ``4003 ping timeout``.
             while True:
                 raw = await ws.recv()
+                if (diagnostics := self._diagnostics_for(ws)) is not None:
+                    diagnostics.frame_received()
                 self._conn_frame_received = True
                 if isinstance(raw, str):
                     # Connection-control frames decide whether this receive
@@ -4671,6 +4776,8 @@ class HostProcess:
                     # _runner_lifecycle_lock in _dispatch_host_frame.
                     self._start_frame_task(ws, raw)
         finally:
+            if (diagnostics := self._diagnostics_for(ws)) is not None:
+                diagnostics.freeze()
             for task in (readiness_task, config_sync_task):
                 if task is None:
                     continue
@@ -4719,13 +4826,14 @@ class HostProcess:
             if configured is not None and (
                 configured != published_configured or gateway != published_gateway
             ):
-                await ws.send(
+                await self._send_text(
+                    ws,
                     encode_host_frame(
                         HostHarnessReadinessFrame(
                             configured_harnesses=configured,
                             gateway_inference=gateway,
                         )
-                    )
+                    ),
                 )
                 published_configured = configured
                 published_gateway = gateway
@@ -4778,9 +4886,9 @@ class HostProcess:
             poll_due = now >= next_poll and (
                 self._config_sync_acked or probes < CONFIG_SYNC_PROBE_ATTEMPTS
             )
-            local_edit = sent is not None and frame.changed and frame.settings != sent.settings
+            local_edit = sent is not None and frame.changed and frame != sent
             if sent is None or local_edit or poll_due:
-                await ws.send(encode_host_frame(frame))
+                await self._send_text(ws, encode_host_frame(frame))
                 sent = frame
                 next_poll = now + CONFIG_SYNC_POLL_INTERVAL_S
                 # Local edits are always reported and do not use up the probe budget.
@@ -4909,7 +5017,12 @@ class HostProcess:
             except ValueError:
                 return
             if isinstance(runner_frame, PingFrame):
-                await ws.send(encode_frame(PongFrame(ts=runner_frame.ts)))
+                diagnostics = self._diagnostics_for(ws)
+                if diagnostics is not None:
+                    diagnostics.app_ping_received()
+                await self._send_text(ws, encode_frame(PongFrame(ts=runner_frame.ts)))
+                if diagnostics is not None:
+                    diagnostics.app_pong_sent()
             return
         # Handle the frame inside a CONSUMER span parented on the trace
         # context the server stamped into the frame envelope, so the
@@ -4958,19 +5071,19 @@ class HostProcess:
                     launch_result = await self._handle_launch(frame)
             finally:
                 completion.set_result(None)
-            await ws.send(encode_host_frame(launch_result))
+            await self._send_text(ws, encode_host_frame(launch_result))
         elif isinstance(frame, HostStopRunnerFrame):
             async with self._runner_lifecycle_lock:
                 stop_result = await self._handle_stop(frame)
-            await ws.send(encode_host_frame(stop_result))
+            await self._send_text(ws, encode_host_frame(stop_result))
         elif isinstance(frame, HostRunnerStatusFrame):
-            await ws.send(encode_host_frame(await self._handle_runner_status(frame)))
+            await self._send_text(ws, encode_host_frame(await self._handle_runner_status(frame)))
         elif isinstance(frame, HostStatFrame):
-            await ws.send(encode_host_frame(self._handle_stat(frame)))
+            await self._send_text(ws, encode_host_frame(self._handle_stat(frame)))
         elif isinstance(frame, HostListDirFrame):
-            await ws.send(encode_host_frame(self._handle_list_dir(frame)))
+            await self._send_text(ws, encode_host_frame(self._handle_list_dir(frame)))
         elif isinstance(frame, HostCreateDirFrame):
-            await ws.send(encode_host_frame(self._handle_create_dir(frame)))
+            await self._send_text(ws, encode_host_frame(self._handle_create_dir(frame)))
         elif isinstance(frame, HostInstallHarnessFrame):
             # The installer shells out (npm) and can run for minutes, so run
             # it off the event loop and reply when it completes.
@@ -4980,7 +5093,7 @@ class HostProcess:
                     install_result.configured_harnesses,
                     install_result.gateway_inference,
                 )
-            await ws.send(encode_host_frame(install_result))
+            await self._send_text(ws, encode_host_frame(install_result))
         elif isinstance(frame, HostStoreSecretFrame):
             # The credential write touches the OS keychain / config file, so run
             # it off the event loop and reply when it completes.
@@ -4990,48 +5103,49 @@ class HostProcess:
                     secret_result.configured_harnesses,
                     secret_result.gateway_inference,
                 )
-            await ws.send(encode_host_frame(secret_result))
+            await self._send_text(ws, encode_host_frame(secret_result))
         elif isinstance(frame, HostDetectCredentialsFrame):
             # Ambient detection may probe files / a localhost socket, so run it
             # off the event loop.
             credentials_result = await asyncio.to_thread(self._handle_detect_credentials, frame)
-            await ws.send(encode_host_frame(credentials_result))
+            await self._send_text(ws, encode_host_frame(credentials_result))
         elif isinstance(frame, HostCreateWorktreeFrame):
-            await ws.send(encode_host_frame(await self._handle_create_worktree(frame)))
+            await self._send_text(ws, encode_host_frame(await self._handle_create_worktree(frame)))
         elif isinstance(frame, HostRemoveWorktreeFrame):
-            await ws.send(encode_host_frame(await self._handle_remove_worktree(frame)))
+            await self._send_text(ws, encode_host_frame(await self._handle_remove_worktree(frame)))
         elif isinstance(frame, HostListWorktreesFrame):
-            await ws.send(encode_host_frame(await self._handle_list_worktrees(frame)))
+            await self._send_text(ws, encode_host_frame(await self._handle_list_worktrees(frame)))
         elif isinstance(frame, HostFsRequestFrame):
             # Git status and directory walks can block, so run the read
             # off the event loop and reply when it completes.
             fs_result = await asyncio.to_thread(self._handle_fs_request, frame)
-            await ws.send(encode_host_frame(fs_result))
+            await self._send_text(ws, encode_host_frame(fs_result))
         elif isinstance(frame, HostFsWriteFrame):
             # gh/git writes can block; run off the event loop and reply back.
             fs_write_result = await asyncio.to_thread(self._handle_fs_write, frame)
-            await ws.send(encode_host_frame(fs_write_result))
+            await self._send_text(ws, encode_host_frame(fs_write_result))
         elif isinstance(frame, HostSkillsFrame):
             skills_result = await asyncio.to_thread(self._handle_skills, frame)
-            await ws.send(encode_host_frame(skills_result))
+            await self._send_text(ws, encode_host_frame(skills_result))
         elif isinstance(frame, HostPluginsFrame):
             plugins_result = await asyncio.to_thread(self._handle_plugins, frame)
-            await ws.send(encode_host_frame(plugins_result))
+            await self._send_text(ws, encode_host_frame(plugins_result))
         elif isinstance(frame, HostSkillContentFrame):
             content_result = await asyncio.to_thread(self._handle_skill_content, frame)
-            await ws.send(encode_host_frame(content_result))
+            await self._send_text(ws, encode_host_frame(content_result))
         elif isinstance(frame, HostMcpToolsFrame):
             tools_result = await self._handle_mcp_tools(frame)
-            await ws.send(encode_host_frame(tools_result))
+            await self._send_text(ws, encode_host_frame(tools_result))
         elif isinstance(frame, HostHarnessStartupFrame):
             startup_result = await asyncio.to_thread(self._handle_harness_startup, frame)
-            await ws.send(encode_host_frame(startup_result))
+            await self._send_text(ws, encode_host_frame(startup_result))
         elif isinstance(frame, HostConfigUpdateFrame):
             self._config_sync_acked = True
-            await asyncio.to_thread(self._handle_config_update, frame)
+            async with self._config_update_order:
+                await asyncio.to_thread(self._handle_config_update, frame)
         elif isinstance(frame, HostMcpServersFrame):
             mcp_result = await asyncio.to_thread(self._handle_mcp_servers, frame)
-            await ws.send(encode_host_frame(mcp_result))
+            await self._send_text(ws, encode_host_frame(mcp_result))
         elif isinstance(frame, HostModelOptionsFrame):
             # Every dispatched frame already runs on its own task (see
             # _start_frame_task), so a cold harness probe here cannot stall
@@ -5046,7 +5160,7 @@ class HostProcess:
                     status="failed",
                     error=f"model options resolution crashed for {frame.harness!r}",
                 )
-            await ws.send(encode_host_frame(options_result))
+            await self._send_text(ws, encode_host_frame(options_result))
         elif isinstance(frame, (HostImportLocalFrame, HostImportLocalByIdFrame)):
             # Streams one host.import_local_session per session (reads run off the
             # event loop inside), then a terminal host.import_local_done.
