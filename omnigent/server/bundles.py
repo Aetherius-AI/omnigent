@@ -11,6 +11,7 @@ import tempfile
 import zlib
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 from sqlalchemy.exc import IntegrityError
 
@@ -18,6 +19,7 @@ from omnigent.db.utils import generate_agent_id, uploaded_agent_id
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.inner.datamodel import OSEnvSpec
 from omnigent.spec import AgentSpec, ExtractionError, ToolRuntime, load
+from omnigent.util.ssrf import host_is_internal
 
 if TYPE_CHECKING:
     from omnigent.entities import Agent
@@ -60,6 +62,56 @@ def _reject_uploaded_callable_tools(spec: AgentSpec) -> None:
             )
     for sub in spec.sub_agents:
         _reject_uploaded_callable_tools(sub)
+
+
+def reject_unsafe_mcp_server(name: str, transport: str, url: str | None) -> None:
+    """
+    Reject an MCP-server declaration that enables SSRF or multi-tenant RCE.
+
+    This is the policy for a shared server; callers apply the trust gate (the
+    MCP-server routes skip it on a single-user/local server, bundle validation
+    runs it under *enforce_handler_allowlist*) so both entry points cannot
+    drift apart.
+
+    - ``stdio``: the command would be spawned on shared runner infrastructure
+      with access to other tenants' runner environment (RCE).
+    - ``http``: the url must not target a non-public address (SSRF to cloud
+      metadata / internal services), as classified by
+      :func:`omnigent.util.ssrf.host_is_internal`.
+
+    :param name: The declared server name, e.g. ``"github"``.
+    :param transport: ``"http"`` or ``"stdio"``.
+    :param url: The http endpoint, e.g. ``"https://mcp.example.com/sse"``;
+        ``None`` for stdio.
+    :raises OmnigentError: ``FORBIDDEN`` when the declaration is not permitted.
+    """
+    if transport == "stdio":
+        raise OmnigentError(
+            f"MCP server {name!r}: stdio MCP servers are not permitted on this "
+            "server; use an http transport.",
+            code=ErrorCode.FORBIDDEN,
+        )
+    if transport == "http" and url:
+        try:
+            host = urlsplit(url).hostname
+        except ValueError:
+            # Malformed authority (e.g. an unclosed IPv6 literal `http://[::1`).
+            host = None
+        if not host or host_is_internal(host):
+            raise OmnigentError(
+                f"MCP server {name!r}: url must be a public http(s) endpoint; "
+                "loopback, private, shared, link-local and cloud-metadata "
+                "addresses are not allowed.",
+                code=ErrorCode.FORBIDDEN,
+            )
+
+
+def _reject_uploaded_unsafe_mcp_servers(spec: AgentSpec) -> None:
+    """Apply the shared-server MCP policy to the agent and all nested agents."""
+    for server in spec.mcp_servers:
+        reject_unsafe_mcp_server(server.name, server.transport, server.url)
+    for sub in spec.sub_agents:
+        _reject_uploaded_unsafe_mcp_servers(sub)
 
 
 def _cwd_escapes_workspace(spec_cwd: str) -> bool:
@@ -130,7 +182,8 @@ def validate_agent_bundle(
     :raises OmnigentError: If the bundle is invalid, the spec is
         missing a name, or (when *enforce_handler_allowlist*) a policy
         names an unregistered handler, ``os_env.cwd`` is an absolute or
-        escaping path, or a tool declares a server-side callable or Python/TS source file.
+        escaping path, a tool declares a server-side callable or Python/TS
+        source file, or an MCP server uses stdio or a non-public http url.
     """
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -169,6 +222,10 @@ def validate_agent_bundle(
 
         # Server-side callables and source-file tools require operator-authored bundles.
         _reject_uploaded_callable_tools(spec)
+
+        # A bundle declares the same MCP servers the MCP-server routes guard,
+        # and the runner spawns/connects them unsandboxed on the next turn.
+        _reject_uploaded_unsafe_mcp_servers(spec)
 
     return spec
 

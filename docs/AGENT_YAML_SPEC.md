@@ -587,6 +587,17 @@ Operator-authored bundles on trusted single-user/local servers retain their
 Python and TypeScript tool support. Changing a tool's declared runtime alone is
 not a migration: client tools require a client-provided implementation.
 
+### Uploaded-agent MCP servers on multi-user servers
+
+On multi-user servers, uploaded agent bundles, including nested agents, cannot
+declare `stdio` MCP servers (the runner would spawn the command unsandboxed on
+shared infrastructure) or `http` MCP servers whose `url` targets a loopback,
+private, link-local or cloud-metadata address. Uploads are rejected with the
+same error the session MCP-server API returns for these declarations. Owners of
+an existing uploaded agent that declares a `stdio` server can still delete that
+entry or replace it with an `http` server through the MCP-server API.
+Operator-authored bundles on trusted single-user/local servers are unaffected.
+
 ### MCP server
 
 ```yaml

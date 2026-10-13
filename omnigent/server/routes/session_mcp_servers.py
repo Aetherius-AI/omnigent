@@ -11,7 +11,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote
 
 import httpx
 import yaml
@@ -23,7 +23,11 @@ from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.runtime import session_stream
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.auth import LEVEL_OWNER, LEVEL_READ, AuthProvider, local_single_user_enabled
-from omnigent.server.bundles import bundle_location, validate_agent_bundle
+from omnigent.server.bundles import (
+    bundle_location,
+    reject_unsafe_mcp_server,
+    validate_agent_bundle,
+)
 from omnigent.server.routes._auth_helpers import (
     get_user_id,
     require_access,
@@ -40,7 +44,6 @@ from omnigent.spec.types import MCPServerConfig
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.artifact_store import ArtifactStore
 from omnigent.stores.permission_store import PermissionStore
-from omnigent.util.ssrf import host_is_internal
 
 if TYPE_CHECKING:
     from omnigent.runner.routing import RunnerRouter
@@ -57,51 +60,22 @@ class _McpLocation:
     raw: dict[str, Any]
 
 
-# Registration-time SSRF / multi-tenant-RCE guard for MCP-server declarations:
-# reject an http url that targets a non-public host, and stdio transport on a
-# multi-tenant server, before the declaration is persisted. Host classification
-# is shared (omnigent.util.ssrf) with the connect-time redirect guard in
-# omnigent.tools.mcp, so both enforcement points agree on what "internal" means.
-
-
 def assert_mcp_server_request_safe(body: UpsertMCPServerRequest) -> None:
     """
     Reject an MCP-server declaration that enables SSRF or multi-tenant RCE.
 
-    - ``http``: the url must not target a non-public address (SSRF to cloud
-      metadata / internal services).
-    - ``stdio``: forbidden on a multi-tenant server, where the command would be
-      spawned on shared runner infrastructure with access to other tenants'
-      runner environment (RCE). A single-user/local server still allows it.
+    Applies :func:`omnigent.server.bundles.reject_unsafe_mcp_server`, the same
+    policy uploaded bundles are validated against, before the declaration is
+    persisted. A single-user/local server has no other tenant to protect and
+    is expected to reach its own loopback services, so it may declare stdio
+    servers and internal http endpoints.
 
     :param body: The create/update request body.
     :raises OmnigentError: ``FORBIDDEN`` when the declaration is not permitted.
     """
-    if body.transport == "stdio":
-        if not local_single_user_enabled():
-            raise OmnigentError(
-                "stdio MCP servers are not permitted on this server; use an http transport.",
-                code=ErrorCode.FORBIDDEN,
-            )
+    if local_single_user_enabled():
         return
-    if body.transport == "http" and body.url:
-        # A single-user / local server has no other tenant to protect and is
-        # expected to reach its own loopback services, so it may target internal
-        # endpoints — mirroring the stdio carve-out above.
-        if local_single_user_enabled():
-            return
-        try:
-            host = urlsplit(body.url).hostname
-        except ValueError:
-            # Malformed authority (e.g. an unclosed IPv6 literal `http://[::1`).
-            host = None
-        if not host or host_is_internal(host):
-            raise OmnigentError(
-                "MCP server url must be a public http(s) endpoint; loopback, "
-                "private, shared, link-local and cloud-metadata addresses are "
-                "not allowed.",
-                code=ErrorCode.FORBIDDEN,
-            )
+    reject_unsafe_mcp_server(body.name, body.transport, body.url)
 
 
 def create_session_mcp_servers_router(
@@ -275,10 +249,12 @@ def create_session_mcp_servers_router(
             root = Path(tmpdir) / "agent"
             extract_safe(bundle_bytes, root)
 
-            current_spec = validate_agent_bundle(
-                bundle_bytes,
-                enforce_handler_allowlist=not local_single_user_enabled(),
-            )
+            # Read the stored declarations without re-applying the upload guards
+            # so an entry that predates one (a stdio server on a now shared
+            # server) stays deletable; the edited bundle is validated in full below.
+            current_spec = agent_cache.load(
+                agent.id, agent.bundle_location, expand_env=agent.operator_authored
+            ).spec
             current_names = {server.name for server in current_spec.mcp_servers}
             if mode == "create":
                 assert body is not None
