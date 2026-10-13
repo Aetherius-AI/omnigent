@@ -196,7 +196,9 @@ export function UsagePage() {
                 {formatSessionCostUsd(totalCost)}
               </p>
               <p className="mt-0.5 text-xs text-muted-foreground">
-                {allSessions.length} session{allSessions.length !== 1 && "s"}
+                <span>
+                  {allSessions.length} session{allSessions.length !== 1 && "s"}
+                </span>
                 {hasNextPage && " loaded"}
               </p>
             </div>
