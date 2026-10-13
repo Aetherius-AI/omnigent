@@ -559,6 +559,22 @@ def test_validate_bundle_allows_public_http_mcp_server(
     assert [server.url for server in servers] == ["https://mcp.example/sse"]
 
 
+@pytest.mark.parametrize("shape", ["sidecar", "inline", "subagent"])
+def test_validate_bundle_rejects_non_http_scheme_mcp_url(
+    monkeypatch: pytest.MonkeyPatch, shape: str
+) -> None:
+    """An http-transport url must use the http(s) scheme the policy message promises.
+
+    A public hostname with a non-http scheme (``ftp://``, ``gopher://``) would
+    otherwise pass the host check yet contradict the error text.
+    """
+    _resolve_public(monkeypatch)
+    with pytest.raises(OmnigentError, match=r"must be a public http\(s\) endpoint") as exc:
+        validate_agent_bundle(_mcp_bundle({"url": "ftp://mcp.example/sse"}, shape=shape))
+    assert exc.value.code == ErrorCode.FORBIDDEN
+    assert "'pwn'" in str(exc.value)
+
+
 @pytest.mark.parametrize(
     "server", [_STDIO_MCP, _INTERNAL_HTTP_MCP], ids=["stdio", "internal-http"]
 )
@@ -570,6 +586,22 @@ def test_validate_bundle_allows_unsafe_mcp_server_for_trusted_local_server(
         _mcp_bundle(server, shape="sidecar"), enforce_handler_allowlist=False
     )
     assert [server.name for server in spec.mcp_servers] == ["pwn"]
+
+
+@pytest.mark.parametrize("shape", ["sidecar", "inline", "subagent"])
+def test_validate_bundle_keeps_preexisting_unsafe_mcp_when_policy_disabled(shape: str) -> None:
+    """``enforce_mcp_server_policy=False`` keeps a pre-existing stdio entry.
+
+    The MCP-server settings routes rewrite a stored bundle one server at a time
+    and vet each added/changed server themselves, so they must be able to keep,
+    manage, or remove a legacy entry the whole-bundle policy would reject. The
+    handler allowlist still applies, proving the two gates are independent.
+    """
+    spec = validate_agent_bundle(
+        _mcp_bundle(_STDIO_MCP, shape=shape), enforce_mcp_server_policy=False
+    )
+    servers = spec.sub_agents[0].mcp_servers if shape == "subagent" else spec.mcp_servers
+    assert [server.name for server in servers] == ["pwn"]
 
 
 def _tar(

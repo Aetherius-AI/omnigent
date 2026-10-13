@@ -93,11 +93,12 @@ def reject_unsafe_mcp_server(name: str, transport: str, url: str | None) -> None
         )
     if transport == "http" and url:
         try:
-            host = urlsplit(url).hostname
+            parts = urlsplit(url)
+            scheme, host = parts.scheme, parts.hostname
         except ValueError:
             # Malformed authority (e.g. an unclosed IPv6 literal `http://[::1`).
-            host = None
-        if not host or host_is_internal(host):
+            scheme, host = "", None
+        if scheme not in ("http", "https") or not host or host_is_internal(host):
             raise OmnigentError(
                 f"MCP server {name!r}: url must be a public http(s) endpoint; "
                 "loopback, private, shared, link-local and cloud-metadata "
@@ -152,6 +153,7 @@ def validate_agent_bundle(
     bundle_bytes: bytes,
     *,
     enforce_handler_allowlist: bool = True,
+    enforce_mcp_server_policy: bool = True,
 ) -> AgentSpec:
     """
     Validate an agent bundle and return the parsed spec.
@@ -178,6 +180,15 @@ def validate_agent_bundle(
         execution, so the restriction would add no security). See the
         call sites in ``omnigent/server/routes/sessions.py``, which gate
         this on :func:`omnigent.server.auth.local_single_user_enabled`.
+    :param enforce_mcp_server_policy: When ``True`` (the default), reject a
+        stdio or non-public http MCP server anywhere in the spec. The
+        MCP-server settings routes pass ``False``: they rewrite a stored
+        bundle one server at a time and already vet each added or changed
+        server with :func:`assert_mcp_server_request_safe`, so re-applying the
+        policy to untouched pre-existing entries would wrongly block managing
+        or removing a legacy stdio entry (including a nested sub-agent's) and
+        deadlock a bundle that declares several. Has no effect unless
+        *enforce_handler_allowlist* is also set.
     :returns: The validated :class:`AgentSpec`.
     :raises OmnigentError: If the bundle is invalid, the spec is
         missing a name, or (when *enforce_handler_allowlist*) a policy
@@ -225,7 +236,8 @@ def validate_agent_bundle(
 
         # A bundle declares the same MCP servers the MCP-server routes guard,
         # and the runner spawns/connects them unsandboxed on the next turn.
-        _reject_uploaded_unsafe_mcp_servers(spec)
+        if enforce_mcp_server_policy:
+            _reject_uploaded_unsafe_mcp_servers(spec)
 
     return spec
 

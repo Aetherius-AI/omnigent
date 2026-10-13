@@ -272,6 +272,117 @@ async def test_owner_can_migrate_legacy_stdio_entry_to_http(
     assert [server["transport"] for server in listed.json()["data"]] == ["http"]
 
 
+def _stdio_server(name: str) -> dict[str, Any]:
+    """An inert stdio declaration whose command must never be spawned."""
+    return {"name": name, "transport": "stdio", "command": "test-mcp-must-never-run", "args": []}
+
+
+def _servers_bundle(
+    *,
+    root: list[dict[str, Any]] | None = None,
+    child: list[dict[str, Any]] | None = None,
+) -> bytes:
+    """Build a bundle with arbitrary root and nested sub-agent MCP declarations.
+
+    ``_bundle`` only carries a single server named ``service``; the legacy
+    multi-entry and nested-stdio cases need several, and a mix of root and
+    sub-agent placement, so they are assembled here.
+    """
+    config: dict[str, Any] = {
+        "spec_version": 1,
+        "name": "mcp-auth-agent",
+        "executor": {"config": {"harness": "claude-sdk"}},
+        "instructions": "Original instructions.",
+    }
+    files: dict[str, dict[str, Any]] = {"config.yaml": config}
+    if child:
+        config["tools"] = {"agents": ["child"]}
+        files["agents/child/config.yaml"] = {
+            "spec_version": 1,
+            "name": "child",
+            "executor": {"config": {"harness": "claude-sdk"}},
+        }
+    for server in root or []:
+        files[f"tools/mcp/{server['name']}.yaml"] = server
+    for server in child or []:
+        files[f"agents/child/tools/mcp/{server['name']}.yaml"] = server
+    result = io.BytesIO()
+    with tarfile.open(fileobj=result, mode="w:gz") as archive:
+        for name, contents in files.items():
+            data = yaml.safe_dump(contents).encode()
+            member = tarfile.TarInfo(name)
+            member.size = len(data)
+            archive.addfile(member, io.BytesIO(data))
+    return result.getvalue()
+
+
+async def _seed_bundle_single_user(
+    client: httpx.AsyncClient,
+    db_uri: str,
+    bundle: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[str, dict[str, str]]:
+    """Upload a bundle a shared server now refuses, then return to shared mode."""
+    monkeypatch.setenv("OMNIGENT_LOCAL_SINGLE_USER", "1")
+    session_id, headers = await _create_session(client, db_uri, bundle, LEVEL_OWNER)
+    monkeypatch.delenv("OMNIGENT_LOCAL_SINGLE_USER")
+    return session_id, headers
+
+
+async def test_owner_can_remove_one_of_several_legacy_stdio_entries(
+    client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Removing one legacy stdio entry is not blocked by the others that remain.
+
+    The edit re-serialises the whole bundle, so re-applying the upload policy
+    to untouched entries would deadlock a bundle with several of them.
+    """
+    bundle = _servers_bundle(root=[_stdio_server("svc-a"), _stdio_server("svc-b")])
+    session_id, headers = await _seed_bundle_single_user(client, db_uri, bundle, monkeypatch)
+    url = f"/v1/sessions/{session_id}/agent/mcp-servers"
+
+    # A new unsafe server is still refused while legacy ones linger.
+    added = await client.post(url, headers=headers, json=_mcp_config("stdio"))
+    assert added.status_code == 403, added.text
+    assert "stdio MCP servers are not permitted" in added.text
+
+    deleted = await client.delete(f"{url}/svc-a", headers=headers)
+    assert deleted.status_code == 204, deleted.text
+    listed = await client.get(url, headers=headers)
+    assert [server["name"] for server in listed.json()["data"]] == ["svc-b"]
+
+    deleted = await client.delete(f"{url}/svc-b", headers=headers)
+    assert deleted.status_code == 204, deleted.text
+    listed = await client.get(url, headers=headers)
+    assert listed.json()["data"] == []
+
+
+async def test_subagent_legacy_stdio_does_not_block_root_mcp_edit(
+    client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A nested sub-agent's legacy stdio entry, unreachable here, must not freeze edits."""
+    bundle = _servers_bundle(
+        root=[{"name": "service", "transport": "http", "url": "https://example.invalid/mcp"}],
+        child=[_stdio_server("legacy")],
+    )
+    session_id, headers = await _seed_bundle_single_user(client, db_uri, bundle, monkeypatch)
+    url = f"/v1/sessions/{session_id}/agent/mcp-servers"
+
+    updated = await client.put(
+        f"{url}/service", headers=headers, json=_mcp_config("http", changed=True)
+    )
+    assert updated.status_code == 200, updated.text
+
+    # The per-request guard still rejects turning the root server unsafe.
+    rejected = await client.put(f"{url}/service", headers=headers, json=_mcp_config("stdio"))
+    assert rejected.status_code == 403, rejected.text
+    assert "stdio MCP servers are not permitted" in rejected.text
+
+
 _INTERNAL_HTTP_MCP: dict[str, Any] = {
     "name": "service",
     "transport": "http",
@@ -419,11 +530,18 @@ async def test_bundle_replacement_requires_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Only owners may replace a bundle, including prompt-only and nested MCP edits."""
-    if transport == "stdio":
+    # A shared server only accepts a stdio bundle in single-user mode, so seed
+    # (and keep running, for the owner-success path) under that flag. For a
+    # non-owner, drop it after seeding so the 403 exercises real shared-server
+    # authorization rather than the single-user owner-gate bypass.
+    legacy_stdio = transport == "stdio"
+    if legacy_stdio:
         monkeypatch.setenv("OMNIGENT_LOCAL_SINGLE_USER", "1")
     config = _mcp_config(transport)
     initial = _bundle(config, nested=nested)
     session_id, headers = await _create_session(client, db_uri, initial, level)
+    if legacy_stdio and level != LEVEL_OWNER:
+        monkeypatch.delenv("OMNIGENT_LOCAL_SINGLE_USER")
     url = f"/v1/sessions/{session_id}/agent"
     prompt_edit = _bundle(config, nested=nested, prompt="Updated instructions.")
     edited = await client.put(

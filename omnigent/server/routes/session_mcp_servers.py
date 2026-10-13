@@ -251,7 +251,7 @@ def create_session_mcp_servers_router(
 
             # Read the stored declarations without re-applying the upload guards
             # so an entry that predates one (a stdio server on a now shared
-            # server) stays deletable; the edited bundle is validated in full below.
+            # server) stays deletable; the edited bundle is re-validated below.
             current_spec = agent_cache.load(
                 agent.id, agent.bundle_location, expand_env=agent.operator_authored
             ).spec
@@ -287,6 +287,12 @@ def create_session_mcp_servers_router(
             new_spec = validate_agent_bundle(
                 new_bundle,
                 enforce_handler_allowlist=not local_single_user_enabled(),
+                # create/update already vet the added or changed server via
+                # assert_mcp_server_request_safe; re-checking the whole bundle
+                # would block managing or removing a pre-existing legacy stdio
+                # entry (including a nested sub-agent's) and deadlock a bundle
+                # declaring several.
+                enforce_mcp_server_policy=False,
             )
             if new_spec.name != agent.name:
                 raise OmnigentError(
