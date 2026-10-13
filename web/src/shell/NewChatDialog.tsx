@@ -2427,12 +2427,17 @@ export function NewChatLandingScreen() {
   // Sandbox repos composed into the managed create's `<url>[#<branch>]` workspaces. Seed
   // from the in-session draft, else the repos last launched with this agent; a remembered
   // repo the account can no longer access simply shows unselected in the combobox.
-  const [sandboxRepoSelections, setSandboxRepoSelections] = useState<LastSandboxRepo[]>(
-    () => restoredDraft?.sandboxRepoSelections ?? readLastSandboxRepos(pickedAgentId),
-  );
-  // True while the list is still that untouched remembered seed; any edit makes
-  // it the user's own, which an agent switch then leaves alone.
-  const sandboxReposSeededRef = useRef<boolean>(restoredDraft?.sandboxReposSeeded ?? true);
+  const [sandboxRepoState, setSandboxRepoState] = useState<{
+    selections: LastSandboxRepo[];
+    seeded: LastSandboxRepo[] | null;
+  }>(() => {
+    const selections = restoredDraft?.sandboxRepoSelections ?? readLastSandboxRepos(pickedAgentId);
+    return { selections, seeded: (restoredDraft?.sandboxReposSeeded ?? true) ? selections : null };
+  });
+  const sandboxRepoSelections = sandboxRepoState.selections;
+  // `seeded` is the exact list the remembered seed produced: while `selections` is still
+  // that list an agent switch may re-seed it; any edit yields a new list, the user's own.
+  const sandboxReposUntouched = sandboxRepoState.selections === sandboxRepoState.seeded;
   // Agent whose remembered repos the current seed came from.
   const sandboxReposSeededForRef = useRef<string | null>(pickedAgentId);
   // Bumped by the project-switch reset so the re-seed effect runs again even when
@@ -2450,6 +2455,16 @@ export function NewChatLandingScreen() {
     effectiveSandboxProvider !== null &&
     info.sandbox_provider_capabilities?.[effectiveSandboxProvider]?.multi_repo === true;
   const maxSandboxRepos = sandboxMultiRepo ? MAX_SANDBOX_REPOS : 1;
+  // An updater that returns its input unchanged is a no-op and keeps the seeded list.
+  const updateSandboxRepos = useCallback(
+    (update: (selections: LastSandboxRepo[]) => LastSandboxRepo[]): void => {
+      setSandboxRepoState((prev) => {
+        const selections = update(prev.selections);
+        return selections === prev.selections ? prev : { ...prev, selections };
+      });
+    },
+    [],
+  );
   // Append a repo (deduped by URL — adding one already picked is a no-op),
   // remove one, or repoint its branch. Order is preserved so the list reads
   // the way the user built it.
@@ -2458,31 +2473,32 @@ export function NewChatLandingScreen() {
       const u = url.trim();
       if (u === "") return;
       // Cap at the provider's limit so a selection can't only fail with a 422
-      // at create; a duplicate URL is a no-op that leaves the seed untouched.
-      const isNoOp = (list: LastSandboxRepo[]) =>
-        list.some((r) => r.url === u) || list.length >= maxSandboxRepos;
-      if (!isNoOp(sandboxRepoSelections)) sandboxReposSeededRef.current = false;
-      setSandboxRepoSelections((prev) =>
-        isNoOp(prev) ? prev : [...prev, { url: u, branch: branch.trim() }],
+      // at create.
+      updateSandboxRepos((prev) =>
+        prev.some((r) => r.url === u) || prev.length >= maxSandboxRepos
+          ? prev
+          : [...prev, { url: u, branch: branch.trim() }],
       );
     },
-    [maxSandboxRepos, sandboxRepoSelections],
+    [maxSandboxRepos, updateSandboxRepos],
   );
   const removeSandboxRepo = useCallback(
     (url: string): void => {
-      if (sandboxRepoSelections.some((r) => r.url === url)) sandboxReposSeededRef.current = false;
-      setSandboxRepoSelections((prev) => prev.filter((r) => r.url !== url));
+      updateSandboxRepos((prev) =>
+        prev.some((r) => r.url === url) ? prev.filter((r) => r.url !== url) : prev,
+      );
     },
-    [sandboxRepoSelections],
+    [updateSandboxRepos],
   );
   const setSandboxRepoBranch = useCallback(
     (url: string, branch: string): void => {
-      if (sandboxRepoSelections.some((r) => r.url === url && r.branch !== branch)) {
-        sandboxReposSeededRef.current = false;
-      }
-      setSandboxRepoSelections((prev) => prev.map((r) => (r.url === url ? { ...r, branch } : r)));
+      updateSandboxRepos((prev) =>
+        prev.some((r) => r.url === url && r.branch !== branch)
+          ? prev.map((r) => (r.url === url ? { ...r, branch } : r))
+          : prev,
+      );
     },
-    [sandboxRepoSelections],
+    [updateSandboxRepos],
   );
   // Free-text URL being typed into the "paste a URL" adder (not yet added).
   const [pendingRepoUrl, setPendingRepoUrl] = useState<string>("");
@@ -2652,7 +2668,7 @@ export function NewChatLandingScreen() {
     sandboxSelected,
     sandboxProvider,
     sandboxRepoSelections,
-    sandboxReposSeeded: sandboxReposSeededRef.current,
+    sandboxReposSeeded: sandboxReposUntouched,
     workspace,
     branchName,
     autoSeededBranch,
@@ -2790,8 +2806,8 @@ export function NewChatLandingScreen() {
     // Drafted sandbox repo fields are location state too — left in place they
     // would clone the previous project's repo into this project's sandbox. The
     // agent's remembered repos seed again once this visit's agent resolves.
-    setSandboxRepoSelections([]);
-    sandboxReposSeededRef.current = true;
+    const cleared: LastSandboxRepo[] = [];
+    setSandboxRepoState({ selections: cleared, seeded: cleared });
     sandboxReposSeededForRef.current = null;
     setSandboxReposSeedNonce((n) => n + 1);
     setPendingRepoUrl("");
@@ -3085,11 +3101,12 @@ export function NewChatLandingScreen() {
   // for one agent never rides into another agent's launch. Left alone once the
   // user has edited the list this visit, or while no agent has resolved yet.
   useEffect(() => {
-    if (!sandboxReposSeededRef.current || effectiveAgentId === null) return;
+    if (!sandboxReposUntouched || effectiveAgentId === null) return;
     if (sandboxReposSeededForRef.current === effectiveAgentId) return;
     sandboxReposSeededForRef.current = effectiveAgentId;
-    setSandboxRepoSelections(readLastSandboxRepos(effectiveAgentId));
-  }, [effectiveAgentId, sandboxReposSeedNonce]);
+    const seeded = readLastSandboxRepos(effectiveAgentId);
+    setSandboxRepoState({ selections: seeded, seeded });
+  }, [effectiveAgentId, sandboxReposSeedNonce, sandboxReposUntouched]);
   const selectedAgent = useMemo(
     () =>
       effectiveAgentId === PENDING_AGENT_ID && pendingAgent

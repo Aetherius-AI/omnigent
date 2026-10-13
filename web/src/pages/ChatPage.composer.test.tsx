@@ -2695,24 +2695,6 @@ describe("Composer shared visible controls", () => {
     );
   });
 
-  it("counts several sandbox repositories from the space-joined label", () => {
-    Object.assign(composerSessionSnapshot, {
-      workspace: null,
-      labels: {
-        "omnigent.sandbox.repo": "https://github.com/org/api https://github.com/org/web#main",
-      },
-    });
-    useChatStore.setState({ conversationId: "conv_two_sandbox_repos", gitBranch: null });
-
-    renderWithTooltips(<Composer {...composerProps()} />);
-
-    const directory = screen.getByTestId("composer-workspace-dir");
-    expect(directory).toHaveTextContent("2 repositories");
-    expect(directory).toHaveAccessibleName(
-      "Sandbox repositories: https://github.com/org/api, https://github.com/org/web#main",
-    );
-  });
-
   it("dispatches the shared permission picker to the session setter", async () => {
     useChatStore.setState({
       conversationId: "shared-permissions",

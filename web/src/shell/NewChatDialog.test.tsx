@@ -39,6 +39,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   composeSandboxWorkspace,
   composeSandboxWorkspaces,
+  sandboxReposFromLabels,
   composerWorktreeHeaderState,
   deriveHomeDir,
   describeCreateError,
@@ -724,6 +725,17 @@ describe("sandbox repository helpers", () => {
       ]),
     ).toEqual(["https://github.com/org/api#main", "https://github.com/org/web"]);
     expect(composeSandboxWorkspaces([])).toEqual([]);
+  });
+
+  it("sandboxReposFromLabels splits the space-joined label and tolerates its absence", () => {
+    expect(
+      sandboxReposFromLabels({
+        "omnigent.sandbox.repo": " https://github.com/org/api  https://github.com/org/web#main ",
+      }),
+    ).toEqual(["https://github.com/org/api", "https://github.com/org/web#main"]);
+    expect(sandboxReposFromLabels({ "omnigent.sandbox.repo": "" })).toEqual([]);
+    expect(sandboxReposFromLabels({})).toEqual([]);
+    expect(sandboxReposFromLabels(undefined)).toEqual([]);
   });
 
   it.each<[string, string]>([
@@ -7388,6 +7400,79 @@ describe("NewChatLandingScreen", () => {
     fireEvent.click(screen.getByTestId("new-chat-landing-agent-a2"));
     expect(screen.getByTestId("new-chat-landing-agent-select")).toHaveAccessibleName(/^Codex/);
     expect(screen.getByTestId("new-chat-landing-repo-chip")).toHaveTextContent("mine");
+  });
+
+  it("treats re-adding the seeded repository as a no-op that keeps the seed re-seedable", async () => {
+    localStorage.setItem(
+      "omnigent:last-sandbox-repos",
+      JSON.stringify({ a1: [{ url: "https://github.com/org/api", branch: "" }] }),
+    );
+    // A multi-repo provider keeps the URL adder visible beside the seeded row.
+    renderLanding({
+      managed_sandboxes_enabled: true,
+      sandbox_provider: "agent_sandbox",
+      sandbox_provider_capabilities: { agent_sandbox: { multi_repo: true } },
+    });
+    fireEvent.pointerDown(screen.getByTestId("new-chat-landing-host-chip"), { button: 0 });
+    fireEvent.click(screen.getByTestId("new-chat-landing-sandbox-option"));
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-repo-chip")).toHaveTextContent("api"),
+    );
+    fireEvent.click(screen.getByTestId("new-chat-landing-repo-chip"));
+    fireEvent.change(screen.getByTestId("new-chat-landing-repo-input"), {
+      target: { value: "https://github.com/org/api" },
+    });
+    fireEvent.click(screen.getByTestId("new-chat-landing-repo-add"));
+    expect(screen.getAllByTestId("new-chat-landing-repo-row")).toHaveLength(1);
+
+    // The list never changed, so Codex (nothing remembered) still starts empty.
+    fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
+    fireEvent.click(screen.getByTestId("new-chat-landing-agent-a2"));
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-repo-chip")).toHaveAttribute(
+        "aria-label",
+        "Sandbox repositories: None selected",
+      ),
+    );
+  });
+
+  it("keeps an edited branch on the seeded repository when the agent changes", async () => {
+    authenticatedFetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: "conv_new" }),
+    } as unknown as Response);
+    localStorage.setItem(
+      "omnigent:last-sandbox-repos",
+      JSON.stringify({
+        a1: [{ url: "https://github.com/org/api", branch: "" }],
+        a2: [{ url: "https://github.com/org/codex-repo", branch: "" }],
+      }),
+    );
+    renderLanding({ managed_sandboxes_enabled: true });
+    fireEvent.pointerDown(screen.getByTestId("new-chat-landing-host-chip"), { button: 0 });
+    fireEvent.click(screen.getByTestId("new-chat-landing-sandbox-option"));
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-repo-chip")).toHaveTextContent("api"),
+    );
+    fireEvent.click(screen.getByTestId("new-chat-landing-repo-chip"));
+    fireEvent.change(screen.getByLabelText("Branch for api"), { target: { value: "dev" } });
+    expect(screen.getByTestId("new-chat-landing-repo-chip")).toHaveTextContent("api#dev");
+
+    // Repointing the branch is the user's own edit, so switching agents keeps it
+    // instead of swapping in Codex's remembered repository.
+    fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
+    fireEvent.click(screen.getByTestId("new-chat-landing-agent-a2"));
+    expect(screen.getByTestId("new-chat-landing-agent-select")).toHaveAccessibleName(/^Codex/);
+    expect(screen.getByTestId("new-chat-landing-repo-chip")).toHaveTextContent("api#dev");
+    fireEvent.change(screen.getByTestId("new-chat-landing-input"), {
+      target: { value: "audit the repo" },
+    });
+    fireEvent.submit(screen.getByTestId("new-chat-landing-composer"));
+    await waitFor(() => expect(authenticatedFetchMock).toHaveBeenCalledTimes(1));
+    const [, init] = authenticatedFetchMock.mock.calls[0];
+    const body = JSON.parse((init as RequestInit).body as string) as Record<string, unknown>;
+    expect(body.agent_id).toBe("a2");
+    expect(body.workspaces).toEqual(["https://github.com/org/api#dev"]);
   });
 
   it("keeps the list empty when the seeded repository was removed and the agent changes", async () => {
