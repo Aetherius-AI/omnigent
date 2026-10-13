@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import yaml
 
+from omnigent.entities.agent import Agent
 from omnigent.entities.conversation import Conversation
 from omnigent.errors import OmnigentError
 from omnigent.runner.app import _build_spawn_env_from_spec
@@ -307,3 +308,41 @@ def test_model_validation_applies_inherited_acp_harness_to_nested_worker(
         orch._validate_session_model_selection(
             _conv(sub_agent_name="worker"), "model-b", MagicMock()
         )
+
+
+def _agent_row(agent_id: str) -> Agent:
+    return Agent(id=agent_id, created_at=1700000000, name="acp-agent", bundle_location="b://acp")
+
+
+def _acp_cache() -> MagicMock:
+    cache = MagicMock()
+    cache.load.return_value.spec = AgentSpec(
+        spec_version=1,
+        name="worker",
+        executor=ExecutorSpec(type="omnigent", config={"harness": "acp:synthetic"}),
+    )
+    return cache
+
+
+def test_resolve_harness_is_acp_reuses_prefetched_agent() -> None:
+    """A caller that already holds the bound agent row must not read it again."""
+    store = MagicMock()
+    store.get.side_effect = AssertionError("the prefetched agent row must be reused")
+    cache = _acp_cache()
+    with patch("omnigent.runtime.get_agent_cache", return_value=cache):
+        assert orch._resolve_harness_impl_is_acp(
+            _conv(agent_id="agent_1"), store, agent=_agent_row("agent_1")
+        )
+    store.get.assert_not_called()
+    assert cache.load.call_args.args[:2] == ("agent_1", "b://acp")
+
+
+def test_resolve_harness_ignores_prefetched_agent_of_another_conversation() -> None:
+    """A row for a different agent id is not trusted; the store is read instead."""
+    store = MagicMock()
+    store.get.return_value = _agent_row("agent_1")
+    with patch("omnigent.runtime.get_agent_cache", return_value=_acp_cache()):
+        assert orch._resolve_harness_impl_is_acp(
+            _conv(agent_id="agent_1"), store, agent=_agent_row("agent_other")
+        )
+    store.get.assert_called_once_with("agent_1")

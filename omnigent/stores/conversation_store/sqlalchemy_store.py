@@ -2895,10 +2895,10 @@ class SqlAlchemyConversationStore(ConversationStore):
 
         with self._conv_session("list_conversations") as session:
             # Bound the content-search scan server-side (Postgres only). SET
-            # LOCAL scopes to this transaction and reverts on commit, so it
-            # can't leak to the connection's next pooled use. See
-            # _SEARCH_STATEMENT_TIMEOUT_MS. A worker-thread query is not stopped
-            # by a client disconnect, so this is the only server-side bound.
+            # LOCAL lasts until this transaction ends (an enclosing
+            # shared_read_scope's commit), so it can't leak to the connection's
+            # next pooled use. See _SEARCH_STATEMENT_TIMEOUT_MS. A worker-thread
+            # query is not stopped by a client disconnect: the only server-side bound.
             is_postgres = session.bind is not None and is_postgresql_family(
                 session.bind.dialect.name
             )
