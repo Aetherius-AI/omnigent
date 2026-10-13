@@ -797,17 +797,14 @@ async def _observe_native_with_real_poller(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("turn_end", ["idle", "failed"])
-async def test_hook_turn_end_rearms_a_poller_whose_file_still_says_busy(
-    tmp_path: Path, turn_end: str
-) -> None:
+async def test_hook_turn_end_rearms_a_poller_whose_file_still_says_busy(tmp_path: Path) -> None:
     """A hook-derived turn end must not silence a Claude that is still working.
 
-    Claude's status file stays ``busy`` across a ``Stop`` (or ``StopFailure``)
-    while a delegate keeps working and when Claude then resumes the session on
-    its own. The file is written only on change, so without a re-arm the poller
-    would never re-publish ``running`` for that turn. A ``Stop`` re-arms it by
-    itself; after a ``StopFailure`` the runner re-arms a dispatched child's.
+    Claude's status file stays ``busy`` across a ``Stop`` while a delegate keeps
+    working and when Claude then resumes the session on its own. The file is
+    written only on change, so without a re-arm the poller would never
+    re-publish ``running`` for that turn. (After a ``StopFailure`` the runner
+    re-arms a dispatched child's poller the same way; the runner tests cover it.)
     """
     config_dir = tmp_path / "claude"
     _write_claude_status_file(config_dir, status="busy")
@@ -824,10 +821,8 @@ async def test_hook_turn_end_rearms_a_poller_whose_file_still_says_busy(
     assert statuses == ["running"], "an unchanged file must stay silent"
 
     # The hook's turn end reaches the runner on /events and becomes the baseline.
-    registry.note_external_session_status("conv_busy_after_stop", turn_end)
+    registry.note_external_session_status("conv_busy_after_stop", "idle")
     assert not registry.session_turn_is_active("conv_busy_after_stop")
-    if turn_end == "failed":
-        registry.resync_status_poller("conv_busy_after_stop")
 
     # Claude's file still says busy: the next tick must re-assert running.
     on_tick()

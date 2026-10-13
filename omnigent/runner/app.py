@@ -188,9 +188,8 @@ from omnigent.runner.subagent_work import (
     _SubagentDeliveryAck,
     _SubagentWorkEntry,
     _truncate_child_preview,
-    drop_unused_in_flight_send_lock,
     get_subagent_work,
-    in_flight_send_lock,
+    in_flight_send_guard,
     is_codex_native_subagent_wrapper,
     list_subagent_work,
     mark_subagent_work_started,
@@ -1685,11 +1684,10 @@ def create_runner_app(
             await _subagent_work._wake_retry_sleep(_SUBAGENT_REARM_SETTLE_GRACE_S)
             # Serialized with a terminal report's check-stamp-record step, so the
             # settle cannot remove the entry a report is about to confirm.
-            async with in_flight_send_lock(child_id):
+            async with in_flight_send_guard(child_id):
                 if get_subagent_work(child_id) is not entry:
                     return
                 reverted = settle_spurious_subagent_rearm(child_id)
-            drop_unused_in_flight_send_lock(child_id)
             if reverted is None:
                 return
             if reverted.rearmed_over is not None and reverted.rearmed_over.status == "failed":
@@ -1738,10 +1736,9 @@ def create_runner_app(
         if status in ("running", "waiting", "idle") and (
             _session_harness_name(session_id) == "claude-native"
         ):
-            # A claude-native child's ``running`` arrives here (never on ``/events``):
-            # from the status-file poller, or from the pane watcher while the file
-            # is unresolved. Either may be stale, and the settle undoes it the same
-            # way; other harnesses' pane repaints neither mark nor end a turn.
+            # A claude-native child's running/idle arrives only here (status-file
+            # poller, or pane watcher while the file is unresolved) and may be
+            # stale; other harnesses' pane repaints neither mark nor end a turn.
             if status == "idle":
                 _settle_subagent_rearm_later(session_id)
             else:
@@ -3536,7 +3533,10 @@ def create_runner_app(
         _cancel_subagent_rearm_settle(session_id)
         for _child_id in list(_subagent_work_by_parent.get(session_id, set())):
             _cancel_subagent_rearm_settle(_child_id)
-            _native_pane_failures.pop(_child_id, None)
+        # Drained children have left the work registry but keep their record.
+        for _child_id, _meta in list(_child_session_parents.items()):
+            if _meta.parent_id == session_id:
+                _native_pane_failures.pop(_child_id, None)
         unregister_child_session(session_id)
         unregister_subagent_work_for_session(session_id)
         if filesystem_registry is not None:
@@ -4671,7 +4671,7 @@ def create_runner_app(
         """
         from omnigent.runner.tool_dispatch import _patch_subagent_label
 
-        async with in_flight_send_lock(child_id):
+        async with in_flight_send_guard(child_id):
             # A settle that ran while this report waited for the lock has put the
             # dispatch back to its finished state; rebuild the entry it owes.
             await _ensure_subagent_work_entry(child_id, report_response_id=response_id)
@@ -4691,7 +4691,7 @@ def create_runner_app(
                         stamp_error,
                         extra={"session_id": child_id},
                     )
-            ack = _mark_subagent_terminal_and_wake(
+            return _mark_subagent_terminal_and_wake(
                 child_id,
                 status=status,
                 output=output,
@@ -4699,8 +4699,6 @@ def create_runner_app(
                 response_id=response_id,
                 confirmed_work_id=confirmed_work_id,
             )
-        drop_unused_in_flight_send_lock(child_id)
-        return ack
 
     # Seam for the entrypoint's launch reaper (and tests): terminal delivery
     # that also schedules the parent wake POST, not just the inbox insert.

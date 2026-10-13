@@ -1927,10 +1927,19 @@ async def test_follow_up_restamp_racing_rearm_settle_keeps_the_turn(
 async def test_unregistering_a_child_keeps_a_send_lock_someone_holds(
     _clean_subagent_registry: None,
 ) -> None:
-    """A held per-child send lock survives the drain's cleanup so no second lock is minted.
+    """A child's send lock survives the drain's cleanup while anyone holds or awaits it.
 
-    The holder forgets the lock once it is free and the child has no dispatch left.
+    ``asyncio.Lock.locked()`` reads ``False`` between a release and the woken
+    waiter's re-acquire, so a guarded waiter must count as a user too; the lock
+    is forgotten only once nobody relies on it (here, with the parent session).
     """
+    subagent_work.register_child_session(
+        CHILD_SESSION_ID,
+        parent_session_id=PARENT_SESSION_ID,
+        title="reviewer:review",
+        tool="reviewer",
+        session_name="review",
+    )
     subagent_work.register_subagent_work(
         parent_session_id=PARENT_SESSION_ID,
         child_session_id=CHILD_SESSION_ID,
@@ -1939,14 +1948,30 @@ async def test_unregistering_a_child_keeps_a_send_lock_someone_holds(
     )
     lock = subagent_work.in_flight_send_lock(CHILD_SESSION_ID)
     await lock.acquire()
+    entered = asyncio.Event()
+    proceed = asyncio.Event()
+
+    async def _guarded_user() -> None:
+        async with subagent_work.in_flight_send_guard(CHILD_SESSION_ID):
+            entered.set()
+            await proceed.wait()
+
+    waiter = asyncio.create_task(_guarded_user())
+    await asyncio.sleep(0)
+    assert not entered.is_set(), "the guarded user should be waiting on the held lock"
+
     subagent_work.unregister_subagent_work(CHILD_SESSION_ID)
     assert subagent_work.in_flight_send_lock(CHILD_SESSION_ID) is lock, (
         "the cleanup minted a second lock while the first was held"
     )
-    subagent_work.drop_unused_in_flight_send_lock(CHILD_SESSION_ID)
-    assert subagent_work.in_flight_send_lock(CHILD_SESSION_ID) is lock, "still held"
     lock.release()
-    subagent_work.drop_unused_in_flight_send_lock(CHILD_SESSION_ID)
+    await entered.wait()
+    assert subagent_work.in_flight_send_lock(CHILD_SESSION_ID) is lock, (
+        "the cleanup dropped a lock a waiter was about to take"
+    )
+    proceed.set()
+    await waiter
+    subagent_work.unregister_subagent_work_for_session(PARENT_SESSION_ID)
     assert CHILD_SESSION_ID not in subagent_work._in_flight_send_locks
 
 
@@ -1954,14 +1979,24 @@ async def test_unregistering_a_child_keeps_a_send_lock_someone_holds(
 async def test_deleting_the_parent_forgets_its_children_s_failure_details(
     _clean_subagent_registry: None,
 ) -> None:
-    """The per-child failure memo does not outlive a parent torn down with its children."""
+    """The per-child failure memo does not outlive a parent torn down with its children.
+
+    The failed result is drained first, so the child has already left the work
+    registry when the parent goes; the parent's child records still name it.
+    """
     server = _ChildSnapshotServerClient()
-    app, _inbox, _work_id = _dispatch_worker(server)
+    app, inbox, _work_id = _dispatch_worker(server)
 
     async with _runner_client(app) as client:
         r = await _post_status(client, status="failed", failure_detail="API Error: 500")
         assert r.status_code == 204
         assert CHILD_SESSION_ID in app.state.native_pane_failures
+        await tool_dispatch._drain_inbox(
+            inbox,
+            server_client=server,  # type: ignore[arg-type]
+            conversation_id=PARENT_SESSION_ID,
+        )
+        assert subagent_work.get_subagent_work(CHILD_SESSION_ID) is None
         r = await client.delete(f"/v1/sessions/{PARENT_SESSION_ID}")
         assert r.status_code < 300, r.text
 

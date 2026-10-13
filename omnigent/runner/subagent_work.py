@@ -9,13 +9,14 @@ child→parent mapping used to mirror child status onto the parent stream.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import logging
 import math
 import os
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -272,11 +273,14 @@ def new_subagent_work_id() -> str:
 
 
 # Per-child locks serializing the classify+register step of an in-flight
-# sub-agent send (see ``tool_dispatch._send_to_in_flight_child``), so two
-# concurrent sends to one child can't install divergent work entries. Co-located
-# with the work registries so it is torn down alongside them — otherwise a
-# long-lived runner would accumulate one lock per steered child forever.
+# sub-agent send (see ``tool_dispatch._send_to_in_flight_child``), a terminal
+# report's confirmation stamp and the grace settle, so none of them acts on the
+# child's entry while another is mid-flight. Co-located with the work registries
+# so they are torn down alongside them, but never while a holder or waiter still
+# relies on one: ``asyncio.Lock.locked()`` reads False between a release and the
+# woken waiter's re-acquire, so users are counted explicitly instead.
 _in_flight_send_locks: dict[str, asyncio.Lock] = {}
+_in_flight_send_lock_users: dict[str, int] = {}
 
 
 def in_flight_send_lock(child_session_id: str) -> asyncio.Lock:
@@ -293,24 +297,36 @@ def in_flight_send_lock(child_session_id: str) -> asyncio.Lock:
     return lock
 
 
-def _drop_in_flight_send_lock(child_session_id: str) -> None:
-    """Forget a child's send lock unless a holder still relies on it being the only one."""
-    lock = _in_flight_send_locks.get(child_session_id)
-    if lock is not None and not lock.locked():
-        _in_flight_send_locks.pop(child_session_id, None)
-
-
-def drop_unused_in_flight_send_lock(child_session_id: str) -> None:
+@contextlib.asynccontextmanager
+async def in_flight_send_guard(child_session_id: str) -> AsyncIterator[None]:
     """
-    Forget a child's send lock once it is free and no dispatch is left to guard.
-
-    A holder calls this after its critical section: a drain that unregistered the
-    child while the lock was held had to leave the lock in place.
+    Hold the child's send lock, counted as its user from the wait to the release.
 
     :param child_session_id: Child session id, e.g. ``"conv_child456"``.
     """
-    if child_session_id not in _subagent_work_by_child:
-        _drop_in_flight_send_lock(child_session_id)
+    _in_flight_send_lock_users[child_session_id] = (
+        _in_flight_send_lock_users.get(child_session_id, 0) + 1
+    )
+    try:
+        async with in_flight_send_lock(child_session_id):
+            yield
+    finally:
+        remaining = _in_flight_send_lock_users.get(child_session_id, 0) - 1
+        if remaining > 0:
+            _in_flight_send_lock_users[child_session_id] = remaining
+        else:
+            _in_flight_send_lock_users.pop(child_session_id, None)
+
+
+def _drop_in_flight_send_lock(child_session_id: str) -> None:
+    """Forget a child's send lock unless a holder or waiter still relies on it."""
+    lock = _in_flight_send_locks.get(child_session_id)
+    if (
+        lock is not None
+        and not lock.locked()
+        and not _in_flight_send_lock_users.get(child_session_id)
+    ):
+        _in_flight_send_locks.pop(child_session_id, None)
 
 
 def register_subagent_work(
@@ -669,6 +685,10 @@ def unregister_subagent_work_for_session(session_id: str) -> None:
         _drained_delivered_subagent_children.discard(child_id)
         _drained_subagent_dispatches.pop(child_id, None)
         _drop_in_flight_send_lock(child_id)
+    # Drained children left the work registry but may still hold a lock.
+    for child_id, meta in list(_child_session_parents.items()):
+        if meta.parent_id == session_id:
+            _drop_in_flight_send_lock(child_id)
     _subagent_work_by_parent.pop(session_id, None)
 
 

@@ -1648,7 +1648,7 @@ async def _send_to_in_flight_child(
             f"{msg_resp.status_code} {msg_resp.text[:200]}"
         )
 
-    async with _subagent_work.in_flight_send_lock(child_session_id):
+    async with _subagent_work.in_flight_send_guard(child_session_id):
         entry = _subagent_work.get_subagent_work(child_session_id)
         live = entry if entry is not None and entry.status in ("running", "waiting") else None
         if live is not None and not live.rearmed:
