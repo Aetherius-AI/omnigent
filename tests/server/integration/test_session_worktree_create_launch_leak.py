@@ -92,6 +92,23 @@ class _HostCapture:
 RegisterHost = Callable[..., _HostCapture]
 
 
+def _fail_all_pending(conn: HostConnection, reason: str) -> None:
+    """Reject every outstanding RPC this fake host answers so a request stuck
+    on a frame the drain does not recognize fails fast with ``reason`` instead
+    of hanging to the 30s launch timeout."""
+    for pending in (
+        conn.pending_stats,
+        conn.pending_create_worktrees,
+        conn.pending_launches,
+        conn.pending_list_worktrees,
+        conn.pending_remove_worktrees,
+    ):
+        while pending:
+            _request_id, fut = pending.popitem()
+            if not fut.done():
+                fut.set_exception(RuntimeError(reason))
+
+
 @pytest_asyncio.fixture()
 async def register_worktree_launch_host(
     app: FastAPI,
@@ -129,6 +146,7 @@ async def register_worktree_launch_host(
                     frame = decode_host_frame(frame_text)
                 except Exception as exc:  # surface decode errors instead of stalling
                     cap.unexpected.append(exc)
+                    _fail_all_pending(conn, f"undecodable host frame: {exc!r}")
                     continue
                 if isinstance(frame, HostStatFrame):
                     fut = conn.pending_stats.pop(frame.request_id, None)
@@ -194,6 +212,7 @@ async def register_worktree_launch_host(
                         )
                 else:
                     cap.unexpected.append(frame)
+                    _fail_all_pending(conn, f"unexpected host frame: {type(frame).__name__}")
 
         conn._drain_task_for_test = asyncio.create_task(_drain())  # type: ignore[attr-defined]
         conns.append(conn)
@@ -471,3 +490,77 @@ async def test_inline_create_successful_launch_fires_no_cleanup(
         f"a successful launch must not trigger create-time cleanup: {cap.remove}; "
         f"unexpected={cap.unexpected}"
     )
+
+
+async def test_inline_create_launch_failure_skips_rollback_when_runner_rebound(
+    register_worktree_launch_host: RegisterHost,
+    client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A concurrent first-message relaunch can rebind a new runner between the
+    failed launch and the rollback. The create must then leave the worktree and
+    the fresh binding alone instead of removing them under the live runner."""
+    cap = register_worktree_launch_host(launch_status="failed")
+    agent = await create_test_agent(client, name="wt-race-agent")
+
+    original_get = SqlAlchemyConversationStore.get_conversation
+    rebound = {"done": False}
+
+    def _racing_get(self: SqlAlchemyConversationStore, conversation_id: str) -> Any:
+        conv = original_get(self, conversation_id)
+        # Rebind once, on the rollback's re-read after the failed launch, to
+        # mimic post_event relaunching a new runner on this same session.
+        if not rebound["done"] and cap.launch and conv is not None and conv.runner_id is not None:
+            rebound["done"] = True
+            self.replace_runner_id(conversation_id, "runner_relaunched")
+            return original_get(self, conversation_id)
+        return conv
+
+    monkeypatch.setattr(SqlAlchemyConversationStore, "get_conversation", _racing_get)
+
+    resp = await _create_git_session(
+        client, agent["id"], {"branch_name": "feature/race", "base_branch": "main"}
+    )
+    assert resp.status_code == 201, resp.text
+    assert rebound["done"], "the rollback never re-read the row, so the race was not exercised"
+    assert len(cap.launch) == 1, f"expected one launch_runner frame; unexpected={cap.unexpected}"
+    assert cap.remove == [], (
+        "rollback must be skipped when a newer runner is bound, so no worktree is "
+        f"removed under the live runner: {cap.remove}; unexpected={cap.unexpected}"
+    )
+
+    conv = SqlAlchemyConversationStore(db_uri).get_conversation(resp.json()["id"])
+    assert conv is not None
+    assert conv.runner_id == "runner_relaunched", conv.runner_id
+    assert conv.workspace is not None and conv.git_branch is not None, conv
+    assert WORKTREE_ROOT_LABEL_KEY in conv.labels, conv.labels
+
+
+async def test_inline_create_launch_failure_tolerates_binding_cleanup_error(
+    register_worktree_launch_host: RegisterHost,
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient store error while clearing the binding after a confirmed
+    worktree removal must not 500 the create; the caller still receives the
+    created, unbound session."""
+    cap = register_worktree_launch_host(launch_status="failed")
+    agent = await create_test_agent(client, name="wt-clearerr-agent")
+
+    def _boom(self: SqlAlchemyConversationStore, conversation_id: str) -> Any:
+        raise RuntimeError("transient store error")
+
+    monkeypatch.setattr(SqlAlchemyConversationStore, "clear_host_binding", _boom)
+
+    resp = await _create_git_session(
+        client, agent["id"], {"branch_name": "feature/clearerr", "base_branch": "main"}
+    )
+    assert resp.status_code == 201, resp.text
+    assert len(cap.remove) == 1, (
+        f"the worktree must still be removed before the clear failed: {cap.remove}; "
+        f"unexpected={cap.unexpected}"
+    )
+    body = resp.json()
+    assert body["host_id"] is None and body["runner_id"] is None, body
+    assert body["workspace"] is None and body["git_branch"] is None, body
