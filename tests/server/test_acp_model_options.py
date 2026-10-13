@@ -346,3 +346,39 @@ def test_resolve_harness_ignores_prefetched_agent_of_another_conversation() -> N
             _conv(agent_id="agent_1"), store, agent=_agent_row("agent_other")
         )
     store.get.assert_called_once_with("agent_1")
+
+
+@pytest.mark.asyncio
+async def test_load_acp_model_options_forwards_prefetched_agent() -> None:
+    """A prefetched agent row reaches the spec loader; without one the call is unchanged."""
+    conv = _conv()
+    store = MagicMock()
+    row = _agent_row("agent_1")
+    with (
+        patch.object(orch, "_load_agent_spec_for_session", return_value=None) as mock_load,
+        patch.object(orch, "_publish_model_options"),
+    ):
+        assert await orch._load_acp_model_options("conv_acp", conv, store, agent=row) == []
+        mock_load.assert_called_once_with(conv, store, agent=row)
+        mock_load.reset_mock()
+        assert await orch._load_acp_model_options("conv_acp", conv, store) == []
+        mock_load.assert_called_once_with(conv, store)
+
+
+@pytest.mark.parametrize(("prefetched_id", "store_reads"), [("agent_1", 0), ("agent_other", 1)])
+def test_load_agent_spec_for_session_reuses_only_the_bound_agent(
+    prefetched_id: str, store_reads: int
+) -> None:
+    """The spec loader skips the agent-store read only when handed conv's own agent row."""
+    from omnigent.server.routes._sessions import helpers
+
+    store = MagicMock()
+    store.get.return_value = _agent_row("agent_1")
+    cache = _acp_cache()
+    with patch.object(helpers, "get_agent_cache", return_value=cache):
+        spec = helpers._load_agent_spec_for_session_impl(
+            _conv(agent_id="agent_1"), store, agent=_agent_row(prefetched_id)
+        )
+    assert spec is cache.load.return_value.spec
+    assert store.get.call_count == store_reads
+    assert cache.load.call_args.args[:2] == ("agent_1", "b://acp")

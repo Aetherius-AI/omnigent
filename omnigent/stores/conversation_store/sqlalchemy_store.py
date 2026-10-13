@@ -2896,8 +2896,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         with self._conv_session("list_conversations") as session:
             # Bound the content-search scan server-side (Postgres only), the only
             # bound a client disconnect can't skip; see _SEARCH_STATEMENT_TIMEOUT_MS.
-            # SET LOCAL ends with this transaction (an enclosing shared_read_scope's
-            # commit), so it never reaches the connection's next pooled use.
+            # SET LOCAL ends with the transaction (a shared_read_scope commit), not later.
             is_postgres = session.bind is not None and is_postgresql_family(
                 session.bind.dialect.name
             )

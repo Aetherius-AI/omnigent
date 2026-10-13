@@ -26,7 +26,6 @@ from fastapi import (
 )
 from fastapi.responses import Response
 from pydantic import ValidationError
-from sqlalchemy.exc import SQLAlchemyError
 
 from omnigent.cli_invocation import cli_invocation
 from omnigent.db.utils import generate_agent_id, generate_task_id, shared_read_scope
@@ -11999,7 +11998,7 @@ async def _fetch_model_options(
         # serves the deployment's curated provider ``models:`` shortlist
         # resolved from the spec instead of a runner-owned catalog.
         if _resolve_harness_impl_is_acp(conv, agent_store, agent=agent):
-            return await _load_acp_model_options(session_id, conv, agent_store)
+            return await _load_acp_model_options(session_id, conv, agent_store, agent=agent)
         return []
     cached = _model_options_cache.get(session_id)
     if runner_client is None:
@@ -12204,6 +12203,7 @@ async def _load_acp_model_options(
     session_id: str,
     conv: Conversation,
     agent_store: AgentStore | None,
+    agent: Agent | None = None,
 ) -> list[dict[str, Any]]:
     """Resolve the curated picker options for a generic ACP session.
 
@@ -12219,6 +12219,8 @@ async def _load_acp_model_options(
     :param conv: Conversation row the options are resolved for.
     :param agent_store: Store for the bound-agent spec load; ``None`` falls
         back to the runtime global store.
+    :param agent: The bound agent row when the caller already read it, so the
+        spec load does not read it again.
     :returns: Option dicts (``id`` / ``displayName`` / ``isDefault``), or
         ``[]`` when nothing was curated.
     """
@@ -12231,7 +12233,12 @@ async def _load_acp_model_options(
         agent_store = _agent_store
     if agent_store is None:
         return []
-    spec = await asyncio.to_thread(_load_agent_spec_for_session, conv, agent_store)
+    spec = await asyncio.to_thread(
+        _load_agent_spec_for_session,
+        conv,
+        agent_store,
+        **({} if agent is None else {"agent": agent}),
+    )
     if spec is None:
         return []
     from omnigent.models.model_catalog import _acp_launch_model, acp_curated_models
@@ -12753,7 +12760,7 @@ def _read_session_snapshot_inputs(
 
     :returns: The access result, the conversation (read here when the access
         check did not), and the bound agent row, or ``None`` when the session
-        has no agent binding or the row could not be read.
+        has no agent binding or the row is gone.
     :raises OmnigentError: 401 / 403 / 404 from the access check, or 404 when
         the conversation does not exist.
     """
@@ -12766,19 +12773,7 @@ def _read_session_snapshot_inputs(
             conv = conversation_store.get_conversation(session_id)
         if conv is None:
             raise _session_not_found()
-        agent: Agent | None = None
-        if conv.agent_id is not None:
-            try:
-                agent = agent_store.get(conv.agent_id)
-            except SQLAlchemyError:
-                # Display enrichment only: the snapshot degrades without the
-                # agent row, exactly as its own best-effort read does.
-                _logger.debug(
-                    "Agent row read failed on snapshot build for session=%s",
-                    session_id,
-                    exc_info=True,
-                    extra={"session_id": session_id},
-                )
+        agent = agent_store.get(conv.agent_id) if conv.agent_id is not None else None
     return access, conv, agent
 
 
