@@ -1785,6 +1785,14 @@ def create_runner_app(
         task.add_done_callback(_background_tasks.discard)
         _background_tasks.add(task)
 
+    def _runner_session_is_live(session_id: str) -> bool:
+        """Whether this runner still hosts ``session_id``; teardown pops the
+        start cache, so an exit-driven rebuild can skip an already-deleted one.
+        """
+        return (
+            process_manager is not None and process_manager.has_session(session_id)
+        ) or session_id in _session_start_cache
+
     def _claim_repl_terminal_auto_recreate(session_id: str) -> bool:
         """Claim one exit-driven REPL recreate inside the rate window.
 
@@ -1851,6 +1859,12 @@ def create_runner_app(
                         event.terminal_name,
                         event.session_id,
                     )
+            except Exception:
+                _logger.exception(
+                    "Unexpected error recovering REPL terminal %s for %s",
+                    event.terminal_name,
+                    event.session_id,
+                )
             finally:
                 _publish_terminal_pending(_publish_event, event.session_id, False)
 
@@ -1868,6 +1882,7 @@ def create_runner_app(
             event.lifecycle != TerminalLifecycle.REQUIRED
             and event.terminal_name == _REPL_TERMINAL_NAME
             and event.session_key == _REPL_TERMINAL_SESSION_KEY
+            and _runner_session_is_live(event.session_id)
             and _begin_repl_terminal_recovery(event)
         )
         _publish_event(
@@ -7219,6 +7234,7 @@ def create_runner_app(
         _resp_to_conv=_resp_to_conv,
         _search_registry_for_root=_search_registry_for_root,
         _session_comment_relays=_session_comment_relays,
+        _session_is_live=_runner_session_is_live,
         auth_token_factory=auth_token_factory,
         filesystem_registry=filesystem_registry,
         resource_registry=resource_registry,

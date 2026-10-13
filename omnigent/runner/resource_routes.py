@@ -133,6 +133,7 @@ def register_resource_routes(
     _resp_to_conv: dict[str, str],
     _search_registry_for_root: Callable[[Path], FilesystemRegistry],
     _session_comment_relays: dict[str, _CommentRelayBinding],
+    _session_is_live: Callable[[str], bool],
     auth_token_factory: Callable[[], str | None] | None,
     filesystem_registry: FilesystemRegistry | None,
     resource_registry: SessionResourceRegistry,
@@ -878,6 +879,10 @@ def register_resource_routes(
         registry = resource_registry.terminal_registry
         lock = _repl_terminal_ensure_locks.setdefault(session_id, asyncio.Lock())
         async with lock:
+            # Teardown can finish during the exit's await window; never rebuild
+            # the pane for a session that is already being deleted.
+            if not _session_is_live(session_id):
+                return None
             existing = registry.get(session_id, _REPL_TERMINAL_NAME, _REPL_TERMINAL_SESSION_KEY)
             if existing is None or not existing.running or not await existing.is_alive():
                 await registry.close(session_id, _REPL_TERMINAL_NAME, _REPL_TERMINAL_SESSION_KEY)
