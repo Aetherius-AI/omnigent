@@ -232,11 +232,7 @@ def register_mcp_routes(
         if method == "tools/call":
             import json as _json
 
-            from omnigent.runner.tool_dispatch import (
-                _ungranted_tool_reason,
-                execute_tool,
-                is_known_mcp_local_tool,
-            )
+            from omnigent.runner.tool_dispatch import _ungranted_tool_reason, execute_tool
 
             tool_name = cast(str, params.get("name") or "")
             arguments = cast(_JsonObject, params.get("arguments") or {})
@@ -345,13 +341,6 @@ def register_mcp_routes(
                     except (OmnigentError, httpx.HTTPError, RuntimeError):
                         pass
                 _agent_id_local = _session_agent_ids.get(session_id)
-                if not is_known_mcp_local_tool(tool_name, spec):
-                    return JSONResponse(
-                        status_code=200,
-                        content={
-                            "error": {"code": -32602, "message": f"Unknown tool: {tool_name}"}
-                        },
-                    )
                 if spec is None:
                     return JSONResponse(
                         status_code=200,
@@ -362,6 +351,8 @@ def register_mcp_routes(
                             }
                         },
                     )
+                # A bare name outside the granted surface is an MCP invalid-params
+                # error, never a tool result that merely carries an error string.
                 refusal = _ungranted_tool_reason(
                     tool_name, spec, _session_harness_name(session_id)
                 )

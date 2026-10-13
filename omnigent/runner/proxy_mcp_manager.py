@@ -267,13 +267,12 @@ class ProxyMcpManager:
         tools_list = _json_object_list(result.get("tools"))
         schemas: list[_JsonObject] = []
         tool_names: set[str] = set()
-        from omnigent.runner.tool_dispatch import is_known_mcp_local_tool
-
         for tool in tools_list:
             name = tool.get("name")
-            # The public proxy also lists runner-local tools. The runner already
-            # registers those directly; injecting them again would duplicate tools.
-            if not isinstance(name, str) or not name or is_known_mcp_local_tool(name, spec):
+            # The proxy catalog also lists the session's bare runner-local tools,
+            # which the runner registers directly; only namespaced ``server__tool``
+            # entries are external MCP tools.
+            if not isinstance(name, str) or not name or "__" not in name:
                 continue
             # The Omnigent server returns ``inputSchema`` (JSON Schema from MCP).
             # Convert to the ``parameters`` key expected by LLM providers,

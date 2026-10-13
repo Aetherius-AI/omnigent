@@ -1036,23 +1036,14 @@ def _is_spec_local_python_tool(tool_name: str, agent_spec: AgentSpec | None) -> 
     )
 
 
-def is_known_mcp_local_tool(tool_name: str, agent_spec: AgentSpec | None) -> bool:
-    """Whether runner MCP dispatch has a handler for this local tool name."""
-    return (
-        tool_name in _ALL_LOCAL_TOOLS
-        or tool_name in _BROWSER_TOOLS
-        or _is_spec_local_python_tool(tool_name, agent_spec)
-    )
-
-
 def build_mcp_local_tool_schemas(
     agent_spec: AgentSpec, effective_harness: str | None = None
 ) -> list[_JsonObject]:
-    """Advertise the local tools that MCP dispatch can actually execute.
+    """Return flat schemas for the local tools ``tools/call`` accepts for *agent_spec*.
 
-    Use the same granted surface as :func:`execute_tool`. Native harnesses
-    additionally grant the four OS tools through their relay, even without
-    an ``os_env`` section in the agent spec.
+    Built from the same granted surface as the dispatch gate, so ``tools/list``
+    and bare-name ``tools/call`` agree. Native harnesses add the ``sys_os_*``
+    relay tools; spec-local file tools need the agent workdir and are not listed.
     """
     harness = _effective_harness_name(agent_spec, effective_harness)
     granted = _granted_tool_names(agent_spec, harness)
@@ -1071,8 +1062,6 @@ def build_mcp_local_tool_schemas(
             continue
         name = function.get("name")
         if not isinstance(name, str) or name not in granted:
-            continue
-        if not is_known_mcp_local_tool(name, agent_spec):
             continue
         description = function.get("description")
         parameters = _string_object_dict(function.get("parameters"))
