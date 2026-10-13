@@ -346,6 +346,28 @@ async def _seed_bundle_single_user(
     return session_id, headers
 
 
+async def test_shared_server_rejects_owner_bundle_replace_with_legacy_stdio(
+    client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A full bundle replace is an upload, so even an owner's prompt-only replace
+    of a legacy stdio bundle is refused on a shared server; the MCP-server routes
+    are how an owner manages such a legacy entry one at a time instead."""
+    initial, session_id, headers = await _create_legacy_mcp_session(
+        client, db_uri, LEVEL_OWNER, monkeypatch
+    )
+    prompt_edit = _bundle(_mcp_config("stdio"), prompt="Updated instructions.")
+    replaced = await client.put(
+        f"/v1/sessions/{session_id}/agent",
+        headers=headers,
+        files={"bundle": ("agent.tar.gz", prompt_edit, "application/gzip")},
+    )
+    assert replaced.status_code == 403, replaced.text
+    assert "stdio MCP servers are not permitted" in replaced.text
+    assert await _download_bundle(client, session_id) == initial
+
+
 async def test_owner_can_remove_one_of_several_legacy_stdio_entries(
     client: httpx.AsyncClient,
     db_uri: str,

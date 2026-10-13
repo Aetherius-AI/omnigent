@@ -249,8 +249,9 @@ def create_session_mcp_servers_router(
             root = Path(tmpdir) / "agent"
             extract_safe(bundle_bytes, root)
 
-            # Skip the MCP policy so a legacy stdio entry (incl. nested) stays
-            # removable; the route vetted the added/changed server per request.
+            # Skip whole-bundle MCP checks so untouched legacy entries,
+            # including a nested sub-agent's, do not block a root edit; the
+            # added or changed server is still vetted per request.
             current_spec = validate_agent_bundle(
                 bundle_bytes,
                 enforce_handler_allowlist=not local_single_user_enabled(),

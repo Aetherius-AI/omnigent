@@ -194,12 +194,11 @@ def validate_agent_bundle(
         this on :func:`omnigent.server.auth.local_single_user_enabled`.
     :param enforce_mcp_server_policy: When ``True`` (the default), reject a
         stdio or non-public http MCP server anywhere in the spec. The
-        MCP-server settings routes pass ``False``: they rewrite a stored
-        bundle one server at a time and already vet each added or changed
-        server with :func:`assert_mcp_server_request_safe`, so re-applying the
-        policy to untouched pre-existing entries would wrongly block managing
-        or removing a legacy stdio entry (including a nested sub-agent's) and
-        deadlock a bundle that declares several. Has no effect unless
+        MCP-server settings routes pass ``False``: they rewrite a stored bundle
+        one server at a time and vet the added or changed server with
+        :func:`assert_mcp_server_request_safe`, so re-applying the policy to
+        untouched pre-existing entries (including a nested sub-agent's) would
+        wrongly block an otherwise safe root edit. Has no effect unless
         *enforce_handler_allowlist* is also set.
     :returns: The validated :class:`AgentSpec`.
     :raises OmnigentError: If the bundle is invalid, the spec is
