@@ -5443,6 +5443,47 @@ describe("NewChatLandingScreen", () => {
     expect(otherMenu).toContainElement(screen.getByTestId("new-chat-landing-agent-a_pi"));
   });
 
+  it("keeps an inline harness's model submenu mounted while its models load", () => {
+    mockAgents([
+      testAgent("a_claude", "claude-native-ui", {
+        display_name: "Claude Code",
+        harness: "claude-native",
+      }),
+      testAgent("a_pi", "pi-native-ui", { display_name: "Pi", harness: "pi-native" }),
+    ]);
+    localStorage.setItem(LAST_AGENT_KEY, "a_pi");
+    const piModels = {
+      ...SUCCESS_QUERY_STATE,
+      data: [{ id: "example/model-a", model: "example/model-a", displayName: "Model A" }],
+    };
+    let claudeModels: Partial<ReturnType<typeof useHostModelOptions>> = {
+      ...PENDING_QUERY_STATE,
+      data: undefined,
+    };
+    mockModelQueries((harness) => (harness === "claude-native" ? claudeModels : piModels));
+    renderLanding();
+    const select = screen.getByTestId("new-chat-landing-agent-select");
+    expect(select.getAttribute("aria-label")).toMatch(/^Pi/);
+    fireEvent.pointerDown(select, { button: 0 });
+    const claudeRow = screen.getByTestId("new-chat-landing-agent-a_claude");
+    fireEvent.click(screen.getByTestId("new-chat-landing-agent-config-a_claude"));
+
+    // Claude Code's catalog is loading: the open menu and its submenu stay mounted.
+    expect(screen.queryByTestId("new-chat-landing-picker-loading")).toBeNull();
+    expect(claudeRow).toHaveAttribute("data-state", "open");
+    expect(screen.getByTestId("new-chat-landing-agent-models")).toHaveTextContent(
+      "Loading models…",
+    );
+
+    claudeModels = CLAUDE_MODEL_OPTIONS_RESULT;
+    fireEvent.change(screen.getByTestId("new-chat-landing-input"), {
+      target: { value: "Claude models arrived" },
+    });
+    expect(screen.queryByTestId("new-chat-landing-picker-loading")).toBeNull();
+    expect(screen.getByTestId("new-chat-landing-agent-model-opus")).toBeVisible();
+    expect(claudeRow).toHaveAttribute("data-state", "open");
+  });
+
   // claude-native (a1, fully supported) plus cursor-native (a_cursor, not) so
   // the preference has a "More" row to act on: the host below reports
   // cursor-native as unconfigured on this machine.

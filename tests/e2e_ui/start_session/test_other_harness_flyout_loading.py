@@ -1,5 +1,5 @@
-"""Edit on a landing-picker harness keeps the open menu while its host catalog loads:
-"Loading models…" shows in place, then the models, with no second click needed."""
+"""Edit on a harness under the landing picker's "Other..." flyout keeps the open menu
+while its host catalog loads: "Loading models…" shows in place, then the models."""
 
 from __future__ import annotations
 
@@ -21,7 +21,6 @@ from tests.e2e_ui.start_session.test_start_session import (
 
 _CLAUDE_AGENT_ID = "ag_claude_e2e"
 _PI_AGENT_ID = "ag_pi_e2e"
-_CLAUDE_MODEL_ID = "sonnet"
 _PI_MODEL_ID = "example/model-a"
 
 # Counts commits that showed the picker's loading placeholder; reset once the
@@ -48,14 +47,6 @@ def test_other_harness_flyout_stays_open_while_models_load(
     _run_in_fresh_loop(_drive_other_flyout_edit(base_url, session_id, activation))
 
 
-def test_inline_harness_edit_keeps_menu_while_models_load(
-    seeded_session: tuple[str, str],
-) -> None:
-    """Edit on an inline harness keeps the open menu mounted while its catalog loads."""
-    base_url, session_id = seeded_session
-    _run_in_fresh_loop(_drive_inline_edit(base_url, session_id))
-
-
 class _HeldCatalog:
     """Hold one harness's host model catalog until the test releases it."""
 
@@ -70,11 +61,7 @@ class _HeldCatalog:
         await route.fulfill(json={"models": self.models})
 
 
-def _instant_catalog(models: list[dict[str, object]]):
-    return lambda route: route.fulfill(json={"models": models})
-
-
-async def _prepare_page(page: Page, session_id: str, *, selected_agent: str) -> None:
+async def _prepare_page(page: Page, session_id: str) -> None:
     agents = json.loads(_agents_body())["data"] + json.loads(_pi_native_agents_body())["data"]
     await _register_common_routes(
         page,
@@ -90,7 +77,7 @@ async def _prepare_page(page: Page, session_id: str, *, selected_agent: str) -> 
     )
     # A remembered host workspace, so host model catalogs are fetched.
     await page.add_init_script(
-        f"""window.localStorage.setItem("omnigent:last-agent-id", {json.dumps(selected_agent)});
+        f"""window.localStorage.setItem("omnigent:last-agent-id", {json.dumps(_CLAUDE_AGENT_ID)});
         window.localStorage.setItem(
             "omnigent:recent-workspaces",
             JSON.stringify({{ {json.dumps(_HOST_ID)}: ["/work/repo"] }})
@@ -107,14 +94,6 @@ async def _open_ready_picker(page: Page, selected_label: str) -> None:
     await page.evaluate("window.placeholderSightings = 0")
     await picker.click()
     await expect(picker).to_have_attribute("aria-expanded", "true")
-
-
-async def _click_edit(page: Page, agent_id: str) -> None:
-    await (
-        page.get_by_test_id(f"new-chat-landing-agent-config-{agent_id}")
-        .get_by_text("Edit", exact=True)
-        .click()
-    )
 
 
 async def _expect_menu_kept_until_models_arrive(
@@ -140,11 +119,11 @@ async def _drive_other_flyout_edit(base_url: str, session_id: str, activation: A
         context = await browser.new_context(viewport={"width": 1440, "height": 900})
         page = await context.new_page()
         try:
-            await _prepare_page(page, session_id, selected_agent=_CLAUDE_AGENT_ID)
+            await _prepare_page(page, session_id)
             await page.route(
                 f"**/v1/hosts/{_HOST_ID}/harnesses/claude-native/model-options",
-                _instant_catalog(
-                    [{"id": _CLAUDE_MODEL_ID, "displayName": "Sonnet", "isDefault": True}]
+                lambda route: route.fulfill(
+                    json={"models": [{"id": "sonnet", "displayName": "Sonnet", "isDefault": True}]}
                 ),
             )
             await page.route(
@@ -157,7 +136,11 @@ async def _drive_other_flyout_edit(base_url: str, session_id: str, activation: A
             if activation == "pointer":
                 await other.click()
                 await expect(other).to_have_attribute("data-state", "open")
-                await _click_edit(page, _PI_AGENT_ID)
+                await (
+                    page.get_by_test_id(f"new-chat-landing-agent-config-{_PI_AGENT_ID}")
+                    .get_by_text("Edit", exact=True)
+                    .click()
+                )
             else:
                 await other.hover()
                 await expect(other).to_have_attribute("data-state", "open")
@@ -172,33 +155,6 @@ async def _drive_other_flyout_edit(base_url: str, session_id: str, activation: A
             # While Pi's catalog loads, the flyout and its model submenu stay open.
             await _expect_menu_kept_until_models_arrive(page, catalog, _PI_MODEL_ID)
             await expect(other).to_have_attribute("data-state", "open")
-        finally:
-            catalog.released.set()
-            await context.close()
-            await browser.close()
-
-
-async def _drive_inline_edit(base_url: str, session_id: str) -> None:
-    catalog = _HeldCatalog([{"id": _CLAUDE_MODEL_ID, "displayName": "Sonnet", "isDefault": True}])
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch()
-        context = await browser.new_context(viewport={"width": 1440, "height": 900})
-        page = await context.new_page()
-        try:
-            await _prepare_page(page, session_id, selected_agent=_PI_AGENT_ID)
-            await page.route(
-                f"**/v1/hosts/{_HOST_ID}/harnesses/pi-native/model-options",
-                _instant_catalog(
-                    [{"id": _PI_MODEL_ID, "displayName": "Model A", "isDefault": True}]
-                ),
-            )
-            await page.route(
-                f"**/v1/hosts/{_HOST_ID}/harnesses/claude-native/model-options", catalog.handle
-            )
-            await page.goto(f"{base_url}/")
-            await _open_ready_picker(page, "Pi")
-            await _click_edit(page, _CLAUDE_AGENT_ID)
-            await _expect_menu_kept_until_models_arrive(page, catalog, _CLAUDE_MODEL_ID)
         finally:
             catalog.released.set()
             await context.close()
