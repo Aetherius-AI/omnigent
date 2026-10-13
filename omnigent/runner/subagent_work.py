@@ -279,9 +279,12 @@ _in_flight_send_locks: dict[str, asyncio.Lock] = {}
 _in_flight_send_lock_users: dict[str, int] = {}
 
 
-def in_flight_send_lock(child_session_id: str) -> asyncio.Lock:
+def _in_flight_send_lock(child_session_id: str) -> asyncio.Lock:
     """
     Return (creating on first use) the per-child in-flight-send lock.
+
+    Hold it through :func:`in_flight_send_guard`: a raw acquisition is not
+    counted as a user, so cleanup could forget the lock mid-handoff.
 
     :param child_session_id: Child session id, e.g. ``"conv_child456"``.
     :returns: The lock guarding that child's in-flight-send bookkeeping.
@@ -309,7 +312,7 @@ async def in_flight_send_guard(child_session_id: str) -> AsyncIterator[None]:
         _in_flight_send_lock_users.get(child_session_id, 0) + 1
     )
     try:
-        async with in_flight_send_lock(child_session_id):
+        async with _in_flight_send_lock(child_session_id):
             yield
     finally:
         remaining = _in_flight_send_lock_users.get(child_session_id, 0) - 1

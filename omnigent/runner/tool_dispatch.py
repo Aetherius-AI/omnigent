@@ -1612,7 +1612,7 @@ async def _send_to_in_flight_child(
 
     Concurrent sends to one child are serialized by the per-child lock so they
     can't install divergent entries; the lock is cleaned up with the child's
-    work registry (see ``in_flight_send_lock`` /
+    work registry (see ``_in_flight_send_lock`` /
     ``unregister_subagent_work_for_session``).
 
     :param child_session_id: The in-flight child session id.

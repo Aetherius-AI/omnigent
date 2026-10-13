@@ -35,6 +35,7 @@ _REGISTRY_MAPS = (
     (subagent_work, "_drained_delivered_subagent_children"),
     (subagent_work, "_drained_subagent_dispatches"),
     (subagent_work, "_in_flight_send_locks"),
+    (subagent_work, "_in_flight_send_lock_users"),
     (subagent_work, "_subagent_recovery_done"),
     (subagent_work, "_subagent_recovery_locks"),
 )
@@ -1633,7 +1634,7 @@ async def test_the_confirmation_stamp_waits_for_a_follow_up_holding_the_send_loc
         await _deliver_and_drain_round_one(client, inbox, server)
         publish_pane_status(CHILD_SESSION_ID, "running", None)
 
-        lock = subagent_work.in_flight_send_lock(CHILD_SESSION_ID)
+        lock = subagent_work._in_flight_send_lock(CHILD_SESSION_ID)
         await lock.acquire()
         stop = asyncio.create_task(
             _post_status(
@@ -1949,7 +1950,7 @@ async def test_unregistering_a_child_keeps_a_send_lock_someone_holds(
         agent="reviewer",
         title="review the diff",
     )
-    lock = subagent_work.in_flight_send_lock(CHILD_SESSION_ID)
+    lock = subagent_work._in_flight_send_lock(CHILD_SESSION_ID)
     await lock.acquire()
     entered = asyncio.Event()
     proceed = asyncio.Event()
@@ -1964,12 +1965,12 @@ async def test_unregistering_a_child_keeps_a_send_lock_someone_holds(
     assert not entered.is_set(), "the guarded user should be waiting on the held lock"
 
     subagent_work.unregister_subagent_work(CHILD_SESSION_ID)
-    assert subagent_work.in_flight_send_lock(CHILD_SESSION_ID) is lock, (
+    assert subagent_work._in_flight_send_lock(CHILD_SESSION_ID) is lock, (
         "the cleanup minted a second lock while the first was held"
     )
     lock.release()
     await entered.wait()
-    assert subagent_work.in_flight_send_lock(CHILD_SESSION_ID) is lock, (
+    assert subagent_work._in_flight_send_lock(CHILD_SESSION_ID) is lock, (
         "the cleanup dropped a lock a waiter was about to take"
     )
     proceed.set()
