@@ -331,6 +331,21 @@ outcome in the caption. Check each claimed moment, especially claims that text
 or controls are absent. If the frames contradict the caption, correct it or
 re-record.
 
+A visible-state assertion checks the element the caption describes, in the
+recorded page, at the moment the caption claims it: `expect(locator).to_be_visible()`
+or `to_have_text(...)` on that element, with the panel or tab that holds it open
+in the recorded viewport. Attribute and DOM reads — `get_attribute("aria-label")`,
+`data-*` or `title` values, `text_content()`, `inner_text()`, `page.evaluate` —
+pass on hidden, collapsed, off-screen, or never-opened elements, so they are not
+screen evidence. The Agents rail's status tile (`subagent-status-avatar`) is the
+standing example: it renders an icon, and "Working", "Failed", "Disconnected" or
+"Done" exist only in its `aria-label`, which the viewer never sees even when the
+rail is open. Quote only text the clip renders; describe an icon-only control by
+what it shows (a red alert icon) or hover it and assert the tooltip is visible
+before quoting it. When you could not inspect the frames (no image tool), say so
+in the caption and limit it to states a visibility assertion established; keep
+sampled attribute values in `evidence`.
+
 For each recording, write a short **`caption`** in its handoff entry describing
 **the actions that clip performs** — the ordered steps a viewer watches, ending in
 what the clip shows: e.g. `"start a session → open the model picker → select the

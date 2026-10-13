@@ -661,9 +661,15 @@ Follow these rules for each clip:
 
 - Show the user action and the product's response.
 - **Caption the screen from screen evidence.** Compare claimed outcomes with
-  inspected frames or visible-state assertions from the clip. Backend storage
-  and logs do not establish what the UI displayed; keep those findings in
-  `evidence`. Correct captions that conflict with the frames.
+  inspected frames or visible-state assertions from the clip —
+  `to_be_visible()` / `to_have_text()` on the element the caption describes,
+  with its panel open in the recorded viewport. Attribute reads such as
+  `get_attribute("aria-label")` pass on hidden or unopened elements and quote
+  text the screen never paints; they are not screen evidence (see "Finishing a
+  clip" in `dev/recording-lanes.md`). Backend storage and logs do not establish
+  what the UI displayed; keep those findings in `evidence`. If you could not
+  inspect the frames, say so in the caption and claim only what visibility
+  assertions established. Correct captions that conflict with the frames.
 - For CLI or terminal output, record the real command and its output, even if
   only an error message changes. For example, run `omnigent host` with an
   expired login and capture the error it prints.
@@ -827,12 +833,12 @@ Field meanings:
   the catalog → picker shows raw IDs"`. Phrase it for *this* clip's outcome: a
   `before` caption ends in the failure, a `fixed` caption ends in the correct
   behavior (the journey completing). Each screen claim comes from screen
-  evidence, not from a transcript or API check (Step 4). This is per-recording
-  (each clip drives its own steps), distinct from the bug-level `journey`
-  field. `capture_mode` is one of the surface-appropriate values in
-  `dev/recording-lanes.md`. Keep an authored-but-unrendered VHS tape in the
-  artifact, but do not declare it as a recording. Empty list when nothing valid
-  was recorded.
+  evidence, not from a transcript, API check, or DOM attribute read (Step 4).
+  This is per-recording (each clip drives its own steps), distinct from the
+  bug-level `journey` field. `capture_mode` is one of the surface-appropriate
+  values in `dev/recording-lanes.md`. Keep an authored-but-unrendered VHS tape
+  in the artifact, but do not declare it as a recording. Empty list when
+  nothing valid was recorded.
 - `recording_unavailable_reason` — leave empty when every expected clip is
   present. Otherwise explain each missing clip:
 
