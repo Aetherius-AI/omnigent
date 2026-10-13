@@ -664,10 +664,9 @@ def _schedule_deferred_elicitation_clear(
             # Re-parked — the new wait owns the eventual clear.
             return
         if native_delivery_attempt is not None:
-            entry = pending_elicitations.lookup(elicitation_id)
+            entry = pending_elicitations.lookup(elicitation_id, conversation_id=session_id)
             if (
                 entry is None
-                or entry[0] != session_id
                 or entry[1].get("params", {}).get("native_delivery", {}).get("attempt")
                 != native_delivery_attempt
             ):
@@ -2224,7 +2223,7 @@ async def _resolve_native_delivery(
     conversation_store: ConversationStore | None,
 ) -> bool:
     """Accept one delivery attempt while keeping its card pending for the native receipt."""
-    entry = pending_elicitations.lookup(elicitation_id)
+    entry = pending_elicitations.lookup(elicitation_id, conversation_id=session_id)
     if entry is None:
         return False
     event = entry[1]
@@ -2232,17 +2231,20 @@ async def _resolve_native_delivery(
     delivery = params.get("native_delivery") if isinstance(params, dict) else None
     if not isinstance(delivery, dict):
         return False
-    if entry[0] != session_id:
+    if params.get("target_session_id") not in (None, session_id):
         return True
     if delivery.get("state") == "sending":
         return True
     if delivery.get("state") == "unconfirmed":
         meta = data.get("_meta")
-        if (
-            not isinstance(meta, dict)
-            or meta.get("native_delivery_attempt") != delivery.get("attempt")
-            or data.get("action") != delivery.get("action")
-        ):
+        if not isinstance(meta, dict) or not meta.get("native_delivery_attempt"):
+            raise OmnigentError(
+                "This client cannot retry delivery. Update Omnigent or answer in the terminal.",
+                code=ErrorCode.INVALID_INPUT,
+            )
+        if meta.get("native_delivery_attempt") != delivery.get("attempt") or data.get(
+            "action"
+        ) != delivery.get("action"):
             raise OmnigentError(
                 "This delivery attempt changed. Refresh the approval before retrying.",
                 code=ErrorCode.INVALID_INPUT,
@@ -2401,8 +2403,8 @@ async def _resolve_elicitation(
             # tombstone with the question's params: a later, different
             # question that reuses this id must not inherit the verdict.
             gap_fingerprint: str | None = None
-            pending_entry = pending_elicitations.lookup(elicitation_id)
-            if pending_entry is not None and pending_entry[0] == session_id:
+            pending_entry = pending_elicitations.lookup(elicitation_id, conversation_id=session_id)
+            if pending_entry is not None:
                 try:
                     gap_fingerprint = _harness_elicitation_request_fingerprint(
                         ElicitationRequestParams.model_validate(pending_entry[1].get("params"))

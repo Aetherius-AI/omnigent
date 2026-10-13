@@ -1872,13 +1872,17 @@ def register_events_routes(
                     "external_elicitation_resolved requires string data.elicitation_id.",
                     code=ErrorCode.INVALID_INPUT,
                 )
-            entry = pending_elicitations.lookup(elicitation_id)
-            _signal_harness_elicitation_resolved_by_id(session_id, elicitation_id)
-            if (
-                entry is not None
-                and entry[0] == session_id
-                and entry[1].get("params", {}).get("native_delivery") is not None
+            entry = pending_elicitations.lookup(elicitation_id, conversation_id=session_id)
+            if entry is not None and entry[1].get("params", {}).get("target_session_id") not in (
+                None,
+                session_id,
             ):
+                raise OmnigentError(
+                    "Elicitation does not belong to this session.",
+                    code=ErrorCode.INVALID_INPUT,
+                )
+            _signal_harness_elicitation_resolved_by_id(session_id, elicitation_id)
+            if entry is not None and entry[1].get("params", {}).get("native_delivery") is not None:
                 # The attempted web verdict may differ from the terminal's answer.
                 _publish_elicitation_resolved(session_id, elicitation_id)
                 await asyncio.to_thread(

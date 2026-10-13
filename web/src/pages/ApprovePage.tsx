@@ -62,10 +62,6 @@ export function ApprovePage() {
     let polling = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const load = async () => {
-      if (submission.current.pending) {
-        timer = setTimeout(() => void load(), 1000);
-        return;
-      }
       const revision = submission.current.revision;
       try {
         const res = await authenticatedFetch(
@@ -80,11 +76,12 @@ export function ApprovePage() {
         const data: ElicitationData = await res.json();
         if (cancelled) return;
         data.native_delivery = parseNativePermissionDelivery(data.native_delivery);
-        polling = Boolean(data.native_delivery) || revision !== submission.current.revision;
-        if (revision !== submission.current.revision) return;
+        polling =
+          data.status !== "resolved" &&
+          (Boolean(data.native_delivery) || revision !== submission.current.revision);
         if (data.status === "resolved") {
           setState({ kind: "resolved" });
-        } else {
+        } else if (!submission.current.pending && revision === submission.current.revision) {
           setState({ kind: "pending", data });
         }
       } catch (err) {
@@ -127,10 +124,18 @@ export function ApprovePage() {
           },
         );
         if (!res.ok) {
-          setState({ kind: "error", message: `Resolve failed: ${res.status}` });
+          setState((current) =>
+            current.kind === "resolved"
+              ? current
+              : { kind: "error", message: `Resolve failed: ${res.status}` },
+          );
         }
       } catch (err) {
-        setState({ kind: "error", message: `Network error: ${String(err)}` });
+        setState((current) =>
+          current.kind === "resolved"
+            ? current
+            : { kind: "error", message: `Network error: ${String(err)}` },
+        );
       } finally {
         submission.current.pending = false;
       }

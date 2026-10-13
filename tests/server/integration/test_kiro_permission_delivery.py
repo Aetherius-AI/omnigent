@@ -55,6 +55,12 @@ async def test_kiro_delivery_stays_pending_and_retries_only_the_current_attempt(
     retry = asyncio.create_task(client.post(hook_url, json=payload))
     try:
         await _wait_for_state(eid, "unconfirmed")
+        unsupported = await client.post(resolve_url, json={"action": "accept"})
+        assert unsupported.status_code == 400
+        assert (
+            "Update Omnigent or answer in the terminal" in unsupported.json()["error"]["message"]
+        )
+        assert not retry.done()
         stale = await client.post(
             resolve_url,
             json={
@@ -63,6 +69,7 @@ async def test_kiro_delivery_stays_pending_and_retries_only_the_current_attempt(
             },
         )
         assert stale.status_code == 400
+        assert "Refresh the approval" in stale.json()["error"]["message"]
         assert not retry.done()
         changed_decision = await client.post(
             resolve_url,
@@ -140,8 +147,13 @@ async def test_kiro_terminal_receipt_cancels_a_waiting_retry(client: httpx.Async
 
 
 @pytest.mark.parametrize("receipt", [True, False], ids=["confirmed", "abandoned"])
+@pytest.mark.parametrize("disconnected", [False, True], ids=["parked", "disconnected"])
 async def test_kiro_child_delivery_stays_pending_in_parent_until_receipt(
-    client: httpx.AsyncClient, db_uri: str, monkeypatch: pytest.MonkeyPatch, receipt: bool
+    client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+    receipt: bool,
+    disconnected: bool,
 ) -> None:
     from omnigent.server.routes import sessions
 
@@ -159,55 +171,96 @@ async def test_kiro_child_delivery_stays_pending_in_parent_until_receipt(
         .id
     )
     eid = f"elicit_kiro_{child}"
-    hook = asyncio.create_task(
+    parent_eid = f"elicit_kiro_{parent}"
+    parent_hook = asyncio.create_task(
         client.post(
-            f"/v1/sessions/{child}/hooks/native-permission-request",
+            f"/v1/sessions/{parent}/hooks/native-permission-request",
             json={
-                "elicitation_id": eid,
+                "elicitation_id": parent_eid,
                 "agent": "Kiro",
                 "policy_name": "kiro_native_permission",
-                "native_delivery": {"state": "ready", "attempt": "first"},
+                "native_delivery": {"state": "ready", "attempt": "parent"},
             },
         )
     )
+    await _wait_for_state(parent_eid, "ready")
+    hook_url = f"/v1/sessions/{child}/hooks/native-permission-request"
+    payload = {
+        "elicitation_id": eid,
+        "agent": "Kiro",
+        "policy_name": "kiro_native_permission",
+        "native_delivery": {"state": "ready", "attempt": "first"},
+    }
+    hook = asyncio.create_task(client.post(hook_url, json=payload))
 
     async def parent_delivery(state: str) -> dict:
         async with asyncio.timeout(5):
             while True:
                 snapshot = (await client.get(f"/v1/sessions/{parent}")).json()
                 entries = snapshot["pending_elicitations"]
-                if entries and entries[0]["params"]["native_delivery"]["state"] == state:
-                    return entries[0]
+                for entry in entries:
+                    if (
+                        entry["elicitation_id"] == eid
+                        and entry["params"]["native_delivery"]["state"] == state
+                    ):
+                        return entry
                 await asyncio.sleep(0.01)
 
     try:
         mirrored = await parent_delivery("ready")
         assert mirrored["params"]["target_session_id"] == child
+        detail_url = f"/v1/sessions/{child}/elicitations/{eid}"
+        assert (await client.get(detail_url)).json()["native_delivery"]["state"] == "ready"
+        wrong_detail = await client.get(f"/v1/sessions/{parent}/elicitations/{eid}")
+        assert wrong_detail.json()["status"] == "resolved"
+        if disconnected:
+            hook.cancel()
+            await asyncio.gather(hook, return_exceptions=True)
+            assert eid not in sessions._harness_elicitation_registry
         wrong_owner = await client.post(
             f"/v1/sessions/{parent}/elicitations/{eid}/resolve", json={"action": "accept"}
         )
         assert wrong_owner.status_code == 202
         assert (await parent_delivery("ready"))["params"]["target_session_id"] == child
-        assert not hook.done()
+        if not disconnected:
+            assert not hook.done()
         response = await client.post(
             f"/v1/sessions/{child}/elicitations/{eid}/resolve", json={"action": "accept"}
         )
         assert response.status_code == 202
-        assert (await hook).json()["action"] == "accept"
+        if disconnected:
+            hook = asyncio.create_task(client.post(hook_url, json=payload))
+        async with asyncio.timeout(2):
+            assert (await hook).json()["action"] == "accept"
+        assert (await parent_delivery("sending"))["params"]["target_session_id"] == child
+        assert (await client.get(detail_url)).json()["native_delivery"]["state"] == "sending"
+        wrong_receipt = await client.post(
+            f"/v1/sessions/{parent}/events",
+            json={"type": "external_elicitation_resolved", "data": {"elicitation_id": eid}},
+        )
+        assert wrong_receipt.status_code == 400
         assert (await parent_delivery("sending"))["params"]["target_session_id"] == child
         if receipt:
-            await client.post(
+            confirmed = await client.post(
                 f"/v1/sessions/{child}/events",
                 json={"type": "external_elicitation_resolved", "data": {"elicitation_id": eid}},
             )
+            assert confirmed.status_code == 202
+            assert pending_elicitations.count_for(child) == 0
+            assert pending_elicitations.count_for(parent) == 1
         await asyncio.gather(*sessions._deferred_elicitation_clear_tasks)
         snapshot = (await client.get(f"/v1/sessions/{parent}")).json()
-        assert snapshot["pending_elicitations"] == []
-        assert pending_elicitations.count_for(parent) == 0
+        assert [entry["elicitation_id"] for entry in snapshot["pending_elicitations"]] == [
+            parent_eid
+        ]
+        assert pending_elicitations.count_for(parent) == 1
         assert pending_elicitations.count_for(child) == 0
+        assert not parent_hook.done()
+        assert (await client.get(detail_url)).json()["status"] == "resolved"
     finally:
         hook.cancel()
-        await asyncio.gather(hook, return_exceptions=True)
+        parent_hook.cancel()
+        await asyncio.gather(hook, parent_hook, return_exceptions=True)
 
 
 @pytest.mark.parametrize(

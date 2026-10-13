@@ -6,6 +6,8 @@ import asyncio
 import contextlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -239,14 +241,36 @@ async def test_post_external_elicitation_resolved_shape() -> None:
 
 
 @pytest.mark.asyncio
-async def test_confirmation_survives_a_transient_server_failure(
+@pytest.mark.parametrize("final_status", [202, 403])
+async def test_confirmation_backs_off_during_an_outage(
     monkeypatch: pytest.MonkeyPatch,
+    final_status: int,
 ) -> None:
-    monkeypatch.setattr(knp, "_POLL_INTERVAL_S", 0.01)
-    client = _QueueClient([httpx.Response(503), httpx.Response(202)])
-    await knp._post_external_elicitation_resolved(client, "conv_2", "elic_9")  # type: ignore[arg-type]
-    assert len(client.posts) == 2
-    assert client.posts[0] == client.posts[1]
+    sleep = AsyncMock()
+    monkeypatch.setattr(knp, "asyncio", SimpleNamespace(**{**vars(asyncio), "sleep": sleep}))
+    requests: list[httpx.Request] = []
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            raise httpx.ConnectError("offline", request=request)
+        if len(requests) <= 10:
+            return httpx.Response(429 if len(requests) % 2 else 503)
+        return httpx.Response(final_status)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handle), base_url="http://test"
+    ) as client:
+        await knp._post_external_elicitation_resolved(client, "conv_2", "elic_9")
+
+    assert len(requests) == 11
+    assert all(request.content == requests[0].content for request in requests)
+    delays = [call.args[0] for call in sleep.await_args_list]
+    assert len(delays) == 10
+    for delay, ceiling in zip(
+        delays, [0.4, 0.8, 1.6, 3.2, 6.4, 12.8, 25.6, 30, 30, 30], strict=True
+    ):
+        assert ceiling / 2 <= delay <= ceiling
 
 
 @pytest.mark.asyncio

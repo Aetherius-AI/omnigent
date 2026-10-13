@@ -7,6 +7,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import random
 import secrets
 import threading
 import time
@@ -26,6 +27,7 @@ _logger = logging.getLogger(__name__)
 _POLL_INTERVAL_S = 0.4
 _POST_TIMEOUT_S = 86400.0
 _DELIVERY_CONFIRM_TIMEOUT_S = 5.0
+_RECEIPT_RETRY_MAX_S = 30.0
 _PREVIEW_MAX = 1024
 _SUPPORTED_ACCEPT_OPTION = "allow_once"
 _SUPPORTED_DECLINE_OPTION = "reject_once"
@@ -419,6 +421,7 @@ async def _post_external_elicitation_resolved(
     client: httpx.AsyncClient, session_id: str, elicitation_id: str
 ) -> None:
     """Tell the server the native Kiro TUI answered a pending prompt."""
+    backoff_s = _POLL_INTERVAL_S
     while True:
         try:
             response = await client.post(
@@ -441,7 +444,8 @@ async def _post_external_elicitation_resolved(
         except httpx.HTTPError:
             _logger.exception("kiro external_elicitation_resolved POST failed")
         # Retrying the receipt is safe; it never sends terminal input.
-        await asyncio.sleep(_POLL_INTERVAL_S)
+        await asyncio.sleep(random.uniform(backoff_s / 2, backoff_s))
+        backoff_s = min(backoff_s * 2, _RECEIPT_RETRY_MAX_S)
 
 
 __all__ = [
