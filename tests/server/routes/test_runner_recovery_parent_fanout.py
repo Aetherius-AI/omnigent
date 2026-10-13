@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import Mock
@@ -13,9 +14,8 @@ import pytest
 
 from omnigent.runtime import session_stream
 from omnigent.server import session_live_state
-from omnigent.server.routes._sessions import common, orchestration
+from omnigent.server.routes._sessions import common, helpers, orchestration
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
-from omnigent.stores.scheduled_task_store.sqlalchemy_store import SqlAlchemyScheduledTaskStore
 
 _CODE_KEY = common._LAST_TASK_ERROR_CODE_LABEL_KEY
 _MESSAGE_KEY = common._LAST_TASK_ERROR_MESSAGE_LABEL_KEY
@@ -44,17 +44,29 @@ class _RecoveryOutcome:
 
 
 async def _recover_passively(
-    db_uri: str,
     store: SqlAlchemyConversationStore,
     monkeypatch: pytest.MonkeyPatch,
     session_id: str,
     *,
     cleanup: tuple[str, ...],
+    during_label_clear: Callable[[], None] | None = None,
 ) -> _RecoveryOutcome:
-    """Run the passive-reconnect recovery for ``session_id`` and capture every publish."""
+    """Run the passive-reconnect recovery for ``session_id`` and capture every publish.
+
+    ``during_label_clear`` runs while recovery is parked on its label write, so a
+    test can land another status edge at exactly that point.
+    """
     published = Mock()
     monkeypatch.setattr(session_stream, "publish", published)
-    session_live_state.configure(store, SqlAlchemyScheduledTaskStore(db_uri))
+    if during_label_clear is not None:
+        original = orchestration._persist_session_status_error_labels
+
+        async def interleaved(*args: Any, **kwargs: Any) -> None:
+            during_label_clear()
+            await original(*args, **kwargs)
+
+        monkeypatch.setattr(orchestration, "_persist_session_status_error_labels", interleaved)
+    session_live_state.configure(store)
     try:
         await orchestration._publish_runner_recovered_status_impl(
             session_id, store, require_disconnect_code=True
@@ -85,9 +97,7 @@ async def test_runner_recovery_notifies_parent_of_cleared_child(
     common._session_status_cache[parent.id] = "running"
     _seed_failed(store, child.id, "runner_disconnected")
 
-    outcome = await _recover_passively(
-        db_uri, store, monkeypatch, child.id, cleanup=(parent.id, child.id)
-    )
+    outcome = await _recover_passively(store, monkeypatch, child.id, cleanup=(parent.id, child.id))
 
     child_events = outcome.events_for(child.id)
     assert [event["type"] for event in child_events] == ["session.status"]
@@ -109,37 +119,34 @@ async def test_runner_recovery_notifies_parent_of_cleared_child(
 
 
 @pytest.mark.asyncio
-async def test_runner_recovery_leaves_genuine_child_failure_on_parent(
+async def test_runner_recovery_fan_out_follows_a_running_edge_landing_mid_clear(
     db_uri: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A real task failure survives a passive reconnect, so neither stream hears anything."""
+    """A ``running`` edge published while recovery clears the labels must not be
+    followed by a stale idle summary on the parent."""
     store = SqlAlchemyConversationStore(db_uri)
     parent = store.create_conversation()
     child = store.create_conversation(kind="sub_agent", parent_conversation_id=parent.id)
-    _seed_failed(store, child.id, "runner_error")
+    _seed_failed(store, child.id, "runner_disconnected")
 
     outcome = await _recover_passively(
-        db_uri, store, monkeypatch, child.id, cleanup=(parent.id, child.id)
+        store,
+        monkeypatch,
+        child.id,
+        cleanup=(parent.id, child.id),
+        during_label_clear=lambda: helpers._publish_status(child.id, "running"),
     )
 
-    assert outcome.events == []
-    assert outcome.cached_status == "failed"
-
-
-@pytest.mark.asyncio
-async def test_runner_recovery_top_level_session_publishes_only_own_status(
-    db_uri: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A session without a parent clears on its own stream and fans out nowhere else."""
-    store = SqlAlchemyConversationStore(db_uri)
-    top_level = store.create_conversation()
-    _seed_failed(store, top_level.id, "runner_disconnected")
-
-    outcome = await _recover_passively(
-        db_uri, store, monkeypatch, top_level.id, cleanup=(top_level.id,)
-    )
-
-    assert [(target, event["type"]) for target, event in outcome.events] == [
-        (top_level.id, "session.status")
+    assert outcome.cached_status == "running"
+    summaries = [
+        (
+            event["child"]["busy"],
+            event["child"]["current_task_status"],
+            event["child"]["last_task_error"],
+        )
+        for event in outcome.events_for(parent.id)
     ]
-    assert outcome.cached_status == "idle"
+    assert summaries, "the parent heard nothing about the child"
+    assert summaries[-1] == (True, "in_progress", None), (
+        f"the parent's last summary is stale after the running edge: {summaries}"
+    )

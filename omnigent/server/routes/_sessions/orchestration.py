@@ -3745,8 +3745,11 @@ async def _publish_runner_recovered_status_impl(
     )
     session_stream.publish(session_id, event.model_dump())
     await _persist_session_status_error_labels(session_id, None, conversation_store)
-    # Runs after the labels clear so the parent's summary drops the disconnect cause.
-    _publish_child_status_to_parent(session_id, "idle")
+    # A newer edge can land while the labels clear; mirror the current status so
+    # the parent's summary drops the disconnect cause without a stale idle following it.
+    current = _session_status_cache.get(session_id)
+    if current is not None:
+        _publish_child_status_to_parent(session_id, current)
 
 
 _RUNNER_OFFLINE_RETRY_DELAYS_S = (0.5, 1.0)
