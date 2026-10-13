@@ -26,9 +26,15 @@ from fastapi import (
 )
 from fastapi.responses import Response
 from pydantic import ValidationError
+from sqlalchemy.exc import SQLAlchemyError
 
 from omnigent.cli_invocation import cli_invocation
-from omnigent.db.utils import generate_agent_id, generate_task_id, shared_read_scope
+from omnigent.db.utils import (
+    generate_agent_id,
+    generate_task_id,
+    rollback_shared_reads,
+    shared_read_scope,
+)
 from omnigent.db.workspace_cache import WorkspaceScopedCache
 from omnigent.debug_logging import debug_event, runner_log_scope
 from omnigent.entities import (
@@ -12233,11 +12239,10 @@ async def _load_acp_model_options(
         agent_store = _agent_store
     if agent_store is None:
         return []
+    # Callers without a prefetched row keep the loader's two-argument call shape.
+    loader_kwargs = {"agent": agent} if agent is not None else {}
     spec = await asyncio.to_thread(
-        _load_agent_spec_for_session,
-        conv,
-        agent_store,
-        **({} if agent is None else {"agent": agent}),
+        _load_agent_spec_for_session, conv, agent_store, **loader_kwargs
     )
     if spec is None:
         return []
@@ -12760,7 +12765,7 @@ def _read_session_snapshot_inputs(
 
     :returns: The access result, the conversation (read here when the access
         check did not), and the bound agent row, or ``None`` when the session
-        has no agent binding or the row is gone.
+        has no agent binding, the row is gone, or its read failed.
     :raises OmnigentError: 401 / 403 / 404 from the access check, or 404 when
         the conversation does not exist.
     """
@@ -12773,7 +12778,20 @@ def _read_session_snapshot_inputs(
             conv = conversation_store.get_conversation(session_id)
         if conv is None:
             raise _session_not_found()
-        agent = agent_store.get(conv.agent_id) if conv.agent_id is not None else None
+        agent: Agent | None = None
+        if conv.agent_id is not None:
+            try:
+                agent = agent_store.get(conv.agent_id)
+            except SQLAlchemyError:
+                # Enrichment only: the snapshot retries best-effort. Roll the shared
+                # session back so the reads above still commit cleanly.
+                rollback_shared_reads()
+                _logger.debug(
+                    "Agent row read failed on snapshot build for session=%s",
+                    session_id,
+                    exc_info=True,
+                    extra={"session_id": session_id},
+                )
     return access, conv, agent
 
 

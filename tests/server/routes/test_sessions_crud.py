@@ -100,6 +100,28 @@ async def test_get_session(
     assert body["id"] == session_id
 
 
+async def test_get_session_survives_agent_row_read_failure(
+    client: httpx.AsyncClient, session_id: str, db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failing agent-row read drops only the agent metadata; the snapshot and harness survive."""
+    from sqlalchemy import text
+
+    SqlAlchemyConversationStore(db_uri).update_conversation(session_id, harness_override="pi")
+
+    def failing_get(self: SqlAlchemyAgentStore, agent_id: str) -> None:
+        with self._session("select_agent_by_id") as session:
+            session.execute(text("SELECT * FROM table_that_does_not_exist"))
+
+    monkeypatch.setattr(SqlAlchemyAgentStore, "get", failing_get)
+    resp = await client.get(f"/v1/sessions/{session_id}")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["id"] == session_id
+    assert body["harness"] == "pi"
+    assert body.get("agent_name") is None
+    assert body.get("llm_model") is None
+
+
 async def test_get_session_not_found(client: httpx.AsyncClient) -> None:
     """Getting a nonexistent session returns 404."""
     resp = await client.get("/v1/sessions/4fe12335002377c209e501c3fe3bcffc")
