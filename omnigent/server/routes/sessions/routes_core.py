@@ -160,6 +160,7 @@ from omnigent.server.routes._sessions.helpers import (
     _validated_cost_control_mode_override,
     _validated_subagent_routing_override,
     reconcile_orphaned_running_status,
+    relaunch_lock_for,
 )
 from omnigent.server.routes._sessions.orchestration import (
     _best_effort_stop,
@@ -868,7 +869,6 @@ def register_core_routes(
                     and conv.git_branch is not None
                 ):
                     from omnigent.server.routes._host_worktree import WORKTREE_ROOT_LABEL_KEY
-                    from omnigent.server.routes._sessions.helpers import relaunch_lock_for
 
                     # Serialize with the first-message relaunch on its own lock, then
                     # re-read: roll back only while our failed launch's runner is still

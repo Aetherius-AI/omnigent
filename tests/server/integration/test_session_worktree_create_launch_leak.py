@@ -734,36 +734,51 @@ async def test_inline_create_launch_failure_holds_relaunch_lock_across_rollback(
             client, agent["id"], {"branch_name": "feature/lock", "base_branch": "main"}
         )
     )
-    await asyncio.wait_for(in_removal.wait(), timeout=5)
-    conv_id = observed["conv_id"]
-    assert observed["locked_at_removal"] is True, "rollback must hold the relaunch lock"
-    assert relaunch_lock_for(conv_id).locked() is True
-
     got_lock = asyncio.Event()
+    waiter_started = asyncio.Event()
+    waiter: asyncio.Task[None] | None = None
+    try:
+        await asyncio.wait_for(in_removal.wait(), timeout=5)
+        conv_id = observed["conv_id"]
+        assert observed["locked_at_removal"] is True, "rollback must hold the relaunch lock"
+        assert relaunch_lock_for(conv_id).locked() is True
 
-    async def _relaunch_waiter() -> None:
-        async with relaunch_lock_for(conv_id):
-            got_lock.set()
+        async def _relaunch_waiter() -> None:
+            # Signal before blocking so the probe below cannot pass vacuously.
+            waiter_started.set()
+            async with relaunch_lock_for(conv_id):
+                got_lock.set()
 
-    waiter = asyncio.create_task(_relaunch_waiter())
-    # The lock is held by the rollback, so the waiter can never acquire it here.
-    await asyncio.sleep(0.05)
-    assert not got_lock.is_set(), "a concurrent relaunch acquired the lock during the rollback"
+        waiter = asyncio.create_task(_relaunch_waiter())
+        await asyncio.wait_for(waiter_started.wait(), timeout=5)
+        await asyncio.sleep(0.05)
+        assert not got_lock.is_set(), "a concurrent relaunch acquired the lock during the rollback"
 
-    proceed.set()
-    resp = await asyncio.wait_for(create, timeout=5)
-    await asyncio.wait_for(got_lock.wait(), timeout=5)
-    await waiter
+        proceed.set()
+        resp = await asyncio.wait_for(create, timeout=5)
+        await asyncio.wait_for(got_lock.wait(), timeout=5)
+        await waiter
 
-    assert resp.status_code == 201, resp.text
-    body = resp.json()
-    assert body["host_id"] is None and body["runner_id"] is None, body
-    assert len(cap.launch) == 1, f"expected one launch_runner frame; unexpected={cap.unexpected}"
-    assert cap.remove == [], f"the barrier stands in for real removal: {cap.remove}"
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        assert body["host_id"] is None and body["runner_id"] is None, body
+        assert len(cap.launch) == 1, (
+            f"expected one launch_runner frame; unexpected={cap.unexpected}"
+        )
+        assert cap.remove == [], f"the barrier stands in for real removal: {cap.remove}"
 
-    conv = SqlAlchemyConversationStore(db_uri).get_conversation(body["id"])
-    assert conv is not None
-    assert conv.host_id is None and conv.workspace is None and conv.git_branch is None
+        conv = SqlAlchemyConversationStore(db_uri).get_conversation(body["id"])
+        assert conv is not None
+        assert conv.host_id is None and conv.workspace is None and conv.git_branch is None
+    finally:
+        # Unblock and drain the background tasks so a failed assertion above
+        # surfaces cleanly, not as a destroyed-pending-task warning.
+        proceed.set()
+        for task in (create, waiter):
+            if task is not None and not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
 
 async def test_inline_create_launch_timeout_cleans_up_worktree(
