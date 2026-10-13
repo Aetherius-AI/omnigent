@@ -69,14 +69,12 @@ def bundle_skill_names(bundle_dir: Path) -> list[str]:
     """
     Name the skills Claude loads from a bundle passed via ``--plugin-dir``.
 
-    Claude Code identifies a plugin skill by its ``skills/<dir>/SKILL.md``
-    directory name (the frontmatter ``name`` is only a label), so these are
-    the names its ``Skill`` tool allowlist matches on.
+    Claude Code keys a plugin skill by its ``skills/<dir>`` directory name,
+    which is what its ``Skill`` tool allowlist matches on.
 
     :param bundle_dir: Materialized agent-bundle root.
-    :returns: Sorted directory names under ``<bundle_dir>/skills/`` that
-        hold a ``SKILL.md``, e.g. ``["code-review"]``; empty when the
-        bundle ships no skills.
+    :returns: Sorted ``skills/<dir>`` names holding a ``SKILL.md``; empty
+        when the bundle ships no skills.
     """
     skills_dir = bundle_dir / "skills"
     if not skills_dir.is_dir():

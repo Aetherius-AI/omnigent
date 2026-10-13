@@ -2317,13 +2317,9 @@ class TestSkillsFilterTranslation(unittest.TestCase):
 
     def test_none_allowlists_bundled_skills_without_host_sources(self) -> None:
         """
-        ``"none"`` with a bundle that ships skills → SDK
-        ``skills=[<bundled names>]`` and ``setting_sources=[]``.
-
-        The SDK turns ``skills`` into the CLI's ``Skill(<name>)``
-        allowlist, and an empty allowlist rejected the bundle's own
-        skill ("not in this session's skills allowlist") while
-        ``--plugin-dir`` kept it listed. Host discovery stays off.
+        ``"none"`` with bundled skills → ``skills=[<bundled names>]`` and
+        ``setting_sources=[]``: the bundle's own skills stay invocable
+        while host discovery stays off.
         """
         from omnigent.inner.claude_sdk_executor import _resolve_skills_option
 

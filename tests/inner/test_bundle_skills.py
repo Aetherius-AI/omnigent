@@ -136,11 +136,7 @@ def test_claude_native_skill_args_bundle_without_skills_dir(tmp_path: Path) -> N
 
 
 def test_bundle_skill_names_lists_skill_directories(tmp_path: Path) -> None:
-    """
-    Claude names a plugin skill by its directory, so the directory name is
-    returned (sorted) even when the frontmatter label differs; entries
-    without a ``SKILL.md`` are not skills.
-    """
+    """Directory names (Claude's identifier) are returned sorted; non-skill entries are skipped."""
     for dir_name, label in (("review", "code-review"), ("brainstorm", "brainstorm")):
         skill_dir = tmp_path / "skills" / dir_name
         skill_dir.mkdir(parents=True)

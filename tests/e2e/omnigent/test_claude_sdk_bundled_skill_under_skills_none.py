@@ -1,14 +1,8 @@
 """Real Claude CLI: a ``skills: none`` bundle can still run its own skill.
 
 Drives ``ClaudeSDKExecutor.run_turn`` in-process against the real ``claude``
-binary, with the mock Anthropic endpoint scripting the model's ``Skill`` tool
-call. The verdict comes from the CLI's own skills-allowlist gate, which the
-Python-level option tests cannot observe.
-
-**What breaks if this fails:** ``skills: none`` hands the CLI an allowlist
-that omits the bundle's own skills, so the model's ``Skill`` call comes back
-as ``Skill <name> is not in this session's skills allowlist`` even though the
-skill is listed via ``--plugin-dir``.
+binary, with the mock Anthropic endpoint scripting the model's ``Skill`` call,
+so the CLI's own skills-allowlist gate produces the verdict.
 """
 
 from __future__ import annotations
