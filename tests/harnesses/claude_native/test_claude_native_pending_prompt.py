@@ -258,6 +258,8 @@ def test_confirmation_retry_stops_when_a_prompt_replaces_the_dialog(
     def send(*args: str) -> None:
         nonlocal accepted
         sent.append(args)
+        if args[-1] != "Enter":
+            return
         accepted = True
         if prompt is None:
             _park_hook(native_bridge)
@@ -280,7 +282,10 @@ def test_confirmation_retry_stops_when_a_prompt_replaces_the_dialog(
             bridge_dir=native_bridge,
         )
     assert accepted
-    assert [args[-1] for args in sent] == ["Enter"]
+    assert [args[1:] for args in sent] == [
+        ("copy-mode", "-q", "-t", "main"),
+        ("send-keys", "-t", "main", "Enter"),
+    ]
 
 
 def test_accepted_submit_can_immediately_raise_a_question(

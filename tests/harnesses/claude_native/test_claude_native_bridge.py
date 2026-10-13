@@ -4144,8 +4144,7 @@ def test_inject_user_message_pastes_content_then_submits(
         f"paste-buffer, copy-mode -q, Enter), got {len(captured)}."
     )
     leave_mode, clear_home, clear_kill, load, paste, leave_mode_again, submit = captured
-    # A pane a native attach scrolled into copy mode would swallow the keys,
-    # so the mode is left before the clearing keys and again before Enter.
+    # Copy mode is left before the clearing keys and again before Enter.
     assert leave_mode[3:] == ["copy-mode", "-q", "-t", "claude:0.0"]
     assert leave_mode_again[3:] == ["copy-mode", "-q", "-t", "claude:0.0"]
     assert clear_home[-4:] == ["-l", "-t", "claude:0.0", "\x1b[97;5u"]
@@ -10416,6 +10415,7 @@ def test_a_model_switch_types_the_argument_form_and_confirms(
         "copy-mode -q",
         "Enter",
         # The "Switch model?" confirmation, once it actually rendered.
+        "copy-mode -q",
         "Enter",
     ]
     # The id must go through literally, not as a tmux key name.
@@ -10450,7 +10450,7 @@ def test_confirm_tui_dialog_polls_instead_of_sleeping_a_fixed_interval(
     )
     # Exactly one Enter: the dialog verifiably closed on the first press, so
     # neither a verify retry nor the blind fallback may add another.
-    assert [args[-1] for args in sends] == ["Enter"]
+    assert [_delivery_step(args) for args in sends] == ["copy-mode -q", "Enter"]
 
 
 def test_a_matched_hint_confirms_before_the_poll_times_out(
@@ -10504,7 +10504,7 @@ def test_a_dialog_whose_title_drifted_still_gets_the_blind_fallback_enter(
         )
         is False
     )
-    assert [args[-1] for args in sends] == ["Enter"]
+    assert [_delivery_step(args) for args in sends] == ["copy-mode -q", "Enter"]
 
 
 def test_an_effort_dialog_rendering_late_is_still_confirmed(
@@ -10530,7 +10530,7 @@ def test_an_effort_dialog_rendering_late_is_still_confirmed(
         is True
     )
     # One Enter, and only once the dialog was actually on screen.
-    assert [args[-1] for args in sends] == ["Enter"]
+    assert [_delivery_step(args) for args in sends] == ["copy-mode -q", "Enter"]
 
 
 @pytest.mark.parametrize(
@@ -10614,10 +10614,10 @@ def test_a_swallowed_confirm_enter_is_retried_while_the_dialog_persists(
         )
         is True
     )
-    enters = [args[-1] for args in sends]
-    assert enters == ["Enter", "Enter"], (
+    steps = [_delivery_step(args) for args in sends]
+    assert steps == ["copy-mode -q", "Enter", "copy-mode -q", "Enter"], (
         f"Expected the swallowed Enter to be retried exactly once before the "
-        f"dialog closed; got {enters}."
+        f"dialog closed; got {steps}."
     )
 
 
@@ -10652,10 +10652,10 @@ def test_a_torn_capture_does_not_end_the_confirm_retry(
         )
         is True
     )
-    enters = [args[-1] for args in sends]
-    assert enters == ["Enter", "Enter"], (
+    steps = [_delivery_step(args) for args in sends]
+    assert steps == ["copy-mode -q", "Enter", "copy-mode -q", "Enter"], (
         f"A blank frame must keep the retry alive, not declare the dialog "
-        f"closed after the first Enter; got {enters}."
+        f"closed after the first Enter; got {steps}."
     )
 
 
@@ -10911,6 +10911,7 @@ def test_an_effort_injection_with_no_dialog_completes_without_hanging(
         "/effort high",
         "copy-mode -q",
         "Enter",
+        "copy-mode -q",
         "Enter",
     ]
 
@@ -10993,7 +10994,7 @@ def test_inject_user_message_restores_an_occupied_input_box_first(
 
     tails = [_delivery_step(cmd) for cmd in captured]
     # Escape (dismiss the surface) must precede every delivery keystroke.
-    assert tails[:4] == ["Escape", "copy-mode -q", "\x1b[97;5u", "\x1b[107;5u"], (
+    assert tails[:5] == ["copy-mode -q", "Escape", "copy-mode -q", "\x1b[97;5u", "\x1b[107;5u"], (
         f"Expected the occupying surface to be Escaped before the clear; got {tails}."
     )
     assert tails.count("Escape") == 1, f"One sighting, one Escape — got {tails.count('Escape')}."
@@ -11475,6 +11476,7 @@ def test_inject_slash_command_restores_an_occupied_input_box_first(
     claude_native_bridge.inject_slash_command(bridge_dir, command="/effort high")
 
     assert [_delivery_step(args) for args in sends] == [
+        "copy-mode -q",
         "Escape",
         "copy-mode -q",
         "C-u",
@@ -11526,8 +11528,10 @@ def test_inject_slash_command_fails_loud_when_dismissal_is_exhausted(
     with pytest.raises(claude_native_bridge.ClaudeTerminalDialog, match="occupied by an overlay"):
         claude_native_bridge.inject_slash_command(bridge_dir, command="/compact")
 
-    tails = [args[-1] for args in sends]
-    assert tails and set(tails) == {"Escape"}, f"Only dismissal Escapes may be sent; got {tails}."
+    steps = [_delivery_step(args) for args in sends]
+    assert "Escape" in steps and set(steps) <= {"copy-mode -q", "Escape"}, (
+        f"Only dismissal Escapes may be sent; got {steps}."
+    )
 
 
 def test_a_torn_frame_after_a_hinted_surface_does_not_refuse_the_slash_command(
@@ -11585,6 +11589,7 @@ def test_a_lowercase_escape_hint_still_marks_a_surface_dismissible(
     claude_native_bridge.inject_slash_command(bridge_dir, command="/compact")
 
     assert [_delivery_step(args) for args in sends] == [
+        "copy-mode -q",
         "Escape",
         "copy-mode -q",
         "C-u",

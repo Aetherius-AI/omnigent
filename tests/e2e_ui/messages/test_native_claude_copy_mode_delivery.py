@@ -26,12 +26,10 @@ import httpx
 import pytest
 from playwright.sync_api import Locator, Page, expect
 
-from tests.e2e_ui.conftest import open_right_rail, reset_mock_llm, set_fallback_mock_llm
+from tests.e2e_ui.conftest import open_right_rail, reset_mock_llm
 
-from .test_message_render_parity import _ASSISTANT, _ensure_chat_view, _send, _turn_prompt
+from .test_message_render_parity import _ensure_chat_view
 from .test_native_claude_render_parity import (
-    _CLAUDE_MOCK_MODEL,
-    _MOCK_TURN_TIMEOUT_MS,
     _open_terminal_view,
     _send_composer_turn,
     _wait_terminal_connected,
@@ -40,7 +38,6 @@ from .test_native_claude_render_parity import (
 _log = logging.getLogger(__name__)
 
 _ERROR_PILL = '[data-testid="error-pill"]'
-_ERROR_MESSAGE = '[data-testid="error-message-content"]'
 _XTERM_INPUT = "textarea.xterm-helper-textarea"
 _SHELL_READY_TIMEOUT_MS = 60_000
 _PANE_STATE_TIMEOUT_S = 20.0
@@ -124,29 +121,40 @@ def _attach_from_runner_shell(
     Mirrors ``omnigent.harnesses.claude_native.main._attach_direct_tmux``:
     ``tmux -S <socket> -f /dev/null attach -t <target>`` with ``TMUX`` unset.
 
-    :returns: The pane state observed once the attach is in place.
+    The state writer runs until ``<state_file>.stop`` exists.
+
+    :returns: The pane state once the attach shows up as one more client.
     """
     fmt = "#{pane_in_mode} #{history_size} #{alternate_on} #{session_attached}"
     # tmux errors go to a sibling file so they cannot be parsed as pane fields.
     err_file = state_file.with_suffix(".err")
+    stop_file = state_file.with_suffix(".stop")
     monitor = (
-        f"( while :; do tmux -S '{socket}' display-message -p -t '{target}' '{fmt}' "
-        f"> '{state_file}.tmp' 2> '{err_file}'; mv -f '{state_file}.tmp' '{state_file}'; "
-        "sleep 0.3; done ) > /dev/null 2>&1 &"
+        f"( while [ ! -e '{stop_file}' ]; do tmux -S '{socket}' display-message -p "
+        f"-t '{target}' '{fmt}' > '{state_file}.tmp' 2> '{err_file}'; "
+        f"mv -f '{state_file}.tmp' '{state_file}'; sleep 0.3; done ) > /dev/null 2>&1 &"
     )
-    attach = (
-        f"env -u TMUX TERM=xterm-256color tmux -S '{socket}' -f /dev/null attach -t '{target}'"
-    )
-    _type_shell_command(page, shell, f"{monitor} {attach}")
-    state = _wait_pane_state(page, state_file, _PANE_STATE_TIMEOUT_S, pane_in_mode="0")
+    _type_shell_command(page, shell, monitor)
+    before = _wait_pane_state(page, state_file, _PANE_STATE_TIMEOUT_S)
     tmux_error = err_file.read_text().strip() if err_file.exists() else ""
-    assert state.get("pane_in_mode") == "0", (
-        f"pane state never arrived from the runner shell (state={state!r}, tmux stderr="
-        f"{tmux_error!r}); is {state_file.parent} shared with the runner host?"
+    assert before, (
+        f"pane state never arrived from the runner shell (tmux stderr={tmux_error!r}); is "
+        f"{state_file.parent} shared with the runner host?"
     )
-    # Give the nested client a moment to attach before sending it keys.
+    assert before.get("pane_in_mode") == "0", f"pane was already in a tmux mode: {before!r}"
+    attached_clients = str(int(before.get("clients", "0")) + 1)
+    _type_shell_command(
+        page,
+        shell,
+        f"env -u TMUX TERM=xterm-256color tmux -S '{socket}' -f /dev/null attach -t '{target}'",
+    )
+    state = _wait_pane_state(page, state_file, _PANE_STATE_TIMEOUT_S, clients=attached_clients)
+    assert state.get("clients") == attached_clients, (
+        f"the native tmux attach never connected (before {before!r}, now {state!r})"
+    )
+    # Give the nested client a moment to settle before sending it keys.
     page.wait_for_timeout(1_500)
-    return _pane_state(state_file)
+    return state
 
 
 def _scroll_back_into_copy_mode(
@@ -179,38 +187,6 @@ def _force_copy_mode(page: Page, *, socket: str, target: str, state_file: Path) 
     second = _open_new_shell(page)
     _type_shell_command(page, second, f"tmux -S '{socket}' copy-mode -t '{target}'")
     return _wait_pane_state(page, state_file, _COPY_MODE_TIMEOUT_S, pane_in_mode="1")
-
-
-def _wait_for_reply_or_error(page: Page, token: str, *, known_errors: int = 0) -> str:
-    """Block until the turn either shows the reply or a new error pill.
-
-    :param known_errors: Error pills already on screen from earlier turns.
-    :returns: ``"reply"``, ``"error"``, or ``"timeout"``.
-    """
-    reply = page.locator(_ASSISTANT, has_text=token).first
-    errors = page.locator(_ERROR_PILL)
-    deadline = time.monotonic() + _MOCK_TURN_TIMEOUT_MS / 1000
-    while time.monotonic() < deadline:
-        if reply.count() and reply.is_visible():
-            return "reply"
-        if errors.count() > known_errors and errors.last.is_visible():
-            return "error"
-        page.wait_for_timeout(250)
-    return "timeout"
-
-
-def _read_error_pill(page: Page) -> str:
-    """Expand the newest error pill and return its headline plus message text."""
-    pill = page.locator(_ERROR_PILL).last
-    headline = pill.get_by_test_id("error-headline").inner_text()
-    pill.click()
-    message = page.locator(_ERROR_MESSAGE).last
-    try:
-        expect(message).to_be_visible(timeout=5_000)
-        detail = message.inner_text()
-    except AssertionError:
-        detail = "<no message content rendered>"
-    return f"{headline} · {detail}"
 
 
 @pytest.mark.nightly
@@ -254,6 +230,7 @@ def test_native_claude_composer_delivers_while_pane_in_copy_mode(
     attached = _attach_from_runner_shell(
         page, shell, socket=socket, target=target, state_file=state_file
     )
+    request.addfinalizer(state_file.with_suffix(".stop").touch)
     _log.info("native attach from the runner shell is up; pane state %s", attached)
     route, state = _scroll_back_into_copy_mode(page, shell, state_file)
     if state.get("pane_in_mode") != "1":
@@ -266,16 +243,17 @@ def test_native_claude_composer_delivers_while_pane_in_copy_mode(
     )
 
     _ensure_chat_view(page)
-    user_marker, token = f"usr-2-{nonce}", f"ast-2-{nonce}"
-    set_fallback_mock_llm(mock_llm_server_url, "default", token)
-    set_fallback_mock_llm(mock_llm_server_url, _CLAUDE_MOCK_MODEL, token)
-    _send(page, _turn_prompt(2, user_marker, token))
-    outcome = _wait_for_reply_or_error(page, token)
-    state_after = _pane_state(state_file)
-    detail = _read_error_pill(page) if outcome == "error" else ""
-    _log.info("copy-mode send outcome=%s pane state after=%s %s", outcome, state_after, detail)
-    assert outcome == "reply", (
-        f"message sent while the pane was in copy mode ({route}) was not answered: "
-        f"outcome={outcome} pane state after={state_after!r}; error pill: {detail}"
+    _send_composer_turn(
+        page,
+        mock_llm_server_url,
+        base_url=base_url,
+        session_id=session_id,
+        index=2,
+        user_marker=f"usr-2-{nonce}",
+        assistant_token=f"ast-2-{nonce}",
+        expected_user_bubbles=2,
     )
+    state_after = _pane_state(state_file)
+    _log.info("copy-mode send answered (%s); pane state after=%s", route, state_after)
     expect(page.locator(_ERROR_PILL)).to_have_count(0)
+    assert state_after.get("pane_in_mode") == "0", f"pane still in a tmux mode: {state_after!r}"

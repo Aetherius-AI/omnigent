@@ -4106,8 +4106,9 @@ def inject_user_message(
     Escape (see :func:`_restore_occupied_input`), so the message reclaims
     the input box instead of being typed into that surface. A pane a
     native ``tmux attach`` scrolled into copy mode is taken out of it
-    before each injected key (see :func:`_leave_tmux_mode`), since tmux
-    would otherwise route the keys through its copy-mode table.
+    before those Escapes, the clearing keys and every submit Enter (see
+    :func:`_leave_tmux_mode`), since tmux would otherwise route the keys
+    through its copy-mode table.
 
     Delivered as one bracketed paste via ``tmux load-buffer`` (from a
     temp file) + ``paste-buffer -p`` so interior newlines ride as raw CR
@@ -4780,6 +4781,7 @@ def _confirm_tui_dialog(
         raise ClaudeUserPromptPending(
             "Claude is waiting for an explicit answer; settings dialog not confirmed."
         )
+    _leave_tmux_mode(socket_path, tmux_target)
     _run_tmux(socket_path, "send-keys", "-t", tmux_target, "Enter")
     return False
 
@@ -5158,6 +5160,7 @@ def _confirm_and_verify_dialog_closed(
         raise ClaudeUserPromptPending(
             "Claude is waiting for an explicit answer; settings dialog not confirmed."
         )
+    _leave_tmux_mode(socket_path, tmux_target)
     _run_tmux(socket_path, "send-keys", "-t", tmux_target, "Enter")
     last_enter = time.monotonic()
     deadline = last_enter + _CONFIRM_DIALOG_ACCEPT_TIMEOUT_S
@@ -5170,6 +5173,7 @@ def _confirm_and_verify_dialog_closed(
             return
         _raise_if_user_prompt_pending(bridge_dir, pane)
         if hint in pane and time.monotonic() - last_enter >= _CONFIRM_DIALOG_RETRY_INTERVAL_S:
+            _leave_tmux_mode(socket_path, tmux_target)
             _run_tmux(socket_path, "send-keys", "-t", tmux_target, "Enter")
             last_enter = time.monotonic()
 
@@ -5775,6 +5779,7 @@ def _restore_occupied_input(
                 return surface
         elif last_escape is None or now - last_escape >= _OCCUPIED_INPUT_DISMISS_RETRY_INTERVAL_S:
             _logger.info("claude-native: dismissing %s covering the input box", surface)
+            _leave_tmux_mode(socket_path, tmux_target)
             _run_tmux(socket_path, "send-keys", "-t", tmux_target, "Escape")
             last_escape = now
         unclearable_seen = unclearable
