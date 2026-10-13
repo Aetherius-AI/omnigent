@@ -1560,6 +1560,44 @@ async def test_a_replay_of_the_drained_turn_does_not_confirm_a_live_rearm(
         _assert_fresh_result(_drain_queue(inbox), server=server, dispatched_id=work_id)
 
 
+@pytest.mark.asyncio
+async def test_an_unnamed_report_inside_a_live_rearm_is_taken_as_the_resumed_turns_result(
+    _clean_subagent_registry: None,
+) -> None:
+    """A report naming no turn confirms a live re-arm: delivered once, under a fresh id.
+
+    A forwarder that names no turn leaves the runner unable to tell a replay of
+    round one from the resumed turn's result, so the unnamed report is taken as
+    that result (a duplicate beats a loss) and a repeat of it is absorbed. The
+    cost is stated on ``_rearm_confirmed_by``: a real ``Stop`` landing after such
+    a replay with no ``running`` edge in between is answered already delivered.
+    """
+    server = _RecordingServerClient()
+    app, inbox, work_id = _dispatch_worker(server)
+    publish_pane_status = _pane_status_publisher(app)
+
+    async with _runner_client(app) as client:
+        await _deliver_and_drain_round_one(client, inbox, server)
+        publish_pane_status(CHILD_SESSION_ID, "running", None)
+
+        unnamed = await _post_status(
+            client, status="idle", output="round one: found the bug", turn_completed=True
+        )
+        assert unnamed.status_code == 204
+        [item] = _drain_queue(inbox)
+        stamped = server.labels.get(subagent_work.SUBAGENT_DISPATCH_ID_LABEL_KEY)
+        assert item["work_id"] == stamped != work_id, "the unnamed report confirmed no re-arm"
+        finished = subagent_work.get_subagent_work(CHILD_SESSION_ID)
+        assert finished is not None and finished.status == "completed" and not finished.rearmed
+
+        repeat = await _post_status(
+            client, status="idle", output="round one: found the bug", turn_completed=True
+        )
+        assert repeat.status_code == 204
+        assert inbox.empty(), "a repeat of the unnamed report was delivered twice"
+        assert server.labels.get(subagent_work.SUBAGENT_DISPATCH_ID_LABEL_KEY) == stamped
+
+
 class _StampFailingServerClient(_RecordingServerClient):
     """Reject dispatch-id stamps while still receipting drains."""
 
@@ -2009,3 +2047,4 @@ async def test_deleting_the_parent_forgets_its_children_s_failure_details(
     assert CHILD_SESSION_ID not in app.state.native_pane_failures
     assert CHILD_SESSION_ID not in subagent_work._drained_delivered_subagent_children
     assert CHILD_SESSION_ID not in subagent_work._drained_subagent_dispatches
+    assert CHILD_SESSION_ID not in subagent_work._child_session_parents

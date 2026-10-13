@@ -506,9 +506,12 @@ def _rearm_confirmed_by(entry: _SubagentWorkEntry, response_id: str | None) -> b
     """Whether a terminal report naming *response_id* confirms *entry*'s re-armed turn.
 
     A live re-armed entry is confirmed by any report but a replay of the finished
-    turn's own (the forwarder re-sending its ``Stop``). A finished entry a settle
-    restored still awaits the anticipated turn's report: any report but a replay
-    of its own (the same ``response_id``) confirms it.
+    turn's own (the forwarder re-sending its ``Stop``). A report naming no turn
+    confirms it too: nothing tells it from the resumed turn's result, and a
+    duplicate beats a lost result, so a forwarder that names no turn pays for a
+    replay landing inside a live re-arm with that turn's real result. A finished
+    entry a settle restored still awaits the anticipated turn's report: any
+    report but a replay of its own (the same ``response_id``) confirms it.
     """
     if not entry.rearmed:
         return False
@@ -600,8 +603,8 @@ def settle_spurious_subagent_rearm(child_session_id: str) -> _SubagentWorkEntry 
     turn's result and is still delivered once.
 
     :param child_session_id: Child session id, e.g. ``"conv_child456"``.
-    :returns: The reverted live entry, or ``None`` when the child has no
-        unsettled re-arm.
+    :returns: The settled re-armed entry, now replaced by the restored entry or
+        unregistered, or ``None`` when the child has no unsettled re-arm.
     """
     entry = _subagent_work_by_child.get(child_session_id)
     if entry is None or not entry.rearmed or entry.status != "running":
@@ -692,12 +695,13 @@ def unregister_subagent_work_for_session(session_id: str) -> None:
         _drained_subagent_dispatches.pop(child_id, None)
         _drop_in_flight_send_lock(child_id)
     # Drained children left the work registry but keep their drain memory and
-    # may still hold a lock.
+    # may still hold a lock; their records serve nothing once the parent is gone.
     for child_id, meta in list(_child_session_parents.items()):
         if meta.parent_id == session_id:
             _drained_delivered_subagent_children.discard(child_id)
             _drained_subagent_dispatches.pop(child_id, None)
             _drop_in_flight_send_lock(child_id)
+            _child_session_parents.pop(child_id, None)
     _subagent_work_by_parent.pop(session_id, None)
 
 
