@@ -13,7 +13,6 @@ from fastapi import FastAPI
 from starlette.testclient import TestClient
 
 from omnigent.server.routes.sessions import create_sessions_router
-from omnigent.stores.conversation_store import CompactionStats
 
 
 def test_switch_agent_is_reserved_and_returns_410() -> None:

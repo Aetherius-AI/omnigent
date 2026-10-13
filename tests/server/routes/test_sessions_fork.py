@@ -36,10 +36,10 @@ from omnigent.server.routes import _session_create_validation as create_validati
 from omnigent.server.routes.sessions import create_sessions_router, routes_core
 from omnigent.stores.conversation_store import (
     _FORK_ONLY_DROPPED_LABEL_KEYS,
-    CompactionStats,
     FORK_SOURCE_LABEL_KEY,
     SIDE_CHAT_LABEL_KEY,
     SIDE_CHAT_SOURCE_LABEL_KEY,
+    CompactionStats,
 )
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from tests.server.helpers import create_test_agent
