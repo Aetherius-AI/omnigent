@@ -5320,8 +5320,9 @@ def test_inject_slash_command_clears_draft_pastes_literal_then_enter(
     C-u kills any draft the user is mid-typing — otherwise the paste
     concatenates and Enter submits ``<draft>/effort high``. ``-l`` is
     required so tmux pastes ``/`` and spaces literally; Enter submits.
-    Every capture shows an empty box, so this also pins the fail-soft path:
-    a never-identifiable draft still gets the single blind submit.
+    Every capture shows an empty framed composer: that confirms the clear,
+    while the pasted command never renders, so this also pins the fail-soft
+    path where a never-identifiable draft still gets the single blind submit.
     """
     bridge_dir = tmp_path / "bridge"
     write_tmux_target(
@@ -10501,12 +10502,27 @@ def test_inject_user_message_clears_a_draft_taller_than_the_input_box(
     assert [text.strip() for text in composer.submitted] == ["hello from the web"]
 
 
+@pytest.mark.parametrize(
+    "draft",
+    [
+        "\n".join(f"line {index:03d}" for index in range(1, 701)),
+        "\n".join(["same line"] * 300),
+    ],
+    ids=["numbered-lines", "identical-lines"],
+)
 def test_inject_user_message_keeps_clearing_while_a_tall_draft_shrinks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    draft: str,
 ) -> None:
-    """A draft needing more rounds than the stuck-box budget clears while each round shrinks it."""
-    draft = "\n".join(f"line {index:03d}" for index in range(1, 701))
+    """
+    A draft needing many rounds clears while each round shrinks it.
+
+    Numbered lines change the visible window every round, so clearing may
+    outlast the stuck-box budget. Identical lines leave the window looking
+    the same, so only the budget itself covers them: about 460 identical
+    lines in a seven-row window before the clear fails closed.
+    """
     bridge_dir = _picker_bridge_dir(tmp_path)
     composer = _EditableComposer(draft, cursor=len(draft), visible_rows=7)
     composer.install(monkeypatch)
@@ -10514,7 +10530,10 @@ def test_inject_user_message_keeps_clearing_while_a_tall_draft_shrinks(
     inject_user_message(bridge_dir, content="hello from the web")
 
     assert [text.strip() for text in composer.submitted] == ["hello from the web"]
-    assert claude_native_bridge.time.monotonic() > claude_native_bridge._COMPOSER_CLEAR_TIMEOUT_S
+    if draft.startswith("line "):
+        assert (
+            claude_native_bridge.time.monotonic() > claude_native_bridge._COMPOSER_CLEAR_TIMEOUT_S
+        )
 
 
 class _StuckComposer(_EditableComposer):

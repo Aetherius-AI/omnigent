@@ -308,10 +308,9 @@ _PASTE_SETTLE_S = 0.1  # let the TUI commit a paste before the separate submit E
 # rather than as text when they arrive in one burst.
 _COMPOSER_KILL_TO_LINE_END = "\x1b[107;5u"
 _COMPOSER_KILL_TO_LINE_START = "\x1b[117;5u"
-# The box shows only a window of a draft taller than it (seven rows in a
-# 24-row terminal), so clearing repeats per window. A box that stops changing
-# for this long is stuck (a stalled TUI gets the same grace as at submit);
-# even a shrinking one must empty within the cap.
+# Clearing repeats per visible window of a tall draft; a box unchanged this
+# long is stuck (the grace a stalled TUI gets at submit), and even a shrinking
+# one must empty within the cap.
 _COMPOSER_CLEAR_TIMEOUT_S = 10.0
 _COMPOSER_CLEAR_MAX_S = 20.0
 # How long to wait for the pasted draft to visibly land in Claude's
@@ -5950,7 +5949,11 @@ def _clear_composer(socket_path: str, tmux_target: str) -> None:
         if rows is not None:
             presses = 2 * len(rows)
             keys = _COMPOSER_KILL_TO_LINE_END * presses + _COMPOSER_KILL_TO_LINE_START * presses
-            _run_tmux(socket_path, "send-keys", "-l", "-t", tmux_target, keys)
+            # tmux caps one client→server command at ~16KB; a very tall pane's burst is split.
+            for start in range(0, len(keys), 8192):
+                _run_tmux(
+                    socket_path, "send-keys", "-l", "-t", tmux_target, keys[start : start + 8192]
+                )
             bursts += 1
         time.sleep(_CLAUDE_READY_POLL_INTERVAL_S)
 

@@ -126,6 +126,11 @@ def main():
                         final = os.read(fd, 1)
                         if not final or 0x40 <= final[0] <= 0x7E:
                             break
+                elif follower == b"\\r":
+                    if chars:
+                        transcript.append("sent: " + "".join(chars))
+                        chars = []
+                        render("", transcript)
                 elif follower and follower[0] >= 0x20:
                     chars.append(chr(follower[0]))
                     render("".join(chars), transcript)

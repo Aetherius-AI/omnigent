@@ -85,20 +85,24 @@ class _TerminalScreen:
     def __init__(self, page: Page) -> None:
         self._screen = pyte.Screen(80, 24)
         self._stream = pyte.ByteStream(self._screen)
+        self._active: WebSocket | None = None
         self.attached = False
         page.on("websocket", self._on_websocket)
 
     def _on_websocket(self, ws: WebSocket) -> None:
         if "/resources/terminals/" not in ws.url or "/attach" not in ws.url:
             return
-        # A redial re-seeds the whole screen, so start from a blank one.
-        self._screen.reset()
+        # A redial re-seeds the whole screen, so start from a blank screen and
+        # parser, and stop listening to the connection it replaces.
+        self._screen = pyte.Screen(80, 24)
+        self._stream = pyte.ByteStream(self._screen)
+        self._active = ws
         self.attached = True
-        ws.on("framesent", self._on_sent)
-        ws.on("framereceived", self._on_received)
+        ws.on("framesent", lambda payload: self._on_sent(ws, payload))
+        ws.on("framereceived", lambda payload: self._on_received(ws, payload))
 
-    def _on_sent(self, payload: str | bytes) -> None:
-        if not isinstance(payload, str):
+    def _on_sent(self, ws: WebSocket, payload: str | bytes) -> None:
+        if ws is not self._active or not isinstance(payload, str):
             return
         try:
             message = json.loads(payload)
@@ -109,8 +113,8 @@ class _TerminalScreen:
             if rows and cols:
                 self._screen.resize(int(rows), int(cols))
 
-    def _on_received(self, payload: str | bytes) -> None:
-        if isinstance(payload, bytes):
+    def _on_received(self, ws: WebSocket, payload: str | bytes) -> None:
+        if ws is self._active and isinstance(payload, bytes):
             self._stream.feed(payload)
 
     def text(self) -> str:
