@@ -10363,21 +10363,26 @@ def _fake_tmux(
 class _EditableComposer:
     """Claude Code's input box, editing a multi-line draft as the real one does.
 
-    Measured on Claude Code 2.1.287: Ctrl+K deletes to the end of the line,
-    or the line break when the cursor is already there; Ctrl+U does the same
-    towards the start; Ctrl+A moves to the start of the line. Each line of
-    the draft renders as its own row of the box.
+    Measured on Claude Code 2.1.283 and 2.1.287: Ctrl+K deletes to the end of
+    the line, or the line break when the cursor is already there; Ctrl+U does
+    the same towards the start; Ctrl+A moves to the start of the line. Each
+    line of the draft renders as its own row of the box, which shows at most
+    a window of a tall draft (seven rows in a 24-row terminal).
     """
 
     _RULE = "──────────────────────────────"
 
-    def __init__(self, draft: str, *, cursor: int) -> None:
+    def __init__(self, draft: str, *, cursor: int, visible_rows: int | None = None) -> None:
         """
         :param draft: Text the person left in the box.
         :param cursor: Cursor offset into *draft*.
+        :param visible_rows: Rows the box shows at once; ``None`` shows the
+            whole draft. A taller draft shows its last rows, as the real box
+            does with the cursor on the last line.
         """
         self.text = draft
         self.cursor = cursor
+        self.visible_rows = visible_rows
         self.submitted: list[str] = []
         self._paste_buffer = ""
         self._actions = {
@@ -10413,7 +10418,10 @@ class _EditableComposer:
 
     def _capture_pane(self, socket_path: str, tmux_target: str) -> str:
         del socket_path, tmux_target
-        first, *rest = self.text.split("\n")
+        lines = self.text.split("\n")
+        if self.visible_rows is not None:
+            lines = lines[-self.visible_rows :]
+        first, *rest = lines
         rows = "\n".join([f"❯ {first}", *(f"  {row}" for row in rest)])
         return f"{self._RULE}\n{rows}\n{self._RULE}\n  ? for shortcuts\n"
 
@@ -10482,6 +10490,64 @@ def test_inject_slash_command_clears_every_line_of_a_leftover_draft(
     claude_native_bridge.inject_slash_command(bridge_dir, command="/effort high")
 
     assert composer.submitted == ["/effort high"]
+
+
+_TALL_DRAFT = "\n".join(f"line {index:02d}" for index in range(1, 31))
+
+
+def test_inject_user_message_clears_a_draft_taller_than_the_input_box(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A draft the box shows only part of is still cleared completely.
+
+    The box shows seven rows of a thirty-line draft, so a round of clearing
+    sized from the visible rows removes seven lines. Giving up after a fixed
+    few rounds left the draft's first lines to be submitted with the message.
+    """
+    bridge_dir = _picker_bridge_dir(tmp_path)
+    composer = _EditableComposer(_TALL_DRAFT, cursor=len(_TALL_DRAFT), visible_rows=7)
+    composer.install(monkeypatch)
+
+    inject_user_message(bridge_dir, content="hello from the web")
+
+    assert [text.strip() for text in composer.submitted] == ["hello from the web"]
+
+
+class _StuckComposer(_EditableComposer):
+    """A two-row surface the clearing keys never change."""
+
+    def _kill_to_line_end(self) -> None:
+        pass
+
+    def _kill_to_line_start(self) -> None:
+        pass
+
+
+def test_clearing_a_box_that_never_empties_gives_up_in_time(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A surface the clearing keys do not shrink is abandoned instead of retried forever."""
+    composer = _StuckComposer("stuck\nstuck", cursor=0)
+    composer.install(monkeypatch)
+    rounds: list[str] = []
+    run_tmux = composer._run_tmux
+
+    def counting_run_tmux(socket_path: str, *args: str) -> None:
+        rounds.append(args[-1])
+        run_tmux(socket_path, *args)
+
+    monkeypatch.setattr(claude_native_bridge, "_run_tmux", counting_run_tmux)
+
+    claude_native_bridge._clear_composer("/tmp/example/tmux.sock", "claude:0.0")
+
+    budget = claude_native_bridge._COMPOSER_CLEAR_TIMEOUT_S
+    assert claude_native_bridge.time.monotonic() >= budget
+    # One round per poll interval until the budget runs out, then one last round.
+    assert 2 <= len(rounds) <= budget / claude_native_bridge._CLAUDE_READY_POLL_INTERVAL_S + 2
+    assert "input box still shows 2 rows" in caplog.text
 
 
 @pytest.mark.parametrize(
