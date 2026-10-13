@@ -62,3 +62,5 @@ def test_lane_caption_rules_cover_the_whole_window_for_absence_claims() -> None:
     assert "support only a qualified claim that states the interval" in lanes
     assert "only shows what the final frame shows" in lanes
     assert "record how long it showed in `evidence`" in lanes
+    assert "caption the end state and say the window was not checked" in lanes
+    assert "whether a transient state is acceptable is a product question for review" in lanes
