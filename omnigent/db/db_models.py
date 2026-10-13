@@ -1431,6 +1431,46 @@ class SqlUserDailyCost(OmnigentBase):
     updated_at: Mapped[int] = mapped_column(Integer)
 
 
+class SqlUserUsageSummary(OmnigentBase):
+    """
+    SQLAlchemy model for the ``user_usage_summary`` table.
+
+    Cached all-time cost-by-harness and cost-by-model maps for one user, so a
+    first-page ``GET /v1/usage`` reads one row instead of summing every
+    session. Stale-and-rebuild, not incremental: a priced turn sets
+    ``needs_rebuild`` (:meth:`ConversationStore.mark_usage_summary_stale`)
+    and the next first-page read replaces the row
+    (:meth:`ConversationStore.set_usage_summary`). A turn priced while a
+    rebuild is in flight is missed until the following turn flags the row
+    again. One row per ``(workspace_id, user_id)``, removed with the account.
+
+    :param user_id: The session owner the breakdowns belong to.
+    :param harness_breakdown: JSON ``{harness_name: total_usd}``.
+    :param model_breakdown: JSON ``{model_id: total_usd}``.
+    :param needs_rebuild: ``True`` until the next rebuild replaces the row.
+    :param total_sessions: Sessions summed by the last rebuild (diagnostics).
+    :param last_updated_at: Unix epoch seconds of the last rebuild.
+    """
+
+    __tablename__ = "user_usage_summary"
+
+    # Tenant partition key
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    user_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    # MySQL forbids TEXT column defaults; application provides "{}" via UPSERT
+    harness_breakdown: Mapped[str] = mapped_column(Text, nullable=False)
+    model_breakdown: Mapped[str] = mapped_column(Text, nullable=False)
+    needs_rebuild: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=true())
+    total_sessions: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    last_updated_at: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+
+
 class SqlScheduledTask(OmnigentBase):
     """
     SQLAlchemy model for the ``scheduled_tasks`` table.

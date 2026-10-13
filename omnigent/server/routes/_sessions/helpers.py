@@ -2131,7 +2131,9 @@ def _record_daily_cost(
 
     Record every priced turn, including sessions without a budget policy.
     Bucket spending by the current UTC day; nonpositive deltas and sessions
-    without a resolvable owner are no-ops.
+    without a resolvable owner are no-ops. The same pass flags the owner's
+    cached usage-page breakdowns stale so the next first-page
+    ``GET /v1/usage`` rebuilds them.
 
     Read the owner's username and generation together, falling back to the
     root session for a sub-agent without its own grant. Retain that snapshot
@@ -2158,6 +2160,7 @@ def _record_daily_cost(
 
     with target_account_scope(owner.user_id, owner.generation):
         conversation_store.add_daily_cost(owner.user_id, _utc_day(now_epoch()), delta_usd)
+        conversation_store.mark_usage_summary_stale(owner.user_id)
 
 
 def _priced_cost_for_display(usage: dict[str, Any]) -> float | None:

@@ -47,6 +47,7 @@ from omnigent.db.db_models import (
     SqlSessionPermission,
     SqlUser,
     SqlUserDailyCost,
+    SqlUserUsageSummary,
     current_workspace_id,
     uuid_to_bytes,
 )
@@ -1970,6 +1971,75 @@ class SqlAlchemyConversationStore(ConversationStore):
                 for row in rows
             ]
 
+    def mark_usage_summary_stale(self, user_id: str) -> None:
+        """Flag the user's cached breakdowns for rebuild; a missing row already reads as stale."""
+
+        def write(session: Session) -> None:
+            session.execute(
+                update(SqlUserUsageSummary)
+                .where(
+                    SqlUserUsageSummary.workspace_id == current_workspace_id(),
+                    SqlUserUsageSummary.user_id == user_id,
+                )
+                .values(needs_rebuild=True)
+            )
+
+        run_write_transaction(self._session_immediate, "mark_usage_summary_stale", write)
+
+    def get_usage_summary(
+        self,
+        user_id: str,
+    ) -> tuple[dict[str, float], dict[str, float]] | None:
+        """Return the cached breakdown maps, or ``None`` when the row is missing or stale."""
+        with self._session("get_usage_summary") as session:
+            row = session.get(SqlUserUsageSummary, (current_workspace_id(), user_id))
+            if row is None or row.needs_rebuild:
+                return None
+            return (
+                json.loads(row.harness_breakdown or "{}"),
+                json.loads(row.model_breakdown or "{}"),
+            )
+
+    def set_usage_summary(
+        self,
+        user_id: str,
+        harness_breakdown: dict[str, float],
+        model_breakdown: dict[str, float],
+        total_sessions: int,
+    ) -> None:
+        """Replace the user's cached breakdowns and clear the rebuild flag."""
+        values: dict[str, Any] = {
+            "harness_breakdown": json.dumps(harness_breakdown),
+            "model_breakdown": json.dumps(model_breakdown),
+            "total_sessions": total_sessions,
+            "needs_rebuild": False,
+            "last_updated_at": now_epoch(),
+        }
+
+        def write(session: Session) -> None:
+            dialect = session.bind.dialect.name if session.bind is not None else ""
+            if dialect == "sqlite" or is_postgresql_family(dialect):
+                if dialect == "sqlite":
+                    from sqlalchemy.dialects.sqlite import insert as dialect_insert
+                else:
+                    from sqlalchemy.dialects.postgresql import insert as dialect_insert
+                stmt: Any = dialect_insert(SqlUserUsageSummary).values(user_id=user_id, **values)
+                session.execute(
+                    stmt.on_conflict_do_update(
+                        index_elements=["workspace_id", "user_id"], set_=values
+                    )
+                )
+                return
+            # Generic dialect fallback — SELECT-then-INSERT/UPDATE in one transaction.
+            existing = session.get(SqlUserUsageSummary, (current_workspace_id(), user_id))
+            if existing is None:
+                session.add(SqlUserUsageSummary(user_id=user_id, **values))
+                return
+            for column, value in values.items():
+                setattr(existing, column, value)
+
+        run_write_transaction(self._session_immediate, "set_usage_summary", write)
+
     def get_session_owner(self, conversation_id: str, *, owner_only: bool = False) -> str | None:
         """
         Return the highest-privilege non-public grantee of a session.
@@ -2746,6 +2816,8 @@ class SqlAlchemyConversationStore(ConversationStore):
         pinned: bool = False,
         pinned_owner: str | None = None,
         title: str | None = None,
+        updated_at_min: int | None = None,
+        updated_at_max: int | None = None,
     ) -> PagedList[Conversation]:
         """
         List conversations with cursor-based pagination.
@@ -3123,6 +3195,10 @@ class SqlAlchemyConversationStore(ConversationStore):
                         )
                     )
                 )
+            if updated_at_min is not None:
+                stmt = stmt.where(SqlConversation.updated_at >= updated_at_min)
+            if updated_at_max is not None:
+                stmt = stmt.where(SqlConversation.updated_at <= updated_at_max)
             if after:
                 stmt = self._apply_cursor(
                     session,

@@ -6,12 +6,12 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 
 from omnigent._wrapper_labels import WRAPPER_LABEL_KEY
 from omnigent.entities import Conversation
 from omnigent.errors import restart_on_stale_cursor
-from omnigent.runtime.policies.builder import load_session_usage_and_tree
+from omnigent.runtime.policies.builder import load_session_usage, load_session_usage_and_tree
 from omnigent.server.auth import RESERVED_USER_LOCAL, AuthProvider
 from omnigent.server.feature_flags import Feature, FeatureFlags, resolve_feature_flags
 from omnigent.server.routes._auth_helpers import require_user
@@ -26,6 +26,10 @@ from omnigent.stores import ConversationStore
 # ``sum_daily_cost`` with this lower bound totals every recorded day.
 _EPOCH_DAY = "0000-00-00"
 
+# Bounds for one page of session detail on ``GET /v1/usage``.
+DEFAULT_SESSION_PAGE_SIZE = 50
+MAX_SESSION_PAGE_SIZE = 200
+
 
 def _utc_today() -> str:
     """Return the current UTC calendar day as ``"YYYY-MM-DD"``."""
@@ -38,6 +42,28 @@ def _day_offset(day_utc: str, *, days: int) -> str:
     """Return the UTC day *days* before *day_utc*, as ``"YYYY-MM-DD"``."""
     base = datetime.strptime(day_utc, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     return (base - timedelta(days=days)).date().isoformat()
+
+
+def _day_bound_epoch(value: str, *, param: str, end_of_day: bool) -> int:
+    """
+    Convert a ``YYYY-MM-DD`` query value to a UTC epoch bound.
+
+    :param value: The raw query value, e.g. ``"2026-10-01"``.
+    :param param: The query parameter name, for the error message.
+    :param end_of_day: Return the day's last second instead of its first.
+    :returns: Unix epoch seconds.
+    :raises HTTPException: 422 when *value* is not a calendar date.
+    """
+    try:
+        day = datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid {param!r} date {value!r}; expected YYYY-MM-DD.",
+        ) from exc
+    if end_of_day:
+        day += timedelta(days=1, seconds=-1)
+    return int(day.timestamp())
 
 
 def _session_models(usage: dict[str, Any]) -> dict[str, float]:
@@ -116,19 +142,76 @@ def _session_cost(usage: dict[str, Any]) -> float:
 
 
 @restart_on_stale_cursor
+def _rebuild_usage_breakdowns(
+    conversation_store: ConversationStore,
+    user_id: str | None,
+    rollup_user: str,
+) -> tuple[dict[str, float], dict[str, float]]:
+    """
+    Recompute and cache the all-time harness and model cost breakdowns.
+
+    Walks every session the caller can access (the set the detail pages
+    enumerate) and sums each session's subtree cost by primary harness and
+    by model, then stores the result under *rollup_user* so later first-page
+    reads are one row lookup until a priced turn marks it stale. A session
+    deleted mid-walk invalidates the page cursor; the whole walk restarts
+    (via :func:`restart_on_stale_cursor`) so the sums never reflect a
+    partial pass.
+
+    :param conversation_store: Store to enumerate sessions from.
+    :param user_id: The caller / ACL scope (``None`` in single-user mode).
+    :param rollup_user: The key the cached row is stored under.
+    :returns: ``(harness_breakdown, model_breakdown)``.
+    """
+    harness_breakdown: dict[str, float] = {}
+    model_breakdown: dict[str, float] = {}
+    total_sessions = 0
+    after: str | None = None
+    while True:
+        page = conversation_store.list_conversations(
+            limit=MAX_SESSION_PAGE_SIZE,
+            after=after,
+            accessible_by=user_id,
+            has_agent_id=True,
+            kind="default",
+            order="desc",
+            sort_by="updated_at",
+        )
+        for conv in page.data:
+            if conv.agent_id is None:
+                continue
+            total_sessions += 1
+            usage = load_session_usage(
+                conv.id, conversation_store, root_conversation_id=conv.root_conversation_id
+            )
+            harness = _resolve_session_harness(conv)
+            if harness:
+                harness_breakdown[harness] = harness_breakdown.get(harness, 0.0) + _session_cost(
+                    usage
+                )
+            for model, cost in _session_models(usage).items():
+                model_breakdown[model] = model_breakdown.get(model, 0.0) + cost
+        if not page.has_more:
+            break
+        after = page.last_id
+    conversation_store.set_usage_summary(
+        rollup_user, harness_breakdown, model_breakdown, total_sessions
+    )
+    return harness_breakdown, model_breakdown
+
+
 def _build_usage_report(
     conversation_store: ConversationStore,
     user_id: str | None,
     *,
     include_page_details: bool = False,
+    limit: int = DEFAULT_SESSION_PAGE_SIZE,
+    after: str | None = None,
+    updated_at_min: int | None = None,
+    updated_at_max: int | None = None,
 ) -> UsageReport:
     """
-    Build the usage report: a daily-rollup cost summary plus session detail.
-
-    A session deleted while the detail enumeration is paging invalidates the
-    page cursor; the whole report is rebuilt (via
-    :func:`restart_on_stale_cursor`) so the detail list is never silently
-    truncated.
+    Build the usage report: a daily-rollup cost summary plus a page of sessions.
 
     The summary (today / last 7 days / last 30 days / all-time) is summed
     from the per-user daily-cost rollup (``user_daily_cost``), which
@@ -138,13 +221,27 @@ def _build_usage_report(
     The per-session detail is a separate view over each top-level session's
     cumulative ``session_usage`` (rolled up across its sub-agent subtree via
     :func:`load_session_usage_and_tree`), newest activity first, carrying the
-    authoritative session cost and the per-model breakdown.
+    authoritative session cost and the per-model breakdown. It is one cursor
+    page: *limit* rows after the *after* session, optionally restricted to
+    sessions last active within ``[updated_at_min, updated_at_max]``. An
+    *after* session that no longer exists raises
+    :class:`~omnigent.errors.StaleCursorError`, which the API maps to a 400
+    ``stale_cursor`` response so the client restarts from the first page.
+
+    The all-time harness and model breakdowns ride only the first page of a
+    report built for the release-gated web Usage page. They come from the
+    per-user summary cache, rebuilt by :func:`_rebuild_usage_breakdowns`
+    when a priced turn has marked it stale.
 
     :param conversation_store: Store to read the rollup and sessions from.
     :param user_id: The caller / ACL scope. ``None`` in single-user mode maps
         to the reserved local owner the daily rollup and grants are keyed by.
-    :param include_page_details: Populate the timeline and display metadata
-        used only by the release-gated web Usage page.
+    :param include_page_details: Populate the timeline, breakdowns and
+        display metadata used only by the release-gated web Usage page.
+    :param limit: Maximum sessions in this page.
+    :param after: Session id this page starts after; ``None`` for the first.
+    :param updated_at_min: Inclusive lower bound on ``updated_at`` (epoch s).
+    :param updated_at_max: Inclusive upper bound on ``updated_at`` (epoch s).
     :returns: The populated :class:`UsageReport`.
     """
     # The daily rollup and session-permission grants key spend by the resolved
@@ -159,58 +256,68 @@ def _build_usage_report(
     cost_30d = conversation_store.sum_daily_cost(rollup_user, _day_offset(today, days=29))
     total = conversation_store.sum_daily_cost(rollup_user, _EPOCH_DAY)
 
+    page = conversation_store.list_conversations(
+        limit=limit,
+        after=after,
+        accessible_by=user_id,
+        has_agent_id=True,
+        kind="default",
+        order="desc",
+        sort_by="updated_at",
+        updated_at_min=updated_at_min,
+        updated_at_max=updated_at_max,
+    )
     sessions: list[SessionUsage] = []
-    after: str | None = None
-    while True:
-        page = conversation_store.list_conversations(
-            limit=200,
-            after=after,
-            accessible_by=user_id,
-            has_agent_id=True,
-            kind="default",
-            order="desc",
-            sort_by="updated_at",
+    for conv in page.data:
+        if conv.agent_id is None:
+            continue
+        # The list page already holds each row, so pass its root to skip
+        # re-reading the same conversation once per listed session. Sums and
+        # rows come from ONE tree load: the harness roll-up below needs the
+        # same tree the sums came from, and loading it again doubled the tree
+        # pages read for every listed session.
+        usage, tree = load_session_usage_and_tree(
+            conv.id,
+            conversation_store,
+            root_conversation_id=conv.root_conversation_id,
         )
-        for conv in page.data:
-            if conv.agent_id is None:
-                continue
-            # The list page already holds each row, so pass its root to skip
-            # re-reading the same conversation once per listed session. Sums and
-            # rows come from ONE tree load: the harness roll-up below needs the
-            # same tree the sums came from, and loading it again doubled the tree
-            # pages read for every listed session.
-            usage, tree = load_session_usage_and_tree(
-                conv.id,
-                conversation_store,
-                root_conversation_id=conv.root_conversation_id,
+        primary_harness = _resolve_session_harness(conv) if include_page_details else None
+        other_harnesses = (
+            _collect_other_harnesses(primary_harness, tree, conv.id)
+            if include_page_details
+            else None
+        )
+        sessions.append(
+            SessionUsage(
+                id=conv.id,
+                created_at=conv.created_at,
+                updated_at=conv.updated_at,
+                title=conv.title,
+                cost_usd=_session_cost(usage),
+                models=_session_models(usage),
+                harness=primary_harness,
+                other_harnesses=other_harnesses,
+                llm_model=(
+                    conv.model_override or _resolve_llm_model(conv)
+                    if include_page_details
+                    else None
+                ),
+                agent_name=conv.sub_agent_name if include_page_details else None,
             )
-            primary_harness = _resolve_session_harness(conv) if include_page_details else None
-            other_harnesses = (
-                _collect_other_harnesses(primary_harness, tree, conv.id)
-                if include_page_details
-                else None
+        )
+
+    # The web page reads the all-time breakdowns from its first page only, so
+    # cursor pages skip the cache (and the rebuild it may trigger) entirely.
+    harness_breakdown: dict[str, float] = {}
+    model_breakdown: dict[str, float] = {}
+    if include_page_details and after is None:
+        cached = conversation_store.get_usage_summary(rollup_user)
+        if cached is not None:
+            harness_breakdown, model_breakdown = cached
+        else:
+            harness_breakdown, model_breakdown = _rebuild_usage_breakdowns(
+                conversation_store, user_id, rollup_user
             )
-            sessions.append(
-                SessionUsage(
-                    id=conv.id,
-                    created_at=conv.created_at,
-                    updated_at=conv.updated_at,
-                    title=conv.title,
-                    cost_usd=_session_cost(usage),
-                    models=_session_models(usage),
-                    harness=primary_harness,
-                    other_harnesses=other_harnesses,
-                    llm_model=(
-                        conv.model_override or _resolve_llm_model(conv)
-                        if include_page_details
-                        else None
-                    ),
-                    agent_name=conv.sub_agent_name if include_page_details else None,
-                )
-            )
-        if not page.has_more:
-            break
-        after = page.last_id
 
     daily_costs_raw = (
         conversation_store.list_daily_costs(rollup_user, _EPOCH_DAY)
@@ -225,6 +332,10 @@ def _build_usage_report(
         total_cost_usd=total,
         daily_costs=[DailyCost(day=d, cost_usd=c) for d, c in daily_costs_raw],
         sessions=sessions,
+        sessions_has_more=page.has_more,
+        sessions_last_id=page.last_id,
+        harness_breakdown=harness_breakdown,
+        model_breakdown=model_breakdown,
     )
 
 
@@ -251,7 +362,13 @@ def create_usage_router(
     router = APIRouter()
 
     @router.get("/usage", response_model=UsageReport)
-    async def get_usage(request: Request) -> UsageReport:
+    async def get_usage(
+        request: Request,
+        limit: int = DEFAULT_SESSION_PAGE_SIZE,
+        after: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+    ) -> UsageReport:
         """
         Aggregate the calling user's LLM spend across their sessions.
 
@@ -259,13 +376,29 @@ def create_usage_router(
         so a request slipping through as ``None`` in multi-user mode would
         read another scope. Fail closed with 401 instead (``user_id`` is
         ``None`` only when auth is disabled — the single-user / local case).
+
+        :param limit: Sessions per page, clamped to
+            ``[1, MAX_SESSION_PAGE_SIZE]``.
+        :param after: Cursor: the previous page's ``sessions_last_id``.
+        :param since: Only sessions last active on or after this UTC day
+            (``YYYY-MM-DD``).
+        :param until: Only sessions last active on or before this UTC day
+            (``YYYY-MM-DD``).
         """
         user_id = require_user(request, auth_provider)
+        updated_at_min = (
+            _day_bound_epoch(since, param="since", end_of_day=False) if since else None
+        )
+        updated_at_max = _day_bound_epoch(until, param="until", end_of_day=True) if until else None
         return await asyncio.to_thread(
             _build_usage_report,
             conversation_store,
             user_id,
             include_page_details=flags.enabled(Feature.USAGE_PAGE),
+            limit=max(1, min(limit, MAX_SESSION_PAGE_SIZE)),
+            after=after,
+            updated_at_min=updated_at_min,
+            updated_at_max=updated_at_max,
         )
 
     return router
