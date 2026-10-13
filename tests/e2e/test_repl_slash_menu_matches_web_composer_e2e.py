@@ -67,8 +67,12 @@ def _seed_project(project: Path) -> None:
     _write_skill(project / ".claude" / "skills", "ws-proj-skill", "project skill")
 
 
-def _read_until(child: pexpect.spawn, pattern: str, *, timeout: float) -> str:
-    """ANSI-stripped output consumed from the PTY until *pattern* matches the plain text."""
+def _read_until(child: pexpect.spawn, pattern: str, *, timeout: float, settle: float = 0.0) -> str:
+    """ANSI-stripped PTY output consumed until *pattern* matches, plus *settle* seconds more.
+
+    The raw stream is stripped once, so an escape sequence split across reads
+    cannot leave stray bytes inside a row.
+    """
     raw = ""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -79,9 +83,10 @@ def _read_until(child: pexpect.spawn, pattern: str, *, timeout: float) -> str:
             exited = True
         else:
             exited = False
-        plain = strip_ansi(raw)
-        if re.search(pattern, plain):
-            return plain
+        if re.search(pattern, strip_ansi(raw)):
+            if settle and not exited:
+                raw += drain_for(child, settle)
+            return strip_ansi(raw)
         if exited:
             break
     raise AssertionError(f"{pattern!r} not rendered within {timeout}s:\n{strip_ansi(raw)[-3000:]}")
@@ -134,17 +139,19 @@ def test_claude_repl_menu_lists_plugin_and_project_skills(
         wait_for_ready(child, timeout=120)
 
         submit_prompt(child, "/help")
-        # The built-in groups print first; drain a little longer so the skill rows
-        # registered after them have arrived before parsing the listing.
-        help_text = _read_until(child, r"/quit\s+Exit", timeout=20)
-        help_text += strip_ansi(drain_for(child, 2.0))
+        # The built-in groups print first; settle so the skill rows registered
+        # after them have arrived before parsing the listing.
+        help_text = _read_until(child, r"/quit\s+Exit", timeout=20, settle=2.0)
         listed = set(_HELP_ROW_RE.findall(help_text))
         assert "/user-tier-skill" in listed, help_text
         # The web composer lists these for the same session; the REPL must too.
         assert {"/figplug:plug-skill", "/ws-proj-skill"} <= listed, sorted(listed)
 
         submit_prompt(child, "/figplug:plug-skill hi")
-        reply = _read_until(child, rf"Unknown command|{STATE_RUNNING}", timeout=20)
+        # Stop on the complete rejection line so the negative check sees the full text.
+        reply = _read_until(
+            child, rf"Unknown command: \S+ · /help for list|{STATE_RUNNING}", timeout=20
+        )
         assert "Unknown command: /figplug:plug-skill" not in reply, reply
     finally:
         clean_exit(child, timeout=15)

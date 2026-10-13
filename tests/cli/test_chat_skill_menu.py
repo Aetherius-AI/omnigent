@@ -18,10 +18,10 @@ from omnigent.spec.skill_sources import resolve_session_skills
 from omnigent.spec.types import AgentSpec, ExecutorSpec, SkillSpec
 
 
-def _write_skill(skills_dir: Path, name: str) -> None:
+def _write_skill(skills_dir: Path, name: str, description: str | None = None) -> None:
     (skills_dir / name).mkdir(parents=True)
     (skills_dir / name / "SKILL.md").write_text(
-        f"---\nname: {name}\ndescription: {name}\n---\nbody\n"
+        f"---\nname: {name}\ndescription: {description or name}\n---\nbody\n"
     )
 
 
@@ -71,16 +71,20 @@ def test_claude_repl_menu_lists_plugin_and_project_skills_like_the_web_menu(
     _write_skill(home / ".claude" / "skills", "user-tier-skill")
     _enable_plugin(home / ".claude", "figplug", "plug-skill")
     _write_skill(workspace / ".claude" / "skills", "ws-proj-skill")
+    _write_skill(workspace / ".claude" / "skills", "shared", "workspace copy")
     # ``omnigent run --harness`` materializes the spec outside the project.
     generated_root = tmp_path / "omnigent-override"
-    generated_root.mkdir()
+    _write_skill(generated_root / ".claude" / "skills", "shared", "agent-root copy")
     materialized = generated_root / "agent.yaml"
     monkeypatch.setitem(chat._MATERIALIZED_OVERRIDE_DIRS, materialized.resolve(), generated_root)
     spec = _spec("claude-sdk")
 
-    repl = {s.name for s in _merge_host_skills(spec, materialized)}
+    merged = _merge_host_skills(spec, materialized)
 
-    assert repl == {"user-tier-skill", "figplug:plug-skill", "ws-proj-skill"}
+    repl = {s.name for s in merged}
+    assert repl == {"user-tier-skill", "figplug:plug-skill", "ws-proj-skill", "shared"}
+    # The workspace is searched ahead of the agent root, so its copy wins.
+    assert [s.description for s in merged if s.name == "shared"] == ["workspace copy"]
     web = resolve_session_skills(spec, (workspace, generated_root), generated_root)
     assert repl == {s.name for s in web}
 

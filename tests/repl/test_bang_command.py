@@ -213,6 +213,7 @@ def test_bang_input_style_is_the_logo_green() -> None:
         ("!echo hi", True),  # a "!" shell command → green
         ("!", True),  # bare "!" (bang mode active) → green
         ("!cd /tmp", True),  # "!cd" is still a bang command → green
+        ("!ls /help", True),  # a slash token inside a bang line stays green
         ("!!literal", False),  # "!!" escape → ordinary prompt, not green
         ("ls -la", False),  # normal prompt → unstyled
         ("", False),  # empty composer → unstyled
@@ -265,7 +266,3 @@ def test_composer_tints_the_command_token_of_a_pasted_multiline_draft() -> None:
     assert get_line(0) == [("", "")]
     assert get_line(1) == [("", "  "), (_accent_style(), "/help"), ("", " check")]
     assert get_line(2) == [("", "this")]
-
-
-def test_bang_draft_stays_green_even_with_a_slash_token_inside() -> None:
-    assert set(_style_per_char("!ls /help")) == {_BANG_INPUT_STYLE}
