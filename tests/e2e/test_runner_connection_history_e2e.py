@@ -8,6 +8,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+import yaml
 from websockets.asyncio.client import connect
 
 from omnigent.host.frames import HostHelloFrame, HostRunnerExitedFrame, encode_host_frame
@@ -15,12 +16,19 @@ from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConver
 from tests._helpers.live_server import terminate_process
 from tests._helpers.server_runner import server_runner
 from tests._helpers.session import bind_session_runner, bundle_files, post_session_bundle
+from tests.e2e.conftest import configure_mock_llm
+from tests.e2e.test_runner_tunnel_mid_turn_reconnect_grace_e2e import _send_user_message
 
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(120)
-async def test_idle_runner_exit_keeps_connection_history_after_restart(tmp_path: Path) -> None:
+async def test_idle_runner_exit_keeps_connection_history_after_restart(
+    tmp_path: Path, isolated_mock_llm_server_url: str
+) -> None:
     runtime_log = tmp_path / "server-runtime.log"
+    model = "runner-history-mock"
+    answer = "IDLE_HISTORY_COMPLETE"
+    configure_mock_llm(isolated_mock_llm_server_url, [{"text": answer}], key=model)
     with server_runner(
         tmp_path / "stack", server_env={"OMNIGENT_PROCESS_LOG_FILE": str(runtime_log)}
     ) as stack:
@@ -31,10 +39,21 @@ async def test_idle_runner_exit_keeps_connection_history_after_restart(tmp_path:
                 "/v1/sessions",
                 bundle_files(
                     {
-                        "idle.yaml": (
-                            b"name: idle\nprompt: Stay idle.\n"
-                            b"executor:\n  harness: openai-agents\n"
-                        )
+                        "idle.yaml": yaml.safe_dump(
+                            {
+                                "name": "idle",
+                                "prompt": "Reply briefly.",
+                                "executor": {
+                                    "harness": "openai-agents",
+                                    "model": model,
+                                    "auth": {
+                                        "type": "api_key",
+                                        "api_key": "mock-key",
+                                        "base_url": f"{isolated_mock_llm_server_url}/v1",
+                                    },
+                                },
+                            }
+                        ).encode()
                     }
                 ),
             )
@@ -49,11 +68,18 @@ async def test_idle_runner_exit_keeps_connection_history_after_restart(tmp_path:
                     break
                 assert time.monotonic() < deadline, stack.log_tail()
                 await asyncio.sleep(0.05)
-            observed = client.post(
-                f"/v1/sessions/{session_id}/events",
-                json={"type": "external_session_status", "data": {"status": "idle"}},
-            )
-            observed.raise_for_status()
+            _send_user_message(client, session_id, "Reply once, then wait for more input.")
+            deadline = time.monotonic() + 30
+            while True:
+                response = client.get(f"/v1/sessions/{session_id}")
+                response.raise_for_status()
+                completed = response.json()
+                assert completed["status"] != "failed", completed
+                if completed["status"] == "idle" and answer in str(completed["items"]):
+                    break
+                assert time.monotonic() < deadline, stack.log_tail()
+                await asyncio.sleep(0.05)
+            assert completed["last_task_error"] is None
 
         terminate_process(stack.runner)
         stack.runner = None
@@ -92,9 +118,9 @@ async def test_idle_runner_exit_keeps_connection_history_after_restart(tmp_path:
                 response = await client.get(f"/v1/sessions/{session_id}")
                 response.raise_for_status()
                 snapshot = response.json()
-            assert snapshot["status"] == "idle"
+            assert snapshot["status"] == "idle", snapshot
             assert snapshot["last_task_error"] is None
             assert snapshot["runner_online"] is False
             persisted = store.get_conversation(session_id)
             assert persisted is not None and persisted.live_status == "idle"
-            assert "omnigent.last_task_error_code" not in persisted.labels
+            assert not persisted.labels.get("omnigent.last_task_error_code")
