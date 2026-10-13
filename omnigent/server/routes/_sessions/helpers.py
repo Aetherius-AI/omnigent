@@ -5997,6 +5997,13 @@ async def _rollback_create_launch_worktree(
     session_vanished = False
     bound_host_id: str | None = launch_host_id
 
+    def _reflect(row: Conversation) -> None:
+        # Report the binding the row actually carries.
+        resp.runner_id = row.runner_id
+        resp.host_id = row.host_id
+        resp.workspace = row.workspace
+        resp.git_branch = row.git_branch
+
     async def _remove_worktree(row: Conversation) -> bool:
         # The helper resolves the recorded root and spares directories other
         # sessions use, so a removal the delete path already made is skipped.
@@ -6045,6 +6052,9 @@ async def _rollback_create_launch_worktree(
                     "a newer runner is bound",
                     resp.id,
                 )
+                conv = latest
+                bound_host_id = latest.host_id
+                _reflect(latest)
             elif latest.workspace is None or latest.git_branch is None:
                 # The binding lost its worktree between create and the
                 # re-read, so there is nothing to roll back.
@@ -6053,9 +6063,10 @@ async def _rollback_create_launch_worktree(
                     "%s: no bound worktree remains",
                     resp.id,
                 )
+                conv = latest
+                bound_host_id = latest.host_id
+                _reflect(latest)
             else:
-                # Nothing reaps worktrees, so roll back the one this create
-                # made, as the bind and delete paths do.
                 removed = await _remove_worktree(latest)
                 if removed:
                     # The worktree is already gone, so unbinding is
@@ -6063,10 +6074,26 @@ async def _rollback_create_launch_worktree(
                     # transient store errors must not fail create.
                     unbound = False
                     try:
+                        # Compare-and-clear on the failed launch's runner: the
+                        # relaunch lock orders writers in this process only, so a
+                        # rebind written through another replica must survive.
                         conv = await asyncio.to_thread(
-                            conversation_store.clear_host_binding, resp.id
+                            conversation_store.clear_host_binding,
+                            resp.id,
+                            expected_runner_id=runner_id,
                         )
-                        unbound = True
+                        if conv.host_id is None:
+                            unbound = True
+                        else:
+                            _logger.warning(
+                                "Session %s was rebound to runner %s while its "
+                                "launch-failure worktree was removed; keeping the "
+                                "new binding",
+                                resp.id,
+                                conv.runner_id,
+                            )
+                            bound_host_id = conv.host_id
+                            _reflect(conv)
                     except ConversationNotFoundError:
                         _logger.warning(
                             "Session %s vanished while clearing its host "
@@ -6129,9 +6156,6 @@ async def _rollback_create_launch_worktree(
                                 )
                                 label_dropped = True
                             except Exception:  # noqa: BLE001
-                                # Binding already cleared and the worktree
-                                # gone; the stale root label is harmless and
-                                # is removed when the session is deleted.
                                 _logger.warning(
                                     "Failed to drop the worktree-root label "
                                     "for session %s after clearing its "

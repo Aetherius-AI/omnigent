@@ -567,11 +567,15 @@ async def test_inline_create_launch_failure_skips_rollback_when_runner_rebound(
         f"removed under the live runner: {cap.remove}; unexpected={cap.unexpected}"
     )
 
-    conv = SqlAlchemyConversationStore(db_uri).get_conversation(resp.json()["id"])
+    body = resp.json()
+    conv = SqlAlchemyConversationStore(db_uri).get_conversation(body["id"])
     assert conv is not None
     assert conv.runner_id == "runner_relaunched", conv.runner_id
     assert conv.workspace is not None and conv.git_branch is not None, conv
     assert WORKTREE_ROOT_LABEL_KEY in conv.labels, conv.labels
+    # The response reports the binding that is actually bound, not the failed launch's runner.
+    assert body["runner_id"] == "runner_relaunched", body
+    assert body["host_id"] == conv.host_id and body["workspace"] == conv.workspace, body
 
 
 async def test_inline_create_launch_failure_tolerates_binding_cleanup_error(
@@ -589,11 +593,11 @@ async def test_inline_create_launch_failure_tolerates_binding_cleanup_error(
 
     original_clear = SqlAlchemyConversationStore.clear_host_binding
 
-    def _boom(self: SqlAlchemyConversationStore, conversation_id: str) -> Any:
+    def _boom(self: SqlAlchemyConversationStore, conversation_id: str, **kwargs: Any) -> Any:
         row = SqlAlchemyConversationStore.get_conversation(self, conversation_id)
         if row is not None and row.git_branch == "feature/clearerr":
             raise RuntimeError("transient store error")
-        return original_clear(self, conversation_id)
+        return original_clear(self, conversation_id, **kwargs)
 
     monkeypatch.setattr(SqlAlchemyConversationStore, "clear_host_binding", _boom)
 
@@ -1002,7 +1006,9 @@ async def test_inline_create_launch_failure_serializes_runner_patch_with_rollbac
     try:
         await asyncio.wait_for(in_removal.wait(), timeout=5)
         conv_id = observed["conv_id"]
-        failed_runner_id = original_get(store, conv_id).runner_id  # type: ignore[union-attr]
+        row = original_get(store, conv_id)
+        assert row is not None
+        failed_runner_id = row.runner_id
         assert failed_runner_id is not None
 
         patch_body = {"runner_id": "" if replacement == "cleared" else "runner_b"}
@@ -1011,7 +1017,8 @@ async def test_inline_create_launch_failure_serializes_runner_patch_with_rollbac
         # the row still carries the failed launch's runner until the unbind.
         await asyncio.wait_for(patch_at_lock.wait(), timeout=5)
         assert not patch.done(), "the rebind must wait for the rollback to finish"
-        assert original_get(store, conv_id).runner_id == failed_runner_id  # type: ignore[union-attr]
+        row = original_get(store, conv_id)
+        assert row is not None and row.runner_id == failed_runner_id
 
         proceed.set()
         resp = await asyncio.wait_for(create, timeout=5)
@@ -1045,7 +1052,8 @@ async def test_inline_create_launch_failure_serializes_runner_patch_with_rollbac
             reject["on"] = False
             rebind = await client.patch(f"/v1/sessions/{conv_id}", json={"runner_id": "runner_b"})
             assert rebind.status_code == 200, rebind.text
-            assert original_get(store, conv_id).runner_id == "runner_b"  # type: ignore[union-attr]
+            row = original_get(store, conv_id)
+            assert row is not None and row.runner_id == "runner_b"
     finally:
         proceed.set()
         for task in (create, patch):
@@ -1053,6 +1061,58 @@ async def test_inline_create_launch_failure_serializes_runner_patch_with_rollbac
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+
+
+async def test_inline_create_launch_failure_keeps_binding_rebound_on_another_replica(
+    register_worktree_launch_host: RegisterHost,
+    client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The relaunch lock orders writers inside one server process only. A rebind
+    written through another replica while this one removes the worktree must
+    survive: the unbind is a compare-and-clear on the failed launch's runner, so
+    the create keeps the newer binding, reports it, and leaves the root label
+    for a later delete or archive."""
+    from omnigent.server.routes._sessions import helpers as sessions_helpers
+
+    cap = register_worktree_launch_host(launch_status="failed")
+    agent = await create_test_agent(client, name="wt-replica-agent")
+    other_replica = SqlAlchemyConversationStore(db_uri)
+    rebound: dict[str, str] = {}
+
+    async def _remove_then_rebind(*args: Any, **kwargs: Any) -> bool:
+        conv_id = kwargs["exclude_conversation_id"]
+        # Past this process's ownership check; another replica now rotates the
+        # runner without taking this process's lock.
+        other_replica.replace_runner_id(conv_id, "runner_replica_b")
+        rebound["conv_id"] = conv_id
+        return True
+
+    monkeypatch.setattr(
+        sessions_helpers, "_remove_session_worktree_best_effort", _remove_then_rebind
+    )
+
+    resp = await _create_git_session(
+        client, agent["id"], {"branch_name": "feature/replica", "base_branch": "main"}
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert rebound.get("conv_id") == body["id"], rebound
+    worktree_path = f"{_SOURCE_REPO}-worktrees/feature-replica"
+
+    conv = other_replica.get_conversation(body["id"])
+    assert conv is not None
+    assert conv.runner_id == "runner_replica_b", conv.runner_id
+    assert conv.host_id == _HOST_ID and conv.workspace == worktree_path
+    assert conv.git_branch == "feature/replica"
+    assert conv.labels.get(WORKTREE_ROOT_LABEL_KEY) == worktree_root_fingerprint(worktree_path)
+    assert body["runner_id"] == "runner_replica_b" and body["host_id"] == _HOST_ID, body
+    assert body["workspace"] == worktree_path and body["git_branch"] == "feature/replica", body
+    assert body["labels"].get(WORKTREE_ROOT_LABEL_KEY) == worktree_root_fingerprint(
+        worktree_path
+    ), body
+    assert len(cap.launch) == 1, f"unexpected={cap.unexpected}"
 
 
 @pytest.mark.parametrize("fault", ["reread", "shared_check"])
@@ -1071,6 +1131,7 @@ async def test_inline_create_launch_failure_tolerates_pre_removal_store_error(
     agent = await create_test_agent(client, name=f"wt-{fault}-err-agent")
     branch = f"feature/{fault}-err"
     raised = {"done": False}
+    guard_calls: list[dict[str, Any]] = []
 
     if fault == "reread":
         original_get = SqlAlchemyConversationStore.get_conversation
@@ -1097,6 +1158,7 @@ async def test_inline_create_launch_failure_tolerates_pre_removal_store_error(
             if not str(kwargs.get("workspace", "")).endswith(f"feature-{fault}-err"):
                 return original_shared(self, **kwargs)
             raised["done"] = True
+            guard_calls.append(kwargs)
             raise RuntimeError("transient store error")
 
         monkeypatch.setattr(
@@ -1126,6 +1188,17 @@ async def test_inline_create_launch_failure_tolerates_pre_removal_store_error(
     assert conv.host_id == _HOST_ID and conv.runner_id is not None
     assert conv.workspace == worktree_path and conv.git_branch == branch
     assert conv.labels.get(WORKTREE_ROOT_LABEL_KEY) == worktree_root_fingerprint(worktree_path)
+    if fault == "shared_check":
+        # The rollback asked the guard about this session's worktree root and
+        # excluded only this session, the same way the delete path does.
+        assert guard_calls == [
+            {
+                "host_id": _HOST_ID,
+                "workspace": worktree_path,
+                "exclude_conversation_id": body["id"],
+                "include_subdirectories": True,
+            }
+        ], guard_calls
 
 
 async def test_inline_create_launch_failure_reconciles_binding_when_cleanup_readback_fails(
@@ -1142,12 +1215,14 @@ async def test_inline_create_launch_failure_reconciles_binding_when_cleanup_read
 
     original_clear = SqlAlchemyConversationStore.clear_host_binding
 
-    def _clear_then_boom(self: SqlAlchemyConversationStore, conversation_id: str) -> Any:
+    def _clear_then_boom(
+        self: SqlAlchemyConversationStore, conversation_id: str, **kwargs: Any
+    ) -> Any:
         row = SqlAlchemyConversationStore.get_conversation(self, conversation_id)
         if row is None or row.git_branch != "feature/readbackerr":
-            return original_clear(self, conversation_id)
+            return original_clear(self, conversation_id, **kwargs)
         # Let the real unbind commit, then fail as a post-commit readback would.
-        original_clear(self, conversation_id)
+        original_clear(self, conversation_id, **kwargs)
         raise RuntimeError("post-commit readback error")
 
     monkeypatch.setattr(SqlAlchemyConversationStore, "clear_host_binding", _clear_then_boom)
