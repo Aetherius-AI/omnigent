@@ -1603,6 +1603,7 @@ async def test_codex_native_model_options_stalled_model_list_fails_retryably(
     write-back of partial rows.
     """
     from omnigent.harnesses.codex_native import app_server as codex_native_app_server
+    from omnigent.models import model_catalog_store
     from omnigent.runner import native_controls as native_controls_module
 
     monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "config"))
@@ -1691,6 +1692,11 @@ async def test_codex_native_model_options_stalled_model_list_fails_retryably(
         _fake_client_for_transport,
     )
 
+    written_catalogs: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(
+        model_catalog_store, "write_catalog", lambda *args: written_catalogs.append(args)
+    )
+
     app, _ = await _build_app_for_spec(_harness_spec("codex-native"))
 
     async with _runner_client(app) as client:
@@ -1722,6 +1728,7 @@ async def test_codex_native_model_options_stalled_model_list_fails_retryably(
     assert len(model_list_calls) == (0 if stall_at == "initialize" else stall_at)
     assert fake_client.closed
     assert write_backs == []
+    assert written_catalogs == []
 
 
 @pytest.mark.asyncio
