@@ -4104,7 +4104,10 @@ def inject_user_message(
     from the embedded terminal — a ctrl+r history search, a rewind
     dialog, a ``/config`` panel, ``!`` shell mode — is dismissed with
     Escape (see :func:`_restore_occupied_input`), so the message reclaims
-    the input box instead of being typed into that surface.
+    the input box instead of being typed into that surface. A pane a
+    native ``tmux attach`` scrolled into copy mode is taken out of it
+    before each injected key (see :func:`_leave_tmux_mode`), since tmux
+    would otherwise route the keys through its copy-mode table.
 
     Delivered as one bracketed paste via ``tmux load-buffer`` (from a
     temp file) + ``paste-buffer -p`` so interior newlines ride as raw CR
@@ -4231,7 +4234,8 @@ def _paste_and_submit(
     Deliver *text* into Claude's input box as one paste plus a verified Enter.
 
     The delivery core of :func:`inject_user_message` (see its docstring for
-    the full hazard notes): clear any leftover draft, bracketed-paste the
+    the full hazard notes): leave any tmux mode the pane sits in (see
+    :func:`_leave_tmux_mode`), clear any leftover draft, bracketed-paste the
     payload via ``load-buffer`` + ``paste-buffer -p``, wait for the draft to
     visibly commit, submit, and verify the draft left the box — re-sending
     Enter while it verifiably hasn't.
@@ -4256,6 +4260,9 @@ def _paste_and_submit(
             "Answer the pending Claude question or permission request before sending a message."
         )
     delivery_diagnostics.set_stage("pasting")
+    # A pane scrolled into copy mode would eat the keys below instead of
+    # passing them to Claude Code.
+    _leave_tmux_mode(socket_path, tmux_target)
     # Clear stale text first: raw controls can otherwise become pasted text.
     # CSI-u sends Ctrl+A/Ctrl+K literally so Claude handles them as keys.
     _run_tmux(socket_path, "send-keys", "-l", "-t", tmux_target, "\x1b[97;5u")
@@ -4328,6 +4335,7 @@ def _paste_and_submit(
             "Claude is waiting for an explicit answer; message not sent."
         )
     delivery_diagnostics.set_stage("submitting")
+    _leave_tmux_mode(socket_path, tmux_target)
     _run_tmux(socket_path, "send-keys", "-t", tmux_target, "Enter")
     delivery_diagnostics.record_details(submit_sent=True)
     if not draft_seen:
@@ -4433,6 +4441,7 @@ def _verify_submit_accepted(
             )
         if now - last_enter >= retry_interval:
             _raise_if_user_prompt_pending(bridge_dir, pane)
+            _leave_tmux_mode(socket_path, tmux_target)
             _run_tmux(socket_path, "send-keys", "-t", tmux_target, "Enter")
             retries += 1
             delivery_diagnostics.record_details(retries=retries)
@@ -4658,6 +4667,7 @@ def inject_slash_command(
         raise ClaudeUserPromptPending(
             "Answer the pending Claude question or permission request before changing settings."
         )
+    _leave_tmux_mode(socket_path, tmux_target)
     # ``C-u`` clears any draft the user is mid-typing; otherwise the
     # paste below concatenates with their text and Enter submits
     # ``<their-draft>/effort high`` as a turn. Unlike Escape it does
@@ -4684,6 +4694,7 @@ def inject_slash_command(
         raise ClaudeUserPromptPending(
             "Claude is waiting for an explicit answer; settings command not sent."
         )
+    _leave_tmux_mode(socket_path, tmux_target)
     _run_tmux(socket_path, "send-keys", "-t", tmux_target, "Enter")
     if draft_seen:
         # Retry only while the command remains drafted and no user decision
@@ -5361,6 +5372,25 @@ def _run_tmux(socket_path: str, *args: str) -> None:
     if proc.returncode != 0:
         detail = proc.stderr.strip() or proc.stdout.strip() or "<no output>"
         raise RuntimeError(f"tmux command failed (rc={proc.returncode}): {detail}")
+
+
+def _leave_tmux_mode(socket_path: str, tmux_target: str) -> None:
+    """
+    Take the pane out of tmux copy mode (or any other mode) before sending keys.
+
+    Scrolling back in a native ``tmux attach`` (Page Up, mouse wheel) leaves
+    the pane in copy mode, where tmux routes ``send-keys`` through the
+    copy-mode key table instead of the pane program: the Escape leading a
+    CSI-u clearing key cancels the mode, the bound bytes after it fail with
+    "not in a mode", and a submit Enter is swallowed. ``copy-mode -q`` is a
+    no-op when the pane is not in a mode.
+
+    :param socket_path: Absolute path to the tmux socket.
+    :param tmux_target: tmux pane target string, e.g. ``"main"``.
+    :returns: None.
+    :raises RuntimeError: If the tmux invocation fails.
+    """
+    _run_tmux(socket_path, "copy-mode", "-q", "-t", tmux_target)
 
 
 def _capture_pane(socket_path: str, tmux_target: str, *, join_wrapped: bool = False) -> str:

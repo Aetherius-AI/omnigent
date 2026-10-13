@@ -17,7 +17,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from http.client import BadStatusLine, RemoteDisconnected
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -4085,8 +4085,8 @@ def test_inject_user_message_pastes_content_then_submits(
     with interior newlines encoded as CR so Claude Code's TUI keeps
     multi-line input as a single editable block instead of submitting on
     each newline (anthropics/claude-code#52126). Fails if the harness
-    regresses to send-keys argv delivery, drops the trailing Enter, or
-    stops clearing the stale buffer.
+    regresses to send-keys argv delivery, drops the trailing Enter, stops
+    clearing the stale buffer, or types into a pane still in tmux copy mode.
     """
     monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._TRUSTED_PARENT", tmp_path)
     bridge_dir = tmp_path / "bridge"
@@ -4137,13 +4137,17 @@ def test_inject_user_message_pastes_content_then_submits(
     monkeypatch.setattr("subprocess.run", _fake_run)
     inject_user_message(bridge_dir, content=content)
 
-    # CSI-u Ctrl+A, Ctrl+K (clear), load-buffer, paste-buffer, Enter — fewer than 5
-    # means a delivery step was dropped.
-    assert len(captured) == 5, (
-        f"Expected 5 tmux calls (CSI-u Ctrl+A, Ctrl+K, load-buffer, paste-buffer, Enter), "
-        f"got {len(captured)}."
+    # copy-mode -q, CSI-u Ctrl+A, Ctrl+K (clear), load-buffer, paste-buffer,
+    # copy-mode -q, Enter — fewer than 7 means a delivery step was dropped.
+    assert len(captured) == 7, (
+        f"Expected 7 tmux calls (copy-mode -q, CSI-u Ctrl+A, Ctrl+K, load-buffer, "
+        f"paste-buffer, copy-mode -q, Enter), got {len(captured)}."
     )
-    clear_home, clear_kill, load, paste, submit = captured
+    leave_mode, clear_home, clear_kill, load, paste, leave_mode_again, submit = captured
+    # A pane a native attach scrolled into copy mode would swallow the keys,
+    # so the mode is left before the clearing keys and again before Enter.
+    assert leave_mode[3:] == ["copy-mode", "-q", "-t", "claude:0.0"]
+    assert leave_mode_again[3:] == ["copy-mode", "-q", "-t", "claude:0.0"]
     assert clear_home[-4:] == ["-l", "-t", "claude:0.0", "\x1b[97;5u"]
     assert clear_kill[-4:] == ["-l", "-t", "claude:0.0", "\x1b[107;5u"]
     # The buffer file carried the normalized content + trailing CR. A
@@ -4630,17 +4634,18 @@ def test_inject_user_message_waits_for_claude_prompt_before_typing(
     monkeypatch.setattr("subprocess.run", _fake_run)
     inject_user_message(bridge_dir, content="hello")
 
-    # Gate polled until the third capture (prompt present), then the
-    # five delivery calls (CSI-u Ctrl+A, Ctrl+K, load-buffer, paste-buffer, Enter)
-    # fired.
+    # Gate polled until the third capture (prompt present), then the seven
+    # delivery calls (copy-mode -q, CSI-u Ctrl+A, Ctrl+K, load-buffer,
+    # paste-buffer, copy-mode -q, Enter) fired.
     assert capture_calls["n"] >= 3, (
         f"Expected >=3 capture-pane polls before the prompt rendered, got {capture_calls['n']}."
     )
-    assert len(send_keys) == 5, (
-        f"Expected 5 tmux calls (CSI-u Ctrl+A, Ctrl+K, load-buffer, paste-buffer, Enter), "
-        f"got {len(send_keys)}."
+    assert len(send_keys) == 7, (
+        f"Expected 7 tmux calls (copy-mode -q, CSI-u Ctrl+A, Ctrl+K, load-buffer, "
+        f"paste-buffer, copy-mode -q, Enter), got {len(send_keys)}."
     )
-    clear_home, clear_kill, load, paste, submit = send_keys
+    leave_mode, clear_home, clear_kill, load, paste, leave_mode_again, submit = send_keys
+    assert leave_mode[3] == leave_mode_again[3] == "copy-mode"
     assert clear_home[-4:] == ["-l", "-t", "claude:0.0", "\x1b[97;5u"]
     assert clear_kill[-4:] == ["-l", "-t", "claude:0.0", "\x1b[107;5u"]
     # The paste fires after the gate via the buffer path. The exact
@@ -10329,6 +10334,19 @@ class _VirtualClock:
         return self.now
 
 
+def _delivery_step(args: Sequence[str]) -> str:
+    """
+    Name one recorded tmux call by what it did to the pane.
+
+    ``copy-mode -q`` (leaving a mode the pane was scrolled into) ends with the
+    pane target, so its argv tail alone would not tell it apart from a key.
+
+    :param args: One recorded tmux argv or argv tail, e.g. from :func:`_fake_tmux`.
+    :returns: ``"copy-mode -q"`` for a mode exit, otherwise the key or text sent.
+    """
+    return "copy-mode -q" if "copy-mode" in args else args[-1]
+
+
 def _fake_tmux(
     monkeypatch: pytest.MonkeyPatch,
     panes: list[str],
@@ -10391,15 +10409,17 @@ def test_a_model_switch_types_the_argument_form_and_confirms(
         confirm_hint=claude_native_bridge.SWITCH_MODEL_DIALOG_HINT,
     )
 
-    assert [args[-1] for args in sends] == [
+    assert [_delivery_step(args) for args in sends] == [
+        "copy-mode -q",
         "C-u",
         "/model databricks-claude-sonnet-5",
+        "copy-mode -q",
         "Enter",
         # The "Switch model?" confirmation, once it actually rendered.
         "Enter",
     ]
     # The id must go through literally, not as a tmux key name.
-    assert sends[1] == [
+    assert sends[2] == [
         "send-keys",
         "-l",
         "-t",
@@ -10750,15 +10770,23 @@ def test_a_swallowed_slash_submit_enter_is_retried_while_the_draft_persists(
             return _composer_pane("/effort high")
         return _IDLE_PANE
 
-    monkeypatch.setattr(claude_native_bridge, "_run_tmux", lambda *args: tails.append(args[-1]))
+    monkeypatch.setattr(
+        claude_native_bridge, "_run_tmux", lambda *args: tails.append(_delivery_step(args))
+    )
     monkeypatch.setattr(claude_native_bridge, "_capture_pane", _fake_capture)
     monkeypatch.setattr(claude_native_bridge, "time", _VirtualClock())
 
     claude_native_bridge.inject_slash_command(bridge_dir, command="/effort high")
 
-    assert tails == ["C-u", "/effort high", "Enter", "Enter"], (
-        f"Expected the swallowed submit Enter to be retried once; got {tails}."
-    )
+    assert tails == [
+        "copy-mode -q",
+        "C-u",
+        "/effort high",
+        "copy-mode -q",
+        "Enter",
+        "copy-mode -q",
+        "Enter",
+    ], f"Expected the swallowed submit Enter to be retried once; got {tails}."
 
 
 def test_a_slash_command_stuck_in_the_composer_fails_loud(
@@ -10796,8 +10824,8 @@ def test_a_slash_command_draft_that_never_renders_submits_blind(
 
     claude_native_bridge.inject_slash_command(bridge_dir, command="/effort high")
 
-    tails = [args[-1] for args in sends]
-    assert tails == ["C-u", "/effort high", "Enter"], (
+    tails = [_delivery_step(args) for args in sends]
+    assert tails == ["copy-mode -q", "C-u", "/effort high", "copy-mode -q", "Enter"], (
         f"An unverifiable draft must submit blind exactly once; got {tails}."
     )
 
@@ -10877,7 +10905,14 @@ def test_an_effort_injection_with_no_dialog_completes_without_hanging(
         confirm_hint=claude_native_bridge.EFFORT_DIALOG_HINT,
     )
 
-    assert [args[-1] for args in sends] == ["C-u", "/effort high", "Enter", "Enter"]
+    assert [_delivery_step(args) for args in sends] == [
+        "copy-mode -q",
+        "C-u",
+        "/effort high",
+        "copy-mode -q",
+        "Enter",
+        "Enter",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -10956,9 +10991,9 @@ def test_inject_user_message_restores_an_occupied_input_box_first(
     monkeypatch.setattr("subprocess.run", _fake_run)
     inject_user_message(bridge_dir, content="restore my composer")
 
-    tails = [cmd[-1] for cmd in captured]
+    tails = [_delivery_step(cmd) for cmd in captured]
     # Escape (dismiss the surface) must precede every delivery keystroke.
-    assert tails[:3] == ["Escape", "\x1b[97;5u", "\x1b[107;5u"], (
+    assert tails[:4] == ["Escape", "copy-mode -q", "\x1b[97;5u", "\x1b[107;5u"], (
         f"Expected the occupying surface to be Escaped before the clear; got {tails}."
     )
     assert tails.count("Escape") == 1, f"One sighting, one Escape — got {tails.count('Escape')}."
@@ -11439,7 +11474,14 @@ def test_inject_slash_command_restores_an_occupied_input_box_first(
 
     claude_native_bridge.inject_slash_command(bridge_dir, command="/effort high")
 
-    assert [args[-1] for args in sends] == ["Escape", "C-u", "/effort high", "Enter"]
+    assert [_delivery_step(args) for args in sends] == [
+        "Escape",
+        "copy-mode -q",
+        "C-u",
+        "/effort high",
+        "copy-mode -q",
+        "Enter",
+    ]
 
 
 def test_inject_slash_command_fails_loud_at_a_surface_escape_cannot_clear(
@@ -11514,7 +11556,13 @@ def test_a_torn_frame_after_a_hinted_surface_does_not_refuse_the_slash_command(
 
     claude_native_bridge.inject_slash_command(bridge_dir, command="/effort high")
 
-    assert [args[-1] for args in sends] == ["C-u", "/effort high", "Enter"]
+    assert [_delivery_step(args) for args in sends] == [
+        "copy-mode -q",
+        "C-u",
+        "/effort high",
+        "copy-mode -q",
+        "Enter",
+    ]
 
 
 def test_a_lowercase_escape_hint_still_marks_a_surface_dismissible(
@@ -11536,7 +11584,14 @@ def test_a_lowercase_escape_hint_still_marks_a_surface_dismissible(
 
     claude_native_bridge.inject_slash_command(bridge_dir, command="/compact")
 
-    assert [args[-1] for args in sends] == ["Escape", "C-u", "/compact", "Enter"]
+    assert [_delivery_step(args) for args in sends] == [
+        "Escape",
+        "copy-mode -q",
+        "C-u",
+        "/compact",
+        "copy-mode -q",
+        "Enter",
+    ]
 
 
 def test_a_single_frame_without_a_composer_does_not_draw_an_escape(
@@ -11561,9 +11616,9 @@ def test_a_single_frame_without_a_composer_does_not_draw_an_escape(
 
     claude_native_bridge.inject_slash_command(bridge_dir, command="/effort high")
 
-    tails = [args[-1] for args in sends]
+    tails = [_delivery_step(args) for args in sends]
     assert "Escape" not in tails, f"A one-frame sighting must not draw an Escape; got {tails}."
-    assert tails == ["C-u", "/effort high", "Enter"]
+    assert tails == ["copy-mode -q", "C-u", "/effort high", "copy-mode -q", "Enter"]
 
 
 def test_the_shortcuts_panel_is_not_treated_as_an_occupied_input(
@@ -11586,7 +11641,13 @@ def test_the_shortcuts_panel_is_not_treated_as_an_occupied_input(
 
     claude_native_bridge.inject_slash_command(bridge_dir, command="/effort high")
 
-    assert [args[-1] for args in sends] == ["C-u", "/effort high", "Enter"]
+    assert [_delivery_step(args) for args in sends] == [
+        "copy-mode -q",
+        "C-u",
+        "/effort high",
+        "copy-mode -q",
+        "Enter",
+    ]
 
 
 def test_claude_pane_ready_is_true_only_at_an_idle_input_box(
