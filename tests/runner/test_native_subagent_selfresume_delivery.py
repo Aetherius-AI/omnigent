@@ -74,16 +74,22 @@ class _ChildSnapshotServerClient(NullServerClient):
     ``POST .../policies/evaluate`` returns ``ALLOW`` so the real ``sys_read_inbox``
     drain formats and cleans up the delivered item rather than re-queuing it.
     ``labels`` mirrors the child's server-side labels as the runner stamps
-    dispatch ids and writes delivery receipts.
+    dispatch ids and writes delivery receipts; ``patches`` lists every label
+    write. A write yields once, as a real request would, so concurrent handlers
+    interleave around it.
     """
 
     def __init__(self) -> None:
         self.labels: dict[str, str] = {}
+        self.patches: list[dict[str, str]] = []
 
     async def patch(self, url: str, **kwargs: Any) -> Any:
         del url
         body = kwargs.get("json") or {}
-        self.labels.update(body.get("labels") or {})
+        labels = dict(body.get("labels") or {})
+        await asyncio.sleep(0)
+        self.patches.append(labels)
+        self.labels.update(labels)
         return self._Response()
 
     class _Resp:
@@ -244,12 +250,14 @@ async def _post_status(
     output: str | None = None,
     turn_completed: bool | None = None,
     response_id: str | None = None,
+    failure_detail: str | None = None,
 ) -> Any:
     """POST an ``external_session_status`` edge to the child, as the forwarder does.
 
     A claude-native ``Stop`` carries ``turn_completed`` and names the turn it
-    ends with ``response_id``; a bare ``idle`` is the pane watcher's quiescence
-    edge and is never a completion on its own.
+    ends with ``response_id``; a ``StopFailure`` carries ``failure_detail``; a
+    bare ``idle`` is the pane watcher's quiescence edge and is never a
+    completion on its own.
     """
     data: dict[str, Any] = {"status": status}
     if output is not None:
@@ -258,6 +266,8 @@ async def _post_status(
         data["turn_completed"] = turn_completed
     if response_id is not None:
         data["response_id"] = response_id
+    if failure_detail is not None:
+        data["failure_detail"] = failure_detail
     return await client.post(
         f"/v1/sessions/{CHILD_SESSION_ID}/events",
         json={"type": "external_session_status", "data": data},
@@ -1191,19 +1201,23 @@ async def test_settling_a_stale_replay_restores_a_confirmed_failure(
     """A ``StopFailure`` the status file lags behind must still read as failed.
 
     The poller's resync after the failed edge can replay the file's leftover
-    ``busy`` as ``running`` (clearing the sticky failure) and then ``idle``
-    (completed). When that re-arm settles, the worker's confirmed failure must
-    be shown again, whether or not the orchestrator already drained it.
+    ``busy`` as ``running`` (clearing the sticky failure and its stored error)
+    and then ``idle`` (completed). When that re-arm settles, the worker's
+    confirmed failure must be shown again with its detail, whether or not the
+    orchestrator already drained it.
     """
     held = _HeldSleep()
     monkeypatch.setattr(subagent_work, "_wake_retry_sleep", held)
     server = _ChildSnapshotServerClient()
     app, inbox, _work_id = _dispatch_worker(server)
     publish_pane_status = _pane_status_publisher(app)
+    failure = {"code": "native_turn_error", "message": "API Error: 500 Internal server error"}
 
     async with _runner_client(app) as client:
         publish_pane_status(CHILD_SESSION_ID, "running", None)
-        r = await _post_status(client, status="failed", output="Error: API 500")
+        r = await _post_status(
+            client, status="failed", failure_detail="API Error: 500 Internal server error"
+        )
         assert r.status_code == 204
         failed = subagent_work.get_subagent_work(CHILD_SESSION_ID)
         assert failed is not None and failed.status == "failed" and failed.delivered
@@ -1225,10 +1239,22 @@ async def test_settling_a_stale_replay_restores_a_confirmed_failure(
         held.release.set()
         await _await_settle(app, CHILD_SESSION_ID)
 
-        assert _status_events(_pop_stream_events(CHILD_SESSION_ID))[-1] == "failed", (
+        child_events = [
+            e for e in _pop_stream_events(CHILD_SESSION_ID) if e.get("type") == "session.status"
+        ]
+        assert child_events[-1]["status"] == "failed", (
             "the rolled-back replay left the worker showing completed"
         )
-        assert _child_row_statuses(_pop_stream_events(PARENT_SESSION_ID))[-1] == "failed"
+        assert child_events[-1].get("error") == failure, (
+            "the restored failure lost the detail the stale running had cleared"
+        )
+        child_rows = [
+            e["child"]
+            for e in _pop_stream_events(PARENT_SESSION_ID)
+            if e.get("type") == "session.child_session.updated"
+        ]
+        assert child_rows[-1]["current_task_status"] == "failed"
+        assert child_rows[-1].get("last_task_error") == failure
         assert app.state.native_pane_status[CHILD_SESSION_ID] == "failed"
         if drained:
             assert subagent_work.get_subagent_work(CHILD_SESSION_ID) is None
@@ -1433,6 +1459,12 @@ async def test_a_rebuild_that_fails_keeps_the_settled_drain_replay_guard(
     # The forwarder retries the late Stop once the snapshot reads again.
     rebuilt = await ensure(CHILD_SESSION_ID, report_response_id="resp_round_two")
     assert rebuilt is not None and rebuilt.work_id == "subagent_round_one" and rebuilt.rearmed
+    assert rebuilt.rearmed_over == subagent_work._FinishedSubagentDispatch(
+        work_id="subagent_round_one",
+        status="completed",
+        response_id="resp_round_one",
+        rearmed=True,
+    ), "the rebuilt entry must still know the finished turn a replay would repeat"
     assert CHILD_SESSION_ID not in subagent_work._drained_delivered_subagent_children
     assert CHILD_SESSION_ID not in subagent_work._drained_subagent_dispatches
 
@@ -1463,6 +1495,9 @@ async def test_a_forgotten_drain_still_absorbs_a_replay_of_its_own_report(
     rebuilt = await ensure(CHILD_SESSION_ID, report_response_id="resp_round_two")
     assert rebuilt is not None and rebuilt.work_id == "subagent_round_one"
     assert rebuilt.rearmed, "the report must be able to stamp the new turn's own id"
+    assert rebuilt.rearmed_over == subagent_work._FinishedSubagentDispatch(
+        work_id="subagent_round_one", status="completed", response_id="resp_round_one"
+    )
 
 
 @pytest.mark.asyncio
@@ -1641,3 +1676,95 @@ async def test_deleting_a_session_cancels_its_pending_rearm_settles(
         await asyncio.sleep(0)
         assert pending.cancelled(), "the settle task outlived the session"
         assert CHILD_SESSION_ID not in app.state.rearm_settle_tasks
+
+
+@pytest.mark.asyncio
+async def test_concurrent_terminal_reports_stamp_the_child_once(
+    _clean_subagent_registry: None,
+) -> None:
+    """Two reports racing for one re-armed turn stamp one id and deliver one result.
+
+    The forwarder can re-send a Stop whose acknowledgement was lost while the
+    first copy is still being recorded. Check, stamp and record run under the
+    child's send lock, so the second copy finds the re-arm already consumed
+    instead of stamping a second id the entry never takes.
+    """
+    server = _RecordingServerClient()
+    app, inbox, work_id = _dispatch_worker(server)
+    server.labels[subagent_work.SUBAGENT_DISPATCH_ID_LABEL_KEY] = work_id
+    publish_pane_status = _pane_status_publisher(app)
+
+    async with _runner_client(app) as client:
+        await _deliver_and_drain_round_one(client, inbox, server)
+        publish_pane_status(CHILD_SESSION_ID, "running", None)
+        stop = {
+            "status": "idle",
+            "output": "round two: should I open the PR?",
+            "turn_completed": True,
+            "response_id": "resp_round_two",
+        }
+        first, second = await asyncio.gather(
+            _post_status(client, **stop), _post_status(client, **stop)
+        )
+        assert first.status_code == 204 and second.status_code == 204
+
+    items = _drain_queue(inbox)
+    assert len(items) == 1
+    stamps = [p for p in server.patches if subagent_work.SUBAGENT_DISPATCH_ID_LABEL_KEY in p]
+    assert len(stamps) == 1, "a concurrent copy of the report stamped a second dispatch id"
+    assert items[0]["work_id"] == server.labels[subagent_work.SUBAGENT_DISPATCH_ID_LABEL_KEY]
+    assert items[0]["work_id"] != work_id
+
+
+@pytest.mark.asyncio
+async def test_a_follow_up_whose_stamp_fails_keeps_the_receipted_id(
+    _clean_subagent_registry: None,
+) -> None:
+    """A follow-up whose fresh id cannot be stamped leaves entry and child on one id.
+
+    The id is persisted before the entry takes it, so a rejected stamp keeps the
+    receipted id on both sides: the follow-up's result is delivered live and its
+    drain receipt matches the child's label, so a restart neither duplicates
+    nor misattributes it (it cannot recover it either, as before).
+    """
+    server = _StampFailingServerClient()
+    app, inbox, work_id = _dispatch_worker(server)
+    server.labels[subagent_work.SUBAGENT_DISPATCH_ID_LABEL_KEY] = work_id
+    publish_pane_status = _pane_status_publisher(app)
+
+    async with _runner_client(app) as client:
+        await _deliver_and_drain_round_one(client, inbox, server)
+        publish_pane_status(CHILD_SESSION_ID, "running", None)
+        handle = await tool_dispatch._send_to_in_flight_child(
+            CHILD_SESSION_ID,
+            "also check the tests",
+            server_client=server,  # type: ignore[arg-type]
+            conversation_id=PARENT_SESSION_ID,
+            agent="reviewer",
+            title="review the diff",
+            child_display_title="reviewer:review",
+            wrapper_label=None,
+        )
+        assert json.loads(handle)["status"] == "running"
+        live = subagent_work.get_subagent_work(CHILD_SESSION_ID)
+        assert live is not None and live.work_id == work_id, (
+            "the entry took an id the child never received"
+        )
+        assert server.labels[subagent_work.SUBAGENT_DISPATCH_ID_LABEL_KEY] == work_id
+
+        r2 = await _post_status(
+            client,
+            status="idle",
+            output="round two: tests pass too",
+            turn_completed=True,
+            response_id="resp_round_two",
+        )
+        assert r2.status_code == 204
+        [second] = _drain_queue(inbox)
+        assert second["work_id"] == work_id
+        await tool_dispatch._cleanup_drained_subagent_work(
+            second,
+            server_client=server,  # type: ignore[arg-type]
+        )
+
+    assert subagent_work.undelivered_subagent_dispatch_id(server.labels) is None

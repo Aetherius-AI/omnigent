@@ -135,8 +135,9 @@ def build_subagent_recovery(
             )
         # A report for a drained dispatch that is no replay ends a new turn: the
         # rebuilt entry stands in for that turn's re-arm, so the report can give
-        # it its own id instead of the drained turn's receipted one.
+        # it its own id and a replay of the drained turn's own is still refused.
         rebuilt.rearmed = drained is not None
+        rebuilt.rearmed_over = drained
         return rebuilt
 
     async def _parent_is_nested_subagent(entry: _SubagentWorkEntry) -> bool:
