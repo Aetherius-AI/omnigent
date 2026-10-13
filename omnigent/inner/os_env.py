@@ -700,9 +700,7 @@ class _HelperProcessClient:
         stderr = ""
         if self._proc.stderr is not None:
             try:
-                stderr = _read_stderr_bounded(
-                    self._proc.stderr, timeout=0.1
-                )
+                stderr = _read_stderr_bounded(self._proc.stderr, timeout=0.1)
             except Exception:  # noqa: BLE001 — stderr read is best-effort for error detail
                 stderr = ""
         if returncode is None:
