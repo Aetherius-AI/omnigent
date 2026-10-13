@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from omnigent.inner.bundle_skills import (
+    bundle_skill_names,
     claude_agents_skill_args,
     claude_native_skill_args,
     ensure_bundle_plugin_manifest,
@@ -132,6 +133,26 @@ def test_claude_native_skill_args_bundle_without_skills_dir(tmp_path: Path) -> N
     """
     (tmp_path / "no_skills").mkdir()
     assert "--plugin-dir" not in claude_native_skill_args(tmp_path / "no_skills")
+
+
+def test_bundle_skill_names_lists_skill_directories(tmp_path: Path) -> None:
+    """
+    Claude names a plugin skill by its directory, so the directory name is
+    returned (sorted) even when the frontmatter label differs; entries
+    without a ``SKILL.md`` are not skills.
+    """
+    for dir_name, label in (("review", "code-review"), ("brainstorm", "brainstorm")):
+        skill_dir = tmp_path / "skills" / dir_name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(f"---\nname: {label}\ndescription: d\n---\nBody.\n")
+    (tmp_path / "skills" / "notes").mkdir()
+    (tmp_path / "skills" / "README.md").write_text("not a skill\n")
+    assert bundle_skill_names(tmp_path) == ["brainstorm", "review"]
+
+
+def test_bundle_skill_names_without_skills_dir_is_empty(tmp_path: Path) -> None:
+    """A bundle that ships no ``skills/`` directory yields no names."""
+    assert bundle_skill_names(tmp_path) == []
 
 
 def test_claude_agents_skill_args_without_portable_skills_skips_native_reads(

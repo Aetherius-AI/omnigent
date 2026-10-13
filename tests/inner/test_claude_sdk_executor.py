@@ -2315,6 +2315,33 @@ class TestSkillsFilterTranslation(unittest.TestCase):
         self.assertEqual(result.skills, [])
         self.assertEqual(result.setting_sources, [])
 
+    def test_none_allowlists_bundled_skills_without_host_sources(self) -> None:
+        """
+        ``"none"`` with a bundle that ships skills → SDK
+        ``skills=[<bundled names>]`` and ``setting_sources=[]``.
+
+        The SDK turns ``skills`` into the CLI's ``Skill(<name>)``
+        allowlist, and an empty allowlist rejected the bundle's own
+        skill ("not in this session's skills allowlist") while
+        ``--plugin-dir`` kept it listed. Host discovery stays off.
+        """
+        from omnigent.inner.claude_sdk_executor import _resolve_skills_option
+
+        result = _resolve_skills_option("none", ["brainstorm", "review"])
+        assert result is not None
+        self.assertEqual(result.skills, ["brainstorm", "review"])
+        self.assertEqual(result.setting_sources, [])
+
+    def test_bundled_skills_leave_all_and_list_filters_unchanged(self) -> None:
+        """Only ``"none"`` consults the bundle; the other filters keep their mapping."""
+        from omnigent.inner.claude_sdk_executor import _resolve_skills_option
+
+        all_result = _resolve_skills_option("all", ["review"])
+        list_result = _resolve_skills_option(["foo"], ["review"])
+        assert all_result is not None and list_result is not None
+        self.assertEqual(all_result.skills, "all")
+        self.assertEqual(list_result.skills, ["foo"])
+
     def test_list_lets_sdk_default_setting_sources(self) -> None:
         """A list of names round-trips and uses the SDK default."""
         from omnigent.inner.claude_sdk_executor import _resolve_skills_option
@@ -2334,6 +2361,60 @@ class TestSkillsFilterTranslation(unittest.TestCase):
         from omnigent.inner.claude_sdk_executor import _resolve_skills_option
 
         self.assertIsNone(_resolve_skills_option("bogus"))
+
+
+class TestBundleSkillsReachSdkOptions(unittest.TestCase):
+    """The bundle on disk, not a hand-built list, feeds the ``"none"`` allowlist."""
+
+    def test_skills_none_options_allowlist_the_bundled_skills(self) -> None:
+        from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor
+
+        captured: dict[str, object] = {}
+
+        class _ResultMessage:
+            def __init__(self, session_id, result):
+                self.session_id = session_id
+                self.result = result
+
+        class _FakeSDK(_sdk_types()):
+            ResultMessage = _ResultMessage
+            messages = []
+
+            class ClaudeSDKClient(_SDKClient):
+                async def query(self, prompt, session_id="default"):
+                    captured["skills"] = getattr(self.options, "skills", None)
+                    captured["setting_sources"] = getattr(self.options, "setting_sources", "unset")
+                    captured["plugins"] = getattr(self.options, "plugins", None)
+                    _FakeSDK.messages = [_ResultMessage(session_id, "done")]
+
+                async def receive_response(self):
+                    for message in _FakeSDK.messages:
+                        yield message
+
+        async def _t(bundle_dir: Path) -> None:
+            executor = ClaudeSDKExecutor(
+                bundle_dir=bundle_dir, agent_name="probe", skills_filter="none"
+            )
+            with patch("omnigent.inner.claude_sdk_executor._ensure_sdk", return_value=_FakeSDK):
+                events = [
+                    e
+                    async for e in executor.run_turn(
+                        [{"role": "user", "content": "hi", "session_id": "s"}], [], ""
+                    )
+                ]
+            self.assertIsInstance(events[-1], TurnComplete)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle_dir = Path(tmp) / "bundle"
+            (bundle_dir / "skills" / "review").mkdir(parents=True)
+            (bundle_dir / "skills" / "review" / "SKILL.md").write_text(
+                "---\nname: review\ndescription: d\n---\nBody.\n"
+            )
+            _run(_t(bundle_dir))
+
+        self.assertEqual(captured["skills"], ["review"])
+        self.assertEqual(captured["setting_sources"], [])
+        self.assertEqual(captured["plugins"], [{"type": "local", "path": str(bundle_dir)}])
 
 
 # ---------------------------------------------------------------------------

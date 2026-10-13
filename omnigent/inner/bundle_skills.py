@@ -65,6 +65,29 @@ def ensure_bundle_plugin_manifest(
     )
 
 
+def bundle_skill_names(bundle_dir: Path) -> list[str]:
+    """
+    Name the skills Claude loads from a bundle passed via ``--plugin-dir``.
+
+    Claude Code identifies a plugin skill by its ``skills/<dir>/SKILL.md``
+    directory name (the frontmatter ``name`` is only a label), so these are
+    the names its ``Skill`` tool allowlist matches on.
+
+    :param bundle_dir: Materialized agent-bundle root.
+    :returns: Sorted directory names under ``<bundle_dir>/skills/`` that
+        hold a ``SKILL.md``, e.g. ``["code-review"]``; empty when the
+        bundle ships no skills.
+    """
+    skills_dir = bundle_dir / "skills"
+    if not skills_dir.is_dir():
+        return []
+    return sorted(
+        entry.name
+        for entry in skills_dir.iterdir()
+        if entry.is_dir() and not entry.name.startswith(".") and (entry / "SKILL.md").is_file()
+    )
+
+
 def claude_native_skill_args(
     bundle_dir: Path | None,
     *,
