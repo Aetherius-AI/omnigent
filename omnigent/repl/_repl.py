@@ -4057,8 +4057,8 @@ async def run_repl(
     # nested closure can rebind the value.
     _bang_cwd: list[str] = [os.getcwd()]
 
-    # Paint the composer in the omnigent-logo green while the line is a "!"
-    # shell command, so bang mode is visible before Enter is pressed.
+    # Tint the composer while the line is a "!" shell command or a slash
+    # command, so the routing is visible before Enter is pressed.
     # ``PromptSession`` reads ``.lexer`` through a ``DynamicLexer``, so setting
     # it here takes effect live.
     _prompt_session = getattr(host, "_prompt", None)
@@ -4145,11 +4145,8 @@ async def run_repl(
         if text.startswith("!!"):
             text = text[1:]  # drop one "!"; fall through as a normal prompt
 
-        # Slash commands are short tokens like "/help", "/clear".
-        # File paths like "/Users/foo/bar.jpg" start with "/" but
-        # contain more path separators — don't treat those as commands.
-        first_token = text.split()[0] if text.split() else ""
-        if first_token.startswith("/") and "/" not in first_token[1:]:
+        first_token = _slash_command_token(text)
+        if first_token:
             # Starting a new conversation orphans any buffered "!" output — it
             # belonged to the prior conversation. Drop it so it can't leak into
             # the fresh conversation's first turn.
@@ -8458,6 +8455,26 @@ def _render_history_item(
 _SLASH_COMMAND_ALIASES: frozenset[str] = frozenset({"/?", "/exit"})
 
 
+def _slash_command_token(text: str) -> str:
+    """
+    Return the leading slash-command token of *text*, or ``""`` if it has none.
+
+    Slash commands are short tokens like ``/help`` or ``/plugin:skill``. A
+    file path such as ``/Users/me/shot.png`` also opens with ``/`` but
+    carries more separators, so it stays an ordinary message. The dispatcher
+    and the composer tint share this predicate, so a tinted token is one the
+    dispatcher really does intercept.
+
+    :param text: Raw composer input, e.g. ``"/effort high"``.
+    :returns: The token including its ``/``, e.g. ``"/effort"``.
+    """
+    parts = text.split(maxsplit=1)
+    first_token = parts[0] if parts else ""
+    if first_token.startswith("/") and "/" not in first_token[1:]:
+        return first_token
+    return ""
+
+
 # A skill name must read as a slash-command token: an alphanumeric start then
 # word chars, ``:`` (Claude ``plugin:skill``), or ``-`` (Cursor ``plugin--skill``).
 # Rejects whitespace, ``/``, and control characters. Mirrors the web composer's
@@ -8650,23 +8667,46 @@ _BANG_INPUT_STYLE = f"fg:{_BANG_GREEN} bold"  # prompt-toolkit composer style
 _BANG_ECHO_MARKUP = f"bold {_BANG_GREEN}"
 
 
+# The terminal's brand accent (the ``TerminalHost`` / ``RichBlockFormatter``
+# default); the web composer's overlay gives a command token its accent too.
+_SLASH_COMMAND_STYLE = "fg:#F43BA6"
+
+
 class _BangInputLexer(Lexer):
     """
-    Color the composer green while the current line is a "!" shell command.
+    Tint composer input that the REPL routes somewhere other than the agent.
 
     A line that begins with ``!`` (but not the ``!!`` literal-escape) runs in
     the shell via the passthrough; painting it in the omnigent-logo green is
-    live feedback that bang mode is active. Any other input renders unstyled.
+    live feedback that bang mode is active. A leading slash-command token goes
+    to the dispatcher, so it takes the brand accent like the web composer's
+    highlight overlay, while the argument stays unstyled so a path or URL in
+    it reads normally. Any other input is a message to the agent and renders
+    unstyled.
     """
 
     def lex_document(self, document: Document) -> Callable[[int], StyleAndTextTuples]:
         text = document.text
         is_bang = text.startswith("!") and not text.startswith("!!")
-        style = _BANG_INPUT_STYLE if is_bang else ""
         lines = document.lines
+        # The dispatcher reads the first token of the whole input, which sits
+        # on the first non-blank line (a paste may open with a newline).
+        head_no = next((i for i, line in enumerate(lines) if line.strip()), 0)
+        command = "" if is_bang else _slash_command_token(lines[head_no])
 
         def get_line(lineno: int) -> StyleAndTextTuples:
-            return [(style, lines[lineno])]
+            line = lines[lineno]
+            if is_bang:
+                return [(_BANG_INPUT_STYLE, line)]
+            if lineno == head_no and command:
+                start = len(line) - len(line.lstrip())
+                end = start + len(command)
+                return [
+                    ("", line[:start]),
+                    (_SLASH_COMMAND_STYLE, line[start:end]),
+                    ("", line[end:]),
+                ]
+            return [("", line)]
 
         return get_line
 

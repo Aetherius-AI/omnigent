@@ -13,6 +13,7 @@ import os
 import pathlib
 
 import pytest
+from omnigent_ui_sdk.terminal import RichBlockFormatter
 from prompt_toolkit.document import Document
 
 from omnigent.repl import _repl
@@ -222,3 +223,62 @@ def test_bang_input_lexer_colors_only_bang_lines(text: str, colored: bool) -> No
     style, rendered = get_line(0)[0]
     assert rendered == text
     assert (style == _BANG_INPUT_STYLE) is colored
+
+
+def _style_per_char(text: str) -> list[str]:
+    """The composer style applied to each character of a single-line draft."""
+    fragments = _BangInputLexer().lex_document(Document(text))(0)
+    assert "".join(piece for _, piece in fragments) == text
+    return [style for style, piece in fragments for _ in piece]
+
+
+def test_composer_tints_slash_command_token_but_not_its_argument() -> None:
+    # Same shape as the web composer: accent on "/help", default colour on the argument.
+    text = "/help check this diff"
+    styles = _style_per_char(text)
+    token, argument = styles[: len("/help")], styles[len("/help ") :]
+    assert all(token) and len(set(token)) == 1, styles
+    assert set(argument) == {""}, styles
+    assert token[0] != _BANG_INPUT_STYLE
+
+
+@pytest.mark.parametrize("text", ["/Users/me/shot.png is attached", "hey /tmp", "ls -la"])
+def test_composer_leaves_non_command_slashes_untinted(text: str) -> None:
+    # The dispatcher sends these to the model, so the colour must not promise a command.
+    assert set(_style_per_char(text)) == {""}
+
+
+def _accent_style() -> str:
+    """The terminal's brand accent, which the ``/help`` listing paints commands in."""
+    return f"fg:{RichBlockFormatter().accent}"
+
+
+@pytest.mark.parametrize(
+    ("text", "token"),
+    [
+        ("/figplug:plug-skill hi", "/figplug:plug-skill"),  # a Claude plugin skill
+        ("  /help now", "/help"),  # the dispatcher splits, so indent is tolerated
+        ("/", "/"),  # a bare "/" still dispatches (and reports unknown)
+        ("/Users/me/shot.png", ""),  # a pasted path is a message
+        ("hey /tmp", ""),  # only the first token can be a command
+        ("!!/help", ""),  # the "!!" escape is an ordinary prompt
+    ],
+)
+def test_composer_tints_exactly_the_token_the_dispatcher_intercepts(text: str, token: str) -> None:
+    styles = _style_per_char(text)
+    tinted = "".join(
+        ch for ch, style in zip(text, styles, strict=True) if style == _accent_style()
+    )
+    assert tinted == token, styles
+    assert set(styles) <= {"", _accent_style()}
+
+
+def test_composer_tints_the_command_token_of_a_pasted_multiline_draft() -> None:
+    get_line = _BangInputLexer().lex_document(Document("\n  /help check\nthis"))
+    assert get_line(0) == [("", "")]
+    assert get_line(1) == [("", "  "), (_accent_style(), "/help"), ("", " check")]
+    assert get_line(2) == [("", "this")]
+
+
+def test_bang_draft_stays_green_even_with_a_slash_token_inside() -> None:
+    assert set(_style_per_char("!ls /help")) == {_BANG_INPUT_STYLE}
