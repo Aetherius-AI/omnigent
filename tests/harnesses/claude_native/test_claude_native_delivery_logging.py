@@ -12,6 +12,8 @@ from omnigent.debug_logging import current_session_id_scope, record_to_row
 from omnigent.harnesses.claude_native import bridge, delivery_diagnostics
 from omnigent.native.input_diagnostics import input_delivery_scope
 
+_EMPTY_BOX = "──────\n❯ \n──────\n"
+
 
 @pytest.mark.parametrize(
     ("scenario", "verification", "outcome"),
@@ -45,7 +47,7 @@ def test_delivery_diagnostics(
         secret = "/private-customer-command"
     content = "\n" + secret if scenario == "blank_line" else secret
     elapsed = 0.0
-    pane = "❯ "
+    pane = _EMPTY_BOX
     enters = 0
     pending_checks = 0
 
@@ -82,7 +84,9 @@ def test_delivery_diagnostics(
             enters += 1
             if scenario in {"blank_line", "timeout"} or (scenario == "retry" and enters == 1):
                 return
-            pane = {"empty_capture": "", "missing_glyph": "terminal output"}.get(scenario, "❯ ")
+            # The re-delivery after an unknown command clears the box again.
+            idle = _EMPTY_BOX if scenario == "unknown_command" else "❯ "
+            pane = {"empty_capture": "", "missing_glyph": "terminal output"}.get(scenario, idle)
 
     monkeypatch.setattr(
         bridge,
@@ -191,7 +195,7 @@ def test_delivery_diagnostics(
         assert attrs["submit_pane_max_columns"] == (0 if scenario == "empty_capture" else 2)
         assert attrs["submit_capture_empty"] == (scenario == "empty_capture")
         assert attrs["stage_verifying_submit_ms"] == 10
-        assert attrs["elapsed_ms"] == 30
+        assert attrs["elapsed_ms"] == 40
 
     if scenario == "blank_line":
         assert attrs["draft_seen"] is False

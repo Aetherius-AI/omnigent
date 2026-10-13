@@ -57,7 +57,6 @@ _TURN_TIMEOUT_MS = 90_000
 _EFFORT_OUTCOME_TIMEOUT_S = 60.0
 # Claude Code's own acknowledgement that the command was applied, not prompted.
 _EFFORT_ACK = "Set effort level to high"
-_EFFORT_ACK_TIMEOUT_S = 20.0
 _PATCH_TIMEOUT_MS = 120_000
 _EVIDENCE_DIR_ENV = "OMNIGENT_E2E_EVIDENCE_DIR"
 
@@ -311,19 +310,16 @@ def test_web_effort_change_replaces_multi_line_tui_draft(
     status, body = _change_effort_from_web(page, session_id, "high")
     _save_evidence("effort-patch-response.txt", f"{status}\n{body}")
 
+    # The outcome is either Claude Code's acknowledgement in the terminal or,
+    # when the command was submitted as a prompt instead, a model request.
+    _show_terminal_outcome(page)
     deadline = time.monotonic() + _EFFORT_OUTCOME_TIMEOUT_S
+    screen_text = screen.text()
     while time.monotonic() < deadline:
-        if _request_count(mock_llm_server_url) > requests_before:
+        screen_text = screen.text()
+        if _EFFORT_ACK in screen_text or _request_count(mock_llm_server_url) > requests_before:
             break
         page.wait_for_timeout(500)
-    expect(page.locator(_WORKING)).to_have_count(0, timeout=_TURN_TIMEOUT_MS)
-    _show_terminal_outcome(page)
-
-    deadline = time.monotonic() + _EFFORT_ACK_TIMEOUT_S
-    screen_text = screen.text()
-    while _EFFORT_ACK not in screen_text and time.monotonic() < deadline:
-        page.wait_for_timeout(500)
-        screen_text = screen.text()
     _save_evidence("effort-screen-after-change.txt", screen_text)
     session = httpx.get(f"{base_url}/v1/sessions/{session_id}", timeout=15.0).json()
     _save_evidence(

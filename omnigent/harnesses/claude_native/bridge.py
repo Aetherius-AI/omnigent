@@ -311,10 +311,6 @@ _COMPOSER_KILL_TO_LINE_START = "\x1b[117;5u"
 # The box shows only a window of a draft taller than it (seven rows in a
 # 24-row terminal), so clearing repeats per window until this budget runs out.
 _COMPOSER_CLEAR_TIMEOUT_S = 2.0
-# Bursts a one-row box may keep its text through before that text is taken for
-# a hint the empty box displays: a draft line goes on the first burst, so text
-# the keys leave untouched is not editable text.
-_COMPOSER_CLEAR_SINGLE_ROW_BURSTS = 2
 # How long to wait for the pasted draft to visibly land in Claude's
 # input box before sending the submit Enter. Claude Code coalesces
 # rapid stdin bursts into a paste, so an Enter sent while the TUI is
@@ -5865,8 +5861,9 @@ def _composer_box_rows(pane: str) -> list[str] | None:
     The box is located as in :func:`_composer_row`: its first row sits
     directly under the opening rule, led by a composer glyph. The rows run to
     the closing rule, or to the bottom of the pane when a draft taller than
-    the pane pushes the closing rule off screen. Blank rows are kept, since a
-    draft's empty lines are lines too.
+    the pane pushes the closing rule off screen. Blank lines between the rule
+    and the glyph row are skipped, as :func:`_composer_row` skips them; blank
+    rows inside the box are kept, since a draft's empty lines are lines too.
 
     :param pane: Captured pane text from :func:`_capture_pane`.
     :returns: The box's rows, e.g. ``["❯ fix the bug", "  in foo.py"]``, or
@@ -5876,13 +5873,14 @@ def _composer_box_rows(pane: str) -> list[str] | None:
     rules = [idx for idx, line in enumerate(lines) if _is_box_rule(line)]
     if not rules:
         return None
+    candidates = [(rules[-1] + 1, len(lines))]
     if len(rules) >= 2:
-        first = rules[-2] + 1
-        if first < rules[-1] and lines[first].strip()[:1] in _COMPOSER_MODE_GLYPHS:
-            return lines[first : rules[-1]]
-    first = rules[-1] + 1
-    if first < len(lines) and lines[first].strip()[:1] in _COMPOSER_MODE_GLYPHS:
-        return lines[first:]
+        candidates.insert(0, (rules[-2] + 1, rules[-1]))
+    for first, end in candidates:
+        while first < end and not lines[first].strip():
+            first += 1
+        if first < end and lines[first].strip()[:1] in _COMPOSER_MODE_GLYPHS:
+            return lines[first:end]
     return None
 
 
@@ -5898,10 +5896,10 @@ def _clear_composer(socket_path: str, tmux_target: str) -> None:
     next message. The box shows at most a window of a tall draft, so a round
     only clears the rows on screen; rounds repeat until a frame captured
     after a burst shows the box empty. A torn capture is re-polled rather
-    than read as an empty box, and a one-row text the bursts leave untouched
-    is taken for a hint of the empty box. Anything else still in the box
-    when :data:`_COMPOSER_CLEAR_TIMEOUT_S` runs out fails the injection,
-    since submitting would send the person's unsent draft to the model.
+    than read as an empty box. Anything still in the box when
+    :data:`_COMPOSER_CLEAR_TIMEOUT_S` runs out fails the injection, since
+    submitting would send the person's unsent draft to the model; Claude
+    Code renders an empty box as a bare glyph, so surviving text is a draft.
 
     :param socket_path: Absolute path to the tmux socket.
     :param tmux_target: tmux pane target string, e.g. ``"main"``.
@@ -5911,22 +5909,12 @@ def _clear_composer(socket_path: str, tmux_target: str) -> None:
     """
     deadline = time.monotonic() + _COMPOSER_CLEAR_TIMEOUT_S
     bursts = 0
-    unchanged_text: str | None = None
-    unchanged_bursts = 0
     while True:
         pane = _capture_pane(socket_path, tmux_target)
         rows = _composer_box_rows(pane) if pane.strip() else None
-        if rows is not None and len(rows) == 1:
-            # The row's text follows its composer glyph.
-            text = rows[0].strip()[1:].strip()
-            if bursts and not text:
-                return
-            if text == unchanged_text:
-                unchanged_bursts += 1
-                if unchanged_bursts >= _COMPOSER_CLEAR_SINGLE_ROW_BURSTS:
-                    return
-            else:
-                unchanged_text, unchanged_bursts = text, 0
+        # The row's text follows its composer glyph.
+        if bursts and rows is not None and len(rows) == 1 and not rows[0].strip()[1:].strip():
+            return
         if time.monotonic() >= deadline:
             if rows is None:
                 raise ClaudeTerminalDialog(

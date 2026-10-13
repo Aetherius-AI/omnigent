@@ -10448,44 +10448,40 @@ class _EditableComposer:
 _STALE_MULTILINE_DRAFT = "STALE ONE\nSTALE TWO\nSTALE THREE"
 
 
-def test_inject_user_message_clears_every_line_of_a_leftover_draft(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """
-    A multi-line draft left in the box is not submitted with the message.
-
-    Clearing only the cursor's line leaves the draft's other lines in the
-    box, and the paste then lands among them, so Enter would send the
-    person's half-written draft as part of the web message.
-    """
-    bridge_dir = _picker_bridge_dir(tmp_path)
-    composer = _EditableComposer(_STALE_MULTILINE_DRAFT, cursor=3)
-    composer.install(monkeypatch)
-
+def _inject_message(bridge_dir: Path) -> None:
     inject_user_message(bridge_dir, content="hello from the web")
 
-    assert [text.strip() for text in composer.submitted] == ["hello from the web"]
+
+def _inject_effort(bridge_dir: Path) -> None:
+    claude_native_bridge.inject_slash_command(bridge_dir, command="/effort high")
 
 
-def test_inject_slash_command_clears_every_line_of_a_leftover_draft(
+@pytest.mark.parametrize(
+    ("inject", "submitted"),
+    [(_inject_message, "hello from the web"), (_inject_effort, "/effort high")],
+    ids=["message", "slash-command"],
+)
+def test_injection_clears_every_line_of_a_leftover_draft(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    inject: Callable[[Path], None],
+    submitted: str,
 ) -> None:
     """
-    A multi-line draft left in the box is not submitted with a slash command.
+    A multi-line draft left in the box is not submitted with the injected text.
 
-    Otherwise the command becomes a line of the draft and Enter sends the
-    draft plus ``/effort high`` to the model as a prompt instead of
-    applying the setting.
+    Clearing only the cursor's line leaves the draft's other lines in the
+    box, and the paste then lands among them: Enter sends the person's
+    half-written draft as part of the web message, or sends the draft plus
+    ``/effort high`` to the model as a prompt instead of applying the setting.
     """
     bridge_dir = _picker_bridge_dir(tmp_path)
     composer = _EditableComposer(_STALE_MULTILINE_DRAFT, cursor=3)
     composer.install(monkeypatch)
 
-    claude_native_bridge.inject_slash_command(bridge_dir, command="/effort high")
+    inject(bridge_dir)
 
-    assert composer.submitted == ["/effort high"]
+    assert [text.strip() for text in composer.submitted] == [submitted]
 
 
 _TALL_DRAFT = "\n".join(f"line {index:02d}" for index in range(1, 31))
@@ -10506,7 +10502,7 @@ def test_inject_user_message_clears_a_draft_taller_than_the_input_box(
 
 
 class _StuckComposer(_EditableComposer):
-    """A two-row surface the clearing keys never change."""
+    """A box the clearing keys never change."""
 
     def _kill_to_line_end(self) -> None:
         pass
@@ -10515,11 +10511,13 @@ class _StuckComposer(_EditableComposer):
         pass
 
 
+@pytest.mark.parametrize("draft", ["stuck", "stuck\nstuck"], ids=["one-row", "two-rows"])
 def test_clearing_a_box_that_never_empties_fails_in_time(
     monkeypatch: pytest.MonkeyPatch,
+    draft: str,
 ) -> None:
     """A box the clearing keys do not shrink fails the injection once the budget runs out."""
-    composer = _StuckComposer("stuck\nstuck", cursor=0)
+    composer = _StuckComposer(draft, cursor=0)
     composer.install(monkeypatch)
     rounds: list[str] = []
     run_tmux = composer._run_tmux
@@ -10540,30 +10538,25 @@ def test_clearing_a_box_that_never_empties_fails_in_time(
 
 
 @pytest.mark.parametrize(
-    "inject",
-    [
-        lambda bridge_dir: inject_user_message(bridge_dir, content="hello from the web"),
-        lambda bridge_dir: claude_native_bridge.inject_slash_command(
-            bridge_dir, command="/effort high"
-        ),
-    ],
-    ids=["message", "slash-command"],
+    "inject", [_inject_message, _inject_effort], ids=["message", "slash-command"]
 )
+@pytest.mark.parametrize("draft", ["stuck", "stuck\nstuck"], ids=["one-row", "two-rows"])
 def test_an_unsuccessful_clear_sends_nothing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     inject: Callable[[Path], None],
+    draft: str,
 ) -> None:
     """Neither injection path pastes or submits while a draft it could not clear remains."""
     bridge_dir = _picker_bridge_dir(tmp_path)
-    composer = _StuckComposer("stuck\nstuck", cursor=0)
+    composer = _StuckComposer(draft, cursor=0)
     composer.install(monkeypatch)
 
     with pytest.raises(claude_native_bridge.ClaudeTerminalDialog):
         inject(bridge_dir)
 
     assert composer.submitted == []
-    assert composer.text == "stuck\nstuck"
+    assert composer.text == draft
 
 
 class _TornCaptureComposer(_EditableComposer):
@@ -10592,28 +10585,6 @@ def test_clearing_re_polls_a_torn_capture_instead_of_reading_it_as_no_box(
     assert composer.text == ""
 
 
-def test_clearing_stops_after_two_bursts_at_a_one_row_box_that_keeps_its_text(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A hint the empty box displays is retried once, not chased until the budget runs out."""
-    composer = _StuckComposer("Try asking a question", cursor=0)
-    composer.install(monkeypatch)
-    bursts: list[str] = []
-    run_tmux = composer._run_tmux
-
-    def counting_run_tmux(socket_path: str, *args: str) -> None:
-        bursts.append(args[-1])
-        run_tmux(socket_path, *args)
-
-    monkeypatch.setattr(claude_native_bridge, "_run_tmux", counting_run_tmux)
-
-    claude_native_bridge._clear_composer("/tmp/example/tmux.sock", "claude:0.0")
-
-    expected = claude_native_bridge._COMPOSER_CLEAR_SINGLE_ROW_BURSTS
-    assert bursts == [_CLEAR_ONE_ROW_COMPOSER] * expected
-    assert claude_native_bridge.time.monotonic() < claude_native_bridge._COMPOSER_CLEAR_TIMEOUT_S
-
-
 @pytest.mark.parametrize(
     ("pane", "rows"),
     [
@@ -10621,11 +10592,18 @@ def test_clearing_stops_after_two_bursts_at_a_one_row_box_that_keeps_its_text(
             "──────\n❯ one\n  two\n\n  four\n──────\n  ? for shortcuts\n",
             ["❯ one", "  two", "", "  four"],
         ),
+        ("──────\n\n❯ one\n  two\n──────\n", ["❯ one", "  two"]),
         ("scrollback\n──────\n❯ one\n  two\n  three", ["❯ one", "  two", "  three"]),
         ("──────\n  Change effort level?\n  ❯ 1. Yes, switch to low\n    2. No, go back\n", None),
         ("plain output, no box\n", None),
     ],
-    ids=["framed-with-blank-row", "closing-rule-off-screen", "dialog-selector", "no-box"],
+    ids=[
+        "framed-with-blank-row",
+        "blank-line-under-rule",
+        "closing-rule-off-screen",
+        "dialog-selector",
+        "no-box",
+    ],
 )
 def test_composer_box_rows_reads_every_row_of_the_input_box(
     pane: str, rows: list[str] | None
@@ -11048,7 +11026,9 @@ def test_a_slash_command_stuck_in_the_composer_fails_loud(
     the authoritative fallback — an honest failure, not a silent divergence.
     """
     bridge_dir = _picker_bridge_dir(tmp_path)
-    _fake_tmux(monkeypatch, [_composer_pane("/effort high")])
+    # Idle frames outlast the restore's sightings, the clear and its
+    # confirming frame; then the command sits drafted forever.
+    _fake_tmux(monkeypatch, [_IDLE_PANE] * 5 + [_composer_pane("/effort high")])
 
     with pytest.raises(RuntimeError, match="was not delivered"):
         claude_native_bridge.inject_slash_command(bridge_dir, command="/effort high")
@@ -11096,7 +11076,7 @@ def test_an_effort_switch_with_a_swallowed_confirm_leaves_the_pane_usable(
 
     def _fake_run_tmux(socket_path: str, *args: str) -> None:
         del socket_path
-        if "-l" in args:
+        if args[-1] == "/effort high":
             tui["pane"] = _composer_pane("/effort high")
         elif args[-1] == "Enter":
             if claude_native_bridge.EFFORT_DIALOG_HINT in tui["pane"]:
