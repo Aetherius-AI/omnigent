@@ -6030,14 +6030,10 @@ async def _rollback_create_launch_worktree(
                     "removing the worktree it created",
                     resp.id,
                 )
-                # Nothing references the directory once the row is gone, so
-                # remove it from the pre-launch snapshot instead of leaving it
-                # behind with no record to retry from.
-                if conv is not None and conv.workspace is not None and conv.git_branch is not None:
-                    await _remove_worktree(conv)
-                # Report the row vanished so the caller skips the default-public
-                # grant, and answer unbound: nothing can act on the deleted
-                # session or its removed worktree.
+                # Report the row vanished before touching the host, so a failed
+                # removal still skips the default-public grant and the create
+                # answers unbound for the deleted session.
+                snapshot = conv
                 conv = None
                 session_vanished = True
                 resp.runner_id = None
@@ -6046,6 +6042,15 @@ async def _rollback_create_launch_worktree(
                 resp.git_branch = None
                 resp.labels.pop(WORKTREE_ROOT_LABEL_KEY, None)
                 bound_host_id = None
+                # Nothing references the directory once the row is gone, so
+                # remove it from the pre-launch snapshot instead of leaving it
+                # behind with no record to retry from.
+                if (
+                    snapshot is not None
+                    and snapshot.workspace is not None
+                    and snapshot.git_branch is not None
+                ):
+                    await _remove_worktree(snapshot)
             elif latest.runner_id != runner_id:
                 _logger.info(
                     "Skipping launch-failure worktree rollback for session %s: "
