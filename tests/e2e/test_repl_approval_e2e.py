@@ -366,8 +366,9 @@ def _wait_for_prompt_ready(
         second client.
     """
     child.expect(welcome_pattern, timeout=timeout)
-    child.expect(r"http://127\.0\.0\.1:\d+", timeout=timeout)
-    server_url = _strip_ansi(child.after).strip()
+    # A non-digit terminator keeps a pty chunk boundary from truncating the port.
+    child.expect(r"(http://127\.0\.0\.1:\d+)[^\d]", timeout=timeout)
+    server_url = _strip_ansi(child.match.group(1)).strip()
     # The banner is not input-readiness. Wait for the status
     # toolbar's ``· ready`` (idle ``state: sleeping``) marker
     # so the next send() lands in prompt_toolkit's live loop
