@@ -8,10 +8,12 @@ so the CLI's own skills-allowlist gate produces the verdict.
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from pathlib import Path
 
 import claude_agent_sdk
+import httpx
 import pytest
 
 from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor, _find_system_claude
@@ -37,32 +39,26 @@ def _claude_cli_available() -> bool:
     return _find_system_claude() is not None or bundled.is_file()
 
 
-def _write_bundle(root: Path, skill_dir_name: str, label: str) -> Path:
-    skill_dir = root / "bundle" / "skills" / skill_dir_name
+def _write_skill(skill_dir: Path, label: str) -> None:
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
         f"---\nname: {label}\ndescription: Prints a marker line.\n---\n\n"
-        "When invoked, output the literal line PROBE-SKILL-BODY.\n"
+        f"When invoked, output the literal line {label.upper()}-BODY.\n"
     )
+
+
+def _write_bundle(root: Path, skill_dir_name: str, label: str) -> Path:
+    _write_skill(root / "bundle" / "skills" / skill_dir_name, label)
     return root / "bundle"
 
 
-@pytest.mark.parametrize(
-    ("skill_dir_name", "label", "invoked"), list(_CASES.values()), ids=list(_CASES)
-)
-def test_native_skill_tool_runs_bundled_skill_under_skills_none(
+def _run_skill_turn(
     mock_llm_server_url: str,
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    skill_dir_name: str,
-    label: str,
+    bundle: Path,
     invoked: str,
-) -> None:
-    """The CLI runs the bundled skill instead of rejecting it as not allowlisted."""
-    if not _claude_cli_available():
-        pytest.skip("No Claude Code CLI (system or SDK-bundled) is available.")
-
-    bundle = _write_bundle(tmp_path, skill_dir_name, label)
+) -> tuple[str, list[ToolCallComplete]]:
+    """Script one ``Skill`` call for *invoked* and return the turn token and results."""
     token = f"skills-none-{uuid.uuid4().hex[:8]}"
     reset_mock_llm(mock_llm_server_url)
     configure_mock_llm(
@@ -90,7 +86,7 @@ def test_native_skill_tool_runs_bundled_skill_under_skills_none(
             return [
                 event
                 async for event in executor.run_turn(
-                    [{"role": "user", "content": f"Run your bundled skill {invoked}. {token}"}],
+                    [{"role": "user", "content": f"Run your skill. {token}"}],
                     [],
                     "You are a test agent.",
                 )
@@ -99,7 +95,63 @@ def test_native_skill_tool_runs_bundled_skill_under_skills_none(
             await executor.close()
 
     events = asyncio.run(asyncio.wait_for(_run(), timeout=_TURN_TIMEOUT_SEC))
-
     skill_results = [e for e in events if isinstance(e, ToolCallComplete) and e.name == "Skill"]
     assert skill_results, f"the scripted Skill call never completed: {events}"
+    return token, skill_results
+
+
+def _turn_request(mock_llm_server_url: str, token: str) -> str:
+    """The JSON of the first model request for this turn that offers the ``Skill`` tool."""
+    captured = httpx.get(f"{mock_llm_server_url}/mock/requests", timeout=10.0).json()
+    bodies = captured.get("requests", []) if isinstance(captured, dict) else captured
+    for body in bodies:
+        tools = body.get("tools") or [] if isinstance(body, dict) else []
+        dumped = json.dumps(body, default=str)
+        if token in dumped and any(tool.get("name") == "Skill" for tool in tools):
+            return dumped
+    raise AssertionError("no provider request carried the turn with the Skill tool")
+
+
+@pytest.mark.parametrize(
+    ("skill_dir_name", "label", "invoked"), list(_CASES.values()), ids=list(_CASES)
+)
+def test_native_skill_tool_runs_bundled_skill_under_skills_none(
+    mock_llm_server_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    skill_dir_name: str,
+    label: str,
+    invoked: str,
+) -> None:
+    """The CLI runs the bundled skill instead of rejecting it as not allowlisted."""
+    if not _claude_cli_available():
+        pytest.skip("No Claude Code CLI (system or SDK-bundled) is available.")
+
+    bundle = _write_bundle(tmp_path, skill_dir_name, label)
+    _, skill_results = _run_skill_turn(mock_llm_server_url, monkeypatch, bundle, invoked)
     assert skill_results[0].status == ToolCallStatus.SUCCESS, skill_results[0]
+
+
+def test_host_skills_stay_hidden_under_skills_none(
+    mock_llm_server_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Seeding the bundle's skills must not re-admit project or user skills."""
+    if not _claude_cli_available():
+        pytest.skip("No Claude Code CLI (system or SDK-bundled) is available.")
+
+    bundle = _write_bundle(tmp_path, "probe-skill", "probe-skill")
+    # Project source: ``<cwd>/.claude/skills``; user source: ``$CLAUDE_CONFIG_DIR/skills``.
+    _write_skill(bundle / ".claude" / "skills" / "project-probe", "project-probe")
+    config_dir = tmp_path / "claude-config"
+    _write_skill(config_dir / "skills" / "user-probe", "user-probe")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+
+    token, skill_results = _run_skill_turn(
+        mock_llm_server_url, monkeypatch, bundle, "project-probe"
+    )
+    assert skill_results[0].status == ToolCallStatus.ERROR, skill_results[0]
+    request = _turn_request(mock_llm_server_url, token)
+    assert f"{_AGENT_NAME}:probe-skill" in request
+    assert "project-probe" not in request and "user-probe" not in request
