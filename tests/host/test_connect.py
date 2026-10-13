@@ -1000,13 +1000,14 @@ async def test_handle_launch_attributes_spawn_failure_to_host(
 
 @pytest.mark.parametrize("binding_token", ["token_abc", "", "   "])
 @pytest.mark.parametrize(
-    ("harness", "selected_pi_version", "harness_ready"),
+    ("harness", "selected_pi_version", "harness_ready", "inference_bound"),
     [
-        ("codex", None, False),
-        ("pi-native", None, False),
-        ("pi-native", (0, 84, 1), False),
-        ("pi-native", (0, 84, 1), True),
-        ("pi-native", (0, 85, 1), False),
+        ("codex", None, False, False),
+        ("pi-native", None, False, False),
+        ("pi-native", (0, 84, 1), False, False),
+        ("pi-native", (0, 84, 1), True, False),
+        ("pi-native", (0, 84, 1), True, True),
+        ("pi-native", (0, 85, 1), False, False),
     ],
 )
 async def test_handle_launch_refuses_unconfigured_harness(
@@ -1016,6 +1017,7 @@ async def test_handle_launch_refuses_unconfigured_harness(
     harness: str,
     selected_pi_version: tuple[int, int, int] | None,
     harness_ready: bool,
+    inference_bound: bool,
 ) -> None:
     """
     Verify _handle_launch refuses to spawn when the frame's harness is
@@ -1055,11 +1057,21 @@ async def test_handle_launch_refuses_unconfigured_harness(
 
         monkeypatch.setattr("omnigent.harnesses.pi_native.main.resolve_pi_executable", missing_pi)
 
+    inference_config = None
+    if inference_bound:
+        monkeypatch.setattr(
+            "omnigent.onboarding.harness_install.missing_harness_cli", lambda _harness: None
+        )
+        inference_config = {
+            "providers": {"test": {}},
+            "inference": {"harnesses": {harness: {"provider": "test"}}},
+        }
     frame = HostLaunchRunnerFrame(
         request_id="req_unconfigured",
         binding_token=binding_token,
         workspace=str(workspace),
         harness=harness,
+        inference_config=inference_config,
     )
     result = await host._handle_launch(frame)
 
