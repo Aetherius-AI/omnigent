@@ -3760,6 +3760,28 @@ def test_socket_recovery_refuses_a_foreign_private_dir(
     assert killed == []
 
 
+def test_failed_identity_recording_clears_a_stale_server(tmp_path: Path) -> None:
+    """A failed re-recording clears a prior identity so recovery fails closed.
+
+    An earlier launch recorded a server; a later launch whose output carries
+    no readable pid must not leave recovery pointing at the old server.
+    """
+    instance = TerminalInstance(
+        name="runtime",
+        session_key="main",
+        socket_path=tmp_path / "tmux.sock",
+        private_dir=tmp_path,
+        running=True,
+    )
+    instance._tmux_server_pid = 4321
+    instance._tmux_server_create_time = 1.0
+
+    instance._record_tmux_server_identity(b"launched without a numeric pid")
+
+    assert instance._tmux_server_pid is None
+    assert instance._tmux_server_create_time is None
+
+
 def test_socket_recovery_refuses_an_unreadable_server_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

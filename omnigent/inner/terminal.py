@@ -2755,6 +2755,10 @@ class TerminalInstance:
             pid = int(text.split()[-1])
             create_time = psutil.Process(pid).create_time()
         except (ValueError, IndexError, psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+            # Clear any stale identity so a failed re-recording fails closed
+            # instead of signalling a previously recorded server.
+            self._tmux_server_pid = None
+            self._tmux_server_create_time = None
             logger.debug(
                 "Could not record tmux server identity for terminal %s:%s; "
                 "reaped-socket recovery stays disabled",
