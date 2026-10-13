@@ -2348,6 +2348,126 @@ async def test_mcp_execute_unknown_bare_tool_returns_protocol_error(
 
 
 @pytest.mark.asyncio
+async def test_mcp_execute_omits_and_refuses_client_runtime_local_tool() -> None:
+    """A client-runtime tool is neither advertised nor dispatchable via the endpoint."""
+    spec = AgentSpec(
+        spec_version=1,
+        name="qa-agent",
+        local_tools=[
+            LocalToolInfo(
+                name="client_pick_file",
+                path=None,
+                language="python",
+                runtime=ToolRuntime.CLIENT,
+                parameters={"type": "object", "properties": {}},
+            )
+        ],
+    )
+    app, _ = await _build_app_for_spec(spec)
+    session_id = "d4c3b2a1908f7e6d5c4b3a2918f7e6d5"
+    async with _runner_client(app) as client:
+        seeded = await client.post(
+            "/v1/sessions",
+            json={"session_id": session_id, "agent_id": "0e36e3219954d2deaef06b8e2a936f38"},
+        )
+        assert seeded.status_code == 201, seeded.text
+        listed = await client.post(
+            f"/v1/sessions/{session_id}/mcp/execute",
+            json={"method": "tools/list", "params": {}},
+        )
+        called = await client.post(
+            f"/v1/sessions/{session_id}/mcp/execute",
+            json={
+                "method": "tools/call",
+                "params": {"name": "client_pick_file", "arguments": {}},
+            },
+        )
+
+    assert listed.status_code == 200, listed.text
+    assert "client_pick_file" not in listed.json()["result"]["tool_names"], (
+        "client-runtime tool must not be advertised: it cannot be dispatched here"
+    )
+    assert called.status_code == 200, called.text
+    payload = called.json()
+    assert "result" not in payload, (
+        f"client tool produced a successful envelope instead of an error: {payload!r}"
+    )
+    assert payload["error"]["code"] == -32602
+    assert "client_pick_file" in payload["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_execute_omits_local_tool_name_containing_double_underscore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``__``-named local tool is not advertised and does not round-trip as success."""
+    from omnigent.runner.mcp_manager import RunnerMcpManager
+
+    spec = AgentSpec(
+        spec_version=1,
+        name="qa-agent",
+        executor=ExecutorSpec(type="omnigent", config={"harness": "codex-native"}),
+        local_tools=[
+            LocalToolInfo(
+                name="local__search",
+                path=None,
+                language="python",
+                runtime=ToolRuntime.UC_FUNCTION,
+                catalog_path="main.nlp.local_search",
+                warehouse_id="wh_test",
+                parameters={"type": "object", "properties": {}},
+            )
+        ],
+    )
+
+    async def _resolver(agent_id: str, session_id: str | None = None) -> AgentSpec:
+        del agent_id, session_id
+        return spec
+
+    async def _no_op_auto_create(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+
+    monkeypatch.setattr(
+        "omnigent.runner.native.orchestration._auto_create_codex_terminal", _no_op_auto_create
+    )
+    app = create_runner_app(
+        process_manager=_FakeProcessManager(_ScriptedHarnessClient([])),  # type: ignore[arg-type]
+        spec_resolver=_resolver,
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+        mcp_manager=RunnerMcpManager(),
+    )
+    session_id = uuid.uuid4().hex
+    async with _runner_client(app) as client:
+        seeded = await client.post(
+            "/v1/sessions",
+            json={"session_id": session_id, "agent_id": "0e36e3219954d2deaef06b8e2a936f38"},
+        )
+        assert seeded.status_code == 201, seeded.text
+        listed = await client.post(
+            f"/v1/sessions/{session_id}/mcp/execute",
+            json={"method": "tools/list", "params": {}},
+        )
+        called = await client.post(
+            f"/v1/sessions/{session_id}/mcp/execute",
+            json={
+                "method": "tools/call",
+                "params": {"name": "local__search", "arguments": {}},
+            },
+        )
+
+    assert listed.status_code == 200, listed.text
+    assert "local__search" not in listed.json()["result"]["tool_names"], (
+        "a '__'-named local tool routes to the external MCP manager, so it must not "
+        "be advertised as a dispatchable local tool"
+    )
+    payload = called.json()
+    assert "result" not in payload, (
+        f"a '__'-named local tool produced a successful envelope: {payload!r}"
+    )
+    assert payload["error"]["code"] < 0
+
+
+@pytest.mark.asyncio
 async def test_sessions_native_path_injects_mcp_schemas() -> None:
     """``POST /v1/sessions/{conv}/events`` with a message body injects MCP schemas.
 

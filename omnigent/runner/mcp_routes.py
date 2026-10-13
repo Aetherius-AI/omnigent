@@ -232,7 +232,11 @@ def register_mcp_routes(
         if method == "tools/call":
             import json as _json
 
-            from omnigent.runner.tool_dispatch import _ungranted_tool_reason, execute_tool
+            from omnigent.runner.tool_dispatch import (
+                _ungranted_tool_reason,
+                client_runtime_tool_names,
+                execute_tool,
+            )
 
             tool_name = cast(str, params.get("name") or "")
             arguments = cast(_JsonObject, params.get("arguments") or {})
@@ -339,7 +343,14 @@ def register_mcp_routes(
                         spec_workdir = _resolved_workdir_for_spec(resolved_entry, runner_workspace)
                         spec = _unwrap_resolved_spec(resolved_entry)
                     except (OmnigentError, httpx.HTTPError, RuntimeError):
-                        pass
+                        # A transient resolution failure here now fails closed
+                        # below; log it so that is distinguishable from a session
+                        # that genuinely has no spec.
+                        _logger.warning(
+                            "MCP tools/call spec resolution failed for session %r; failing closed",
+                            session_id,
+                            exc_info=True,
+                        )
                 _agent_id_local = _session_agent_ids.get(session_id)
                 if spec is None:
                     return JSONResponse(
@@ -356,6 +367,14 @@ def register_mcp_routes(
                 refusal = _ungranted_tool_reason(
                     tool_name, spec, _session_harness_name(session_id)
                 )
+                if refusal is None and tool_name in client_runtime_tool_names(spec):
+                    # Client-runtime tools are granted but have no server-side
+                    # dispatch, so running them here would return success with an
+                    # error string. Refuse with the same invalid-params contract.
+                    refusal = (
+                        f"tool {tool_name!r} runs on the client and cannot be "
+                        f"dispatched through the session MCP endpoint"
+                    )
                 if refusal is not None:
                     return JSONResponse(
                         status_code=200,

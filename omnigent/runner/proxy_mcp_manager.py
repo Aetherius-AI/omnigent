@@ -267,12 +267,14 @@ class ProxyMcpManager:
         tools_list = _json_object_list(result.get("tools"))
         schemas: list[_JsonObject] = []
         tool_names: set[str] = set()
+        server_prefixes = tuple(f"{server.name}__" for server in spec.mcp_servers)
         for tool in tools_list:
             name = tool.get("name")
-            # The proxy catalog also lists the session's bare runner-local tools,
-            # which the runner registers directly; only namespaced ``server__tool``
-            # entries are external MCP tools.
-            if not isinstance(name, str) or not name or "__" not in name:
+            # The proxy catalog also lists the session's runner-local tools, which
+            # the runner registers directly. Keep only tools namespaced under a
+            # configured MCP server; a bare or local name (even one containing
+            # ``__``) is not an external MCP tool.
+            if not isinstance(name, str) or not name or not name.startswith(server_prefixes):
                 continue
             # The Omnigent server returns ``inputSchema`` (JSON Schema from MCP).
             # Convert to the ``parameters`` key expected by LLM providers,

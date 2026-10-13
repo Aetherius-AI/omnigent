@@ -240,6 +240,42 @@ async def test_schemas_for_ignores_local_tools_in_mixed_proxy_catalog() -> None:
 
 
 @pytest.mark.asyncio
+async def test_schemas_for_drops_local_tool_name_containing_double_underscore() -> None:
+    """A local tool whose name contains ``__`` is not treated as external.
+
+    The catalog is filtered by the configured MCP server prefixes, not by the
+    mere presence of ``__``, so a user-named spec-local tool is never
+    re-injected as an external MCP tool and duplicated into the harness turn.
+    """
+    rpc_resp = _json_resp(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "tools": [
+                    {
+                        "name": "github__search",
+                        "description": "Search",
+                        "inputSchema": {"type": "object", "properties": {}},
+                    },
+                    {
+                        "name": "my__local_tool",
+                        "description": "A spec-local tool",
+                        "inputSchema": {"type": "object", "properties": {}},
+                    },
+                ]
+            },
+        }
+    )
+    manager = _make_manager(_StubTransport([rpc_resp]))
+
+    result = await manager.schemas_for(_make_spec("github"))
+
+    assert result.tool_names == {"github__search"}
+    assert [schema["name"] for schema in result.schemas] == ["github__search"]
+
+
+@pytest.mark.asyncio
 async def test_schemas_for_normalizes_null_input_schema() -> None:
     """A tool with ``inputSchema: null`` must normalize to ``{type: object, properties: {}}``.
 
