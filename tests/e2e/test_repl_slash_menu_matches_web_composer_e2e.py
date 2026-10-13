@@ -9,7 +9,6 @@ and the ``Unknown command`` reply are rendered locally.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import re
@@ -27,6 +26,7 @@ from tests.e2e.omnigent._pexpect_harness import (
     submit_prompt,
     wait_for_ready,
 )
+from tests.e2e.omnigent._repl_test_helpers import drain_for
 
 pexpect = pytest.importorskip("pexpect")
 
@@ -67,18 +67,17 @@ def _seed_project(project: Path) -> None:
 
 
 def _read_until(child: pexpect.spawn, pattern: str, *, timeout: float) -> str:
-    """ANSI-stripped output accumulated until *pattern* matches the plain text."""
+    """ANSI-stripped output consumed from the PTY until *pattern* matches the plain text."""
     raw = ""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        with contextlib.suppress(pexpect.TIMEOUT):
-            child.expect([pexpect.TIMEOUT, pexpect.EOF], timeout=0.5)
-        raw += child.before or ""
+        try:
+            raw += drain_for(child, 0.5)
+        except pexpect.EOF:
+            break
         plain = strip_ansi(raw)
         if re.search(pattern, plain):
             return plain
-        if not child.isalive():
-            break
     raise AssertionError(f"{pattern!r} not rendered within {timeout}s:\n{strip_ansi(raw)[-3000:]}")
 
 
@@ -92,7 +91,9 @@ def repl_env(mock_llm_server_url: str, tmp_path: Path) -> dict[str, str]:
     env = {
         k: v
         for k, v in os.environ.items()
-        if not k.startswith(("ANTHROPIC_", "OPENAI_", "DATABRICKS_", "CLAUDE_", "CODEX_"))
+        if not k.startswith(
+            ("ANTHROPIC_", "OPENAI_", "DATABRICKS_", "CLAUDE_", "CODEX_", "OMNIGENT_")
+        )
     }
     env.update(
         HOME=str(home),

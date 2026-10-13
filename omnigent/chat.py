@@ -3479,15 +3479,9 @@ def _merge_host_skills(
     """
     Merge bundled skills with the ones the session's harness exposes.
 
-    Resolution goes through :func:`resolve_session_skills`, the entry
-    point the host uses for the web composer's slash-command menu, so
-    both composers offer the same commands for the same session: a
-    Claude harness adds enabled plugin skills (``<plugin>:<skill>``),
-    a harness without a dedicated provider keeps the generic
-    ``.claude/skills`` / ``.agents/skills`` walk. The workspace is
-    searched ahead of the agent root because ``omnigent run --harness``
-    materializes its spec in a temp directory that never passes the
-    project the user is working in.
+    Uses the web composer's resolver, searching the workspace before the
+    agent root (a temp directory when ``omnigent run --harness`` rewrites
+    the spec), so both composers offer the same commands.
 
     :param agent_spec: Parsed AgentSpec with ``.skills`` and
         ``.skills_filter``.

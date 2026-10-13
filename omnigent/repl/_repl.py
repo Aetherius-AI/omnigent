@@ -4058,9 +4058,8 @@ async def run_repl(
     _bang_cwd: list[str] = [os.getcwd()]
 
     # Tint the composer while the line is a "!" shell command or a slash
-    # command, so the routing is visible before Enter is pressed.
-    # ``PromptSession`` reads ``.lexer`` through a ``DynamicLexer``, so setting
-    # it here takes effect live.
+    # command, so routing is visible before Enter. ``PromptSession`` reads
+    # ``.lexer`` through a ``DynamicLexer``, so setting it here is live.
     _prompt_session = getattr(host, "_prompt", None)
     if _prompt_session is not None:
         _prompt_session.lexer = _BangInputLexer()
@@ -8662,9 +8661,9 @@ _BANG_INPUT_STYLE = f"fg:{_BANG_GREEN} bold"  # prompt-toolkit composer style
 _BANG_ECHO_MARKUP = f"bold {_BANG_GREEN}"
 
 
-# The terminal's brand accent (the ``TerminalHost`` / ``RichBlockFormatter``
-# default); the web composer's overlay gives a command token its accent too.
-_SLASH_COMMAND_STYLE = "fg:#F43BA6"
+# The terminal's brand accent; the web composer's overlay tints a command
+# token with its accent too.
+_SLASH_COMMAND_STYLE = f"fg:{RichBlockFormatter().accent}"
 
 
 class _BangInputLexer(Lexer):

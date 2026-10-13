@@ -232,22 +232,6 @@ def _style_per_char(text: str) -> list[str]:
     return [style for style, piece in fragments for _ in piece]
 
 
-def test_composer_tints_slash_command_token_but_not_its_argument() -> None:
-    # Same shape as the web composer: accent on "/help", default colour on the argument.
-    text = "/help check this diff"
-    styles = _style_per_char(text)
-    token, argument = styles[: len("/help")], styles[len("/help ") :]
-    assert all(token) and len(set(token)) == 1, styles
-    assert set(argument) == {""}, styles
-    assert token[0] != _BANG_INPUT_STYLE
-
-
-@pytest.mark.parametrize("text", ["/Users/me/shot.png is attached", "hey /tmp", "ls -la"])
-def test_composer_leaves_non_command_slashes_untinted(text: str) -> None:
-    # The dispatcher sends these to the model, so the colour must not promise a command.
-    assert set(_style_per_char(text)) == {""}
-
-
 def _accent_style() -> str:
     """The terminal's brand accent, which the ``/help`` listing paints commands in."""
     return f"fg:{RichBlockFormatter().accent}"
@@ -256,11 +240,15 @@ def _accent_style() -> str:
 @pytest.mark.parametrize(
     ("text", "token"),
     [
+        # Same shape as the web composer: accent on the command, default colour on the argument.
+        ("/help check this diff", "/help"),
         ("/figplug:plug-skill hi", "/figplug:plug-skill"),  # a Claude plugin skill
         ("  /help now", "/help"),  # the dispatcher splits, so indent is tolerated
         ("/", "/"),  # a bare "/" still dispatches (and reports unknown)
-        ("/Users/me/shot.png", ""),  # a pasted path is a message
-        ("hey /tmp", ""),  # only the first token can be a command
+        # The dispatcher sends these to the model, so the colour must not promise a command.
+        ("/Users/me/shot.png is attached", ""),
+        ("hey /tmp", ""),
+        ("ls -la", ""),
         ("!!/help", ""),  # the "!!" escape is an ordinary prompt
     ],
 )
