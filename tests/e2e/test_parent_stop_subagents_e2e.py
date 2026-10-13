@@ -174,9 +174,8 @@ def test_native_parent_teardown_preserves_child_outcome(
     }
     dispatch_prompt = "PARENT_TEARDOWN_PROBE: delegate the research to the worker."
     child_prompt = "CHILD_TEARDOWN_PROBE: research the requested topic."
-    # Child turns can precede MCP discovery; built-in tools still exclude title requests.
-    tool_guard = "Bash" if harness == "claude" else "exec_command"
-    dispatch_guard = "mcp__omnigent__sys_session_send" if harness == "claude" else "mcp__omnigent"
+    tool_guard = "Bash" if harness == "claude" else "mcp__omnigent"
+    dispatch_guard = "mcp__omnigent__sys_session_send" if harness == "claude" else tool_guard
     httpx.post(
         f"{mock_url}/mock/configure",
         trust_env=False,
