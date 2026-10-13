@@ -400,9 +400,9 @@ def test_pagination_load_more_button_appears_and_loads_next_page(
     expect(load_more_button).not_to_be_visible()
     expect(total_value).to_have_text("$2.50")
 
-    # Two fetches: the initial page, then one cursored Load More carrying the
-    # first page's last id. Asserting the cursor keeps the check meaningful even
-    # if an unrelated refetch is ever added.
+    # Exactly two fetches: the initial page without a cursor, then one Load More
+    # carrying the first page's last id. A third request would mean the hook
+    # refetched on its own.
     assert len(requests) == 2
     assert "after=" not in requests[0]
     assert "after=conv_page1" in requests[1]

@@ -82,12 +82,17 @@ def priced_sessions(live_server: str) -> Iterator[list[str]]:
         with httpx.Client() as client, ThreadPoolExecutor(max_workers=_SEED_WORKERS) as pool:
             list(
                 pool.map(
-                    lambda session_id: client.delete(
-                        f"{live_server}/v1/sessions/{session_id}", timeout=30.0
-                    ),
+                    lambda session_id: _delete_session(client, live_server, session_id),
                     session_ids,
                 )
             )
+
+
+def _delete_session(client: httpx.Client, base_url: str, session_id: str) -> None:
+    """Delete a seeded session; a failed cleanup must surface, not leak into other tests."""
+    response = client.delete(f"{base_url}/v1/sessions/{session_id}", timeout=30.0)
+    if response.status_code != 404:
+        response.raise_for_status()
 
 
 def _advertise_usage_page(page: Page) -> None:
@@ -104,7 +109,7 @@ def _advertise_usage_page(page: Page) -> None:
     page.route("**/v1/info", handle_info)
 
 
-@pytest.mark.min_server_version("0.18.0")
+@pytest.mark.min_server_version("0.19.0")
 def test_usage_page_pages_sessions_for_large_session_counts(
     request: pytest.FixtureRequest,
     live_server: str,

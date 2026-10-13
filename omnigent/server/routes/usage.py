@@ -176,13 +176,10 @@ def _fetch_session_rows(
     """
     Return ``(rows, has_more, last_id)`` for the requested session window.
 
-    A positive *limit* returns exactly that cursor page; a stale *after*
-    surfaces as :class:`~omnigent.errors.StaleCursorError` (the API's 400
-    ``stale_cursor``) so the client restarts from the first page. ``limit=None``
-    keeps the endpoint's original unbounded contract for callers that never opt
-    into pagination (the pre-pagination CLI and any client that omits
-    ``limit``): every matching session is walked and ``has_more`` is always
-    ``False``.
+    A positive *limit* returns one cursor page, and a stale *after* surfaces as
+    :class:`~omnigent.errors.StaleCursorError` (the API's 400 ``stale_cursor``).
+    ``limit=None`` preserves the complete legacy report: every matching session
+    is returned and ``has_more`` is always ``False``.
     """
     if limit is not None:
         page = _list_conversation_page(
@@ -250,14 +247,10 @@ def _compute_breakdowns(
     """
     Sum each session's subtree cost by primary harness and by model.
 
-    The web Usage page shows harness/model breakdowns for the selected date
-    range. The paginated client holds only one session page, so these sums are
-    computed server-side in a single pass over the sessions last active within
-    ``[updated_at_min, updated_at_max]`` rather than from the loaded page.
-    Sessions with no resolved harness are bucketed under ``"Unknown"`` so their
-    spend still appears, matching the pre-pagination client charts. A session
-    deleted mid-walk invalidates the page cursor; the whole walk restarts (via
-    :func:`restart_on_stale_cursor`) so the sums never reflect a partial pass.
+    Aggregates every in-range session subtree (not just the loaded page),
+    bucketing sessions with no resolved harness under ``"Unknown"``. A deletion
+    mid-walk restarts the whole pass via :func:`restart_on_stale_cursor` so the
+    sums never reflect a partial walk.
 
     :param conversation_store: Store to enumerate sessions from.
     :param user_id: The caller / ACL scope (``None`` in single-user mode).
