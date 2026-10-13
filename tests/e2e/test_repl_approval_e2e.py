@@ -1777,6 +1777,9 @@ def test_repl_ignores_unrelated_elicitation_resolved(
         server_url = _wait_for_prompt_ready(child, timeout=_LAUNCH_TIMEOUT)
         with httpx.Client(base_url=server_url, trust_env=False, timeout=10.0) as http:
             sessions = http.get("/v1/sessions", params={"visibility": "all"})
+            sessions.raise_for_status()
+            # Newest first: the REPL just created its session. The needle-pinned
+            # snapshot polls below fail loudly if this is not that session.
             session_id = sessions.json()["data"][0]["id"]
 
             # Turn 1: a real elicitation, declined at the keyboard. The session
@@ -1800,10 +1803,8 @@ def test_repl_ignores_unrelated_elicitation_resolved(
 
             requests_before = len(get_mock_requests(mock_llm_server_url))
 
-            # Another client resolves the DIFFERENT, prior elicitation, then
-            # declines the pending card itself. The stream preserves that
-            # order, so the first "› …" settlement line names the event that
-            # released the gate.
+            # Another client resolves the DIFFERENT, prior elicitation first,
+            # then declines the pending card; the stream preserves that order.
             resolve = _decline_from_another_client(http, session_id, prior_elicitation_id)
             assert resolve.status_code == 202, resolve.text
             resolve = _decline_from_another_client(http, session_id, pending_elicitation_id)

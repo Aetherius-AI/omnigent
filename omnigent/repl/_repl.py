@@ -758,17 +758,24 @@ def _parse_approval_input(text: str) -> _ApprovalVerdict:
     return _ApprovalVerdict.REFUSE
 
 
-_RESOLVED_ELSEWHERE_LABELS: dict[str, str] = {
-    "accept": "approved elsewhere",
-    "decline": "declined elsewhere",
-    "cancel": "cancelled elsewhere",
+# How another client's verdict settles the ASK this REPL is prompting for,
+# paired with the transcript line that reports it.
+_RESOLVED_ELSEWHERE: dict[str, tuple[_ApprovalVerdict, str]] = {
+    "accept": (_ApprovalVerdict.APPROVE_ONCE, "approved elsewhere"),
+    "decline": (_ApprovalVerdict.REFUSE, "declined elsewhere"),
+    "cancel": (_ApprovalVerdict.REFUSE, "cancelled elsewhere"),
 }
+
+
+def _resolved_elsewhere_verdict(action: str | None) -> _ApprovalVerdict:
+    """Verdict for an external resolution; anything but ``accept`` refuses."""
+    return _RESOLVED_ELSEWHERE.get(action or "", (_ApprovalVerdict.REFUSE, ""))[0]
 
 
 def _resolved_elsewhere_label(action: str | None, reason: str | None) -> str:
     """Transcript line for an ASK another client settled, e.g. ``"declined elsewhere"``."""
-    if action in _RESOLVED_ELSEWHERE_LABELS:
-        return _RESOLVED_ELSEWHERE_LABELS[action]
+    if action in _RESOLVED_ELSEWHERE:
+        return _RESOLVED_ELSEWHERE[action][1]
     if reason == "unanswered":
         return "expired unanswered · refused"
     return "resolved elsewhere · no verdict recorded · refused"
@@ -951,8 +958,7 @@ class _ApprovalState:
             return False
         if elicitation_id != self._current_elicitation_id:
             return False
-        verdict = _ApprovalVerdict.APPROVE_ONCE if action == "accept" else _ApprovalVerdict.REFUSE
-        return self.resolve_verdict(verdict)
+        return self.resolve_verdict(_resolved_elsewhere_verdict(action))
 
     def cancel(self) -> None:
         """
