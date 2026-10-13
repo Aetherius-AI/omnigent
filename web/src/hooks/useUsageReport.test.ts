@@ -69,4 +69,21 @@ describe("useUsageReport", () => {
       fetchSpy.mock.calls.slice(staleIndex + 1).some(([params]) => params?.after == null),
     ).toBe(true);
   });
+
+  it("stops restarting after one attempt when the first page is also stale", async () => {
+    const fetchSpy = vi
+      .spyOn(usageApi, "fetchUsageReport")
+      .mockRejectedValue(new StaleCursorError());
+
+    renderHook(() => useUsageReport(null, null), { wrapper: createWrapper() });
+
+    // The first page is stale and so is the single restart: the hook must make
+    // exactly two fetches (initial + one bounded restart), never looping.
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(2));
+    const settledCalls = fetchSpy.mock.calls.length;
+    await new Promise((resolve) => {
+      setTimeout(resolve, 50);
+    });
+    expect(fetchSpy.mock.calls.length).toBe(settledCalls);
+  });
 });

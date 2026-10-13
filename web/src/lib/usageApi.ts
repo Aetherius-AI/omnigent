@@ -145,7 +145,9 @@ export async function fetchUsageReport(params?: FetchUsageReportParams): Promise
 // sessions without a resolved harness bucket under "Unknown".
 
 export function aggregateHarnessBreakdown(sessions: SessionUsage[]): Record<string, number> {
-  const breakdown: Record<string, number> = {};
+  // Null prototype so a harness named "__proto__" counts as a key instead of
+  // hitting Object.prototype's setter.
+  const breakdown: Record<string, number> = Object.create(null);
   for (const session of sessions) {
     const harness = session.harness ?? "Unknown";
     breakdown[harness] = (breakdown[harness] ?? 0) + session.costUsd;
@@ -154,7 +156,7 @@ export function aggregateHarnessBreakdown(sessions: SessionUsage[]): Record<stri
 }
 
 export function aggregateModelBreakdown(sessions: SessionUsage[]): Record<string, number> {
-  const breakdown: Record<string, number> = {};
+  const breakdown: Record<string, number> = Object.create(null);
   for (const session of sessions) {
     for (const [model, cost] of Object.entries(session.models)) {
       breakdown[model] = (breakdown[model] ?? 0) + cost;

@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
-from omnigent.errors import StaleCursorError
+from omnigent.errors import OmnigentError, StaleCursorError
 from omnigent.server.auth import RESERVED_USER_LOCAL
 from omnigent.server.feature_flags import FeatureFlags
 from omnigent.server.routes.usage import (
@@ -523,6 +524,34 @@ def test_get_usage_rejects_malformed_dates(monkeypatch: pytest.MonkeyPatch, quer
     assert resp.status_code == 422, resp.text
     assert "YYYY-MM-DD" in resp.json()["detail"]
     assert calls == []
+
+
+def test_get_usage_maps_stale_cursor_to_http_400(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A builder stale cursor surfaces over HTTP as 400 ``stale_cursor``."""
+
+    def raise_stale(store: object, user_id: object, **kwargs: object) -> UsageReport:
+        raise StaleCursorError("conv_gone")
+
+    monkeypatch.setattr("omnigent.server.routes.usage._build_usage_report", raise_stale)
+    app = FastAPI()
+    app.include_router(
+        create_usage_router(object(), feature_flags=FeatureFlags(frozenset())),  # type: ignore[arg-type]
+        prefix="/v1",
+    )
+
+    # Mirror create_app's OmnigentError handler so the test exercises the real
+    # error-code -> HTTP-status mapping the paginated client recovers from.
+    @app.exception_handler(OmnigentError)
+    async def _handle(_request: Request, exc: OmnigentError) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.http_status,
+            content={"error": {"code": exc.code, "message": exc.message}},
+        )
+
+    resp = TestClient(app).get("/v1/usage?after=conv_gone")
+
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"]["code"] == "stale_cursor"
 
 
 def test_build_usage_report_stale_client_cursor_raises(

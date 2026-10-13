@@ -95,8 +95,7 @@ export function UsagePage() {
   // breakdown fields, so the page filters and aggregates its response itself.
   const legacy = firstPage?.legacy ?? false;
 
-  // Paging on a mutable updated_at can repeat a session across pages; keep the
-  // most recently updated copy so an edit between fetches is not lost.
+  // Deduplicate repeated rows by id, preferring the newest observed version.
   const allSessions = useMemo(() => {
     const byId = new Map<string, SessionUsage>();
     for (const session of data?.pages.flatMap((page) => page.sessions) ?? []) {

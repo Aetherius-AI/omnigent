@@ -80,6 +80,7 @@ describe("fetchUsageReport", () => {
     expect(report.sessionsHasMore).toBe(true);
     expect(report.sessionsLastId).toBe("conv_1");
     expect(report.harnessBreakdown).toEqual({ "codex-native": 1.5 });
+    expect(report.modelBreakdown).toEqual({ "model-a": 1.5 });
     expect(report.legacy).toBe(false);
   });
 

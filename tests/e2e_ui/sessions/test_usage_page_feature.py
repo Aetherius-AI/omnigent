@@ -333,6 +333,8 @@ def test_pagination_load_more_button_appears_and_loads_next_page(
             ],
             "sessions_has_more": True,
             "sessions_last_id": "conv_page1",
+            "harness_breakdown": {"claude-sdk": 2.50},
+            "model_breakdown": {"claude-opus-4-8": 2.50},
         }
     )
 
@@ -359,14 +361,15 @@ def test_pagination_load_more_button_appears_and_loads_next_page(
             ],
             "sessions_has_more": False,
             "sessions_last_id": "conv_page2",
+            "harness_breakdown": {},
+            "model_breakdown": {},
         }
     )
 
-    request_count = 0
+    requests: list[str] = []
 
     def handle_usage(route: Route) -> None:
-        nonlocal request_count
-        request_count += 1
+        requests.append(route.request.url)
         url = route.request.url
         if "after=" in url:
             route.fulfill(status=200, content_type="application/json", body=second_page)
@@ -397,4 +400,9 @@ def test_pagination_load_more_button_appears_and_loads_next_page(
     expect(load_more_button).not_to_be_visible()
     expect(total_value).to_have_text("$2.50")
 
-    assert request_count == 2
+    # Two fetches: the initial page, then one cursored Load More carrying the
+    # first page's last id. Asserting the cursor keeps the check meaningful even
+    # if an unrelated refetch is ever added.
+    assert len(requests) == 2
+    assert "after=" not in requests[0]
+    assert "after=conv_page1" in requests[1]
