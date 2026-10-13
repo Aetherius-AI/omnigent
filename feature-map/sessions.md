@@ -68,6 +68,15 @@ the header menu), and each place is a separate entry point.
   composer; sending returns to that board with the new session selected.
 - `canvas-session-health`: an opened Canvas session receives host health and
   live updates even before it appears in the loaded sidebar pages.
+- `view-options`: the one filter menu, on the Projects header, with Grouping
+  (Default / Status / Updated), Display (All / My / Shared / Archived), Ordering
+  (Updated / Status) and Show (Updated / Environment / Repo / Branch) submenus,
+  saved per device. Shared sessions get their own section above Sessions. A
+  Status or Updated grouping replaces Projects, Shared and Sessions with titled
+  groups; the first group's header takes the Projects header's place. Select
+  sessions sits beside the filter and selects every list below it at once. Behind
+  the `sidebar_grouping_ui` release flag; with it off, the Sessions header keeps
+  a flat Display filter and the tooltip keeps its plain layout.
 
 ## How to get to it (user POV)
 
@@ -92,7 +101,18 @@ agents (installed with `omnigent agent add`, imported in the Create custom agent
 dialog, or uploaded by running a session with their spec) stay available until
 you remove them.
 
-**Archived view:** switch the sidebar to archived sessions and filter by project.
+**Archived view:** choose Display → Archived sessions in the sidebar filter
+menu, then filter by project.
+
+**Sidebar filter menu:** with `sidebar_grouping_ui` on, the funnel on the
+Projects header holds Grouping, Display, Ordering and Show. In a Status or
+Updated grouping, Projects is hidden and the funnel sits in the same spot on the
+first group's header. The Select sessions button sits beside it and selects
+project, Shared and Sessions rows together; the Sessions header keeps only New
+session. Hovering a row opens
+its tooltip; the repo and PR rows load from the session's GitHub info only once
+the tooltip opens. With the flag off, the funnel sits on the Sessions header and
+offers Display only.
 
 **Canvas:** choose Canvas in the sidebar, select Main or a project, and click
 a session card once. Expand navigation manually to keep it open while switching
@@ -289,6 +309,12 @@ plain `uv run pytest`, which starts a private server for the test.
   the mobile entry point; keep browser evidence outside the checkout.
 - **`reconnect`, stopped session (own environment):**
   `tests/e2e_ui/sessions/test_sidebar_stop.py::test_stopped_session_shows_reconnect_affordance`
+- **`reconnect`, completed turn after host handoff (own environment):**
+  `tests/e2e/test_runner_exit_replica_handoff_e2e.py::test_host_report_after_handoff_preserves_only_completed_turns`
+  moves a real host tunnel to a different server replica while its runner
+  stays on the original replica, then kills that owned runner. Reloaded API
+  snapshots keep completed work idle; interrupted work and runners that never
+  connected still fail. The OpenAI Agents harness uses local scripted replies.
 - **`reconnect`, idle replica handoff (own environment):**
   `tests/e2e_ui/sessions/test_idle_runner_handoff.py::test_idle_session_stays_healthy_after_unreadable_replica_handoff`
   moves a real runner between two servers sharing storage, then makes the old
@@ -443,6 +469,12 @@ plain `uv run pytest`, which starts a private server for the test.
   `tests/e2e_ui/sessions/test_canvas_creation.py::test_stale_canvas_creation_url_returns_to_its_board`;
   ordinary sessions still return to the new-session page in
   `tests/e2e_ui/sessions/test_canvas_creation.py::test_stale_regular_creation_url_returns_to_new_session`.
+- **`view-options`:**
+  `tests/e2e_ui/sessions/test_sidebar_view_options.py::test_status_grouping_and_show_toggles_persist_across_reload`,
+  `tests/e2e_ui/sessions/test_sidebar_view_options.py::test_tooltip_fetches_repo_and_pr_only_when_opened`
+  (both enable the flag by patching `GET /v1/info`). Unit tests in
+  `web/src/shell/Sidebar.test.tsx` ("sidebar_grouping_ui release flag") check
+  that the flag-off sidebar ignores stored view options.
 
 ## Gotchas
 
@@ -492,3 +524,6 @@ plain `uv run pytest`, which starts a private server for the test.
   shows the command instead.
 - Tests marked "own environment" fail under `verify-env run` with an explicit
   message. That is expected; run them with plain `uv run pytest`.
+- Grouping and ordering apply to the loaded pages only: an older session joins
+  its group once it is paged in. Grouped views hide Projects, so dragging a
+  session onto the list never removes it from its project there.

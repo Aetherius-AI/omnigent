@@ -129,6 +129,15 @@ the extra fields. Resolver and raw-tunnel checks:
 
 Cross-harness journeys:
 
+- **`launch-cli` and `launch-web`, Pi CLI compatibility (own environment):**
+  `tests/e2e/test_pi_native_cli_version_floor_e2e.py::test_real_pi_cli_version_floor`
+  runs real unsupported and supported npm Pi installations through `omnigent pi`
+  and the server's native-terminal launch endpoint. Set
+  `OMNIGENT_E2E_PI_OLD_BINARY` and `OMNIGENT_E2E_PI_CURRENT_BINARY` to their
+  executable paths. The old release must report its version and upgrade command
+  before a terminal starts. The supported release must answer terminal and API
+  input through the real Pi process; only model replies are scripted locally.
+  Each case owns its stack and saves terminal recordings plus API evidence.
 - **`side-chat`, Codex:**
   `tests/e2e_ui/chat/test_native_codex_side_chat.py::test_native_codex_side_chat_inherits_context_and_closes_independently`
   uses a real Codex CLI/app-server and the local mock model. It verifies inherited
@@ -156,6 +165,13 @@ Cross-harness journeys:
   `tests/e2e_ui/start_session/test_native_picker_cli_parity.py::test_codex_picker_offers_the_clis_catalog_and_default`
   (real host API and Codex CLI, with custom/bundled catalogs and a hidden default; desktop and mobile);
   see also [composer](./composer.md) for effort.
+- **`model-and-effort`, managed sandbox before a host exists:**
+  `tests/e2e_ui/start_session/test_sandbox_gateway_models_without_binding.py::test_sandbox_codex_picker_offers_gateway_models_before_a_host_exists`,
+  `tests/e2e_ui/start_session/test_sandbox_model_selection.py::test_optional_gateway_preview_without_a_host`.
+  The picker offers the sandbox gateway's models for native and SDK agents with
+  a Harness default row; efforts come from the listing's reasoning metadata, and
+  an unavailable listing keeps Harness default launchable. Connected-host
+  discovery and bound (`inference_models`) targets are unchanged.
 - **`model-and-effort`, Codex runtime settings:**
   `tests/e2e/test_codex_native_supported_efforts_e2e.py::test_codex_clamps_unsupported_effort`,
   `tests/e2e/test_codex_native_supported_efforts_e2e.py::test_codex_preserves_supported_effort`,
