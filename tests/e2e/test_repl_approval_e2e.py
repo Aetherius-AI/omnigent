@@ -1738,13 +1738,13 @@ def test_repl_subagent_tool_call_ask_does_not_tunnel_banner_to_root(
             child.terminate(force=True)
 
 
-def _decline_from_another_client(
-    http: httpx.Client, session_id: str, elicitation_id: str
+def _resolve_from_another_client(
+    http: httpx.Client, session_id: str, elicitation_id: str, action: str
 ) -> httpx.Response:
-    """Decline an elicitation through the resolve endpoint the approval page uses."""
+    """Resolve an elicitation through the endpoint the approval page uses."""
     return http.post(
         f"/v1/sessions/{session_id}/elicitations/{elicitation_id}/resolve",
-        json={"action": "decline"},
+        json={"action": action},
     )
 
 
@@ -1760,9 +1760,10 @@ def test_repl_ignores_unrelated_elicitation_resolved(
     ``response.elicitation_resolved`` fans out for every elicitation in the
     session. An event for an earlier card (different id, here a decline) is
     not an answer to the card in front of the user: the ASK must stay pending
-    and the gated turn must not reach the LLM. Declining the pending card
-    itself from another client releases it as a refusal. No path here
-    approves a turn, so the LLM is never called.
+    and the gated turn must not reach the LLM. Cancelling the pending card
+    itself from another client releases it as a refusal, and the distinct
+    verdicts show which event settled the prompt. No path here approves a
+    turn, so the LLM is never called.
     """
     _configure_mock_text(mock_llm_server_url, ["should not be reached"], match="unrelated-resolve")
     child = pexpect.spawn(
@@ -1804,18 +1805,23 @@ def test_repl_ignores_unrelated_elicitation_resolved(
 
             requests_before = len(get_mock_requests(mock_llm_server_url))
 
-            # Another client resolves the DIFFERENT, prior elicitation first,
-            # then declines the pending card; the stream preserves that order.
-            resolve = _decline_from_another_client(http, session_id, prior_elicitation_id)
+            # Another client declines the DIFFERENT, prior elicitation first,
+            # then cancels the pending card; the stream preserves that order and
+            # the distinct verdicts show which event settled the prompt.
+            resolve = _resolve_from_another_client(
+                http, session_id, prior_elicitation_id, "decline"
+            )
             assert resolve.status_code == 202, resolve.text
-            resolve = _decline_from_another_client(http, session_id, pending_elicitation_id)
+            resolve = _resolve_from_another_client(
+                http, session_id, pending_elicitation_id, "cancel"
+            )
             assert resolve.status_code == 202, resolve.text
 
             child.expect(r"› ([^\r\n]*)\r?\n", timeout=15)
             settlement = _strip_ansi(child.match.group(1)).strip()
-            assert settlement.startswith("declined elsewhere"), (
+            assert settlement.startswith("cancelled elsewhere"), (
                 "Pending policy ASK was settled by the unrelated elicitation_resolved "
-                f"event instead of its own decline; first settlement line: {settlement!r}"
+                f"event instead of its own cancel; first settlement line: {settlement!r}"
             )
             child.expect(r"Denied by policy", timeout=15)
             assert len(get_mock_requests(mock_llm_server_url)) == requests_before, (
