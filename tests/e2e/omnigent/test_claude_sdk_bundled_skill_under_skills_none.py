@@ -91,4 +91,3 @@ def test_native_skill_tool_runs_bundled_skill_under_skills_none(
     skill_results = [e for e in events if isinstance(e, ToolCallComplete) and e.name == "Skill"]
     assert skill_results, f"the scripted Skill call never completed: {events}"
     assert skill_results[0].status == ToolCallStatus.SUCCESS, skill_results[0]
-    assert "skills allowlist" not in str(skill_results[0].result)

@@ -1705,10 +1705,15 @@ class ClaudeSDKExecutor(Executor):
         if self._bundle_dir is not None:
             try:
                 self._bundle_skill_names = bundle_skill_names(self._bundle_dir)
+            except OSError as exc:
+                logger.warning(
+                    "could not read bundle skill names at %s: %s", self._bundle_dir, exc
+                )
+            try:
                 ensure_bundle_plugin_manifest(self._bundle_dir, self._agent_name)
             except OSError as exc:
                 logger.warning(
-                    "could not prepare bundle plugin skills at %s: %s",
+                    "could not write bundle plugin manifest at %s: %s",
                     self._bundle_dir,
                     exc,
                 )
