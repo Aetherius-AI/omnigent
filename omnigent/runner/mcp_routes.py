@@ -184,7 +184,7 @@ def register_mcp_routes(
                         }
                     },
                 )
-            if mcp_manager is None and spec.mcp_servers:
+            if mcp_manager is None and getattr(spec, "mcp_servers", None):
                 return JSONResponse(
                     status_code=503,
                     content={

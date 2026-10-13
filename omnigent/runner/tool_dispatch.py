@@ -1083,7 +1083,7 @@ def build_mcp_local_tool_schemas(
     cache_key = (id(agent_spec), harness)
     cached = _mcp_local_tool_schemas_cache.get(cache_key)
     if cached is not None and cached[0]() is agent_spec:
-        return cached[1]
+        return list(cached[1])
     granted = _granted_tool_names(agent_spec, harness)
     client_names = client_runtime_tool_names(agent_spec)
     manager = ToolManager(agent_spec, os_env_schema_only=True)
@@ -1117,7 +1117,9 @@ def build_mcp_local_tool_schemas(
     if len(_mcp_local_tool_schemas_cache) >= _GRANTED_TOOL_NAMES_CACHE_MAX:
         _mcp_local_tool_schemas_cache.clear()
     _mcp_local_tool_schemas_cache[cache_key] = (weakref.ref(agent_spec), result)
-    return result
+    # Return a copy here and on cache hits so a caller mutating the list cannot
+    # corrupt the cached schemas for later tools/list calls on the same spec.
+    return list(result)
 
 
 async def _execute_local_python_tool(

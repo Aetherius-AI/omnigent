@@ -35,7 +35,13 @@ from omnigent.runner.native import NativeLaunchContext, _resolve_native_spawn_en
 from omnigent.runner.resource_registry import (
     SessionResourceRegistry,
 )
-from omnigent.spec.types import AgentSpec, ExecutorSpec, LocalToolInfo, ToolRuntime
+from omnigent.spec.types import (
+    AgentSpec,
+    ExecutorSpec,
+    LocalToolInfo,
+    MCPServerConfig,
+    ToolRuntime,
+)
 from tests.runner.conftest import (
     _build_app_for_spec,
     _build_app_with_mcp_tool,
@@ -2125,6 +2131,31 @@ async def test_mcp_execute_list_local_only_without_external_manager() -> None:
     names = {schema["name"] for schema in schemas}
     assert "sys_session_list" in names
     assert "sys_os_read" not in names
+
+
+@pytest.mark.asyncio
+async def test_mcp_execute_list_requires_manager_when_servers_configured() -> None:
+    """Configured external servers with no runner MCP manager fail with 503."""
+    spec = AgentSpec(
+        spec_version=1,
+        name="qa-agent",
+        mcp_servers=[MCPServerConfig(name="github", transport="http", url="http://x")],
+    )
+    app, _ = await _build_app_for_spec(spec)
+    session_id = "b1a2c3d4e5f60718293a4b5c6d7e8f90"
+    async with _runner_client(app) as client:
+        seeded = await client.post(
+            "/v1/sessions",
+            json={"session_id": session_id, "agent_id": "0e36e3219954d2deaef06b8e2a936f38"},
+        )
+        assert seeded.status_code == 201, seeded.text
+        response = await client.post(
+            f"/v1/sessions/{session_id}/mcp/execute",
+            json={"method": "tools/list", "params": {}},
+        )
+
+    assert response.status_code == 503, response.text
+    assert response.json()["error"]["code"] == -32000
 
 
 @pytest.mark.asyncio
