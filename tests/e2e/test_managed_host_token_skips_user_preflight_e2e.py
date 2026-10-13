@@ -34,6 +34,7 @@ from pathlib import Path
 
 import pytest
 
+from omnigent.host import HOST_FATAL_EXIT_CODE
 from omnigent.host.identity import (
     HOST_ID_ENV_VAR,
     HOST_NAME_ENV_VAR,
@@ -277,3 +278,7 @@ def test_launch_token_host_skips_user_sign_in_preflight(
     assert all(
         seen.host_token == LAUNCH_TOKEN and not seen.has_authorization for seen in tunnel
     ), tunnel
+    # The stub's 400 is permanent, so the host gives up on its own.
+    assert returncode == HOST_FATAL_EXIT_CODE, (
+        f"host did not exit on the refused tunnel (exit {returncode}):\n{output}"
+    )
