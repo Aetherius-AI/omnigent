@@ -125,7 +125,11 @@ async def register_worktree_launch_host(
                 frame_text = await conn.outbound_queue.get()
                 if frame_text is None:
                     return
-                frame = decode_host_frame(frame_text)
+                try:
+                    frame = decode_host_frame(frame_text)
+                except Exception as exc:  # surface decode errors instead of stalling
+                    cap.unexpected.append(exc)
+                    continue
                 if isinstance(frame, HostStatFrame):
                     fut = conn.pending_stats.pop(frame.request_id, None)
                     if fut is not None and not fut.done():
@@ -204,6 +208,8 @@ async def register_worktree_launch_host(
             await asyncio.wait_for(asyncio.shield(task), timeout=1.0)
         if not task.done():
             task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
 
 async def _create_git_session(
@@ -419,7 +425,7 @@ async def test_inline_create_launch_failure_keeps_cleanup_metadata_until_removed
     cap_retry = register_worktree_launch_host()
     cap_retry.worktrees.extend(cap.worktrees)
     del_resp = await client.delete(f"/v1/sessions/{body['id']}?delete_branch=true")
-    assert del_resp.status_code in (200, 204), del_resp.text
+    assert del_resp.status_code == 200, del_resp.text
     assert len(cap_retry.remove) == 1, (
         f"the retained binding should let delete retry the removal; got {cap_retry.remove}"
     )
@@ -449,7 +455,7 @@ async def test_delete_with_delete_branch_removes_worktree(
     assert cap.remove == [], f"successful create unexpectedly removed a worktree: {cap.remove}"
 
     del_resp = await client.delete(f"/v1/sessions/{session_id}?delete_branch=true")
-    assert del_resp.status_code in (200, 204), del_resp.text
+    assert del_resp.status_code == 200, del_resp.text
     assert len(cap.remove) == 1, "delete_branch=true should send host.remove_worktree"
     assert cap.remove[0].worktree_path == worktree_path
     assert cap.remove[0].delete_branch is True

@@ -865,9 +865,8 @@ def register_core_routes(
                     from omnigent.server.routes._host_worktree import WORKTREE_ROOT_LABEL_KEY
 
                     # Nothing reaps worktrees, so roll back the one this create
-                    # made, as the bind and delete paths do. The helper resolves
-                    # the recorded root when the workspace is a relocated
-                    # subdirectory and leaves a directory another session uses.
+                    # made, as the bind and delete paths do; the helper resolves
+                    # the recorded root and spares directories other sessions use.
                     removed = await _remove_session_worktree_best_effort(
                         host_id=launch_host_id,
                         worktree_path=conv.workspace,
@@ -881,12 +880,24 @@ def register_core_routes(
                         expected_root_fingerprint=conv.labels.get(WORKTREE_ROOT_LABEL_KEY),
                     )
                     if removed:
-                        conv = await asyncio.to_thread(
-                            conversation_store.clear_host_binding, resp.id
-                        )
-                        await asyncio.to_thread(
-                            conversation_store.delete_label, resp.id, WORKTREE_ROOT_LABEL_KEY
-                        )
+                        # A concurrent delete can drop the row between removal
+                        # and here; the worktree is already gone, so clearing
+                        # the binding is best-effort.
+                        try:
+                            conv = await asyncio.to_thread(
+                                conversation_store.clear_host_binding, resp.id
+                            )
+                            await asyncio.to_thread(
+                                conversation_store.delete_label,
+                                resp.id,
+                                WORKTREE_ROOT_LABEL_KEY,
+                            )
+                        except ConversationNotFoundError:
+                            _logger.warning(
+                                "Session %s vanished while clearing its host binding "
+                                "after a launch-failure worktree rollback",
+                                resp.id,
+                            )
                         resp.runner_id = None
                         resp.host_id = None
                         resp.workspace = None
