@@ -611,9 +611,23 @@ def test_read_stderr_bounded_reads_descriptors_above_fd_setsize() -> None:
         os.write(write_fd, b"helper: boom\n")
         os.close(write_fd)
         with os.fdopen(fd, "r") as stream:
-            assert _read_stderr_bounded(stream, timeout=0.5, exited=True) == "helper: boom"
+            assert _read_stderr_bounded(stream, timeout=0.5) == "helper: boom"
     finally:
         resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+
+@pytest.mark.timeout(5)
+def test_read_stderr_bounded_with_writer_still_open() -> None:
+    read_fd, write_fd = os.pipe()
+    try:
+        os.write(write_fd, b"helper exited\n")
+        with os.fdopen(read_fd, "r") as stream:
+            started = time.monotonic()
+            assert _read_stderr_bounded(stream, timeout=0.05) == "helper exited"
+            assert time.monotonic() - started < 1
+            assert os.get_blocking(stream.fileno())
+    finally:
+        os.close(write_fd)
 
 
 def test_helper_reports_stdin_closed_before_any_request(

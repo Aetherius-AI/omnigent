@@ -9,7 +9,6 @@ import contextlib
 import json
 import logging
 import os
-import selectors
 import shutil
 import subprocess
 import sys
@@ -372,24 +371,25 @@ class OSEnvironment(ABC):
         """
 
 
-def _read_stderr_bounded(stream: IO[str], *, timeout: float, exited: bool) -> str:
-    """Collect the helper's stderr without blocking on a write end that is still open."""
-    if IS_WINDOWS:
-        # Selectors cannot watch pipes on Windows; read only once the helper has exited.
-        return stream.read().strip() if exited else ""
+def _read_stderr_bounded(stream: IO[str], *, timeout: float) -> str:
+    """Read available stderr even if a descendant keeps the pipe open."""
     fd = stream.fileno()
+    blocking = os.get_blocking(fd)
     chunks: list[bytes] = []
     deadline = time.monotonic() + timeout
-    # DefaultSelector (epoll/kqueue) has no FD_SETSIZE ceiling, unlike select().
-    with selectors.DefaultSelector() as selector:
-        selector.register(fd, selectors.EVENT_READ)
+    os.set_blocking(fd, False)
+    try:
         while (remaining := deadline - time.monotonic()) > 0:
-            if not selector.select(remaining):
-                break
-            data = os.read(fd, 65536)
+            try:
+                data = os.read(fd, 65536)
+            except BlockingIOError:
+                time.sleep(min(0.01, remaining))
+                continue
             if not data:
                 break
             chunks.append(data)
+    finally:
+        os.set_blocking(fd, blocking)
     return b"".join(chunks).decode("utf-8", "replace").strip()
 
 
@@ -701,7 +701,7 @@ class _HelperProcessClient:
         if self._proc.stderr is not None:
             try:
                 stderr = _read_stderr_bounded(
-                    self._proc.stderr, timeout=0.1, exited=returncode is not None
+                    self._proc.stderr, timeout=0.1
                 )
             except Exception:  # noqa: BLE001 — stderr read is best-effort for error detail
                 stderr = ""
