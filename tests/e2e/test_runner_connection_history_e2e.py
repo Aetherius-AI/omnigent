@@ -19,6 +19,9 @@ from tests._helpers.session import bind_session_runner, bundle_files, post_sessi
 from tests.e2e.conftest import configure_mock_llm
 from tests.e2e.test_runner_tunnel_mid_turn_reconnect_grace_e2e import _send_user_message
 
+# An older host that never owned the runner; its exit report carries no ``had_connected``.
+_OLDER_HOST_ID = "7b778cb70b4b466f8676ad75aa21e8b6"
+
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(120)
@@ -93,14 +96,23 @@ async def test_idle_runner_exit_keeps_connection_history_after_restart(
                 await asyncio.sleep(0.05)
             stack.restart_server()
 
+            marker = f"Runner disconnect for session={session_id}:"
+
+            def decision_lines() -> list[str]:
+                log = runtime_log.read_text(errors="replace") if runtime_log.exists() else ""
+                return [line for line in log.splitlines() if marker in line]
+
+            # The log survives the restart, so wait for a decision newer than any the
+            # first server recorded when the runner was terminated.
+            baseline = len(decision_lines())
             socket_url = stack.base_url.replace("http://", "ws://") + (
-                "/v1/hosts/7b778cb70b4b466f8676ad75aa21e8b6/tunnel"
+                f"/v1/hosts/{_OLDER_HOST_ID}/tunnel"
             )
             async with connect(socket_url) as socket:
                 await socket.send(
                     encode_host_frame(
                         HostHelloFrame(
-                            version="0.1-test", frame_protocol_version=1, name="Owned host"
+                            version="0.1-test", frame_protocol_version=1, name="Older host"
                         )
                     )
                 )
@@ -111,17 +123,10 @@ async def test_idle_runner_exit_keeps_connection_history_after_restart(
                         )
                     )
                 )
-                marker = f"Runner disconnect for session={session_id}:"
                 async with asyncio.timeout(10):
-                    while True:
-                        log = (
-                            runtime_log.read_text(errors="replace") if runtime_log.exists() else ""
-                        )
-                        decisions = [line for line in log.splitlines() if marker in line]
-                        if decisions:
-                            break
+                    while len(decision_lines()) <= baseline:
                         await asyncio.sleep(0.05)
-                assert "idle_no_failure" in decisions[-1]
+                assert "idle_no_failure" in decision_lines()[-1]
                 async with httpx.AsyncClient(base_url=stack.base_url, trust_env=False) as client:
                     response = await client.get(f"/v1/sessions/{session_id}")
                     response.raise_for_status()

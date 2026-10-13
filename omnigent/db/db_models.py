@@ -636,7 +636,7 @@ class SqlSessionPermission(OmnigentBase):
     )
 
 
-# Bound shared by ``runner_id`` and the connection marker copied from it.
+# Max length shared by ``runner_id`` and ``runner_connected_id``.
 RUNNER_ID_MAX_LENGTH = 64
 
 

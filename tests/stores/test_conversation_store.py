@@ -7115,6 +7115,8 @@ def test_runner_connection_history_tracks_the_binding(
 def test_runner_connection_history_skips_oversized_runner_ids(
     conversation_store: SqlAlchemyConversationStore,
 ) -> None:
+    if conversation_store._engine.dialect.name != "sqlite":
+        pytest.skip("only SQLite stores a runner_id longer than its declared bound")
     oversized = "runner_" + "x" * RUNNER_ID_MAX_LENGTH
     conv = conversation_store.create_conversation(runner_id=oversized)
     conversation_store.touch_runner_liveness([oversized], now=1)
