@@ -137,10 +137,11 @@ selection and retained evidence instead of reinstating the omitted source.
 - Cover the **specific behavior the bug got wrong**, plus the obvious adjacent
   edge cases the root cause implies — not just "the function runs."
 - A check that a state never appears during a transition must watch
-  continuously — poll or observe from the trigger until the end state the
-  claim names. One assertion after recovery, even an auto-retrying one, cannot
-  see a transient state and does not support a "never" claim in a caption or
-  PR text; if the watch catches the state, report it as a finding about the fix.
+  continuously — observe from the trigger until the end state the claim names;
+  a poll supports only a claim qualified by its interval. One assertion after
+  recovery, even an auto-retrying one, cannot see a transient state and does
+  not support a "never" claim in a caption or PR text; if the watch catches
+  the state, report it as a finding about the fix.
 - Put them where the repo keeps tests for that layer, following existing files'
   fixtures and structure. Do not invent a new harness.
 - **Name by the problem, never the ticket.** Test files, test functions, fixtures,
