@@ -1322,15 +1322,10 @@ async def test_call_tool_budget_restarts_after_user_approval(
 
 
 @pytest.mark.asyncio
-async def test_call_tool_cannot_recover_an_approved_call_lost_after_approval(
+async def test_call_tool_does_not_replay_a_consumed_approval(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An approved call whose reply is lost cannot be replayed; the server rejects it.
-
-    The server consumes the elicitation on the first approved request, so a
-    re-send after a gateway drop gets ``Elicitation not found`` instead of the
-    retained result. This known limitation surfaces as a soft error, not a hang.
-    """
+    """A lost approved response must not replay a consumed approval."""
     monkeypatch.setattr(proxy_mcp_manager_mod, "_REATTACH_RETRY_DELAY_S", 0.01)
     elicitation = "elicit_lost_reply"
     registry = McpExecutionRegistry()
@@ -1392,19 +1387,17 @@ async def test_call_tool_cannot_recover_an_approved_call_lost_after_approval(
         await _wait_until_registered(elicitation)
         assert pending_approvals.resolve(elicitation, approved=True)
 
-        result = await task
+        with pytest.raises(RuntimeError, match="Approved MCP call lost its response"):
+            await task
     finally:
         if not task.done():
             task.cancel()
         await client.aclose()
         pending_approvals.reset_for_tests()
 
-    assert json.loads(result) == {"error": "Elicitation not found or already resolved"}
     assert transport.external_invocations == 1, "the approved command must not run twice"
-    assert [call.body["id"] for call in transport.calls] == [1, 2, 3]
-    approved_params, retry_params = [call.body["params"] for call in transport.calls[1:]]
-    assert retry_params == approved_params
-    assert elicitation in retry_params["inputResponses"]
+    assert [call.body["id"] for call in transport.calls] == [1, 2]
+    assert elicitation in transport.calls[1].body["params"]["inputResponses"]
 
 
 @pytest.mark.asyncio

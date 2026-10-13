@@ -420,6 +420,11 @@ class ProxyMcpManager:
             waits for the tunnel to rebind, which advances the server generation.
             """
             nonlocal detached_since
+            if approval_retries:
+                raise RuntimeError(
+                    "Approved MCP call lost its response; replay is unsafe because "
+                    "the server may have consumed the approval"
+                ) from cause
             registry = self._execution_registry
             if registry is None or not registry.has_operation(self._session_id, operation_id):
                 if cause is not None:
