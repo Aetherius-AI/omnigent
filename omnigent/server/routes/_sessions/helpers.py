@@ -5952,14 +5952,8 @@ _detached_supersede_stops: set[asyncio.Task[None]] = set()
 
 
 def relaunch_lock_for(conversation_id: str) -> asyncio.Lock:
-    """
-    Return the per-conversation lock that serializes runner (re)launches.
-
-    The create-time launch-failure rollback takes this same lock before it
-    re-reads the binding and removes the worktree, so a concurrent
-    first-message relaunch cannot rebind a new runner — and have its fresh
-    worktree deleted — between that re-read and the unbind.
-    """
+    """Return the per-conversation lock serializing runner launches, PATCH
+    rebinding, and the launch-failure rollback."""
     return _relaunch_locks.setdefault(conversation_id, asyncio.Lock())
 
 

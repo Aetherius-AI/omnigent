@@ -587,8 +587,13 @@ async def test_inline_create_launch_failure_tolerates_binding_cleanup_error(
     cap = register_worktree_launch_host(launch_status="failed")
     agent = await create_test_agent(client, name="wt-clearerr-agent")
 
+    original_clear = SqlAlchemyConversationStore.clear_host_binding
+
     def _boom(self: SqlAlchemyConversationStore, conversation_id: str) -> Any:
-        raise RuntimeError("transient store error")
+        row = SqlAlchemyConversationStore.get_conversation(self, conversation_id)
+        if row is not None and row.git_branch == "feature/clearerr":
+            raise RuntimeError("transient store error")
+        return original_clear(self, conversation_id)
 
     monkeypatch.setattr(SqlAlchemyConversationStore, "clear_host_binding", _boom)
 
@@ -757,8 +762,16 @@ async def test_inline_create_launch_failure_skips_grant_when_session_vanished(
                     and conv.git_branch == "feature/vanish"
                 ):
                     vanished["done"] = True
-                    # This runs on the to_thread worker, which has no event loop.
-                    asyncio.run(self.delete_conversation(conversation_id))
+                    try:
+                        asyncio.get_running_loop()
+                    except RuntimeError:
+                        # On the to_thread worker, as expected: no running loop here.
+                        asyncio.run(self.delete_conversation(conversation_id))
+                    else:
+                        raise AssertionError(
+                            "vanish hook fired on the event-loop thread; the rollback "
+                            "re-read is expected to run via to_thread"
+                        )
                     return original_get(self, conversation_id)
                 return conv
 
@@ -905,7 +918,7 @@ async def test_inline_create_launch_failure_holds_relaunch_lock_across_rollback(
                     await task
 
 
-@pytest.mark.parametrize("replacement", ["accepted", "rejected"])
+@pytest.mark.parametrize("replacement", ["accepted", "rejected", "cleared"])
 async def test_inline_create_launch_failure_serializes_runner_patch_with_rollback(
     register_worktree_launch_host: RegisterHost,
     client: httpx.AsyncClient,
@@ -913,13 +926,14 @@ async def test_inline_create_launch_failure_serializes_runner_patch_with_rollbac
     monkeypatch: pytest.MonkeyPatch,
     replacement: str,
 ) -> None:
-    """``PATCH /v1/sessions/{id}`` rebinding the runner takes the relaunch lock
-    the rollback holds, from its binding re-read through the rebind, the
-    runner's acceptance check, and any revert. A rebind racing a failed launch
-    therefore waits until the rollback has finished; an accepted replacement
-    then survives the unbind, and a replacement that rejects the session's saved
-    inference profile reverts to the binding the rollback left (none), so the
-    session stays consistently unbound and can be rebound afterwards."""
+    """``PATCH /v1/sessions/{id}`` runner writes take the relaunch lock the
+    rollback holds; a rebind holds it from its binding re-read through the
+    rebind, the runner's acceptance check, and any revert. A PATCH racing a
+    failed launch therefore waits until the rollback has finished: an accepted
+    replacement then survives the unbind, a replacement that rejects the
+    session's saved inference profile reverts to the binding the rollback left
+    (none) so the session can be rebound afterwards, and a runner clear leaves
+    the already-unbound row without a runner."""
     from omnigent.runner.routing import RunnerRouter
     from omnigent.server.routes._sessions import helpers as sessions_helpers
     from omnigent.server.routes.sessions import routes_core
@@ -991,9 +1005,8 @@ async def test_inline_create_launch_failure_serializes_runner_patch_with_rollbac
         failed_runner_id = original_get(store, conv_id).runner_id  # type: ignore[union-attr]
         assert failed_runner_id is not None
 
-        patch = asyncio.create_task(
-            client.patch(f"/v1/sessions/{conv_id}", json={"runner_id": "runner_b"})
-        )
+        patch_body = {"runner_id": "" if replacement == "cleared" else "runner_b"}
+        patch = asyncio.create_task(client.patch(f"/v1/sessions/{conv_id}", json=patch_body))
         # The PATCH reaches the lock the rollback holds, so it cannot finish, and
         # the row still carries the failed launch's runner until the unbind.
         await asyncio.wait_for(patch_at_lock.wait(), timeout=5)
@@ -1018,6 +1031,10 @@ async def test_inline_create_launch_failure_serializes_runner_patch_with_rollbac
         if replacement == "accepted":
             assert patch_resp.status_code == 200, patch_resp.text
             assert conv.runner_id == "runner_b", conv.runner_id
+        elif replacement == "cleared":
+            # The clear waited for the rollback too and left no runner behind.
+            assert patch_resp.status_code == 200, patch_resp.text
+            assert conv.runner_id is None, conv.runner_id
         else:
             # The replacement rejected the saved profile, so PATCH failed and
             # reverted to the binding the rollback left: none, not the failed
@@ -1074,8 +1091,11 @@ async def test_inline_create_launch_failure_tolerates_pre_removal_store_error(
 
         monkeypatch.setattr(SqlAlchemyConversationStore, "get_conversation", _raising_get)
     else:
+        original_shared = SqlAlchemyConversationStore.has_other_live_session_in_workspace
 
         def _shared_boom(self: SqlAlchemyConversationStore, **kwargs: Any) -> bool:
+            if not str(kwargs.get("workspace", "")).endswith(f"feature-{fault}-err"):
+                return original_shared(self, **kwargs)
             raised["done"] = True
             raise RuntimeError("transient store error")
 
@@ -1123,6 +1143,9 @@ async def test_inline_create_launch_failure_reconciles_binding_when_cleanup_read
     original_clear = SqlAlchemyConversationStore.clear_host_binding
 
     def _clear_then_boom(self: SqlAlchemyConversationStore, conversation_id: str) -> Any:
+        row = SqlAlchemyConversationStore.get_conversation(self, conversation_id)
+        if row is None or row.git_branch != "feature/readbackerr":
+            return original_clear(self, conversation_id)
         # Let the real unbind commit, then fail as a post-commit readback would.
         original_clear(self, conversation_id)
         raise RuntimeError("post-commit readback error")

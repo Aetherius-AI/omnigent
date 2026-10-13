@@ -2679,10 +2679,9 @@ def register_core_routes(
                 runner_id = _sf._registered_runner_id(
                     runner_router, body.runner_id, user_id=user_id
                 )
-                # Hold the relaunch lock from the binding re-read through the
-                # rebind, the runner's acceptance check, and any revert, so the
-                # launch-failure rollback and the relaunch never see a half-moved
-                # binding or have a runner they cleared restored behind them.
+                # Hold the relaunch lock across the re-read, rebind, acceptance
+                # check, and revert so the launch-failure rollback and relaunch
+                # never see a half-moved binding or restore a runner they cleared.
                 async with relaunch_lock_for(session_id):
                     fresh = await asyncio.to_thread(
                         conversation_store.get_conversation, session_id
@@ -2715,9 +2714,7 @@ def register_core_routes(
                     # resolve the spec and cache it before the first turn.
                     # This is the design doc's "Server POST /v1/sessions
                     # (to runner)" step from §7 Flow: session creation.
-                    conv = conversation_store.get_conversation(
-                        session_id,
-                    )
+                    conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
                     parent_initialized = False
                     if (
                         _runner_client is not None
