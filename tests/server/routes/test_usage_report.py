@@ -539,8 +539,7 @@ def test_build_usage_report_stale_client_cursor_raises(
 
     assert asyncio.run(store.delete_conversation(newest))
 
-    # A client cursor the client must restart from is not a full-walk restart:
-    # it surfaces as the API's stale_cursor error instead of an empty page.
+    # A deleted client cursor surfaces as StaleCursorError, not an empty page.
     with pytest.raises(StaleCursorError):
         _build_usage_report(store, None, limit=1, after=newest)
 

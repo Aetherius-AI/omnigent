@@ -95,15 +95,17 @@ export function UsagePage() {
   // breakdown fields, so the page filters and aggregates its response itself.
   const legacy = firstPage?.legacy ?? false;
 
-  // Paging on a mutable updated_at can repeat a session across pages; keep its first occurrence.
+  // Paging on a mutable updated_at can repeat a session across pages; keep the
+  // most recently updated copy so an edit between fetches is not lost.
   const allSessions = useMemo(() => {
-    const flat = data?.pages.flatMap((page) => page.sessions) ?? [];
-    const seen = new Set<string>();
-    return flat.filter((session) => {
-      if (seen.has(session.id)) return false;
-      seen.add(session.id);
-      return true;
-    });
+    const byId = new Map<string, SessionUsage>();
+    for (const session of data?.pages.flatMap((page) => page.sessions) ?? []) {
+      const existing = byId.get(session.id);
+      if (!existing || session.updatedAt > existing.updatedAt) {
+        byId.set(session.id, session);
+      }
+    }
+    return [...byId.values()];
   }, [data]);
 
   // A legacy server returns every session unfiltered; narrow to the window here.
@@ -132,16 +134,16 @@ export function UsagePage() {
     };
   }, [legacy, sessions, firstPage]);
 
-  // The daily rollup is the authoritative spend ledger for the window, so the
-  // total stays fixed no matter how many session pages have been loaded. A
-  // legacy server without a windowed rollup falls back to the session sum.
+  // The daily rollup is the authoritative window total, so it stays fixed
+  // regardless of how many session pages are loaded. When the rollup is empty
+  // (lag, or a legacy server), fall back to the loaded session spend.
   const totalCost = useMemo(() => {
     const fromDaily = filteredCosts.reduce((sum, d) => sum + d.costUsd, 0);
-    if (legacy && fromDaily === 0) {
+    if (fromDaily === 0) {
       return sessions.reduce((sum, s) => sum + s.costUsd, 0);
     }
     return fromDaily;
-  }, [filteredCosts, legacy, sessions]);
+  }, [filteredCosts, sessions]);
 
   return (
     <PageScroll>

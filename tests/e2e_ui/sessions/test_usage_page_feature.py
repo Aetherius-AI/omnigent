@@ -308,6 +308,7 @@ def test_pagination_load_more_button_appears_and_loads_next_page(
     """Load More button appears when sessions_has_more is true and fetches next page."""
     _stub_server_info(page, usage_page=True)
     now = int(time.time())
+    today_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     first_page = json.dumps(
         {
@@ -315,7 +316,7 @@ def test_pagination_load_more_button_appears_and_loads_next_page(
             "cost_last_7d": 2.50,
             "cost_last_30d": 2.50,
             "total_cost_usd": 2.50,
-            "daily_costs": [],
+            "daily_costs": [{"day": today_iso, "cost_usd": 2.50}],
             "sessions": [
                 {
                     "id": "conv_page1",
@@ -341,7 +342,7 @@ def test_pagination_load_more_button_appears_and_loads_next_page(
             "cost_last_7d": 2.50,
             "cost_last_30d": 2.50,
             "total_cost_usd": 2.50,
-            "daily_costs": [],
+            "daily_costs": [{"day": today_iso, "cost_usd": 2.50}],
             "sessions": [
                 {
                     "id": "conv_page2",
@@ -389,11 +390,11 @@ def test_pagination_load_more_button_appears_and_loads_next_page(
     total_value = page.get_by_text("Total cost", exact=True).locator(
         "xpath=following-sibling::p[1]"
     )
-    total_before = total_value.inner_text()
+    expect(total_value).to_have_text("$2.50")
 
     load_more_button.click()
     expect(page.get_by_text("Session from page 2")).to_be_visible(timeout=10_000)
     expect(load_more_button).not_to_be_visible()
-    expect(total_value).to_have_text(total_before)
+    expect(total_value).to_have_text("$2.50")
 
     assert request_count == 2

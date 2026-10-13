@@ -251,9 +251,9 @@ def _compute_breakdowns(
     Sum each session's subtree cost by primary harness and by model.
 
     The web Usage page shows harness/model breakdowns for the selected date
-    range, but it now holds only one page of sessions, so these sums are
+    range. The paginated client holds only one session page, so these sums are
     computed server-side in a single pass over the sessions last active within
-    ``[updated_at_min, updated_at_max]`` instead of from the loaded page.
+    ``[updated_at_min, updated_at_max]`` rather than from the loaded page.
     Sessions with no resolved harness are bucketed under ``"Unknown"`` so their
     spend still appears, matching the pre-pagination client charts. A session
     deleted mid-walk invalidates the page cursor; the whole walk restarts (via
@@ -325,8 +325,7 @@ def _build_usage_report(
     The harness and model breakdowns for the selected range ride only the first
     page of a report built for the release-gated web Usage page; they are
     computed by a single server-side pass (:func:`_compute_breakdowns`) over the
-    in-range sessions because the page no longer holds them all to sum
-    client-side.
+    in-range sessions, which the paginated client cannot sum from its one page.
 
     :param conversation_store: Store to read the rollup and sessions from.
     :param user_id: The caller / ACL scope. ``None`` in single-user mode maps
@@ -363,11 +362,8 @@ def _build_usage_report(
     for conv in rows:
         if conv.agent_id is None:
             continue
-        # The list page already holds each row, so pass its root to skip
-        # re-reading the same conversation once per listed session. Sums and
-        # rows come from ONE tree load: the harness roll-up below needs the
-        # same tree the sums came from, and loading it again doubled the tree
-        # pages read for every listed session.
+        # Pass the already-listed root so one tree load serves both the session
+        # cost sum and the other-harness roll-up below.
         usage, tree = load_session_usage_and_tree(
             conv.id,
             conversation_store,

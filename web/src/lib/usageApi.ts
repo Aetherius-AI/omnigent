@@ -92,10 +92,10 @@ export interface FetchUsageReportParams {
 
 export async function fetchUsageReport(params?: FetchUsageReportParams): Promise<UsageReport> {
   const searchParams = new URLSearchParams();
-  if (params?.limit) searchParams.set("limit", String(params.limit));
-  if (params?.after) searchParams.set("after", params.after);
-  if (params?.since) searchParams.set("since", params.since);
-  if (params?.until) searchParams.set("until", params.until);
+  if (params?.limit != null) searchParams.set("limit", String(params.limit));
+  if (params?.after != null) searchParams.set("after", params.after);
+  if (params?.since != null) searchParams.set("since", params.since);
+  if (params?.until != null) searchParams.set("until", params.until);
   const query = searchParams.toString();
   const url = query ? `/v1/usage?${query}` : "/v1/usage";
 
@@ -141,10 +141,8 @@ export async function fetchUsageReport(params?: FetchUsageReportParams): Promise
 }
 
 // ── Legacy-response aggregation ─────────────────────────────────
-// A pre-pagination server returns every session without breakdown maps. These
-// mirror the server's first-page aggregation so a new client still charts spend
-// against an older server. Sessions without a resolved harness bucket under
-// "Unknown" so their spend still appears.
+// Mirrors the server's first-page aggregation for pre-pagination servers;
+// sessions without a resolved harness bucket under "Unknown".
 
 export function aggregateHarnessBreakdown(sessions: SessionUsage[]): Record<string, number> {
   const breakdown: Record<string, number> = {};

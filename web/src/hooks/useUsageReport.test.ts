@@ -26,9 +26,10 @@ function makeReport(overrides: Partial<UsageReport>): UsageReport {
   };
 }
 
-function wrapper({ children }: { children: ReactNode }) {
+function createWrapper() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return createElement(QueryClientProvider, { client }, children);
+  return ({ children }: { children: ReactNode }) =>
+    createElement(QueryClientProvider, { client }, children);
 }
 
 afterEach(() => {
@@ -42,7 +43,9 @@ describe("useUsageReport", () => {
       return makeReport({ sessionsHasMore: true, sessionsLastId: "conv_1" });
     });
 
-    const { result } = renderHook(() => useUsageReport(null, null), { wrapper });
+    const { result } = renderHook(() => useUsageReport(null, null), {
+      wrapper: createWrapper(),
+    });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.hasNextPage).toBe(true);
@@ -57,6 +60,13 @@ describe("useUsageReport", () => {
       expect(result.current.isError).toBe(false);
       expect(result.current.data?.pages).toHaveLength(1);
     });
-    expect(fetchSpy.mock.calls.some(([params]) => params?.after === "conv_1")).toBe(true);
+
+    // A fresh cursorless fetch must follow the stale next-page attempt, proving
+    // the reset re-requested page one rather than only reusing cached data.
+    const staleIndex = fetchSpy.mock.calls.findIndex(([params]) => params?.after === "conv_1");
+    expect(staleIndex).toBeGreaterThanOrEqual(0);
+    expect(
+      fetchSpy.mock.calls.slice(staleIndex + 1).some(([params]) => params?.after == null),
+    ).toBe(true);
   });
 });
