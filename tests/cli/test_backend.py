@@ -3403,6 +3403,52 @@ def test_databricks_preflight_non_interactive_overrides_tty(
     assert login_calls == []
 
 
+def test_host_with_launch_token_skips_user_preflight(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A launch-token host connects without the user sign-in preflight.
+
+    Server-managed sandboxes authenticate the tunnel with ``OMNIGENT_HOST_TOKEN``
+    alone and hold no user credentials, so a Databricks-fronted server's
+    sign-in redirect on the unauthenticated probe must not abort the start.
+    """
+    import httpx
+
+    monkeypatch.setenv("OMNIGENT_HOST_TOKEN", "launch-token")
+    monkeypatch.setattr(cli, "_workspace_api_server_url", lambda server: server.rstrip("/"))
+    user_credential_lookups: list[str | None] = []
+
+    def _spy_remote_headers(
+        server_url: str | None = None,
+        *,
+        host_id: str | None = None,
+        org_id: str | None = None,
+    ) -> dict[str, str]:
+        user_credential_lookups.append(server_url)
+        return {}
+
+    monkeypatch.setattr("omnigent.chat._remote_headers", _spy_remote_headers)
+    monkeypatch.setattr(httpx, "get", lambda url, **kw: _databricks_probe_response(302))
+    # A credential-less sandbox resolves no workspace token.
+    monkeypatch.setattr(cli, "_databricks_workspace_auth_info", lambda workspace: None)
+    login_calls: list[str] = []
+    monkeypatch.setattr(
+        cli, "_databricks_login", lambda server, *args, **kwargs: login_calls.append(server)
+    )
+    connected = _patch_foreground_host(monkeypatch, tmp_path)
+
+    result = CliRunner().invoke(cli_group, ["host", _HOST_DATABRICKS_SERVER, "--non-interactive"])
+
+    assert result.exit_code == 0, (
+        "launch-token host start aborted at the user preflight "
+        f"(user credential lookups: {user_credential_lookups}):\n{result.output}"
+    )
+    # The launch token is the tunnel credential: no user credential is looked up.
+    assert user_credential_lookups == []
+    assert connected == [_HOST_DATABRICKS_SERVER]
+    assert login_calls == []
+
+
 def _patch_rejected_credential_preflight(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -3710,6 +3756,45 @@ def test_host_remote_preflight_skips_when_authenticated(
     assert result.exit_code == 0, result.output
     assert login_calls == []
     assert connected == [_HOST_DATABRICKS_SERVER]
+
+
+@pytest.mark.parametrize(
+    "entry_point", [["host", "--background"], ["start"]], ids=["host-background", "start"]
+)
+@pytest.mark.parametrize(
+    ("launch_token", "expected_preflight"),
+    [(None, [(_HOST_DATABRICKS_SERVER, True)]), ("launch-token", [])],
+    ids=["user-host", "launch-token-host"],
+)
+def test_background_host_preflight_follows_launch_token(
+    monkeypatch: pytest.MonkeyPatch,
+    entry_point: list[str],
+    launch_token: str | None,
+    expected_preflight: list[tuple[str, bool]],
+) -> None:
+    """The detached entry points run the sign-in pre-flight only for a user-credentialed host.
+
+    ``host --background`` and ``start`` authenticate in the foreground before
+    spawning the daemon; a launch-token host has no user credential to
+    establish and spawns at once.
+    """
+    if launch_token is not None:
+        monkeypatch.setenv("OMNIGENT_HOST_TOKEN", launch_token)
+    preflight = _capture_preflight(monkeypatch)
+    monkeypatch.setattr(cli, "_load_effective_config", dict)
+    spawned: list[str | None] = []
+    monkeypatch.setattr(cli, "_ensure_host_daemon", lambda server: spawned.append(server))
+    # The registry already holds this target's daemon, so the spawn reports a reuse.
+    monkeypatch.setattr(cli, "_find_daemon_record", _server_record)
+    monkeypatch.setattr(cli, "_confirm_background_host_registered", lambda record: None)
+
+    result = CliRunner().invoke(
+        cli_group, [*entry_point, "--server", _HOST_DATABRICKS_SERVER, "--non-interactive"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert preflight == expected_preflight
+    assert spawned == [_HOST_DATABRICKS_SERVER]
 
 
 # ── Workspace-URL expansion for attach / resume / host ──────────────
