@@ -1657,8 +1657,12 @@ async def test_error_step_after_approved_run_command_still_fails_turn(
 
 @pytest.mark.parametrize(
     "unrelated_error",
-    ["model exploded", "run_command failed: permission denied"],
-    ids=["plain", "mentions-denied-and-tool"],
+    [
+        "model exploded",
+        "run_command failed: permission denied",
+        'Denied by policy "workspace_only". ("denied by pre-tool hook: ...")',
+    ],
+    ids=["plain", "mentions-denied-and-tool", "other-hook-denial"],
 )
 @pytest.mark.asyncio
 async def test_unrelated_error_after_denied_run_command_still_fails_turn(

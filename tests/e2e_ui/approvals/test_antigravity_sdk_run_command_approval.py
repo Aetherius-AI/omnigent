@@ -428,7 +428,10 @@ def _run_journey(
         f"{result['transcript_errors']!r}; run_command results relayed to the model: "
         f"{result['run_command_outcomes']!r}"
     )
-    assert "run_command" in result["card_text"], result["card_text"]
+    # The card must show the full proposed command and its working directory before any decision.
+    card_text = result["card_text"]
+    assert "run_command" in card_text, card_text
+    assert f"touch {marker} && ls" in card_text and host["workspace"] in card_text, card_text
     return result
 
 

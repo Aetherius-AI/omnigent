@@ -311,7 +311,7 @@ def _is_denial_report(text: str) -> bool:
     """Whether *text* is the harness reporting a policy refusal, e.g.
     ``Denied by user (confirm_run_command). ("denied by pre-tool hook: ...")``."""
     lowered = text.lower()
-    return "denied" in lowered and ("pre-tool hook" in lowered or "confirm_run_command" in lowered)
+    return "denied" in lowered and "confirm_run_command" in lowered
 
 
 @dataclass
@@ -807,7 +807,7 @@ class AntigravityExecutor(Executor):
         queue = state.active_queue
         if queue is None or not state.denied_tools:
             return False
-        reported = getattr(step, "error", "") or getattr(step, "content_delta", "") or ""
+        reported = str(getattr(step, "error", "") or getattr(step, "content_delta", "") or "")
         if not _is_denial_report(reported):
             return False
         raw_id = getattr(step, "id", None)
@@ -1060,6 +1060,8 @@ class AntigravityExecutor(Executor):
             name = _tool_name(getattr(tool_call, "name", None)) or "run_command"
             raw_args = getattr(tool_call, "args", None)
             args: ToolArgs = dict(raw_args) if isinstance(raw_args, dict) else {}
+            # Lead with the command and cwd so the approval card's bounded preview shows them.
+            args = {key: args[key] for key in ("CommandLine", "Cwd") if key in args} | args
             handler = self._elicitation_handler
             if handler is None:
                 logger.warning(
