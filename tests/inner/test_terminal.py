@@ -3583,6 +3583,47 @@ def test_socket_recovery_refuses_a_preclaimed_symlink(
     assert killed == []
 
 
+def test_socket_recovery_refuses_a_symlink_swapped_in_before_the_fd_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dir swapped to a symlink mid-recovery is never followed for a write.
+
+    Models the shared-``/tmp`` replacement race: the reaped name is a real
+    entry when recovery starts but becomes a symlink to a victim directory
+    before recovery opens it. The ``O_NOFOLLOW`` open must refuse it so neither
+    the chmod nor the owner-claim write lands in the victim.
+    """
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    os.chmod(victim, 0o755)
+    (victim / "owner.pid").write_text("attacker")
+    private_dir = tmp_path / "omnigent-terminal-swap"
+    instance = TerminalInstance(
+        name="runtime",
+        session_key="main",
+        socket_path=private_dir / "tmux.sock",
+        private_dir=private_dir,
+        running=True,
+    )
+    instance._tmux_server_pid = os.getpid()
+    monkeypatch.setattr(instance, "_tmux_server_process_alive", lambda: True)
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(terminal_mod.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+
+    def mkdir_then_swap(path: str, mode: int = 0o777) -> NoReturn:
+        # The attacker wins the race: the name becomes a symlink to the victim
+        # between recovery's mkdir and its O_NOFOLLOW open.
+        os.symlink(victim, path, target_is_directory=True)
+        raise FileExistsError(path)
+
+    monkeypatch.setattr(terminal_mod.os, "mkdir", mkdir_then_swap)
+
+    assert instance._recover_private_socket() is False
+    assert stat.S_IMODE(victim.stat().st_mode) == 0o755
+    assert (victim / "owner.pid").read_text() == "attacker"
+    assert killed == []
+
+
 def test_socket_recovery_rejects_a_recycled_server_pid(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3718,12 +3759,9 @@ def test_socket_recovery_refuses_an_unreadable_server_identity(
 def test_concurrent_recovery_joins_one_attempt_without_a_false_exit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Two callers racing the same reaped socket both wait on one recovery.
-
-    Regression for a second caller hitting ``FileExistsError`` on the first
-    caller's freshly created dir and reporting a false exit while the server
-    and its pane are still alive.
-    """
+    """Concurrent callers share one recovery attempt and both observe the
+    restored socket, so a second caller never treats the first's fresh dir as
+    a failure and reports a false exit while the server and pane stay alive."""
     private_dir = tmp_path / "omnigent-terminal-race"
     socket_path = private_dir / "tmux.sock"
     instance = TerminalInstance(
@@ -3759,6 +3797,7 @@ def test_concurrent_recovery_joins_one_attempt_without_a_false_exit(
 
     assert results == {"a": True, "b": True}
     assert socket_path.exists()
+    assert killed == [(os.getpid(), terminal_mod.signal.SIGUSR1)]
 
 
 @pytest.mark.asyncio

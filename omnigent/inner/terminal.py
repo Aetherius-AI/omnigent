@@ -2662,22 +2662,27 @@ class TerminalInstance:
             return False
         return True
 
-    async def _tmux(self, *args: str) -> None:
-        """Run a tmux command against this instance's server."""
+    async def _run_tmux(self, args: tuple[str, ...], *, capture: bool) -> str | None:
+        """Run a tmux command, recovering a reaped private socket once.
+
+        Shared async body for :meth:`_tmux` and :meth:`_tmux_output` so the
+        missing-socket retry policy lives in one place. Returns decoded stdout
+        when ``capture`` is set, otherwise ``None``.
+        """
         cmd = [*self._tmux_base_cmd(), *args]
         recovery_attempted = False
         while True:
             try:
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
-                    stdout=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE if capture else asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.PIPE,
                 )
             except OSError as exc:
                 raise _tmux_process_start_error(cmd, exc) from exc
-            _, stderr = await proc.communicate()
+            stdout, stderr = await proc.communicate()
             if proc.returncode == 0:
-                return
+                return stdout.decode() if capture else None
             error = _tmux_command_failed_error(cmd, proc.returncode, stderr)
             if (
                 not recovery_attempted
@@ -2688,31 +2693,13 @@ class TerminalInstance:
                 continue
             raise error
 
+    async def _tmux(self, *args: str) -> None:
+        """Run a tmux command against this instance's server."""
+        await self._run_tmux(args, capture=False)
+
     async def _tmux_output(self, *args: str) -> str:
         """Run a tmux command and return stdout."""
-        cmd = [*self._tmux_base_cmd(), *args]
-        recovery_attempted = False
-        while True:
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-            except OSError as exc:
-                raise _tmux_process_start_error(cmd, exc) from exc
-            stdout, stderr = await proc.communicate()
-            if proc.returncode == 0:
-                return stdout.decode()
-            error = _tmux_command_failed_error(cmd, proc.returncode, stderr)
-            if (
-                not recovery_attempted
-                and _tmux_reports_socket_missing(error.detail)
-                and await self._recover_private_socket_async()
-            ):
-                recovery_attempted = True
-                continue
-            raise error
+        return cast(str, await self._run_tmux(args, capture=True))
 
     def _tmux_output_sync(self, *args: str) -> str:
         """
@@ -2754,22 +2741,30 @@ class TerminalInstance:
             raise error
 
     def _record_tmux_server_identity(self, launch_output: bytes) -> None:
-        """Record the private tmux server's pid from the launch output.
+        """Record server identity; disable recovery when it cannot be verified.
 
-        ``launch`` appends ``display-message -p '#{pid}'`` to its command
-        sequence so the server pid returns on stdout without a second tmux
-        round-trip. Capturing it (with its start time, so a recycled pid is
-        never signalled) lets a reaped socket be recreated via SIGUSR1 later.
-        Best-effort: recovery simply stays disabled if the pid is unavailable.
+        ``launch`` appends ``display-message -p '#{pid}'`` so the server pid is
+        the last token on stdout. Capturing it with its start time (so a
+        recycled pid is never signalled) lets a reaped socket be recreated via
+        SIGUSR1 later.
         """
-        with contextlib.suppress(ValueError, IndexError):
-            pid = int(launch_output.decode(errors="replace").split()[0])
-            # Store pid and start time together, or neither: recovery stays
-            # disabled unless both are known so SIGUSR1 never hits a recycled pid.
-            with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied, OSError):
-                create_time = psutil.Process(pid).create_time()
-                self._tmux_server_pid = pid
-                self._tmux_server_create_time = create_time
+        text = launch_output.decode(errors="replace")
+        try:
+            # The pid is the final token: display-message is appended last, so a
+            # stray earlier line can never shift it.
+            pid = int(text.split()[-1])
+            create_time = psutil.Process(pid).create_time()
+        except (ValueError, IndexError, psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+            logger.debug(
+                "Could not record tmux server identity for terminal %s:%s; "
+                "reaped-socket recovery stays disabled",
+                self.name,
+                self.session_key,
+            )
+            return
+        # Store pid and start time together so SIGUSR1 never hits a recycled pid.
+        self._tmux_server_pid = pid
+        self._tmux_server_create_time = create_time
 
     def _tmux_server_process_alive(self) -> bool:
         """Whether the recorded private tmux server process is still running.
@@ -2798,6 +2793,9 @@ class TerminalInstance:
         sees the socket an earlier one restored instead of racing to recreate
         the private dir and reporting a false exit for a server still alive.
 
+        Restores the private tmux socket only; clipboard-bridge files removed
+        with the directory are not recreated.
+
         :returns: ``True`` when the socket is present again (already there, or
             the recorded server recreated it after SIGUSR1); ``False`` when
             there is no live server to recover or the socket never returned.
@@ -2808,20 +2806,25 @@ class TerminalInstance:
             if not self._tmux_server_process_alive():
                 return False
             try:
-                # Reuse the dir when a per-file sweep reaped only the socket,
-                # but never follow a symlink or adopt another user's dir left
-                # at the predictable name on a shared /tmp.
-                if self.private_dir.is_symlink():
-                    return False
-                if self.private_dir.is_dir():
-                    if os.stat(self.private_dir).st_uid != os.geteuid():
-                        return False
-                else:
+                # Reuse the dir when a per-file sweep reaped only the socket.
+                # mkdir never follows a symlink and fails on an existing name,
+                # so a planted symlink cannot capture a freshly created dir.
+                with contextlib.suppress(FileExistsError):
                     os.mkdir(self.private_dir, 0o700)
-                os.chmod(self.private_dir, 0o700)
-                # The orphan sweep qualifies ownership from this file; the
-                # cleaner removed it with the dir, so re-establish it.
-                owner_claim.write_owner_claim(self.private_dir)
+                # Operate through an O_NOFOLLOW descriptor so a symlink swapped
+                # in at this predictable name on a shared /tmp can never
+                # redirect the ownership check, chmod, or owner-claim write into
+                # a victim-owned directory.
+                dir_fd = os.open(self.private_dir, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY)
+                try:
+                    if os.fstat(dir_fd).st_uid != os.geteuid():
+                        return False
+                    os.fchmod(dir_fd, 0o700)
+                    # The orphan sweep qualifies ownership from this file; the
+                    # cleaner removed it with the dir, so re-establish it.
+                    owner_claim.write_owner_claim(self.private_dir, dir_fd=dir_fd)
+                finally:
+                    os.close(dir_fd)
                 # Re-confirm identity just before signalling so a pid recycled
                 # during recovery is rejected by its start time, not signalled.
                 if not self._tmux_server_process_alive():

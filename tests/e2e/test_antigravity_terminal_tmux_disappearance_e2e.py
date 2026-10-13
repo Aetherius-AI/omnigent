@@ -24,6 +24,7 @@ import pytest
 import omnigent.inner.terminal as terminal_mod
 from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec, TerminalEnvSpec
 from omnigent.inner.terminal import TerminalInstance
+from omnigent.native import owner_claim
 from omnigent.runner import create_runner_app
 from omnigent.runner.resource_registry import SessionResourceRegistry
 from omnigent.terminals import TerminalRegistry
@@ -113,6 +114,11 @@ def test_reaped_private_socket_is_recovered_while_the_server_lives(
             assert healthy_tick.wait(_TIMEOUT_S), "watcher did not resume after recovery"
             pane = terminal._tmux_output_sync("capture-pane", "-p", "-t", terminal.tmux_target)
             assert "ready" in pane, pane
+            # Recovery restored the private dir with locked-down perms and a
+            # fresh owner claim for the orphan sweep, not just the socket.
+            assert stat.S_IMODE(terminal.private_dir.stat().st_mode) == 0o700
+            claim = owner_claim.read_owner_claim(terminal.private_dir)
+            assert claim is not None and claim.pid == os.getpid()
         finally:
             terminal._stop_idle_watcher_thread()
     assert any(_RECOVERY_SIGNATURE in record.getMessage() for record in caplog.records)
