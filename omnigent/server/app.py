@@ -3637,6 +3637,7 @@ def create_app(
             # Never lose the crash event to a failed session lookup.
             log_runner_exited(host_id, runner_id, error)
             raise
+        runner_ran = runner_ran or any(conv.runner_has_connected for conv in affected)
         # One row per bound session so every crash is attributable; a runner
         # with no bound session still gets a session-less row.
         for session_id in [conv.id for conv in affected] or [None]:

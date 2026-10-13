@@ -7076,6 +7076,33 @@ def test_list_conversations_archived_only_returns_only_archived(
     assert active.id not in ids
 
 
+def test_runner_connection_history_tracks_the_binding(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    conv = conversation_store.create_conversation(runner_id="runner-old")
+    conversation_store.touch_runner_liveness(["runner-old"], now=1)
+    conversation_store.clear_runner_liveness("runner-old")
+    offline = conversation_store.get_conversation(conv.id)
+    assert offline is not None
+    assert offline.runner_last_seen is None
+    assert offline.runner_has_connected
+    assert offline.updated_at == conv.updated_at
+
+    conversation_store.clear_runner_id(conv.id)
+    assert conversation_store.set_runner_id(conv.id, "runner-new")
+    conversation_store.touch_runner_liveness(["runner-old"], now=2)
+    rebound = conversation_store.get_conversation(conv.id)
+    assert rebound is not None
+    assert not rebound.runner_has_connected
+    assert rebound.runner_connected_id == "runner-old"
+
+    conversation_store.touch_runner_liveness(["runner-new"], now=3)
+    connected = conversation_store.get_conversation(conv.id)
+    assert connected is not None and connected.runner_has_connected
+    assert connected.runner_connected_id == "runner-new"
+    assert connected.runner_last_seen == 3
+
+
 def test_live_state_columns_round_trip_without_bumping_updated_at(
     conversation_store: SqlAlchemyConversationStore,
 ) -> None:

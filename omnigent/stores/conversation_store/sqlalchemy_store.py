@@ -265,6 +265,7 @@ def _to_conversation(
         ),
         pending_elicitation_count=meta.pending_elicitation_count if meta else None,
         runner_last_seen=meta.runner_last_seen if meta else None,
+        runner_connected_id=meta.runner_connected_id if meta else None,
         project_id=meta.project_id if meta else None,
     )
 
@@ -3747,7 +3748,9 @@ class SqlAlchemyConversationStore(ConversationStore):
                     SqlConversationMetadata.workspace_id == current_workspace_id(),
                     SqlConversationMetadata.runner_id.in_(runner_ids),
                 )
-                .values(runner_last_seen=now)
+                .values(
+                    runner_last_seen=now, runner_connected_id=SqlConversationMetadata.runner_id
+                )
             )
 
         run_write_transaction(self._session_immediate, "touch_runner_liveness", write)

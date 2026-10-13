@@ -1950,7 +1950,7 @@ def _persisted_task_error(
     return sessions_module._last_task_error_from_labels(refreshed.labels)
 
 
-@pytest.mark.parametrize("connection_source", ["replica", "host"])
+@pytest.mark.parametrize("connection_source", ["replica", "host", "persisted"])
 async def test_runner_exited_after_connect_keeps_idle_session_idle(
     db_uri: str,
     tmp_path: Path,
@@ -1975,6 +1975,10 @@ async def test_runner_exited_after_connect_keeps_idle_session_idle(
     conv_store.set_session_live_status(conv.id, "idle")
     if connection_source == "replica":
         session_live_state.touch_runner_liveness(["runner_ran_idle"])
+    elif connection_source == "persisted":
+        conv_store.touch_runner_liveness(["runner_ran_idle"], now=1)
+        conv_store.clear_runner_liveness("runner_ran_idle")
+        assert session_live_state.last_liveness_stamp("runner_ran_idle") is None
     else:
         assert session_live_state.last_liveness_stamp("runner_ran_idle") is None
 
@@ -2039,7 +2043,7 @@ async def test_runner_exited_before_connect_fails_idle_session(
     assert getattr(failed[0], "attributes", {})["code"] == "runner_failed_to_start"
 
 
-@pytest.mark.parametrize("connection_source", ["replica", "host"])
+@pytest.mark.parametrize("connection_source", ["replica", "host", "persisted"])
 async def test_runner_exited_after_connect_fails_mid_turn_session(
     db_uri: str,
     tmp_path: Path,
@@ -2059,6 +2063,10 @@ async def test_runner_exited_after_connect_fails_mid_turn_session(
     conv_store.set_session_live_status(conv.id, "running")
     if connection_source == "replica":
         session_live_state.touch_runner_liveness(["runner_ran_mid_turn"])
+    elif connection_source == "persisted":
+        conv_store.touch_runner_liveness(["runner_ran_mid_turn"], now=1)
+        conv_store.clear_runner_liveness("runner_ran_mid_turn")
+        assert session_live_state.last_liveness_stamp("runner_ran_mid_turn") is None
     else:
         assert session_live_state.last_liveness_stamp("runner_ran_mid_turn") is None
 

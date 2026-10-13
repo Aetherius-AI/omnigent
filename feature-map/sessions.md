@@ -373,6 +373,12 @@ plain `uv run pytest`, which starts a private server for the test.
   stays on the original replica, then kills that owned runner. Reloaded API
   snapshots keep completed work idle; interrupted work and runners that never
   connected still fail. The OpenAI Agents harness uses local scripted replies.
+- **`reconnect`, idle exit after server restart (own environment):**
+  `tests/e2e/test_runner_connection_history_e2e.py::test_idle_runner_exit_keeps_connection_history_after_restart`
+  waits for a real runner heartbeat, stops the owned runner, restarts the server,
+  and reports the exit through a host tunnel without connection-history hints.
+  Reloaded API state stays idle and offline without an error. Store and snapshot
+  component tests cover replacement bindings and interrupted work.
 - **`reconnect`, idle replica handoff (own environment):**
   `tests/e2e_ui/sessions/test_idle_runner_handoff.py::test_idle_session_stays_healthy_after_unreadable_replica_handoff`
   moves a real runner between two servers sharing storage, then makes the old
