@@ -290,6 +290,7 @@ export function MonacoDiffViewer({
       readOnly: true, // modified side: view + select + comment, no editing
       originalEditable: false,
       // Bound expensive character refinement; Monaco returns coarser hunks on timeout.
+      // Covered by test_large_diff_has_bounded_computation's budget assertion.
       maxComputationTime: 1000,
       renderSideBySide: layout === "split",
       // Below `renderSideBySideInlineBreakpoint` (900px) Monaco collapses
