@@ -2458,11 +2458,8 @@ async def test_fork_of_copy_needing_agent_with_pruned_bundle_is_not_internal_err
 ) -> None:
     """A copy-needing fork whose source agent bundle blob is gone must not 500.
 
-    ``agent_needs_own_copy`` is True both for a legacy session agent whose
-    ``created_by`` was never backfilled (``None`` != the owner) and for a
-    cross-user fork, so each must copy the bundle. When that blob has been
-    pruned, ``copy_agent_bundle``'s ``get()`` raises ``KeyError`` outside the
-    fork's try/except and escapes as an uncaught ``internal_error`` 500.
+    A legacy session agent with no recorded owner and a cross-user fork both
+    need their own copy of the bundle, so both read the missing blob.
     """
     agent_id = "30f9aa4d441e344d3eb273f8cc13e4a5"
     location = f"{agent_id}/e70dc208"
