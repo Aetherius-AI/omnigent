@@ -335,9 +335,9 @@ def _wait_for_prompt_ready(
     child: Any,
     timeout: float = 30.0,
     welcome_pattern: str = "ask.demo",
-) -> None:
+) -> str:
     """
-    Wait until the REPL is ready for input.
+    Wait until the REPL is ready for input and return its local server URL.
 
     ``omnigent chat <path>`` starts a local server, waits for
     health, then launches the REPL. The welcome block
@@ -361,13 +361,19 @@ def _wait_for_prompt_ready(
         welcome block. Defaults to ``"ask.demo"`` (for the
         ``ask-demo`` fixture); pass a different pattern for
         other fixtures.
+    :returns: The local server URL printed in the banner, e.g.
+        ``"http://127.0.0.1:6767"``, for tests that act as a
+        second client.
     """
     child.expect(welcome_pattern, timeout=timeout)
+    child.expect(r"http://127\.0\.0\.1:\d+", timeout=timeout)
+    server_url = _strip_ansi(child.after).strip()
     # The banner is not input-readiness. Wait for the status
     # toolbar's ``· ready`` (idle ``state: sleeping``) marker
     # so the next send() lands in prompt_toolkit's live loop
     # instead of racing ahead of it.
     child.expect(r"·\s*ready", timeout=timeout)
+    return server_url
 
 
 def _wait_for_turn_complete(child: Any, timeout: float = 45.0) -> None:
@@ -1731,15 +1737,6 @@ def test_repl_subagent_tool_call_ask_does_not_tunnel_banner_to_root(
             child.terminate(force=True)
 
 
-def _wait_ready_capture_server_url(child: Any, timeout: float) -> str:
-    """Wait for an input-ready REPL and return the local server URL from the banner."""
-    child.expect("ask.demo", timeout=timeout)
-    child.expect(r"http://127\.0\.0\.1:\d+", timeout=timeout)
-    server_url = _strip_ansi(child.after).strip()
-    child.expect(r"·\s*ready", timeout=timeout)
-    return server_url
-
-
 def _decline_from_another_client(
     http: httpx.Client, session_id: str, elicitation_id: str
 ) -> httpx.Response:
@@ -1777,7 +1774,7 @@ def test_repl_ignores_unrelated_elicitation_resolved(
         timeout=_LAUNCH_TIMEOUT,
     )
     try:
-        server_url = _wait_ready_capture_server_url(child, timeout=_LAUNCH_TIMEOUT)
+        server_url = _wait_for_prompt_ready(child, timeout=_LAUNCH_TIMEOUT)
         with httpx.Client(base_url=server_url, trust_env=False, timeout=10.0) as http:
             sessions = http.get("/v1/sessions", params={"visibility": "all"})
             session_id = sessions.json()["data"][0]["id"]
@@ -1803,32 +1800,24 @@ def test_repl_ignores_unrelated_elicitation_resolved(
 
             requests_before = len(get_mock_requests(mock_llm_server_url))
 
-            # Another client resolves the DIFFERENT, prior elicitation.
+            # Another client resolves the DIFFERENT, prior elicitation, then
+            # declines the pending card itself. The stream preserves that
+            # order, so the first "› …" settlement line names the event that
+            # released the gate.
             resolve = _decline_from_another_client(http, session_id, prior_elicitation_id)
             assert resolve.status_code == 202, resolve.text
-
-            # Any "› …" transcript line here would be the REPL settling the
-            # gate without the user's verdict.
-            released = child.expect(["›", pexpect.TIMEOUT], timeout=15) == 0
-            tail = _read_pending(child, seconds=1.0)
-            assert not released, (
-                "Pending policy ASK was settled by an unrelated elicitation_resolved "
-                f"event; the REPL released the gate without a user verdict.\n"
-                f"Buffer snippet:\n{tail[:800]}"
-            )
-            assert len(get_mock_requests(mock_llm_server_url)) == requests_before, (
-                "Gated turn reached the LLM after an unrelated elicitation was "
-                "resolved — the pending ASK was auto-approved without a verdict."
-            )
-
-            # Declining the pending card itself from another client releases
-            # the gate with that refusal rather than an approval.
             resolve = _decline_from_another_client(http, session_id, pending_elicitation_id)
             assert resolve.status_code == 202, resolve.text
-            child.expect("declined elsewhere", timeout=15)
+
+            child.expect(r"› ([^\r\n]*)\r?\n", timeout=15)
+            settlement = _strip_ansi(child.match.group(1)).strip()
+            assert settlement.startswith("declined elsewhere"), (
+                "Pending policy ASK was settled by the unrelated elicitation_resolved "
+                f"event instead of its own decline; first settlement line: {settlement!r}"
+            )
             child.expect(r"Denied by policy", timeout=15)
             assert len(get_mock_requests(mock_llm_server_url)) == requests_before, (
-                "Gated turn reached the LLM after its elicitation was declined elsewhere."
+                "Gated turn reached the LLM — the pending ASK was approved without a user verdict."
             )
     finally:
         try:
