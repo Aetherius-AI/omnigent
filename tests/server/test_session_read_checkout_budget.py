@@ -58,9 +58,13 @@ def meter_engine(engine: Engine, monkeypatch: pytest.MonkeyPatch) -> Iterator[Ch
         event.remove(engine, "checkout", _on_checkout)
 
 
-async def _create_session(client: httpx.AsyncClient) -> str:
+async def _create_session(client: httpx.AsyncClient, title: str | None = None) -> str:
     response = await post_session_bundle(
-        client.post, "/v1/sessions", build_agent_bundle(name="hello_world"), headers=OWNER
+        client.post,
+        "/v1/sessions",
+        build_agent_bundle(name="hello_world"),
+        metadata={"title": title} if title else None,
+        headers=OWNER,
     )
     assert response.status_code == 201, response.text
     return response.json()["session_id"]
@@ -115,6 +119,23 @@ async def test_session_sidebar_list_costs_one_checkout(
 ) -> None:
     session_id = await _create_session(auth_client)
     request = f"/v1/sessions?{SIDEBAR_QUERY}"
+
+    with meter_engine(get_or_create_engine(db_uri), monkeypatch) as meter:
+        response = await auth_client.get(request, headers=OWNER)
+
+    assert response.status_code == 200, response.text
+    assert [row["id"] for row in response.json()["data"]] == [session_id]
+    _assert_one_checkout(meter, f"GET {request}")
+
+
+@pytest.mark.asyncio
+async def test_session_sidebar_search_costs_one_checkout(
+    auth_client: httpx.AsyncClient, db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sidebar search shares the checkout too, including the Postgres statement timeout."""
+    session_id = await _create_session(auth_client, title="budget search target")
+    await _create_session(auth_client, title="unrelated")
+    request = f"/v1/sessions?{SIDEBAR_QUERY}&search_query=budget"
 
     with meter_engine(get_or_create_engine(db_uri), monkeypatch) as meter:
         response = await auth_client.get(request, headers=OWNER)

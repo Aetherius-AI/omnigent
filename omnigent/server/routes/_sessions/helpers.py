@@ -8750,11 +8750,9 @@ def _load_agent_spec_for_session_impl(
     agent_store: AgentStore,
     agent: Agent | None = None,
 ) -> AgentSpec | None:
-    # Split from _build_policy_engine_from_spec so the caller can run the
-    # cheap guardrails/default-policy skip check between the two and avoid
-    # paying for engine construction when no policy could fire. Both halves
-    # are blocking DB/IO, so each is run under asyncio.to_thread. A caller
-    # that already holds conv's agent row passes it to skip the store read.
+    # Split from _build_policy_engine_from_spec so callers can skip engine
+    # construction when no policy could fire; both halves run in to_thread.
+    # A caller already holding conv's agent row passes it to skip the store read.
     if conv.agent_id is None:
         return None
     if agent is None or agent.id != conv.agent_id:
