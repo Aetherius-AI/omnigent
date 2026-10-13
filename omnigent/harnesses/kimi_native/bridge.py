@@ -651,13 +651,13 @@ def _normalized_contains(content: str, expected: str) -> bool:
     return normalized_expected.replace(" ", "") in normalized_content.replace(" ", "")
 
 
-def _normalized_endswith(content: str, tail: str) -> bool:
-    """True when *content* ends with *tail*, with the same wrap tolerance as above."""
-    normalized_content = _normalize_screen_text(content)
+def _normalized_endswith(text: str, tail: str) -> bool:
+    """True when *text* ends with *tail*, with the same wrap tolerance as above."""
+    normalized_text = _normalize_screen_text(text)
     normalized_tail = _normalize_screen_text(tail)
-    if normalized_content.endswith(normalized_tail):
+    if normalized_text.endswith(normalized_tail):
         return True
-    return normalized_content.replace(" ", "").endswith(normalized_tail.replace(" ", ""))
+    return normalized_text.replace(" ", "").endswith(normalized_tail.replace(" ", ""))
 
 
 def _draft_visible_in_editor(
