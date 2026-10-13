@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -541,7 +542,13 @@ async def test_inline_create_launch_failure_skips_rollback_when_runner_rebound(
         conv = original_get(self, conversation_id)
         # Rebind once, on the rollback's re-read after the failed launch, to
         # mimic post_event relaunching a new runner on this same session.
-        if not rebound["done"] and cap.launch and conv is not None and conv.runner_id is not None:
+        if (
+            not rebound["done"]
+            and cap.launch
+            and conv is not None
+            and conv.runner_id is not None
+            and conv.git_branch == "feature/race"
+        ):
             rebound["done"] = True
             self.replace_runner_id(conversation_id, "runner_relaunched")
             return original_get(self, conversation_id)
@@ -676,20 +683,18 @@ async def test_inline_create_launch_failure_skips_grant_when_session_vanished(
     runtime_init: None,
     db_uri: str,
     tmp_path: Path,
-    mock_llm: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When the rollback's re-read finds the row gone, the create must still
-    remove the worktree it made (nothing else records it) and must suppress the
-    default-public grant it would otherwise write, so a concurrently deleted
-    session is never left publicly shared. Runs with header auth so the grant
-    branch is reachable: the first, ordinary failed launch is the positive
-    control that proves the grant spy fires; the second create stubs the
-    re-read to return ``None`` once."""
+    remove the worktree it made (nothing else records it), answer unbound, and
+    suppress the default-public grant it would otherwise write, so a
+    concurrently deleted session is never left publicly shared. Runs with header
+    auth so the grant branch is reachable: the first, ordinary failed launch is
+    the positive control that proves the grant spy fires; the second create
+    deletes the row through the store on the rollback's re-read."""
     from omnigent.server.auth import UnifiedAuthProvider
     from omnigent.server.routes.sessions import routes_core
     from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
-    from tests.server.conftest import _app_client
 
     user = "alice@example.com"
     headers = {"X-Forwarded-Email": user}
@@ -706,6 +711,7 @@ async def test_inline_create_launch_failure_skips_grant_when_session_vanished(
         auth_provider=UnifiedAuthProvider(source="header"),
     )
     cap, conn = _install_fake_host(auth_app, db_uri, owner=user, launch_status="failed")
+    store = SqlAlchemyConversationStore(db_uri)
 
     granted: list[str] = []
 
@@ -718,7 +724,8 @@ async def test_inline_create_launch_failure_skips_grant_when_session_vanished(
         granted.append(session_id)
 
     try:
-        async with _app_client(auth_app, mock_llm, tmp_path) as client:
+        transport = httpx.ASGITransport(app=auth_app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             agent = await create_test_agent(client, name="wt-vanish-agent", user=user)
             # Spy only on the git sessions below, not on the agent's owning session.
             monkeypatch.setattr(routes_core, "_grant_default_public", _spy_grant)
@@ -739,16 +746,20 @@ async def test_inline_create_launch_failure_skips_grant_when_session_vanished(
 
             def _vanishing_get(self: SqlAlchemyConversationStore, conversation_id: str) -> Any:
                 conv = original_get(self, conversation_id)
-                # Return None once, on the rollback's re-read after the failed
-                # launch, standing in for a concurrent delete that dropped the row.
+                # On the rollback's re-read after the failed launch, delete the
+                # row through the store, as a concurrent DELETE would, and answer
+                # with the read the rollback then sees.
                 if (
                     not vanished["done"]
                     and len(cap.launch) == 2
                     and conv is not None
                     and conv.runner_id is not None
+                    and conv.git_branch == "feature/vanish"
                 ):
                     vanished["done"] = True
-                    return None
+                    # This runs on the to_thread worker, which has no event loop.
+                    asyncio.run(self.delete_conversation(conversation_id))
+                    return original_get(self, conversation_id)
                 return conv
 
             monkeypatch.setattr(SqlAlchemyConversationStore, "get_conversation", _vanishing_get)
@@ -763,13 +774,18 @@ async def test_inline_create_launch_failure_skips_grant_when_session_vanished(
             assert vanished["done"], (
                 "the rollback never re-read the row, so the vanish was not hit"
             )
+            body = resp.json()
             # The row is gone, so the worktree is removed from the pre-launch
-            # snapshot: it is the only record left of the directory.
+            # snapshot and the response advertises no binding to act on.
             assert len(cap.remove) == 2, (
                 f"a vanished row must still have its new worktree removed: {cap.remove}; "
                 f"unexpected={cap.unexpected}"
             )
             assert cap.remove[1].worktree_path == f"{_SOURCE_REPO}-worktrees/feature-vanish"
+            assert body["host_id"] is None and body["runner_id"] is None, body
+            assert body["workspace"] is None and body["git_branch"] is None, body
+            assert WORKTREE_ROOT_LABEL_KEY not in body["labels"], body
+            assert store.get_conversation(body["id"]) is None
             assert granted == [control.json()["id"]], (
                 f"no default-public grant may be written for a vanished session: {granted}"
             )
@@ -889,23 +905,27 @@ async def test_inline_create_launch_failure_holds_relaunch_lock_across_rollback(
                     await task
 
 
+@pytest.mark.parametrize("replacement", ["accepted", "rejected"])
 async def test_inline_create_launch_failure_serializes_runner_patch_with_rollback(
     register_worktree_launch_host: RegisterHost,
     client: httpx.AsyncClient,
     db_uri: str,
     monkeypatch: pytest.MonkeyPatch,
+    replacement: str,
 ) -> None:
     """``PATCH /v1/sessions/{id}`` rebinding the runner takes the relaunch lock
-    the rollback holds, so a rebind racing a failed launch waits until the
-    rollback has finished instead of landing between its ownership check and
-    its unbind. The rebind then survives the unbind, and the runner is never
-    initialized into the directory being removed."""
+    the rollback holds, from its binding re-read through the rebind, the
+    runner's acceptance check, and any revert. A rebind racing a failed launch
+    therefore waits until the rollback has finished; an accepted replacement
+    then survives the unbind, and a replacement that rejects the session's saved
+    inference profile reverts to the binding the rollback left (none), so the
+    session stays consistently unbound and can be rebound afterwards."""
     from omnigent.runner.routing import RunnerRouter
     from omnigent.server.routes._sessions import helpers as sessions_helpers
     from omnigent.server.routes.sessions import routes_core
 
     cap = register_worktree_launch_host(launch_status="failed")
-    agent = await create_test_agent(client, name="wt-patch-agent")
+    agent = await create_test_agent(client, name=f"wt-patch-{replacement}-agent")
     store = SqlAlchemyConversationStore(db_uri)
 
     in_removal = asyncio.Event()
@@ -920,15 +940,35 @@ async def test_inline_create_launch_failure_serializes_runner_patch_with_rollbac
 
     monkeypatch.setattr(sessions_helpers, "_remove_session_worktree_best_effort", _barrier_remove)
 
-    # The replacement runner only has to look registered: the binding write is
-    # what is under test, so no relay or runner init is started for it.
+    # The replacement runner only has to look registered; its verdict on the
+    # session's saved inference profile is modeled by the runner client below.
     monkeypatch.setattr(RunnerRouter, "runner_is_online", lambda self, rid: rid == "runner_b")
     monkeypatch.setattr(RunnerRouter, "runner_owner", lambda self, rid: None)
 
-    async def _no_runner_client(*args: Any, **kwargs: Any) -> None:
-        return None
+    class _RejectingRunnerClient:
+        async def post(self, *args: Any, **kwargs: Any) -> httpx.Response:
+            return httpx.Response(500, json={"error": "inference profile rejected"})
 
-    monkeypatch.setattr(routes_core, "_get_runner_client", _no_runner_client)
+    reject = {"on": replacement == "rejected"}
+
+    async def _runner_client(*args: Any, **kwargs: Any) -> Any:
+        return _RejectingRunnerClient() if reject["on"] else None
+
+    monkeypatch.setattr(routes_core, "_get_runner_client", _runner_client)
+
+    original_get = SqlAlchemyConversationStore.get_conversation
+
+    def _with_saved_profile(self: SqlAlchemyConversationStore, conversation_id: str) -> Any:
+        # Give the session under test a saved inference profile, which is what
+        # makes PATCH revert when the replacement runner rejects the session.
+        conv = original_get(self, conversation_id)
+        if reject["on"] and conv is not None and conversation_id == observed.get("conv_id"):
+            return dataclasses.replace(
+                conv, inference_snapshot={"runtime_config": {"providers": {}}}
+            )
+        return conv
+
+    monkeypatch.setattr(SqlAlchemyConversationStore, "get_conversation", _with_saved_profile)
 
     patch_at_lock = asyncio.Event()
     real_lock_for = routes_core.relaunch_lock_for
@@ -948,7 +988,7 @@ async def test_inline_create_launch_failure_serializes_runner_patch_with_rollbac
     try:
         await asyncio.wait_for(in_removal.wait(), timeout=5)
         conv_id = observed["conv_id"]
-        failed_runner_id = store.get_conversation(conv_id).runner_id  # type: ignore[union-attr]
+        failed_runner_id = original_get(store, conv_id).runner_id  # type: ignore[union-attr]
         assert failed_runner_id is not None
 
         patch = asyncio.create_task(
@@ -958,26 +998,37 @@ async def test_inline_create_launch_failure_serializes_runner_patch_with_rollbac
         # the row still carries the failed launch's runner until the unbind.
         await asyncio.wait_for(patch_at_lock.wait(), timeout=5)
         assert not patch.done(), "the rebind must wait for the rollback to finish"
-        assert store.get_conversation(conv_id).runner_id == failed_runner_id  # type: ignore[union-attr]
+        assert original_get(store, conv_id).runner_id == failed_runner_id  # type: ignore[union-attr]
 
         proceed.set()
         resp = await asyncio.wait_for(create, timeout=5)
         patch_resp = await asyncio.wait_for(patch, timeout=10)
 
         assert resp.status_code == 201, resp.text
-        assert patch_resp.status_code == 200, patch_resp.text
         assert len(cap.launch) == 1, (
             f"expected only the failed launch frame; unexpected={cap.unexpected}"
         )
         assert cap.remove == [], f"the barrier stands in for real removal: {cap.remove}"
 
-        # The rollback unbound the removed worktree first; the rebind that
-        # waited on the lock then landed and was not erased.
-        conv = store.get_conversation(conv_id)
+        conv = original_get(store, conv_id)
         assert conv is not None
-        assert conv.runner_id == "runner_b", conv.runner_id
+        # The rollback unbound the removed worktree before the rebind landed.
         assert conv.host_id is None and conv.workspace is None and conv.git_branch is None
         assert WORKTREE_ROOT_LABEL_KEY not in conv.labels
+        if replacement == "accepted":
+            assert patch_resp.status_code == 200, patch_resp.text
+            assert conv.runner_id == "runner_b", conv.runner_id
+        else:
+            # The replacement rejected the saved profile, so PATCH failed and
+            # reverted to the binding the rollback left: none, not the failed
+            # launch's runner read before the lock.
+            assert patch_resp.status_code >= 400, patch_resp.text
+            assert conv.runner_id is None, conv.runner_id
+            # The session is still rebindable once a runner accepts it.
+            reject["on"] = False
+            rebind = await client.patch(f"/v1/sessions/{conv_id}", json={"runner_id": "runner_b"})
+            assert rebind.status_code == 200, rebind.text
+            assert original_get(store, conv_id).runner_id == "runner_b"  # type: ignore[union-attr]
     finally:
         proceed.set()
         for task in (create, patch):
@@ -1001,6 +1052,7 @@ async def test_inline_create_launch_failure_tolerates_pre_removal_store_error(
     reporting the binding and the root label for a later delete or archive."""
     cap = register_worktree_launch_host(launch_status="failed")
     agent = await create_test_agent(client, name=f"wt-{fault}-err-agent")
+    branch = f"feature/{fault}-err"
     raised = {"done": False}
 
     if fault == "reread":
@@ -1014,6 +1066,7 @@ async def test_inline_create_launch_failure_tolerates_pre_removal_store_error(
                 and cap.launch
                 and conv is not None
                 and conv.runner_id is not None
+                and conv.git_branch == branch
             ):
                 raised["done"] = True
                 raise RuntimeError("transient store error")
@@ -1030,7 +1083,6 @@ async def test_inline_create_launch_failure_tolerates_pre_removal_store_error(
             SqlAlchemyConversationStore, "has_other_live_session_in_workspace", _shared_boom
         )
 
-    branch = f"feature/{fault}-err"
     resp = await _create_git_session(
         client, agent["id"], {"branch_name": branch, "base_branch": "main"}
     )

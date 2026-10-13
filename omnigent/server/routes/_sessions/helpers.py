@@ -6035,9 +6035,16 @@ async def _rollback_create_launch_worktree(
                 if conv is not None and conv.workspace is not None and conv.git_branch is not None:
                     await _remove_worktree(conv)
                 # Report the row vanished so the caller skips the default-public
-                # grant for a session that no longer exists.
+                # grant, and answer unbound: nothing can act on the deleted
+                # session or its removed worktree.
                 conv = None
                 session_vanished = True
+                resp.runner_id = None
+                resp.host_id = None
+                resp.workspace = None
+                resp.git_branch = None
+                resp.labels.pop(WORKTREE_ROOT_LABEL_KEY, None)
+                bound_host_id = None
             elif latest.runner_id != runner_id:
                 _logger.info(
                     "Skipping launch-failure worktree rollback for session %s: "

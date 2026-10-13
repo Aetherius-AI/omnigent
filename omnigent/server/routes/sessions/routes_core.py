@@ -2639,7 +2639,6 @@ def register_core_routes(
         conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
         if conv is None:
             raise _session_not_found()
-        previous_runner_id = conv.runner_id
         if body.runner_id is not None:
             # Empty string is the clear sentinel (None = leave unchanged);
             # used by /clear and /switch to move the runner between sessions.
@@ -2680,82 +2679,100 @@ def register_core_routes(
                 runner_id = _sf._registered_runner_id(
                     runner_router, body.runner_id, user_id=user_id
                 )
-                try:
-                    async with relaunch_lock_for(session_id):
+                # Hold the relaunch lock from the binding re-read through the
+                # rebind, the runner's acceptance check, and any revert, so the
+                # launch-failure rollback and the relaunch never see a half-moved
+                # binding or have a runner they cleared restored behind them.
+                async with relaunch_lock_for(session_id):
+                    fresh = await asyncio.to_thread(
+                        conversation_store.get_conversation, session_id
+                    )
+                    if fresh is None:
+                        raise _session_not_found()
+                    previous_runner_id = fresh.runner_id
+                    try:
                         await asyncio.to_thread(
                             conversation_store.replace_runner_id, session_id, runner_id
                         )
-                except ConversationNotFoundError as exc:
-                    raise _session_not_found() from exc
-                set_current_runner_id(runner_id)
-                _logger.info(
-                    "Session bound to runner",
-                    extra=debug_event(
-                        "session_runner_bound",
-                        session_id=session_id,
-                        runner_id=runner_id,
-                        operation="bind",
-                        stage="runner_launch",
-                    ),
-                )
-                _runner_client = await _get_runner_client(
-                    session_id,
-                    runner_router,
-                )
-                # Notify the runner about the session so it can
-                # resolve the spec and cache it before the first turn.
-                # This is the design doc's "Server POST /v1/sessions
-                # (to runner)" step from §7 Flow: session creation.
-                conv = conversation_store.get_conversation(
-                    session_id,
-                )
-                parent_initialized = False
-                if _runner_client is not None and conv is not None and conv.agent_id is not None:
-                    # The versioned payload's snapshot carries harness_override,
-                    # so a rebind after a cross-harness create initializes the
-                    # override harness — a bare body left the runner resolving
-                    # from the spec, and the recovery turn that executes seeded
-                    # initial_items ran on the spec's harness. Recovery stays
-                    # enabled: on rebind it is what runs the pending kickoff.
-                    try:
-                        runner_init_resp = await _runner_client.post(
-                            "/v1/sessions",
-                            json=build_runner_session_init_payload(
-                                conv,
-                                server_version=VERSION,
-                            ),
-                            timeout=10.0,
-                        )
-                    except (httpx.HTTPError, ConnectionError):
-                        # ConnectionError covers a tunnel close mid-POST
-                        # (same source as the relay's except clause).
-                        _logger.warning(
-                            "Failed to notify runner about session %s",
-                            session_id,
-                            exc_info=True,
-                        )
-                    else:
-                        from omnigent.server.runner_session_init import runner_inference_verified
-
-                        parent_initialized = (
-                            runner_init_resp.status_code < 400
-                            and runner_inference_verified(conv, runner_init_resp)
-                        )
-                if (
-                    conv is not None
-                    and conv.inference_snapshot is not None
-                    and not parent_initialized
-                ):
-                    if previous_runner_id is None:
-                        await asyncio.to_thread(conversation_store.clear_runner_id, session_id)
-                    else:
-                        await asyncio.to_thread(
-                            conversation_store.replace_runner_id, session_id, previous_runner_id
-                        )
-                    raise OmnigentError(
-                        "The runner did not accept this session's saved inference configuration",
-                        code=ErrorCode.RUNNER_UNAVAILABLE,
+                    except ConversationNotFoundError as exc:
+                        raise _session_not_found() from exc
+                    set_current_runner_id(runner_id)
+                    _logger.info(
+                        "Session bound to runner",
+                        extra=debug_event(
+                            "session_runner_bound",
+                            session_id=session_id,
+                            runner_id=runner_id,
+                            operation="bind",
+                            stage="runner_launch",
+                        ),
                     )
+                    _runner_client = await _get_runner_client(
+                        session_id,
+                        runner_router,
+                    )
+                    # Notify the runner about the session so it can
+                    # resolve the spec and cache it before the first turn.
+                    # This is the design doc's "Server POST /v1/sessions
+                    # (to runner)" step from §7 Flow: session creation.
+                    conv = conversation_store.get_conversation(
+                        session_id,
+                    )
+                    parent_initialized = False
+                    if (
+                        _runner_client is not None
+                        and conv is not None
+                        and conv.agent_id is not None
+                    ):
+                        # The versioned payload's snapshot carries harness_override,
+                        # so a rebind after a cross-harness create initializes the
+                        # override harness — a bare body left the runner resolving
+                        # from the spec, and the recovery turn that executes seeded
+                        # initial_items ran on the spec's harness. Recovery stays
+                        # enabled: on rebind it is what runs the pending kickoff.
+                        try:
+                            runner_init_resp = await _runner_client.post(
+                                "/v1/sessions",
+                                json=build_runner_session_init_payload(
+                                    conv,
+                                    server_version=VERSION,
+                                ),
+                                timeout=10.0,
+                            )
+                        except (httpx.HTTPError, ConnectionError):
+                            # ConnectionError covers a tunnel close mid-POST
+                            # (same source as the relay's except clause).
+                            _logger.warning(
+                                "Failed to notify runner about session %s",
+                                session_id,
+                                exc_info=True,
+                            )
+                        else:
+                            from omnigent.server.runner_session_init import (
+                                runner_inference_verified,
+                            )
+
+                            parent_initialized = (
+                                runner_init_resp.status_code < 400
+                                and runner_inference_verified(conv, runner_init_resp)
+                            )
+                    if (
+                        conv is not None
+                        and conv.inference_snapshot is not None
+                        and not parent_initialized
+                    ):
+                        if previous_runner_id is None:
+                            await asyncio.to_thread(conversation_store.clear_runner_id, session_id)
+                        else:
+                            await asyncio.to_thread(
+                                conversation_store.replace_runner_id,
+                                session_id,
+                                previous_runner_id,
+                            )
+                        raise OmnigentError(
+                            "The runner did not accept this session's saved inference configuration",
+                            code=ErrorCode.RUNNER_UNAVAILABLE,
+                        )
                 if _runner_client is None:
                     # Runner deregistered between validation and
                     # lookup; PATCH still returns 200 but no
