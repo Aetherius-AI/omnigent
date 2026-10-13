@@ -516,51 +516,35 @@ describe("AssistantBubble error-only role", () => {
     expect(bubble).toHaveTextContent("Message not delivered. Try sending it again.");
   });
 
-  it("keeps a prose reply carrying a trailing error on the assistant role", () => {
+  it.each<{ name: string; nonError: Extract<Bubble, { kind: "assistant" }>["items"][number] }>([
+    {
+      name: "a prose reply carrying a trailing error",
+      nonError: { kind: "text", itemId: "reply_text", text: "the answer is 42", final: true },
+    },
+    {
+      name: "a failed turn with reasoning but no prose",
+      nonError: {
+        kind: "reasoning",
+        itemId: "thinking",
+        text: "Weighing the options.",
+        duration: 1,
+      },
+    },
+  ])("keeps $name on the assistant role", ({ nonError }) => {
     render(
       <QueryClientProvider client={new QueryClient()}>
         <BubbleView
           bubble={{
             kind: "assistant",
-            responseId: "resp_reply",
-            stableId: "assistant_reply",
+            responseId: "resp_mixed_failure",
+            stableId: "mixed_failure",
             lifecycle: "failed",
             error: null,
             items: [
-              { kind: "text", itemId: "reply_text", text: "the answer is 42", final: true },
+              nonError,
               {
                 kind: "error",
-                itemId: "reply_error",
-                message: "API Error: Request rejected (429): rate limit",
-                source: "execution",
-                code: "rate_limit_exceeded",
-              },
-            ],
-          }}
-          isLastAssistant={false}
-        />
-      </QueryClientProvider>,
-    );
-
-    const bubble = screen.getByTestId("message-bubble");
-    expect(bubble).toHaveAttribute("data-role", "assistant");
-  });
-
-  it("keeps a failed turn with reasoning but no prose on the assistant role", () => {
-    render(
-      <QueryClientProvider client={new QueryClient()}>
-        <BubbleView
-          bubble={{
-            kind: "assistant",
-            responseId: "resp_reasoned_failure",
-            stableId: "reasoned_failure",
-            lifecycle: "failed",
-            error: null,
-            items: [
-              { kind: "reasoning", itemId: "thinking", text: "Weighing the options.", duration: 1 },
-              {
-                kind: "error",
-                itemId: "reasoned_failure",
+                itemId: "mixed_error",
                 message: "API Error: Request rejected (429): rate limit",
                 source: "execution",
                 code: "rate_limit_exceeded",
