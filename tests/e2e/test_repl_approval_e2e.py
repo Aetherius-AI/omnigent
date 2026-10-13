@@ -39,7 +39,6 @@ import re
 import shutil
 import sys
 import tempfile
-import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -49,6 +48,7 @@ import httpx
 import pytest
 
 from omnigent.testing.process_reaper import reap_leaked_omnigent_processes
+from tests.e2e._native_resume_helpers import poll_for_pending_elicitation
 from tests.e2e.conftest import (
     configure_mock_llm,
     get_mock_requests,
@@ -1731,52 +1731,6 @@ def test_repl_subagent_tool_call_ask_does_not_tunnel_banner_to_root(
             child.terminate(force=True)
 
 
-class _ElicitationStreamWatcher:
-    """Record ``response.elicitation_request`` ids from a session's SSE stream, in order."""
-
-    def __init__(self, server_url: str, session_id: str) -> None:
-        self._url = f"{server_url}/v1/sessions/{session_id}/stream"
-        self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self.request_ids: list[str] = []
-
-    def __enter__(self) -> _ElicitationStreamWatcher:
-        self._thread.start()
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        self._stop.set()
-
-    def _run(self) -> None:
-        try:
-            with httpx.Client(trust_env=False, timeout=None) as client:
-                with client.stream("GET", self._url) as resp:
-                    for line in resp.iter_lines():
-                        if self._stop.is_set():
-                            return
-                        if not line.startswith("data:"):
-                            continue
-                        payload = line[len("data:") :].strip()
-                        if payload in ("", "[DONE]"):
-                            continue
-                        try:
-                            event = json.loads(payload)
-                        except json.JSONDecodeError:
-                            continue
-                        if event.get("type") == "response.elicitation_request":
-                            eid = event.get("elicitation_id")
-                            if eid and eid not in self.request_ids:
-                                self.request_ids.append(eid)
-        except Exception:
-            pass
-
-    def wait_for_count(self, count: int, timeout: float = 15.0) -> list[str]:
-        deadline = time.monotonic() + timeout
-        while len(self.request_ids) < count and time.monotonic() < deadline:
-            time.sleep(0.1)
-        return list(self.request_ids)
-
-
 def _wait_ready_capture_server_url(child: Any, timeout: float) -> str:
     """Wait for an input-ready REPL and return the local server URL from the banner."""
     child.expect("ask.demo", timeout=timeout)
@@ -1787,14 +1741,13 @@ def _wait_ready_capture_server_url(child: Any, timeout: float) -> str:
 
 
 def _decline_from_another_client(
-    server_url: str, session_id: str, elicitation_id: str
+    http: httpx.Client, session_id: str, elicitation_id: str
 ) -> httpx.Response:
     """Decline an elicitation through the resolve endpoint the approval page uses."""
-    with httpx.Client(trust_env=False, timeout=10.0) as http:
-        return http.post(
-            f"{server_url}/v1/sessions/{session_id}/elicitations/{elicitation_id}/resolve",
-            json={"action": "decline"},
-        )
+    return http.post(
+        f"/v1/sessions/{session_id}/elicitations/{elicitation_id}/resolve",
+        json={"action": "decline"},
+    )
 
 
 def test_repl_ignores_unrelated_elicitation_resolved(
@@ -1825,17 +1778,17 @@ def test_repl_ignores_unrelated_elicitation_resolved(
     )
     try:
         server_url = _wait_ready_capture_server_url(child, timeout=_LAUNCH_TIMEOUT)
-        with httpx.Client(trust_env=False, timeout=10.0) as http:
-            sessions = http.get(f"{server_url}/v1/sessions", params={"visibility": "all"})
+        with httpx.Client(base_url=server_url, trust_env=False, timeout=10.0) as http:
+            sessions = http.get("/v1/sessions", params={"visibility": "all"})
             session_id = sessions.json()["data"][0]["id"]
 
-        with _ElicitationStreamWatcher(server_url, session_id) as watcher:
-            # Turn 1: a real elicitation, declined at the keyboard.
+            # Turn 1: a real elicitation, declined at the keyboard. The session
+            # snapshot's pending_elicitations supplies each prompt's id.
             child.send("first unrelated-resolve" + "\r")
             child.expect("approval required", timeout=30)
-            ids = watcher.wait_for_count(1)
-            assert ids, "stream never surfaced the first elicitation_request"
-            prior_elicitation_id = ids[0]
+            prior_elicitation_id = poll_for_pending_elicitation(
+                http, conversation_id=session_id, timeout=15, needle="first unrelated-resolve"
+            )["elicitation_id"]
             child.send("n" + "\r")
             child.expect("refused", timeout=5)
             child.expect(r"Denied by policy", timeout=10)
@@ -1843,41 +1796,40 @@ def test_repl_ignores_unrelated_elicitation_resolved(
             # Turn 2: pend on a second ASK and leave it unanswered.
             child.send("second unrelated-resolve" + "\r")
             child.expect("approval required", timeout=30)
-            ids = watcher.wait_for_count(2)
-            assert len(ids) >= 2 and ids[1] != prior_elicitation_id, (
-                f"expected a distinct second elicitation; saw {ids}"
+            pending_elicitation_id = poll_for_pending_elicitation(
+                http, conversation_id=session_id, timeout=15, needle="second unrelated-resolve"
+            )["elicitation_id"]
+            assert pending_elicitation_id != prior_elicitation_id
+
+            requests_before = len(get_mock_requests(mock_llm_server_url))
+
+            # Another client resolves the DIFFERENT, prior elicitation.
+            resolve = _decline_from_another_client(http, session_id, prior_elicitation_id)
+            assert resolve.status_code == 202, resolve.text
+
+            # Any "› …" transcript line here would be the REPL settling the
+            # gate without the user's verdict.
+            released = child.expect(["›", pexpect.TIMEOUT], timeout=15) == 0
+            tail = _read_pending(child, seconds=1.0)
+            assert not released, (
+                "Pending policy ASK was settled by an unrelated elicitation_resolved "
+                f"event; the REPL released the gate without a user verdict.\n"
+                f"Buffer snippet:\n{tail[:800]}"
             )
-            pending_elicitation_id = ids[1]
+            assert len(get_mock_requests(mock_llm_server_url)) == requests_before, (
+                "Gated turn reached the LLM after an unrelated elicitation was "
+                "resolved — the pending ASK was auto-approved without a verdict."
+            )
 
-        requests_before = len(get_mock_requests(mock_llm_server_url))
-
-        # Another client resolves the DIFFERENT, prior elicitation.
-        resolve = _decline_from_another_client(server_url, session_id, prior_elicitation_id)
-        assert resolve.status_code == 202, resolve.text
-
-        # Any "› …" transcript line here would be the REPL settling the gate
-        # without the user's verdict.
-        released = child.expect(["›", pexpect.TIMEOUT], timeout=15) == 0
-        tail = _read_pending(child, seconds=1.0)
-        assert not released, (
-            "Pending policy ASK was settled by an unrelated elicitation_resolved "
-            f"event; the REPL released the gate without a user verdict.\n"
-            f"Buffer snippet:\n{tail[:800]}"
-        )
-        assert len(get_mock_requests(mock_llm_server_url)) == requests_before, (
-            "Gated turn reached the LLM after an unrelated elicitation was "
-            "resolved — the pending ASK was auto-approved without a verdict."
-        )
-
-        # Declining the pending card itself from another client releases the
-        # gate with that refusal rather than an approval.
-        resolve = _decline_from_another_client(server_url, session_id, pending_elicitation_id)
-        assert resolve.status_code == 202, resolve.text
-        child.expect("declined elsewhere", timeout=15)
-        child.expect(r"Denied by policy", timeout=15)
-        assert len(get_mock_requests(mock_llm_server_url)) == requests_before, (
-            "Gated turn reached the LLM after its elicitation was declined elsewhere."
-        )
+            # Declining the pending card itself from another client releases
+            # the gate with that refusal rather than an approval.
+            resolve = _decline_from_another_client(http, session_id, pending_elicitation_id)
+            assert resolve.status_code == 202, resolve.text
+            child.expect("declined elsewhere", timeout=15)
+            child.expect(r"Denied by policy", timeout=15)
+            assert len(get_mock_requests(mock_llm_server_url)) == requests_before, (
+                "Gated turn reached the LLM after its elicitation was declined elsewhere."
+            )
     finally:
         try:
             child.send("/quit" + "\r")
