@@ -663,8 +663,10 @@ Follow these rules for each clip:
 - **Caption the screen from screen evidence.** Compare claimed outcomes with
   inspected frames or visible-state assertions from the clip:
   `to_be_visible()` on the element the caption describes, scrolled into the
-  recorded viewport, plus `to_have_text()` on that same element for any text
-  you quote; text matching alone passes on hidden content. Attribute reads such
+  recorded viewport, plus `to_have_text()` on the visible element that paints
+  any text you quote; text matching alone passes on hidden content, and even a
+  visible container matches screen-reader-only descendants, so confirm such
+  text in a frame before quoting it. Attribute reads such
   as `get_attribute("aria-label")` pass on hidden or unopened elements and quote
   text the screen never paints; they are not screen evidence (see "Finishing a
   clip" in `dev/recording-lanes.md`). Backend storage and logs do not establish

@@ -335,9 +335,12 @@ A visible-state assertion is `expect(locator).to_be_visible()` on the element
 the caption describes, in the recorded page, at the moment the caption claims
 it, after scrolling that element into the recorded viewport: an off-screen row
 is visible to Playwright but not to the viewer. When the caption quotes text,
-add `to_have_text(...)` on that same visible element; text matching alone is not
-a substitute, because it passes on hidden content and on screen-reader-only
-descendants. Attribute and DOM reads — `get_attribute("aria-label")`, `data-*`
+add `to_have_text(...)` on the visible element that paints it, not on a
+container: text matching alone is not a substitute, and even on a visible
+element it is satisfied by hidden or screen-reader-only descendants (an
+icon-only button's `sr-only` label), so quote such text only after an inspected
+frame shows it; otherwise describe only the established state. Attribute and
+DOM reads — `get_attribute("aria-label")`, `data-*`
 or `title` values, `text_content()`, `inner_text()`, `page.evaluate` — pass on
 hidden, collapsed, off-screen, or never-opened elements, so they are not screen
 evidence; opening the containing panel does not make every descendant visible.

@@ -63,16 +63,23 @@ def test_caption_rules_require_visible_assertions_not_attribute_reads() -> None:
         "the caption describes" in lanes
     )
     assert "scrolling that element into the recorded viewport" in lanes
+    assert "on the visible element that paints it, not on a container" in lanes
     assert "text matching alone is not a substitute" in lanes
+    assert "satisfied by hidden or screen-reader-only descendants" in lanes
+    assert "quote such text only after an inspected frame shows it" in lanes
     assert "or `to_have_text(...)`" not in lanes
     assert '`get_attribute("aria-label")`' in lanes
     assert "never-opened elements, so they are not screen evidence" in lanes
     assert "Quote only text the clip renders" in lanes
-    assert "a native `title` tooltip has no locator" in lanes
+    assert (
+        "a native `title` tooltip has no locator and counts only if an inspected frame "
+        "shows it" in lanes
+    )
     assert "say so in the caption" in lanes
 
     assert "`to_be_visible()` on the element the caption describes" in instructions
     assert "text matching alone passes on hidden content" in instructions
+    assert "even a visible container matches screen-reader-only descendants" in instructions
     assert "`to_be_visible()` / `to_have_text()`" not in instructions
     assert '`get_attribute("aria-label")`' in instructions
     assert "they are not screen evidence" in instructions
