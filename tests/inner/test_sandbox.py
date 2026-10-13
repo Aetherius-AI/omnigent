@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import dataclasses
 import json
 import logging
 import os
@@ -48,6 +49,42 @@ def _noop_policy_arg() -> str:
         "utf-8"
     )
     return base64.urlsafe_b64encode(raw).decode("ascii")
+
+
+@pytest.mark.parametrize("grant_field", ["write_roots", "write_files"])
+@pytest.mark.parametrize("grant_parent", [False, True])
+def test_exec_launcher_rejects_writable_launcher_directory(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, grant_field: str, grant_parent: bool
+) -> None:
+    launcher_dir = tmp_path / "launchers"
+    launcher_dir.mkdir()
+    monkeypatch.setattr("omnigent.inner.sandbox.tempfile.tempdir", str(launcher_dir))
+    policy = dataclasses.replace(_noop_policy(), active=True, backend_type="linux_bwrap")
+    setattr(policy, grant_field, [tmp_path if grant_parent else launcher_dir])
+
+    with pytest.raises(ValueError, match="Grant a dedicated scratch directory"):
+        create_exec_launcher(sys.executable, policy)
+    assert list(launcher_dir.iterdir()) == []
+
+
+def test_exec_launcher_accepts_dedicated_scratch_directory(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    launcher_dir = tmp_path / "launchers"
+    launcher_dir.mkdir()
+    scratch = launcher_dir / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr("omnigent.inner.sandbox.tempfile.tempdir", str(launcher_dir))
+    policy = dataclasses.replace(
+        _noop_policy(), active=True, backend_type="linux_bwrap", write_roots=[scratch]
+    )
+
+    path = pathlib.Path(create_exec_launcher(sys.executable, policy, cwd=str(scratch)))
+    try:
+        assert path.parent == launcher_dir
+        assert path.stat().st_mode & 0o777 == 0o700
+    finally:
+        path.unlink()
 
 
 def test_run_launcher_emits_logger_checkpoints(caplog) -> None:
@@ -235,6 +272,20 @@ def test_sandbox_policy_round_trips_spawn_env_allowlist() -> None:
     # Old payloads (no key) and unset policies must decode to None —
     # "no prune", not "prune everything".
     assert SandboxPolicy.from_jsonable(_noop_policy().to_jsonable()).spawn_env_allowlist is None
+
+
+def test_credential_source_paths_survive_serialization_and_cloning(tmp_path: pathlib.Path) -> None:
+    from omnigent.inner.sandbox import with_additional_read_roots, with_additional_write_roots
+
+    policy = _noop_policy()
+    protected = (tmp_path / "token.sock").resolve()
+    policy.credential_source_paths = [protected]
+    decoded = SandboxPolicy.from_jsonable(policy.to_jsonable())
+    cloned = with_additional_read_roots(decoded, [tmp_path / "tools"])
+    cloned = with_additional_write_roots(cloned, [tmp_path / "scratch"])
+    assert cloned.credential_source_paths == [protected]
+    assert cloned.credential_source_paths is not decoded.credential_source_paths
+    assert SandboxPolicy.from_jsonable({}).credential_source_paths is None
 
 
 def test_sandbox_policy_round_trips_deny_unix_socket_paths() -> None:
