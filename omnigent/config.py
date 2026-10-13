@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import logging
 import os
 import stat
@@ -178,8 +179,11 @@ def global_config_lock(path: Path | None = None) -> Iterator[None]:
                 try:
                     msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)  # pyrefly: ignore[missing-attribute]
                     break
-                except OSError:  # LK_LOCK gives up after ten seconds; keep waiting.
-                    continue
+                except OSError as exc:
+                    # LK_LOCK gives up after ten seconds with EACCES/EDEADLOCK; keep waiting on
+                    # those only, and surface any other failure.
+                    if exc.errno not in (errno.EACCES, getattr(errno, "EDEADLOCK", errno.EDEADLK)):
+                        raise
         try:
             yield
         finally:
@@ -204,8 +208,15 @@ def write_global_config(cfg: Mapping[str, object], path: Path | None = None) -> 
     )
     tmp = Path(tmp_name)
     try:
-        with os.fdopen(handle, "w") as config_file:
+        try:
+            config_file = os.fdopen(handle, "w")
+        except BaseException:
+            os.close(handle)
+            raise
+        with config_file:
             yaml.safe_dump(dict(cfg), config_file, default_flow_style=False, sort_keys=True)
+            config_file.flush()
+            os.fsync(config_file.fileno())
         with contextlib.suppress(FileNotFoundError):
             os.chmod(tmp, stat.S_IMODE(resolved.stat().st_mode))
         os.replace(tmp, resolved)

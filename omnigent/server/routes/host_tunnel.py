@@ -498,9 +498,11 @@ def create_host_tunnel_router(
                         heartbeat_task,
                         return_exceptions=True,
                     )
-                    if conn.config_sync_task is not None:
-                        conn.config_sync_task.cancel()
-                        await asyncio.gather(conn.config_sync_task, return_exceptions=True)
+                    if conn.config_sync_tasks:
+                        pending_syncs = list(conn.config_sync_tasks)
+                        for task in pending_syncs:
+                            task.cancel()
+                        await asyncio.gather(*pending_syncs, return_exceptions=True)
                     # If the host already reconnected, this handler's connection
                     # was replaced; only the current one may mark it offline.
                     if host_registry.deregister(host_id, conn=conn):
@@ -794,6 +796,8 @@ async def _receive_loop(
                     ),
                     name=f"host-config-sync:{host_id}",
                 )
+                conn.config_sync_tasks.add(conn.config_sync_task)
+                conn.config_sync_task.add_done_callback(conn.config_sync_tasks.discard)
             continue
 
         if isinstance(frame, HostLaunchRunnerResultFrame):
@@ -1110,6 +1114,8 @@ async def _sync_user_config_after(
 ) -> None:
     """Reconcile one report after this connection's earlier one, keeping them ordered."""
     if previous is not None:
+        # Only ordering matters here: the earlier reconcile contains its own
+        # failures, and a disconnect cancels every link of the chain directly.
         await asyncio.wait([previous])
     await _sync_user_config(conn, frame, host_id, store, host_registry)
 

@@ -508,7 +508,10 @@ class HostConnection:
     )
     # This host's settings reports reconcile in order on a background chain, so a
     # wait for another host's reconcile never stalls this tunnel's other frames.
+    # ``config_sync_task`` is the chain's tail; every live link stays in the set so
+    # a disconnect cancels all of them.
     config_sync_task: asyncio.Task[None] | None = None
+    config_sync_tasks: set[asyncio.Task[None]] = field(default_factory=set)
 
     def enqueue(self, data: str, *, app_ping_ts: int | None = None) -> None:
         """Queue a frame on the socket loop, retaining local timing metadata."""
