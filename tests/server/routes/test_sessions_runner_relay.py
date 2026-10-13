@@ -1663,14 +1663,10 @@ async def test_relay_completion_idle_recovery_updates_parent_child_summary(
     db_uri: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """
-    Clearing a sub-agent's disconnect failure on completion reaches the parent's stream.
+    """Completion-idle recovery of a disconnected sub-agent reaches the parent's stream.
 
-    The parent's Agents rail only learns a child's status from
-    ``session.child_session.updated`` on the parent stream. When the runner's
-    completion ``idle`` clears a stale ``runner_disconnected`` failure, the
-    parent must receive a summary without that error, or its rail keeps the
-    child on "Disconnected" until a reload.
+    The recovery publisher bypasses ``_publish_status`` and its parent fan-out, so
+    the parent must still receive a child summary without the cleared failure.
     """
     from omnigent.runtime import session_stream
     from omnigent.server import session_live_state
