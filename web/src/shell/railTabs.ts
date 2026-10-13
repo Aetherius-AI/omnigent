@@ -5,14 +5,16 @@
  */
 
 /**
- * The selectable tabs in the right workspace rail, in display order. The
- * runtime list is the single source of truth (the type derives from it) so
- * consumers that validate or iterate tabs — e.g. the persisted-state
- * sanitizer — can never drift behind a newly added tab.
+ * The fixed-order workspace-rail tabs used for iteration/fallback. The
+ * runtime list is the single source of truth for the static tab ids, so
+ * consumers that validate or iterate them can't drift behind a newly added
+ * tab. "sidechat" is a dynamic-tab mode (a side-chat tab is selected), not a
+ * fixed tab in this list. "github" is the stable stored id for the Pull
+ * Requests tab; renaming it drops saved choices.
  */
 export const RIGHT_RAIL_TABS = ["files", "changes", "github", "subagents", "browser"] as const;
 
-export type RightRailTab = (typeof RIGHT_RAIL_TABS)[number];
+export type RightRailTab = (typeof RIGHT_RAIL_TABS)[number] | "sidechat";
 
 /**
  * Count/status badge geometry. Fixed height with min-width == height keeps a
