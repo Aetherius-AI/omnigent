@@ -38,13 +38,12 @@ Activation = Literal["pointer", "keyboard"]
 
 @pytest.mark.parametrize("activation", ["pointer", "keyboard"])
 def test_other_harness_flyout_stays_open_while_models_load(
-    seeded_session: tuple[str, str], activation: Activation
+    live_server: str, activation: Activation
 ) -> None:
     """Edit on an "Other..." harness lands on its model list; ``keyboard`` hovers
     "Other..." then uses the arrow keys, so the cursor rests on that row when Pi's
     model submenu opens over it."""
-    base_url, session_id = seeded_session
-    _run_in_fresh_loop(_drive_other_flyout_edit(base_url, session_id, activation))
+    _run_in_fresh_loop(_drive_other_flyout_edit(live_server, activation))
 
 
 class _HeldCatalog:
@@ -61,11 +60,12 @@ class _HeldCatalog:
         await route.fulfill(json={"models": self.models})
 
 
-async def _prepare_page(page: Page, session_id: str) -> None:
+async def _prepare_page(page: Page) -> None:
     agents = json.loads(_agents_body())["data"] + json.loads(_pi_native_agents_body())["data"]
+    # The journey never creates a session, so the stubbed create needs no real id.
     await _register_common_routes(
         page,
-        created_session_id=session_id,
+        created_session_id="unused",
         create_bodies=[],
         agents_body=json.dumps({"data": agents}),
     )
@@ -112,14 +112,14 @@ async def _expect_menu_kept_until_models_arrive(
     )
 
 
-async def _drive_other_flyout_edit(base_url: str, session_id: str, activation: Activation) -> None:
+async def _drive_other_flyout_edit(base_url: str, activation: Activation) -> None:
     catalog = _HeldCatalog([{"id": _PI_MODEL_ID, "displayName": "Model A", "isDefault": True}])
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch()
         context = await browser.new_context(viewport={"width": 1440, "height": 900})
         page = await context.new_page()
         try:
-            await _prepare_page(page, session_id)
+            await _prepare_page(page)
             await page.route(
                 f"**/v1/hosts/{_HOST_ID}/harnesses/claude-native/model-options",
                 lambda route: route.fulfill(

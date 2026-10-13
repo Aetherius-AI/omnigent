@@ -140,7 +140,7 @@ export function ignorePointerLeaveIntoSubmenu(event: PointerEvent<HTMLElement>):
     event.relatedTarget instanceof Element ? event.relatedTarget.closest('[role="menu"]') : null;
   if (menu === ownMenu) return;
   while (menu && menu !== ownMenu) {
-    const triggerId = menu.getAttribute("aria-labelledby");
+    const triggerId = menu.getAttribute("aria-labelledby")?.split(/\s+/)[0];
     menu = triggerId
       ? (menu.ownerDocument.getElementById(triggerId)?.closest('[role="menu"]') ?? null)
       : null;

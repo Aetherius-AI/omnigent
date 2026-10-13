@@ -5484,6 +5484,50 @@ describe("NewChatLandingScreen", () => {
     expect(claudeRow).toHaveAttribute("data-state", "open");
   });
 
+  it("shows the placeholder again when the preserved menu closes during an uncached load", () => {
+    mockAgents([
+      testAgent("a_claude", "claude-native-ui", {
+        display_name: "Claude Code",
+        harness: "claude-native",
+      }),
+      testAgent("a_pi", "pi-native-ui", { display_name: "Pi", harness: "pi-native" }),
+    ]);
+    let piModels: Partial<ReturnType<typeof useHostModelOptions>> = {
+      ...PENDING_QUERY_STATE,
+      data: undefined,
+    };
+    mockModelQueries((harness) =>
+      harness === "pi-native" ? piModels : CLAUDE_MODEL_OPTIONS_RESULT,
+    );
+    renderLanding();
+    fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
+    fireEvent.click(screen.getByTestId("new-chat-landing-harness-more"));
+    fireEvent.click(screen.getByTestId("new-chat-landing-agent-config-a_pi"));
+    expect(screen.queryByTestId("new-chat-landing-picker-loading")).toBeNull();
+    expect(screen.getByTestId("new-chat-landing-agent-models")).toHaveTextContent(
+      "Loading models…",
+    );
+
+    // Dismissing the menu mid-load falls back to the cold-load placeholder.
+    closeMenu();
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(screen.getByTestId("new-chat-landing-picker-loading")).toBeVisible();
+
+    piModels = {
+      ...SUCCESS_QUERY_STATE,
+      data: [{ id: "example/model-a", model: "example/model-a", displayName: "Model A" }],
+    };
+    fireEvent.change(screen.getByTestId("new-chat-landing-input"), {
+      target: { value: "Pi models arrived" },
+    });
+    expect(screen.queryByTestId("new-chat-landing-picker-loading")).toBeNull();
+    expect(screen.getByTestId("new-chat-landing-agent-select")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
   // claude-native (a1, fully supported) plus cursor-native (a_cursor, not) so
   // the preference has a "More" row to act on: the host below reports
   // cursor-native as unconfigured on this machine.
