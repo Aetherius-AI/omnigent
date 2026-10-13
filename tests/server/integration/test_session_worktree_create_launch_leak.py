@@ -255,16 +255,19 @@ async def _create_git_session(
     )
 
 
+@pytest.mark.parametrize("launch_status", ["failed", "timeout"])
 async def test_inline_create_launch_failure_cleans_up_worktree(
     register_worktree_launch_host: RegisterHost,
     client: httpx.AsyncClient,
     db_uri: str,
+    launch_status: str,
 ) -> None:
-    """A launch failure after the worktree is created sends one
-    ``host.remove_worktree`` and clears the host binding, matching the
-    dedicated bind endpoint; otherwise the worktree leaks until storage fills."""
-    cap = register_worktree_launch_host(launch_status="failed")
-    agent = await create_test_agent(client, name="wt-leak-agent")
+    """A launch the host reports as failed, or whose result wait expires, sends
+    one ``host.remove_worktree`` for the worktree this create made and clears
+    the host binding, matching the dedicated bind endpoint; otherwise the
+    worktree leaks until storage fills."""
+    cap = register_worktree_launch_host(launch_status=launch_status)
+    agent = await create_test_agent(client, name=f"wt-leak-{launch_status}-agent")
 
     resp = await _create_git_session(
         client, agent["id"], {"branch_name": "feature/leak", "base_branch": "main"}
@@ -600,9 +603,13 @@ async def test_inline_create_launch_failure_reports_unbound_when_label_delete_fa
     cap = register_worktree_launch_host(launch_status="failed")
     agent = await create_test_agent(client, name="wt-labelerr-agent")
 
+    original_delete_label = SqlAlchemyConversationStore.delete_label
+
     def _label_boom(self: SqlAlchemyConversationStore, conversation_id: str, key: str) -> None:
+        # Fail only the root-label delete; every other label keeps its real behavior.
         if key == WORKTREE_ROOT_LABEL_KEY:
             raise RuntimeError("transient store error")
+        original_delete_label(self, conversation_id, key)
 
     monkeypatch.setattr(SqlAlchemyConversationStore, "delete_label", _label_boom)
 
@@ -809,35 +816,6 @@ async def test_inline_create_launch_failure_holds_relaunch_lock_across_rollback(
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
-
-
-async def test_inline_create_launch_timeout_cleans_up_worktree(
-    register_worktree_launch_host: RegisterHost,
-    client: httpx.AsyncClient,
-    db_uri: str,
-) -> None:
-    """A launch whose wait expires is treated as a failure, so the create rolls
-    back the worktree it made and clears the binding, the same as an explicit
-    host-reported launch failure."""
-    cap = register_worktree_launch_host(launch_status="timeout")
-    agent = await create_test_agent(client, name="wt-timeout-agent")
-
-    resp = await _create_git_session(
-        client, agent["id"], {"branch_name": "feature/timeout", "base_branch": "main"}
-    )
-    assert resp.status_code == 201, resp.text
-    assert len(cap.launch) == 1, f"expected one launch_runner frame; unexpected={cap.unexpected}"
-    worktree_path = f"{_SOURCE_REPO}-worktrees/feature-timeout"
-    assert len(cap.remove) == 1, (
-        f"a launch timeout must roll back the new worktree: {cap.remove}; "
-        f"unexpected={cap.unexpected}"
-    )
-    assert cap.remove[0].worktree_path == worktree_path
-
-    conv = SqlAlchemyConversationStore(db_uri).get_conversation(resp.json()["id"])
-    assert conv is not None
-    assert conv.host_id is None and conv.workspace is None and conv.git_branch is None
-    assert WORKTREE_ROOT_LABEL_KEY not in conv.labels
 
 
 @pytest.mark.parametrize("fault", ["reread", "shared_check"])
