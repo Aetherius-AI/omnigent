@@ -333,14 +333,16 @@ re-record.
 
 A claim that spans time — a state that "never" appears, a notice that "no
 longer" shows, a transition made "without" an intermediate screen — covers the
-whole window from the trigger to the end state the caption names. Support it
-with frames inspected through that window at a stated interval, or with a check
-that watches continuously until that end state. One assertion after recovery,
-even an auto-retrying one, only shows what the final frame shows; without the
-watch, caption the end state and say the window was not checked. When frames or
-the watch catch the state even briefly, say so in the caption and record how
-long it showed in `evidence`; whether a transient state is acceptable is a
-product question for review.
+whole window from the trigger to the end state the caption names. An
+unqualified claim needs a check that watches continuously until that end state.
+Frames inspected through the window support only a qualified claim that states
+the interval ("not seen in frames sampled every 250 ms"), since a shorter
+transient can fall between samples. One assertion after recovery, even an
+auto-retrying one, only shows what the final frame shows; without the watch,
+caption the end state and say the window was not checked. When frames or the
+watch catch the state even briefly, say so in the caption and record how long
+it showed in `evidence`; whether a transient state is acceptable is a product
+question for review.
 
 For each recording, write a short **`caption`** in its handoff entry describing
 **the actions that clip performs** — the ordered steps a viewer watches, ending in

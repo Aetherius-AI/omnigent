@@ -59,5 +59,6 @@ def test_lane_caption_rules_cover_the_whole_window_for_absence_claims() -> None:
 
     assert "covers the whole window from the trigger to the end state the caption names" in lanes
     assert "watches continuously until that end state" in lanes
+    assert "support only a qualified claim that states the interval" in lanes
     assert "only shows what the final frame shows" in lanes
     assert "record how long it showed in `evidence`" in lanes
