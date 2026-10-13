@@ -66,8 +66,8 @@ def ensure_bundle_plugin_manifest(
     )
 
 
-# Claude Code registers a plugin skill as ``<plugin>:<dir>`` with every other
-# character of the directory name replaced by ``-``.
+# Claude Code registers a plugin skill as ``<plugin>:<dir>``, replacing each
+# directory-name character outside ``[A-Za-z0-9_-]`` with ``-``.
 _CLAUDE_SKILL_NAME_OTHER_RE = re.compile(r"[^A-Za-z0-9_-]")
 
 
