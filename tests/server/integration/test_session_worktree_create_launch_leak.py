@@ -304,8 +304,12 @@ async def test_inline_create_launch_failure_removes_relocated_worktree_root(
     )
     assert resp.status_code == 201, resp.text
     assert len(cap.create) == 1 and cap.create[0].repo_path == f"{_SOURCE_REPO}/packages/app"
-    assert len(cap.launch) == 1, f"expected one launch_runner frame, got {len(cap.launch)}"
-    assert len(cap.remove) == 1, f"expected one remove_worktree frame, got {cap.remove}"
+    assert len(cap.launch) == 1, (
+        f"expected one launch_runner frame, got {len(cap.launch)}; unexpected={cap.unexpected}"
+    )
+    assert len(cap.remove) == 1, (
+        f"expected one remove_worktree frame, got {cap.remove}; unexpected={cap.unexpected}"
+    )
     assert cap.remove[0].worktree_path == f"{_SOURCE_REPO}-worktrees/feature-sub"
     assert cap.remove[0].delete_branch is True
 
@@ -332,7 +336,10 @@ async def test_inline_create_existing_worktree_launch_failure_keeps_worktree(
     assert resp.status_code == 201, resp.text
     assert len(cap.launch) == 1, f"expected one launch_runner frame, got {len(cap.launch)}"
     assert cap.create == [], "existing_worktree must not create a worktree"
-    assert cap.remove == [], f"a user's existing worktree must never be removed: {cap.remove}"
+    assert cap.remove == [], (
+        f"a user's existing worktree must never be removed: {cap.remove}; "
+        f"unexpected={cap.unexpected}"
+    )
 
     conv = SqlAlchemyConversationStore(db_uri).get_conversation(resp.json()["id"])
     assert conv is not None
@@ -358,7 +365,9 @@ async def test_inline_create_launch_failure_keeps_existing_branch(
     )
     assert resp.status_code == 201, resp.text
     assert len(cap.create) == 1 and cap.create[0].existing_branch is True
-    assert len(cap.remove) == 1, f"expected one remove_worktree frame, got {cap.remove}"
+    assert len(cap.remove) == 1, (
+        f"expected one remove_worktree frame, got {cap.remove}; unexpected={cap.unexpected}"
+    )
     assert cap.remove[0].worktree_path == f"{_SOURCE_REPO}-worktrees/feature-existing"
     assert cap.remove[0].delete_branch is False, "a pre-existing branch must survive the rollback"
 
@@ -393,21 +402,28 @@ async def test_inline_create_launch_failure_keeps_cleanup_metadata_until_removed
     worktree_path = f"{_SOURCE_REPO}-worktrees/feature-retry"
     assert len(cap.create) == 1 and len(cap.launch) == 1
     # A reachable host is asked once and refuses; an offline host is never asked.
-    assert len(cap.remove) == (1 if failure == "rejected" else 0), cap.remove
+    assert len(cap.remove) == (1 if failure == "rejected" else 0), (
+        f"got {cap.remove}; unexpected={cap.unexpected}"
+    )
 
     store = SqlAlchemyConversationStore(db_uri)
     conv = store.get_conversation(body["id"])
     assert conv is not None
+    # An unconfirmed removal keeps the whole binding, including the bound
+    # runner_id, so a later delete/archive has everything it needs to retry.
+    assert body["runner_id"] is not None, body
     expected_binding = {
         "host_id": _HOST_ID,
         "workspace": worktree_path,
         "git_branch": "feature/retry",
+        "runner_id": body["runner_id"],
         "root_label": worktree_root_fingerprint(worktree_path),
     }
     retained = {
         "host_id": conv.host_id,
         "workspace": conv.workspace,
         "git_branch": conv.git_branch,
+        "runner_id": conv.runner_id,
         "root_label": conv.labels.get(WORKTREE_ROOT_LABEL_KEY),
     }
     assert retained == expected_binding, (
@@ -418,6 +434,7 @@ async def test_inline_create_launch_failure_keeps_cleanup_metadata_until_removed
         "host_id": body["host_id"],
         "workspace": body["workspace"],
         "git_branch": body["git_branch"],
+        "runner_id": body["runner_id"],
         "root_label": body["labels"].get(WORKTREE_ROOT_LABEL_KEY),
     } == expected_binding, body
 
@@ -434,13 +451,14 @@ async def test_inline_create_launch_failure_keeps_cleanup_metadata_until_removed
     assert store.get_conversation(body["id"]) is None
 
 
-async def test_delete_with_delete_branch_removes_worktree(
+async def test_inline_create_successful_launch_fires_no_cleanup(
     register_worktree_launch_host: RegisterHost,
     client: httpx.AsyncClient,
 ) -> None:
-    """A successfully-started session's worktree is removed on opt-in
-    ``DELETE ...?delete_branch=true``. Launch succeeds here, so no
-    create-time cleanup fires; the delete path sends the remove frame."""
+    """A successfully-started git session keeps its worktree: the create
+    path rolls back only on launch failure, so no host.remove_worktree
+    frame is sent. Opt-in delete removal is covered by the delete suite's
+    ``test_delete_with_flag_sends_remove_worktree``."""
     cap = register_worktree_launch_host(launch_status="launched")
     agent = await create_test_agent(client, name="wt-del-agent")
 
@@ -448,14 +466,8 @@ async def test_delete_with_delete_branch_removes_worktree(
         client, agent["id"], {"branch_name": "feature/keep", "base_branch": "main"}
     )
     assert resp.status_code == 201, resp.text
-    session_id = resp.json()["id"]
-    worktree_path = f"{_SOURCE_REPO}-worktrees/feature-keep"
 
-    # Successful launch leaves the worktree in place; nothing removed yet.
-    assert cap.remove == [], f"successful create unexpectedly removed a worktree: {cap.remove}"
-
-    del_resp = await client.delete(f"/v1/sessions/{session_id}?delete_branch=true")
-    assert del_resp.status_code == 200, del_resp.text
-    assert len(cap.remove) == 1, "delete_branch=true should send host.remove_worktree"
-    assert cap.remove[0].worktree_path == worktree_path
-    assert cap.remove[0].delete_branch is True
+    assert cap.remove == [], (
+        f"a successful launch must not trigger create-time cleanup: {cap.remove}; "
+        f"unexpected={cap.unexpected}"
+    )
