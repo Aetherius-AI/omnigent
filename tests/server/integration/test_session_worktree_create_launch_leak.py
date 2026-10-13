@@ -1,6 +1,8 @@
 """Regression: a worktree this inline ``POST /v1/sessions`` create made is
 removed and its binding cleared on launch failure, while a user's existing
-worktree is kept for the lenient first-message relaunch."""
+worktree is kept for the lenient first-message relaunch. When the host does
+not confirm the removal, the binding and root label stay so an opt-in delete
+can retry the cleanup later."""
 
 from __future__ import annotations
 
@@ -29,7 +31,10 @@ from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.app import create_app
 from omnigent.server.auth import RESERVED_USER_LOCAL
 from omnigent.server.host_registry import HostConnection
-from omnigent.server.routes._host_worktree import WORKTREE_ROOT_LABEL_KEY
+from omnigent.server.routes._host_worktree import (
+    WORKTREE_ROOT_LABEL_KEY,
+    worktree_root_fingerprint,
+)
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.stores.artifact_store.local import LocalArtifactStore
 from omnigent.stores.comment_store.sqlalchemy_store import SqlAlchemyCommentStore
@@ -74,12 +79,14 @@ class _FakeWebSocket:
 class _HostCapture:
     """Control frames a fake host received during one request, plus the
     worktrees it reports so a cleanup-time ``host.list_worktrees`` has
-    something to list."""
+    something to list. ``unexpected`` records frames the drain does not
+    answer, so a request stuck on a new frame type is diagnosable."""
 
     create: list[HostCreateWorktreeFrame] = field(default_factory=list)
     launch: list[HostLaunchRunnerFrame] = field(default_factory=list)
     remove: list[HostRemoveWorktreeFrame] = field(default_factory=list)
     worktrees: list[dict[str, Any]] = field(default_factory=list)
+    unexpected: list[Any] = field(default_factory=list)
 
 
 RegisterHost = Callable[..., _HostCapture]
@@ -91,12 +98,18 @@ async def register_worktree_launch_host(
     db_uri: str,
 ) -> AsyncIterator[RegisterHost]:
     """Yield a factory registering a fake host that answers and captures
-    stat/create/launch/list/remove frames. ``launch_status`` models the launch
-    verdict; ``workspace_subdir`` relocates the picked subdir into the worktree."""
+    stat/create/launch/list/remove frames. ``launch_status`` and
+    ``remove_status`` model the host's verdicts; ``workspace_subdir``
+    relocates the picked subdir into the worktree; ``disconnect_after_launch``
+    drops the host right after it answers the launch frame."""
     conns: list[HostConnection] = []
 
     def _register(
-        *, launch_status: str = "launched", workspace_subdir: str | None = None
+        *,
+        launch_status: str = "launched",
+        workspace_subdir: str | None = None,
+        remove_status: str = "ok",
+        disconnect_after_launch: bool = False,
     ) -> _HostCapture:
         HostStore(db_uri).upsert_on_connect(_HOST_ID, "wt-host", RESERVED_USER_LOCAL)
         conn = app.state.host_registry.register(
@@ -156,6 +169,10 @@ async def register_worktree_launch_host(
                                 "error": None if launched else "boom",
                             }
                         )
+                    if disconnect_after_launch:
+                        app.state.host_registry.deregister(
+                            conn.host_id, workspace_id=conn.workspace_id, conn=conn
+                        )
                 elif isinstance(frame, HostListWorktreesFrame):
                     fut = conn.pending_list_worktrees.pop(frame.request_id, None)
                     if fut is not None and not fut.done():
@@ -164,7 +181,15 @@ async def register_worktree_launch_host(
                     cap.remove.append(frame)
                     fut = conn.pending_remove_worktrees.pop(frame.request_id, None)
                     if fut is not None and not fut.done():
-                        fut.set_result({"status": "ok", "error": None})
+                        removed = remove_status == "ok"
+                        fut.set_result(
+                            {
+                                "status": remove_status,
+                                "error": None if removed else "worktree is locked",
+                            }
+                        )
+                else:
+                    cap.unexpected.append(frame)
 
         conn._drain_task_for_test = asyncio.create_task(_drain())  # type: ignore[attr-defined]
         conns.append(conn)
@@ -175,7 +200,7 @@ async def register_worktree_launch_host(
     for conn in conns:
         conn.outbound_queue.put_nowait(None)
         task = conn._drain_task_for_test  # type: ignore[attr-defined]
-        with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError, Exception):
+        with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
             await asyncio.wait_for(asyncio.shield(task), timeout=1.0)
         if not task.done():
             task.cancel()
@@ -229,6 +254,7 @@ async def test_inline_create_launch_failure_cleans_up_worktree(
         "session_git_branch": conv.git_branch,
         "session_host_id": conv.host_id,
         "session_runner_id_set": conv.runner_id is not None,
+        "unexpected_frames": cap.unexpected,
     }
     assert len(cap.remove) == 1, (
         "ABANDONED WORKTREE (leak): the inline create path sent no host.remove_worktree "
@@ -307,6 +333,99 @@ async def test_inline_create_existing_worktree_launch_failure_keeps_worktree(
     assert conv.host_id == _HOST_ID
     assert conv.workspace == _SOURCE_REPO
     assert conv.git_branch == "feature/mine"
+    assert conv.runner_id is not None, "the lenient path keeps the runner binding for relaunch"
+    assert resp.json()["runner_id"] == conv.runner_id
+
+
+async def test_inline_create_launch_failure_keeps_existing_branch(
+    register_worktree_launch_host: RegisterHost,
+    client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """Rolling back a worktree that checked out a pre-existing branch removes
+    the directory but never force-deletes the user's branch."""
+    cap = register_worktree_launch_host(launch_status="failed")
+    agent = await create_test_agent(client, name="wt-existing-branch-agent")
+
+    resp = await _create_git_session(
+        client, agent["id"], {"branch_name": "feature/existing", "existing_branch": True}
+    )
+    assert resp.status_code == 201, resp.text
+    assert len(cap.create) == 1 and cap.create[0].existing_branch is True
+    assert len(cap.remove) == 1, f"expected one remove_worktree frame, got {cap.remove}"
+    assert cap.remove[0].worktree_path == f"{_SOURCE_REPO}-worktrees/feature-existing"
+    assert cap.remove[0].delete_branch is False, "a pre-existing branch must survive the rollback"
+
+    conv = SqlAlchemyConversationStore(db_uri).get_conversation(resp.json()["id"])
+    assert conv is not None
+    assert conv.host_id is None and conv.workspace is None and conv.git_branch is None
+
+
+@pytest.mark.parametrize("failure", ["rejected", "offline"])
+async def test_inline_create_launch_failure_keeps_cleanup_metadata_until_removed(
+    register_worktree_launch_host: RegisterHost,
+    client: httpx.AsyncClient,
+    db_uri: str,
+    failure: str,
+) -> None:
+    """When the host rejects the removal or has disconnected, the session keeps
+    its host binding and root label instead of discarding the only record of
+    the directory, and ``DELETE ...?delete_branch=true`` removes the worktree
+    once the host is back."""
+    cap = register_worktree_launch_host(
+        launch_status="failed",
+        remove_status="failed" if failure == "rejected" else "ok",
+        disconnect_after_launch=failure == "offline",
+    )
+    agent = await create_test_agent(client, name=f"wt-retry-{failure}-agent")
+
+    resp = await _create_git_session(
+        client, agent["id"], {"branch_name": "feature/retry", "base_branch": "main"}
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    worktree_path = f"{_SOURCE_REPO}-worktrees/feature-retry"
+    assert len(cap.create) == 1 and len(cap.launch) == 1
+    # A reachable host is asked once and refuses; an offline host is never asked.
+    assert len(cap.remove) == (1 if failure == "rejected" else 0), cap.remove
+
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.get_conversation(body["id"])
+    assert conv is not None
+    expected_binding = {
+        "host_id": _HOST_ID,
+        "workspace": worktree_path,
+        "git_branch": "feature/retry",
+        "root_label": worktree_root_fingerprint(worktree_path),
+    }
+    retained = {
+        "host_id": conv.host_id,
+        "workspace": conv.workspace,
+        "git_branch": conv.git_branch,
+        "root_label": conv.labels.get(WORKTREE_ROOT_LABEL_KEY),
+    }
+    assert retained == expected_binding, (
+        "an unconfirmed removal must keep the cleanup metadata; "
+        f"retained={retained} unexpected_frames={cap.unexpected}"
+    )
+    assert {
+        "host_id": body["host_id"],
+        "workspace": body["workspace"],
+        "git_branch": body["git_branch"],
+        "root_label": body["labels"].get(WORKTREE_ROOT_LABEL_KEY),
+    } == expected_binding, body
+
+    # The host comes back (newest connection wins) and still has the worktree.
+    cap_retry = register_worktree_launch_host()
+    cap_retry.worktrees.extend(cap.worktrees)
+    del_resp = await client.delete(f"/v1/sessions/{body['id']}?delete_branch=true")
+    assert del_resp.status_code in (200, 204), del_resp.text
+    assert len(cap_retry.remove) == 1, (
+        f"the retained binding should let delete retry the removal; got {cap_retry.remove}"
+    )
+    assert cap_retry.remove[0].worktree_path == worktree_path
+    assert cap_retry.remove[0].delete_branch is True
+    assert store.get_conversation(body["id"]) is None
 
 
 async def test_delete_with_delete_branch_removes_worktree(

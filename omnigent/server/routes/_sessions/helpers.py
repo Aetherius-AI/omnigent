@@ -9475,7 +9475,7 @@ async def _remove_session_worktree_best_effort(
     exclude_conversation_id: str | None = None,
     fail_if_unavailable: bool = False,
     expected_root_fingerprint: str | None = None,
-) -> None:
+) -> bool:
     """
     Best-effort removal of a session's git worktree.
 
@@ -9510,6 +9510,9 @@ async def _remove_session_worktree_best_effort(
     :param fail_if_unavailable: When ``True``, raise ``CONFLICT`` if the
         host cannot be reached to run git. Create-rollback leaves this
         ``False`` so a failed create still surfaces its original error.
+    :returns: ``True`` once the host confirms the removal; ``False`` when it
+        was skipped or failed best-effort, so a caller can keep its cleanup
+        metadata and retry later.
     """
     from omnigent.server.routes._host_worktree import (
         WorktreeHostUnavailableError,
@@ -9533,7 +9536,7 @@ async def _remove_session_worktree_best_effort(
             _logger.warning(
                 "Workspace %s no longer matches its recorded cleanup root", worktree_path
             )
-            return
+            return False
         shared = await asyncio.to_thread(
             conversation_store.has_other_live_session_in_workspace,
             host_id=host_id,
@@ -9547,7 +9550,7 @@ async def _remove_session_worktree_best_effort(
                 worktree_path,
                 reason,
             )
-            return
+            return False
 
     if host_registry is None:
         if fail_if_unavailable:
@@ -9555,7 +9558,7 @@ async def _remove_session_worktree_best_effort(
                 "host registry is not configured; cannot delete a worktree",
                 code=ErrorCode.INTERNAL_ERROR,
             )
-        return
+        return False
     host_conn = host_registry.get(host_id)
     if host_conn is None:
         if fail_if_unavailable:
@@ -9569,7 +9572,7 @@ async def _remove_session_worktree_best_effort(
             worktree_path,
             host_id,
         )
-        return
+        return False
     try:
         if conversation_store is not None and exclude_conversation_id is not None:
             worktrees = await list_worktrees_on_host(
@@ -9594,7 +9597,7 @@ async def _remove_session_worktree_best_effort(
                 _logger.warning(
                     "No matching linked worktree for %s; skipping cleanup", worktree_path
                 )
-                return
+                return False
             worktree_path = max(roots, key=len)
         await remove_worktree_on_host(
             host_registry=host_registry,
@@ -9603,6 +9606,7 @@ async def _remove_session_worktree_best_effort(
             branch=branch,
             delete_branch=delete_branch,
         )
+        return True
     except WorktreeHostUnavailableError as exc:
         if fail_if_unavailable:
             raise OmnigentError(
@@ -9615,6 +9619,7 @@ async def _remove_session_worktree_best_effort(
             worktree_path,
             host_id,
         )
+        return False
     except WorktreeProxyError:
         _logger.warning(
             "Best-effort worktree removal (%s) failed for %s",
@@ -9622,6 +9627,7 @@ async def _remove_session_worktree_best_effort(
             worktree_path,
             exc_info=True,
         )
+        return False
 
 
 def _resolve_subagent_spec(

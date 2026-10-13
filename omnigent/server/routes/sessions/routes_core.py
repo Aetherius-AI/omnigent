@@ -485,7 +485,9 @@ def register_core_routes(
         keeps the binding; the first message drives the real runner
         start, and if the host still refuses there, that path consults
         the daemon and persists a transcript error (see post_event's
-        relaunch branch). No create-time harness gating.
+        relaunch branch). No create-time harness gating. The JSON create
+        path unbinds the session instead once the host confirms removal
+        of a worktree that create made for it (see ``create_session``).
 
         :param request: The create request (for ``app.state`` lookups).
         :param user_id: Authenticated caller, or ``None`` when auth is
@@ -860,42 +862,46 @@ def register_core_routes(
                     and conv.workspace is not None
                     and conv.git_branch is not None
                 ):
-                    from omnigent.server.routes._host_worktree import (
-                        WORKTREE_ROOT_LABEL_KEY,
-                        recorded_worktree_root,
-                    )
+                    from omnigent.server.routes._host_worktree import WORKTREE_ROOT_LABEL_KEY
 
                     # Nothing reaps worktrees, so roll back the one this create
-                    # made, as the bind and delete paths do. The stored workspace
-                    # may be a relocated subdirectory; remove the recorded root.
-                    worktree_root = recorded_worktree_root(
-                        conv.workspace, conv.labels.get(WORKTREE_ROOT_LABEL_KEY)
+                    # made, as the bind and delete paths do. The helper resolves
+                    # the recorded root when the workspace is a relocated
+                    # subdirectory and leaves a directory another session uses.
+                    removed = await _remove_session_worktree_best_effort(
+                        host_id=launch_host_id,
+                        worktree_path=conv.workspace,
+                        branch=conv.git_branch,
+                        # Never -D a pre-existing branch the user checked out.
+                        delete_branch=not body.git.existing_branch,
+                        host_registry=getattr(request.app.state, "host_registry", None),
+                        reason="create-launch-failure",
+                        conversation_store=conversation_store,
+                        exclude_conversation_id=resp.id,
+                        expected_root_fingerprint=conv.labels.get(WORKTREE_ROOT_LABEL_KEY),
                     )
-                    if worktree_root is None:
-                        _logger.warning(
-                            "Workspace %s no longer matches its recorded cleanup root",
-                            conv.workspace,
+                    if removed:
+                        conv = await asyncio.to_thread(
+                            conversation_store.clear_host_binding, resp.id
                         )
+                        await asyncio.to_thread(
+                            conversation_store.delete_label, resp.id, WORKTREE_ROOT_LABEL_KEY
+                        )
+                        resp.runner_id = None
+                        resp.host_id = None
+                        resp.workspace = None
+                        resp.git_branch = None
+                        resp.labels.pop(WORKTREE_ROOT_LABEL_KEY, None)
+                        launch_host_id = None
                     else:
-                        await _remove_session_worktree_best_effort(
-                            host_id=launch_host_id,
-                            worktree_path=worktree_root,
-                            branch=conv.git_branch,
-                            # Never -D a pre-existing branch the user checked out.
-                            delete_branch=not body.git.existing_branch,
-                            host_registry=getattr(request.app.state, "host_registry", None),
-                            reason="create-launch-failure",
+                        # Unconfirmed removal: keep the binding and root label so
+                        # an opt-in delete or archive can retry the cleanup.
+                        _logger.warning(
+                            "Worktree %s for session %s was not removed after its launch "
+                            "failed; keeping the binding so a later delete or archive can retry",
+                            conv.workspace,
+                            resp.id,
                         )
-                    conv = await asyncio.to_thread(conversation_store.clear_host_binding, resp.id)
-                    await asyncio.to_thread(
-                        conversation_store.delete_label, resp.id, WORKTREE_ROOT_LABEL_KEY
-                    )
-                    resp.runner_id = None
-                    resp.host_id = None
-                    resp.workspace = None
-                    resp.git_branch = None
-                    resp.labels.pop(WORKTREE_ROOT_LABEL_KEY, None)
-                    launch_host_id = None
 
         # Default-public grant only once every launch step has been accepted, so a
         # rejected request never leaves a public session behind. Sub-agent
