@@ -2467,6 +2467,41 @@ async def test_mcp_execute_omits_local_tool_name_containing_double_underscore(
     assert payload["error"]["code"] < 0
 
 
+def _nb2_echo_callable(text: str = "") -> str:
+    """Return the text unchanged (test fixture for a dotted callable tool)."""
+    return text
+
+
+def test_build_mcp_local_tool_schemas_lists_callable_omits_file_local() -> None:
+    """A dotted callable is listed; a file-local tool that needs a workdir is not."""
+    spec = AgentSpec(
+        spec_version=1,
+        name="qa-agent",
+        local_tools=[
+            LocalToolInfo(
+                name="echo_callable",
+                path=f"{__name__}._nb2_echo_callable",
+                language="omnigent-python-callable",
+                runtime=ToolRuntime.SERVER,
+                parameters={"type": "object", "properties": {"text": {"type": "string"}}},
+            ),
+            LocalToolInfo(
+                name="file_local_tool",
+                path="tools/python/file_local_tool.py",
+                language="python",
+                runtime=ToolRuntime.SERVER,
+            ),
+        ],
+    )
+
+    names = {schema["name"] for schema in _tool_dispatch.build_mcp_local_tool_schemas(spec)}
+
+    assert "echo_callable" in names, "a dotted callable tool resolves without a workdir"
+    assert "file_local_tool" not in names, (
+        "a file-local tool needs the agent workdir to load, so it is not advertised"
+    )
+
+
 @pytest.mark.asyncio
 async def test_sessions_native_path_injects_mcp_schemas() -> None:
     """``POST /v1/sessions/{conv}/events`` with a message body injects MCP schemas.
