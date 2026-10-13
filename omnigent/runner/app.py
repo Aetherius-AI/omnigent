@@ -1808,10 +1808,11 @@ def create_runner_app(
         _background_tasks.add(task)
 
     def _runner_session_is_live(session_id: str) -> bool:
-        """Whether this runner still hosts ``session_id``; teardown pops the
-        start cache, so an exit-driven rebuild can skip an already-deleted one.
+        """Whether this runner still hosts ``session_id`` and may rebuild its
+        REPL pane; teardown pops the start cache and shutdown tears tmux down,
+        so an exit-driven rebuild skips an already-deleted or draining session.
         """
-        if session_id in _sessions_tearing_down:
+        if session_id in _sessions_tearing_down or _shutting_down.is_set():
             return False
         return (
             process_manager is not None and process_manager.has_session(session_id)
@@ -1838,12 +1839,10 @@ def create_runner_app(
     def _begin_repl_terminal_recovery(event: TerminalExitEvent) -> bool:
         """Claim an exit-driven REPL rebuild and announce it on the session stream.
 
-        ``tui:main`` is a live SDK session's main terminal. When its tmux
-        backing dies, the resource would silently vanish and the web view
-        would claim the harness is not running while the session is still
-        alive — so rebuild the terminal instead. Deliberate closes stop the
-        watcher before killing tmux and never reach the exit publisher, so
-        an exit seen here is an unexpected death.
+        ``tui:main`` is a live SDK session's main terminal, so an unexpected
+        tmux death must rebuild it rather than let the pane silently vanish.
+        Deliberate closes stop the watcher before killing tmux and never reach
+        the exit publisher, so an exit seen here is an unexpected death.
 
         :param event: The auxiliary REPL terminal's exit event.
         :returns: ``True`` when a rebuild was claimed; the caller then runs
@@ -1931,7 +1930,6 @@ def create_runner_app(
             event.lifecycle != TerminalLifecycle.REQUIRED
             and event.terminal_name == _REPL_TERMINAL_NAME
             and event.session_key == _REPL_TERMINAL_SESSION_KEY
-            and not _shutting_down.is_set()
             and _runner_session_is_live(event.session_id)
         ):
             # Claims a rate-limit slot and publishes terminal_pending=True
@@ -3510,7 +3508,6 @@ def create_runner_app(
         _qwen_terminal_ensure_locks.pop(session_id, None)
         _kimi_terminal_ensure_locks.pop(session_id, None)
         _hermes_terminal_ensure_locks.pop(session_id, None)
-        _repl_terminal_ensure_locks.pop(session_id, None)
         _repl_terminal_auto_recreates.pop(session_id, None)
         _interrupted_sessions.discard(session_id)
         await _cancel_auto_forwarder_task(session_id)
@@ -3527,7 +3524,13 @@ def create_runner_app(
         if process_manager is not None:
             await process_manager.release(session_id)
 
-        await resource_registry.cleanup_session(session_id)
+        # Coordinate with an in-flight exit-driven REPL rebuild: a launch past
+        # the liveness gate holds this recreate lock, so cleanup waits for it
+        # and tears its pane down instead of leaking one built after cleanup.
+        _repl_lock = _repl_terminal_ensure_locks.setdefault(session_id, asyncio.Lock())
+        async with _repl_lock:
+            await resource_registry.cleanup_session(session_id)
+        _repl_terminal_ensure_locks.pop(session_id, None)
 
         await _delete_native_bridge_dirs(
             server_client=server_client,
@@ -7562,11 +7565,15 @@ def create_runner_app(
         _qwen_terminal_ensure_locks.pop(session_id, None)
         _kimi_terminal_ensure_locks.pop(session_id, None)
         _hermes_terminal_ensure_locks.pop(session_id, None)
-        _repl_terminal_ensure_locks.pop(session_id, None)
         _repl_terminal_auto_recreates.pop(session_id, None)
         if process_manager is not None:
             await process_manager.release(session_id)
-        await resource_registry.cleanup_session(session_id)
+        # Serialize with an in-flight exit-driven REPL rebuild so cleanup tears
+        # down a pane the launch is still building rather than leaking it.
+        _repl_lock = _repl_terminal_ensure_locks.setdefault(session_id, asyncio.Lock())
+        async with _repl_lock:
+            await resource_registry.cleanup_session(session_id)
+        _repl_terminal_ensure_locks.pop(session_id, None)
         await _delete_native_bridge_dirs(
             server_client=server_client,
             session_id=session_id,
@@ -7597,12 +7604,16 @@ def create_runner_app(
         _qwen_terminal_ensure_locks.pop(session_id, None)
         _kimi_terminal_ensure_locks.pop(session_id, None)
         _hermes_terminal_ensure_locks.pop(session_id, None)
-        _repl_terminal_ensure_locks.pop(session_id, None)
         _repl_terminal_auto_recreates.pop(session_id, None)
-        await _teardown_session_terminals(session_id)
-        if process_manager is not None:
-            await process_manager.release(session_id)
-        await resource_registry.cleanup_session(session_id)
+        # Serialize with an in-flight exit-driven REPL rebuild so cleanup tears
+        # down a pane the launch is still building rather than leaking it.
+        _repl_lock = _repl_terminal_ensure_locks.setdefault(session_id, asyncio.Lock())
+        async with _repl_lock:
+            await _teardown_session_terminals(session_id)
+            if process_manager is not None:
+                await process_manager.release(session_id)
+            await resource_registry.cleanup_session(session_id)
+        _repl_terminal_ensure_locks.pop(session_id, None)
         _clear_session_agent_caches(session_id, _session_agent_ids.get(session_id))
         return JSONResponse(
             status_code=200,

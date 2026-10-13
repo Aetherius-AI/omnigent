@@ -5196,6 +5196,156 @@ async def test_delete_session_clears_teardown_marker_when_cleanup_raises(
     assert conv_id not in _sessions_tearing_down_ref
 
 
+@pytest.mark.asyncio
+async def test_delete_session_waits_for_in_flight_repl_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Teardown waits for an in-flight REPL rebuild, then tears its pane down.
+
+    The recover task can pass the under-lock liveness check and then await
+    inside the launch while still holding the recreate lock. ``delete_session``
+    must not finish its resource cleanup until that launch releases the lock,
+    so the canonical cleanup removes the just-built role and pane instead of
+    the launch resurrecting per-session state after cleanup has already run.
+    """
+    from omnigent.runner.app import _session_event_queues_ref
+    from omnigent.runner.resource_registry import (
+        OMNIGENT_REPL_TERMINAL_ROLE,
+        TerminalExitEvent,
+        TerminalLifecycle,
+    )
+
+    conv_id = uuid.uuid4().hex
+    launch_started = asyncio.Event()
+    release_launch = asyncio.Event()
+
+    async def _blocking_auto_create_repl_terminal(
+        session_id: str, resource_registry: Any, *args: Any, **kwargs: Any
+    ) -> None:
+        # Model the real launch: stamp the REPL role (per-session state) while
+        # holding the recreate lock, then await so teardown must coordinate.
+        resource_registry.retain_terminal_role(
+            session_id, "terminal_tui_main", OMNIGENT_REPL_TERMINAL_ROLE
+        )
+        launch_started.set()
+        await release_launch.wait()
+
+    monkeypatch.setattr(
+        "omnigent.runner.resource_routes._auto_create_repl_terminal",
+        _blocking_auto_create_repl_terminal,
+    )
+    pm = _FakeProcessManager(_ScriptedHarnessClient([]))
+    pm._sessions.add(conv_id)
+    app = create_runner_app(
+        process_manager=pm,  # type: ignore[arg-type]
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+        terminal_registry=TerminalRegistry(),
+    )
+    resource_registry = app.state.session_resource_registry
+    publish_exit = resource_registry._terminal_exit_publisher
+    assert callable(publish_exit)
+
+    try:
+        async with _runner_client(app) as client:
+            # Recovery is claimed while live and runs until it holds the lock
+            # inside the launch, before any teardown begins.
+            publish_exit(
+                TerminalExitEvent(
+                    session_id=conv_id,
+                    terminal_id="terminal_tui_main",
+                    terminal_name="tui",
+                    session_key="main",
+                    lifecycle=TerminalLifecycle.AUXILIARY,
+                )
+            )
+            await asyncio.wait_for(launch_started.wait(), timeout=5)
+
+            delete_task = asyncio.create_task(client.delete(f"/v1/sessions/{conv_id}"))
+            for _ in range(50):
+                await asyncio.sleep(0)
+                if delete_task.done():
+                    break
+            # Teardown is parked on the recreate lock the launch holds, so it
+            # has not cleaned the session up and the launched role still exists.
+            assert not delete_task.done()
+            assert (
+                resource_registry.terminal_resource_role(conv_id, "terminal_tui_main")
+                == OMNIGENT_REPL_TERMINAL_ROLE
+            )
+
+            release_launch.set()
+            await _await_repl_terminal_recover(conv_id)
+            resp = await delete_task
+    finally:
+        _session_event_queues_ref.pop(conv_id, None)
+
+    assert resp.status_code == 200, resp.text
+    # The launch finished first, then cleanup removed its role: no terminal,
+    # watcher, role, or per-session state leaks past teardown.
+    assert resource_registry.terminal_resource_role(conv_id, "terminal_tui_main") is None
+    assert resource_registry.terminal_registry.list_for_conversation(conv_id) == []
+
+
+@pytest.mark.asyncio
+async def test_auxiliary_repl_exit_skips_rebuild_when_shutdown_begins_mid_recover(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shutdown that begins after recovery is claimed still refuses the rebuild.
+
+    The exit is claimed while the runner is live (so the spinner shows), but
+    the runner begins shutting down before the deferred recover task runs. The
+    recover task's liveness gate must observe the shutdown flag and refuse to
+    rebuild a pane for a runner that is tearing tmux down.
+    """
+    from omnigent.runner.app import _session_event_queues_ref
+    from omnigent.runner.resource_registry import TerminalExitEvent, TerminalLifecycle
+
+    conv_id = uuid.uuid4().hex
+    recreated: list[str] = []
+
+    async def _fake_auto_create_repl_terminal(session_id: str, *args: Any, **kwargs: Any) -> None:
+        recreated.append(session_id)
+
+    monkeypatch.setattr(
+        "omnigent.runner.resource_routes._auto_create_repl_terminal",
+        _fake_auto_create_repl_terminal,
+    )
+    pm = _FakeProcessManager(_ScriptedHarnessClient([]))
+    pm._sessions.add(conv_id)
+    app = create_runner_app(
+        process_manager=pm,  # type: ignore[arg-type]
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+        terminal_registry=TerminalRegistry(),
+    )
+    publish_exit = app.state.session_resource_registry._terminal_exit_publisher
+    assert callable(publish_exit)
+
+    try:
+        publish_exit(
+            TerminalExitEvent(
+                session_id=conv_id,
+                terminal_id="terminal_tui_main",
+                terminal_name="tui",
+                session_key="main",
+                lifecycle=TerminalLifecycle.AUXILIARY,
+            )
+        )
+        # Shutdown starts after the synchronous claim but before the deferred
+        # recover task runs.
+        app.state.shutting_down.set()
+        await _await_repl_terminal_recover(conv_id)
+        events = _drain_session_event_queue(_session_event_queues_ref.get(conv_id))
+    finally:
+        _session_event_queues_ref.pop(conv_id, None)
+
+    # The claim announced the spinner, but the recover task saw shutdown at its
+    # liveness gate and refused to rebuild, without resurrecting the queue.
+    assert recreated == []
+    assert [
+        event["pending"] for event in events if event.get("type") == "session.terminal_pending"
+    ] == [True]
+
+
 @pytest.mark.parametrize("terminal_name", ["qwen", "antigravity"])
 @pytest.mark.asyncio
 async def test_required_terminal_clean_quit_publishes_idle_not_failed(

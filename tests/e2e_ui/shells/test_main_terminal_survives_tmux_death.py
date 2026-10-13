@@ -215,6 +215,7 @@ def test_repl_terminal_survives_tmux_server_death(
         current = _repl_terminal(base_url, session_id)
         if (
             current is not None
+            and str(current["metadata"]["tmux_socket"]) != socket_path
             and "connected" in _terminal_states(terminal)
             and _tmux(str(current["metadata"]["tmux_socket"]), "has-session").returncode == 0
         ):
