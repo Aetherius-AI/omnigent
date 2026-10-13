@@ -587,7 +587,8 @@ async def test_inline_create_launch_failure_tolerates_binding_cleanup_error(
     """A transient store error while clearing the binding after a confirmed
     worktree removal must not 500 the create. The worktree is already gone, so
     the response and the persisted row keep reporting the binding instead of a
-    false unbound result, and retain the root label for a later retry."""
+    false unbound result; the root label was dropped before the unbind was
+    attempted, since the directory it fingerprinted no longer exists."""
     cap = register_worktree_launch_host(launch_status="failed")
     agent = await create_test_agent(client, name="wt-clearerr-agent")
 
@@ -612,18 +613,16 @@ async def test_inline_create_launch_failure_tolerates_binding_cleanup_error(
     worktree_path = f"{_SOURCE_REPO}-worktrees/feature-clearerr"
     body = resp.json()
     # The clear failed, so the still-persisted binding must be reported, not a
-    # misleading unbound result, and the root label kept for a later retry.
+    # misleading unbound result; the root label of the removed directory is gone.
     assert body["host_id"] == _HOST_ID and body["runner_id"] is not None, body
     assert body["workspace"] == worktree_path and body["git_branch"] == "feature/clearerr", body
-    assert body["labels"].get(WORKTREE_ROOT_LABEL_KEY) == worktree_root_fingerprint(
-        worktree_path
-    ), body
+    assert WORKTREE_ROOT_LABEL_KEY not in body["labels"], body
 
     conv = SqlAlchemyConversationStore(db_uri).get_conversation(body["id"])
     assert conv is not None
     assert conv.host_id == _HOST_ID and conv.runner_id is not None
     assert conv.workspace == worktree_path and conv.git_branch == "feature/clearerr"
-    assert conv.labels.get(WORKTREE_ROOT_LABEL_KEY) == worktree_root_fingerprint(worktree_path)
+    assert WORKTREE_ROOT_LABEL_KEY not in conv.labels
 
 
 async def test_inline_create_launch_failure_reports_unbound_when_label_delete_fails(
@@ -632,10 +631,11 @@ async def test_inline_create_launch_failure_reports_unbound_when_label_delete_fa
     db_uri: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Unbinding is the success criterion: once ``clear_host_binding`` commits,
-    a later failure to drop the root label must not revert the response to the
-    old binding. The POST, a follow-up GET, and the stored row then agree the
-    session is unbound, leaving only the orphaned label for a later retry."""
+    """Unbinding is the success criterion: a failure to drop the root label
+    must neither stop the unbind nor make the response report the old binding.
+    The POST, a follow-up GET, and the stored row then agree the session is
+    unbound, leaving only the orphaned label, which is inert until the session
+    is deleted."""
     cap = register_worktree_launch_host(launch_status="failed")
     agent = await create_test_agent(client, name="wt-labelerr-agent")
 
@@ -659,8 +659,8 @@ async def test_inline_create_launch_failure_reports_unbound_when_label_delete_fa
     )
     worktree_path = f"{_SOURCE_REPO}-worktrees/feature-labelerr"
     body = resp.json()
-    # clear_host_binding committed, so the response reports the session unbound
-    # even though the label delete failed; the stale label stays visible.
+    # The unbind committed, so the response reports the session unbound even
+    # though the label delete failed; the stale label stays visible.
     assert body["host_id"] is None and body["runner_id"] is None, body
     assert body["workspace"] is None and body["git_branch"] is None, body
     assert body["labels"].get(WORKTREE_ROOT_LABEL_KEY) == worktree_root_fingerprint(
@@ -684,7 +684,7 @@ async def test_inline_create_launch_failure_reports_unbound_when_label_delete_fa
     assert conv is not None
     assert conv.host_id is None and conv.runner_id is None
     assert conv.workspace is None and conv.git_branch is None
-    # The label delete failed, so the orphaned root label persists for a retry.
+    # The label delete failed, so the orphaned root label persists until deletion.
     assert conv.labels.get(WORKTREE_ROOT_LABEL_KEY) == worktree_root_fingerprint(worktree_path)
 
 
@@ -1072,8 +1072,8 @@ async def test_inline_create_launch_failure_keeps_binding_rebound_on_another_rep
     """The relaunch lock orders writers inside one server process only. A rebind
     written through another replica while this one removes the worktree must
     survive: the unbind is a compare-and-clear on the failed launch's runner, so
-    the create keeps the newer binding, reports it, and leaves the root label
-    for a later delete or archive."""
+    the create keeps the newer binding and reports it. The root label is gone,
+    since it fingerprinted the directory the host has just confirmed removed."""
     from omnigent.server.routes._sessions import helpers as sessions_helpers
 
     cap = register_worktree_launch_host(launch_status="failed")
@@ -1106,13 +1106,91 @@ async def test_inline_create_launch_failure_keeps_binding_rebound_on_another_rep
     assert conv.runner_id == "runner_replica_b", conv.runner_id
     assert conv.host_id == _HOST_ID and conv.workspace == worktree_path
     assert conv.git_branch == "feature/replica"
-    assert conv.labels.get(WORKTREE_ROOT_LABEL_KEY) == worktree_root_fingerprint(worktree_path)
+    assert WORKTREE_ROOT_LABEL_KEY not in conv.labels, conv.labels
     assert body["runner_id"] == "runner_replica_b" and body["host_id"] == _HOST_ID, body
     assert body["workspace"] == worktree_path and body["git_branch"] == "feature/replica", body
-    assert body["labels"].get(WORKTREE_ROOT_LABEL_KEY) == worktree_root_fingerprint(
-        worktree_path
-    ), body
+    assert WORKTREE_ROOT_LABEL_KEY not in body["labels"], body
     assert len(cap.launch) == 1, f"unexpected={cap.unexpected}"
+
+
+async def test_inline_create_launch_failure_keeps_replacement_bind_fingerprint(
+    register_worktree_launch_host: RegisterHost,
+    client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The root label is dropped before the binding is released. A bind through
+    ``POST /v1/hosts/{host_id}/runners`` that claims the session the moment it
+    is unbound, relocating a picked subdirectory into a new worktree, keeps the
+    fingerprint it records for that worktree root, so a later delete removes the
+    replacement root instead of skipping an unrecorded subdirectory checkout."""
+    cap = register_worktree_launch_host(launch_status="failed")
+    agent = await create_test_agent(client, name="wt-bind-claim-agent")
+    loop = asyncio.get_running_loop()
+    replacement: dict[str, Any] = {}
+
+    async def _bind_replacement(conversation_id: str) -> None:
+        # A healthy connection for the same host now serves the bind.
+        replacement["cap"] = register_worktree_launch_host(
+            launch_status="launched", workspace_subdir="web"
+        )
+        resp = await client.post(
+            f"/v1/hosts/{_HOST_ID}/runners",
+            json={
+                "session_id": conversation_id,
+                "workspace": f"{_SOURCE_REPO}/web",
+                "git": {"branch_name": "feature/replacement", "base_branch": "main"},
+            },
+        )
+        replacement["status"] = resp.status_code
+        replacement["body"] = resp.text
+
+    original_clear = SqlAlchemyConversationStore.clear_host_binding
+
+    def _clear_then_bind(
+        self: SqlAlchemyConversationStore, conversation_id: str, **kwargs: Any
+    ) -> Any:
+        row = SqlAlchemyConversationStore.get_conversation(self, conversation_id)
+        if row is None or row.git_branch != "feature/bind-claim":
+            return original_clear(self, conversation_id, **kwargs)
+        cleared = original_clear(self, conversation_id, **kwargs)
+        # The unbind has committed; the bind lands before the rollback resumes.
+        asyncio.run_coroutine_threadsafe(_bind_replacement(conversation_id), loop).result(30)
+        return cleared
+
+    monkeypatch.setattr(SqlAlchemyConversationStore, "clear_host_binding", _clear_then_bind)
+
+    resp = await _create_git_session(
+        client, agent["id"], {"branch_name": "feature/bind-claim", "base_branch": "main"}
+    )
+    assert resp.status_code == 201, resp.text
+    assert replacement.get("status") == 200, replacement
+    assert len(cap.remove) == 1, f"got {cap.remove}; unexpected={cap.unexpected}"
+    body = resp.json()
+    # The create reports the unbind it committed; the bind landed after it.
+    assert body["host_id"] is None and body["runner_id"] is None, body
+    assert WORKTREE_ROOT_LABEL_KEY not in body["labels"], body
+
+    replacement_root = f"{_SOURCE_REPO}-worktrees/feature-replacement"
+    cap_bind = replacement["cap"]
+    assert len(cap_bind.create) == 1 and len(cap_bind.launch) == 1, cap_bind.unexpected
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.get_conversation(body["id"])
+    assert conv is not None
+    assert conv.runner_id is not None and conv.host_id == _HOST_ID
+    assert conv.workspace == f"{replacement_root}/web"
+    assert conv.git_branch == "feature/replacement"
+    assert conv.labels.get(WORKTREE_ROOT_LABEL_KEY) == worktree_root_fingerprint(
+        replacement_root
+    ), conv.labels
+
+    del_resp = await client.delete(f"/v1/sessions/{body['id']}?delete_branch=true")
+    assert del_resp.status_code == 200, del_resp.text
+    assert [frame.worktree_path for frame in cap_bind.remove] == [replacement_root], (
+        f"got {cap_bind.remove}; unexpected={cap_bind.unexpected}"
+    )
+    assert cap_bind.remove[0].delete_branch is True
+    assert store.get_conversation(body["id"]) is None
 
 
 @pytest.mark.parametrize("fault", ["reread", "shared_check"])

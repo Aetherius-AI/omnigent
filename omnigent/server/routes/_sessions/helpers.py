@@ -5969,15 +5969,13 @@ async def _rollback_create_launch_worktree(
 ) -> tuple[Conversation | None, bool, str | None]:
     """
     Roll back the worktree an inline ``POST /v1/sessions`` created once its
-    caller-host launch has failed, mirroring the bind and delete cleanup paths.
+    caller-host launch has failed.
 
-    Nothing reaps a worktree a failed inline create leaves behind, so this
-    removes it under the per-conversation relaunch lock after re-reading the
-    row to confirm the failed launch's runner is still bound. The session is
-    unbound only once the host confirms the removal. Every store read, the
-    shared-worktree guard, and the unbind itself are best-effort: a transient
-    failure keeps the binding and root label for a later delete or archive to
-    retry, and the create still returns 201.
+    Runs under the per-conversation relaunch lock and only while the failed
+    launch's runner is still bound, so it never removes a directory a newer
+    runner uses. The binding is released only after the host confirms the
+    removal. Every store step is best-effort: a failure keeps the stored
+    binding for a later delete or archive, and the create still returns 201.
 
     :param conversation_store: Store holding the session row.
     :param host_registry: Live host tunnels, or ``None`` when hosts are not
@@ -6074,6 +6072,23 @@ async def _rollback_create_launch_worktree(
             else:
                 removed = await _remove_worktree(latest)
                 if removed:
+                    # Drop the root label before releasing the binding, so a bind
+                    # that claims the session right after the unbind keeps the
+                    # fingerprint it writes for its own worktree.
+                    label_dropped = False
+                    try:
+                        await asyncio.to_thread(
+                            conversation_store.delete_label, resp.id, WORKTREE_ROOT_LABEL_KEY
+                        )
+                        label_dropped = True
+                    except Exception:  # noqa: BLE001
+                        _logger.warning(
+                            "Failed to drop the worktree-root label for session %s after "
+                            "its launch-failure worktree was removed; the stale label is "
+                            "removed when the session is deleted",
+                            resp.id,
+                            exc_info=True,
+                        )
                     unbound = False
                     try:
                         # Compare-and-clear on the failed launch's runner: the
@@ -6148,27 +6163,8 @@ async def _rollback_create_launch_worktree(
                         resp.workspace = None
                         resp.git_branch = None
                         bound_host_id = None
-                        label_dropped = session_vanished
-                        if not session_vanished:
-                            try:
-                                await asyncio.to_thread(
-                                    conversation_store.delete_label,
-                                    resp.id,
-                                    WORKTREE_ROOT_LABEL_KEY,
-                                )
-                                label_dropped = True
-                            except Exception:  # noqa: BLE001
-                                _logger.warning(
-                                    "Failed to drop the worktree-root label "
-                                    "for session %s after clearing its "
-                                    "launch-failure binding; the stale "
-                                    "label is removed when the session "
-                                    "is deleted",
-                                    resp.id,
-                                    exc_info=True,
-                                )
-                        if label_dropped:
-                            resp.labels.pop(WORKTREE_ROOT_LABEL_KEY, None)
+                    if label_dropped or session_vanished:
+                        resp.labels.pop(WORKTREE_ROOT_LABEL_KEY, None)
                 else:
                     _logger.warning(
                         "Worktree %s for session %s was not removed after its "
