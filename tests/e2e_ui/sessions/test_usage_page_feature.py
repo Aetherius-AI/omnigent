@@ -382,8 +382,16 @@ def test_pagination_load_more_button_appears_and_loads_next_page(
     load_more_button = page.get_by_role("button", name="Load More", exact=True)
     expect(load_more_button).to_be_visible()
 
+    # The window total comes from the authoritative daily rollup, not the
+    # loaded session rows, so appending another page must not change it.
+    total_value = page.get_by_text("Total cost", exact=True).locator(
+        "xpath=following-sibling::p[1]"
+    )
+    total_before = total_value.inner_text()
+
     load_more_button.click()
     expect(page.get_by_text("Session from page 2")).to_be_visible(timeout=10_000)
     expect(load_more_button).not_to_be_visible()
+    expect(total_value).to_have_text(total_before)
 
     assert request_count == 2
