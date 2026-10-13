@@ -334,25 +334,29 @@ def loopback_no_proxy_env(
     """
     Build ``NO_PROXY`` / ``no_proxy`` values that exempt the loopback server.
 
-    Appends *hostname* and the loopback names to the exceptions already in
-    *base_env*, so an inherited proxy still carries remote traffic while
+    Unions the exceptions already present under either spelling in *base_env*,
+    appends *hostname* and the loopback names, and returns that one list under
+    both spellings, so an inherited proxy still carries remote traffic while
     ``opencode`` reaches loopback endpoints directly.
 
     :param hostname: Bind host of ``opencode serve``, e.g. ``"127.0.0.1"``.
     :param base_env: Environment whose exceptions are preserved; ``None``
         reads ``os.environ``.
-    :returns: Both spellings of the variable with loopback appended, e.g.
+    :returns: Both spellings set to the merged list, e.g.
         ``"corp.example,127.0.0.1,localhost"``.
     """
     source = os.environ if base_env is None else base_env
-    env: dict[str, str] = {}
+    entries: list[str] = []
     for key in ("NO_PROXY", "no_proxy"):
-        entries = [entry.strip() for entry in source.get(key, "").split(",") if entry.strip()]
-        for host in (hostname, *_LOOPBACK_NO_PROXY_HOSTS):
-            if host not in entries:
-                entries.append(host)
-        env[key] = ",".join(entries)
-    return env
+        for raw in source.get(key, "").split(","):
+            entry = raw.strip()
+            if entry and entry not in entries:
+                entries.append(entry)
+    for host in (hostname, *_LOOPBACK_NO_PROXY_HOSTS):
+        if host not in entries:
+            entries.append(host)
+    merged = ",".join(entries)
+    return {"NO_PROXY": merged, "no_proxy": merged}
 
 
 def filtered_server_env(
@@ -394,8 +398,8 @@ def filtered_server_env(
             or key in extra_names
         ):
             env[key] = value
-    env.update(loopback_no_proxy_env(hostname))
     env.update(extra_env or {})
+    env.update(loopback_no_proxy_env(hostname, env))
     env["XDG_DATA_HOME"] = str(xdg_data_home_for_bridge_dir(bridge_dir))
     env["XDG_CONFIG_HOME"] = str(xdg_config_home_for_bridge_dir(bridge_dir))
     env[OPENCODE_SERVER_PASSWORD_ENV_VAR] = auth_secret

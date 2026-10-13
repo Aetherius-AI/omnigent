@@ -21,6 +21,7 @@ from omnigent.harnesses.opencode_native.app_server import (
     opencode_terminal_env,
     parse_opencode_version,
 )
+from tests._helpers.proxy_env import dead_proxy_url, loopback_json_stub, set_proxy_env
 
 
 def test_parse_opencode_version() -> None:
@@ -147,10 +148,26 @@ def test_filtered_server_env_drops_global_opencode_config(
     assert env["XDG_CONFIG_HOME"] == str(tmp_path / "xdg-config")
 
 
-def test_loopback_no_proxy_env_merges_existing_exceptions() -> None:
-    env = loopback_no_proxy_env("127.0.0.1", {"NO_PROXY": "corp.example, 127.0.0.1"})
-    assert env["NO_PROXY"] == "corp.example,127.0.0.1,localhost"
-    assert env["no_proxy"] == "127.0.0.1,localhost"
+@pytest.mark.parametrize(
+    ("base_env", "expected"),
+    [
+        ({"NO_PROXY": "corp.example, 127.0.0.1"}, "corp.example,127.0.0.1,localhost"),
+        ({"no_proxy": "corp.example"}, "corp.example,127.0.0.1,localhost"),
+        (
+            {"NO_PROXY": "corp.example", "no_proxy": "other.example"},
+            "corp.example,other.example,127.0.0.1,localhost",
+        ),
+    ],
+    ids=["uppercase-only", "lowercase-only", "differing"],
+)
+def test_loopback_no_proxy_env_merges_existing_exceptions(
+    base_env: dict[str, str], expected: str
+) -> None:
+    # Both spellings carry the union so neither can un-exempt the other's hosts.
+    assert loopback_no_proxy_env("127.0.0.1", base_env) == {
+        "NO_PROXY": expected,
+        "no_proxy": expected,
+    }
 
 
 def test_filtered_server_env_exempts_loopback_from_proxy(
@@ -159,11 +176,14 @@ def test_filtered_server_env_exempts_loopback_from_proxy(
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:3128")
     monkeypatch.setenv("NO_PROXY", "corp.example")
     monkeypatch.delenv("no_proxy", raising=False)
-    env = filtered_server_env(bridge_dir=tmp_path, auth_secret="pw")
-    # Remote traffic keeps the proxy; loopback (the runner relay) bypasses it.
+    env = filtered_server_env(
+        bridge_dir=tmp_path, auth_secret="pw", extra_env={"NO_PROXY": "gateway.example"}
+    )
+    # Remote traffic keeps the proxy; loopback (the runner relay) bypasses it even
+    # when a caller's extra_env supplies its own NO_PROXY.
     assert env["HTTPS_PROXY"] == "http://proxy.example:3128"
-    assert env["NO_PROXY"] == "corp.example,127.0.0.1,localhost"
-    assert env["no_proxy"] == "127.0.0.1,localhost"
+    assert env["NO_PROXY"] == "gateway.example,127.0.0.1,localhost"
+    assert env["no_proxy"] == env["NO_PROXY"]
 
 
 def _server(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> OpenCodeNativeServer:
@@ -199,7 +219,7 @@ def test_terminal_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert env["XDG_DATA_HOME"] == str(server.xdg_data_home)
     # The attach pane inherits the runner's proxy env; the serve host must be exempt.
     assert env["NO_PROXY"] == "corp.example,127.0.0.1,localhost"
-    assert env["no_proxy"] == "127.0.0.1,localhost"
+    assert env["no_proxy"] == env["NO_PROXY"]
 
 
 async def test_start_polls_until_ready(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -442,49 +462,8 @@ async def test_wait_until_ready_bypasses_proxy_env_for_loopback(
 ) -> None:
     # A proxy that cannot route 127.0.0.1 must not black-hole the readiness
     # probe; the loopback opencode serve is reachable without any proxy.
-    import http.server
-    import socket
-    import socketserver
-    import threading
-
-    class _Handler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self) -> None:
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"[]")
-
-        def log_message(self, format: str, *args: object) -> None:
-            pass
-
-    httpd = socketserver.TCPServer(("127.0.0.1", 0), _Handler)
-    stub_port = httpd.server_address[1]
-    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-    thread.start()
-
-    probe = socket.socket()
-    probe.bind(("127.0.0.1", 0))
-    dead_port = probe.getsockname()[1]
-    # Keep probe bound (never listening) so dead_port refuses connects deterministically.
-    proxy = f"http://127.0.0.1:{dead_port}"
-
-    try:
-        for var in (
-            "HTTP_PROXY",
-            "HTTPS_PROXY",
-            "http_proxy",
-            "https_proxy",
-            "ALL_PROXY",
-            "all_proxy",
-        ):
-            monkeypatch.setenv(var, proxy)
-        monkeypatch.delenv("NO_PROXY", raising=False)
-        monkeypatch.delenv("no_proxy", raising=False)
-
+    with loopback_json_stub(b"[]") as stub, dead_proxy_url() as proxy:
+        set_proxy_env(monkeypatch, proxy)
         server = _server(monkeypatch, tmp_path)
-        server.port = stub_port
-
+        server.port = stub.port
         await server._wait_until_ready(attempts=5, delay=0.05)
-    finally:
-        probe.close()
-        httpd.shutdown()
-        httpd.server_close()
