@@ -486,8 +486,10 @@ def register_core_routes(
         start, and if the host still refuses there, that path consults
         the daemon and persists a transcript error (see post_event's
         relaunch branch). No create-time harness gating. The JSON create
-        path unbinds the session instead once the host confirms removal
-        of a worktree that create made for it (see ``create_session``).
+        path instead rolls back a worktree that create made when the
+        launch fails or times out, unbinding the session only once the
+        host confirms removal; an unconfirmed removal keeps the binding
+        so a first message can still retry (see ``create_session``).
 
         :param request: The create request (for ``app.state`` lookups).
         :param user_id: Authenticated caller, or ``None`` when auth is
@@ -937,9 +939,9 @@ def register_core_routes(
                                     session_vanished = True
                                     unbound = True
                                 except Exception:
-                                    # Unbinding failed, so the stored session still
-                                    # references the removed worktree; keep the response
-                                    # honest and leave the root label for later reconcile.
+                                    # Unbind failed; the response and row still carry the
+                                    # binding to the removed worktree, and the root label
+                                    # stays for an opt-in delete or archive to clean up.
                                     _logger.warning(
                                         "Best-effort host-binding cleanup failed for "
                                         "session %s after its launch-failure worktree "
@@ -964,9 +966,9 @@ def register_core_routes(
                                             )
                                             label_dropped = True
                                         except Exception:
-                                            # The binding is already cleared; a stale root
-                                            # label is harmless and a later delete or
-                                            # archive reconciles it.
+                                            # Binding already cleared; the orphaned root
+                                            # label is harmless and goes away with an
+                                            # opt-in delete or archive of the session.
                                             _logger.warning(
                                                 "Failed to drop the worktree-root label "
                                                 "for session %s after clearing its "
