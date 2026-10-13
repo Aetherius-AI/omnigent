@@ -2750,8 +2750,6 @@ class TerminalInstance:
         """
         text = launch_output.decode(errors="replace")
         try:
-            # The pid is the final token: display-message is appended last, so a
-            # stray earlier line can never shift it.
             pid = int(text.split()[-1])
             create_time = psutil.Process(pid).create_time()
         except (ValueError, IndexError, psutil.NoSuchProcess, psutil.AccessDenied, OSError):
@@ -2766,7 +2764,6 @@ class TerminalInstance:
                 self.session_key,
             )
             return
-        # Store pid and start time together so SIGUSR1 never hits a recycled pid.
         self._tmux_server_pid = pid
         self._tmux_server_create_time = create_time
 

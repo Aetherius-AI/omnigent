@@ -3831,6 +3831,18 @@ def test_concurrent_recovery_joins_one_attempt_without_a_false_exit(
     killed: list[tuple[int, int]] = []
     monkeypatch.setattr(terminal_mod.os, "kill", lambda pid, sig: killed.append((pid, sig)))
     monkeypatch.setattr(terminal_mod, "_SOCKET_RECOVERY_WAIT_SECONDS", 2.0)
+
+    # The first caller signals when it reaches the socket-readiness poll, so
+    # the test releases the socket only once recovery is genuinely pending
+    # and the second caller is blocked on the lock.
+    waiting = threading.Event()
+    real_sleep = time.sleep
+
+    def poll_sleep(duration: float) -> None:
+        waiting.set()
+        real_sleep(duration)
+
+    monkeypatch.setattr(terminal_mod.time, "sleep", poll_sleep)
     monkeypatch.setattr(terminal_mod, "_SOCKET_RECOVERY_POLL_SECONDS", 0.01)
 
     results: dict[str, bool] = {}
@@ -3841,7 +3853,7 @@ def test_concurrent_recovery_joins_one_attempt_without_a_false_exit(
     threads = [threading.Thread(target=run, args=(key,)) for key in ("a", "b")]
     for thread in threads:
         thread.start()
-    time.sleep(0.25)
+    assert waiting.wait(5)
     # The first caller created the dir and is waiting; the socket is not back
     # yet, so a second caller must not treat the existing dir as a failure.
     assert private_dir.is_dir()
