@@ -862,6 +862,11 @@ def test_native_claude_lost_message_does_not_duplicate_the_next_one(
     expect(
         page.get_by_test_id("error-headline").filter(has_text=_UNDELIVERED_HEADLINE)
     ).to_have_count(1)
+    # ...and the notice is a thread-level error card, not a Claude reply: at the
+    # settled state it must not carry the assistant role. Pinning the settled set
+    # to the two real replies catches a regressed notice without the mid-turn race.
+    expect(page.locator(_ASSISTANT).filter(has_text=_UNDELIVERED_HEADLINE)).to_have_count(0)
+    expect(page.locator(_ASSISTANT)).to_have_count(2)
 
     # The canonical transcript agrees: each message once, in send order.
     user_texts = [

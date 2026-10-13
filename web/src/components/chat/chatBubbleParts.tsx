@@ -1063,7 +1063,8 @@ function AssistantBubble({
   // An error banner's dashed rule spans the full chat column.
   const hasError = bubble.items.some((it) => it.kind === "error");
   // A bubble carrying an error but no prose stands alone as a thread-level
-  // element — the hover footer belongs to assistant text, not to the error.
+  // element: the hover footer belongs to assistant text, and the notice is
+  // not a reply, so it takes the "error" role instead of the assistant one.
   const errorOnly = hasError && !markdownText;
   const spansFullColumn = isWide || hasError;
 
@@ -1072,7 +1073,7 @@ function AssistantBubble({
       <Message
         from="assistant"
         data-testid="message-bubble"
-        data-role="assistant"
+        data-role={errorOnly ? "error" : "assistant"}
         data-response-stable-id={bubble.stableId}
         data-message-id={bubble.responseId}
         className={spansFullColumn ? "max-w-full" : "max-w-[var(--chat-prose-width)]"}

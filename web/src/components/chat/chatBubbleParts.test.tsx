@@ -482,6 +482,62 @@ describe("AssistantBubble error retry", () => {
   });
 });
 
+describe("AssistantBubble error-only role", () => {
+  // The reconnect journey counts [data-role="assistant"] bubbles as Claude
+  // replies. An undelivered-message notice is a standalone error item with no
+  // prose, so it must not carry the assistant role and inflate that count.
+  it("tags an undelivered-message notice as an error bubble, not an assistant reply", () => {
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <BubbleView
+          bubble={{
+            kind: "assistant",
+            responseId: "resp_undelivered",
+            stableId: "undelivered_notice",
+            lifecycle: "failed",
+            error: null,
+            items: [
+              {
+                kind: "error",
+                itemId: "undelivered_notice",
+                message: "Message not delivered. Try sending it again.",
+                source: "runtime",
+                code: "native_prompt_not_recorded",
+              },
+            ],
+          }}
+          isLastAssistant={false}
+        />
+      </QueryClientProvider>,
+    );
+
+    const bubble = screen.getByTestId("message-bubble");
+    expect(bubble).toHaveAttribute("data-role", "error");
+    expect(bubble).toHaveTextContent("Message not delivered. Try sending it again.");
+  });
+
+  it("keeps a bubble carrying assistant prose on the assistant role", () => {
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <BubbleView
+          bubble={{
+            kind: "assistant",
+            responseId: "resp_reply",
+            stableId: "assistant_reply",
+            lifecycle: "completed",
+            error: null,
+            items: [{ kind: "text", itemId: "reply_text", text: "the answer is 42", final: true }],
+          }}
+          isLastAssistant={false}
+        />
+      </QueryClientProvider>,
+    );
+
+    const bubble = screen.getByTestId("message-bubble");
+    expect(bubble).toHaveAttribute("data-role", "assistant");
+  });
+});
+
 describe("AssistantBubble sealed side-chat recovery", () => {
   it("removes recovery actions when the side chat is sealed but keeps the error", () => {
     const view = render(
