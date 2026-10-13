@@ -2519,6 +2519,21 @@ def test_build_mcp_local_tool_schemas_ignores_non_agent_spec_stand_in() -> None:
     assert _tool_dispatch.build_mcp_local_tool_schemas(_StandInSpec()) == []
 
 
+def test_client_runtime_tool_names_ignores_non_agent_spec_stand_in() -> None:
+    """The client-runtime gate tolerates a stand-in like its sibling gates.
+
+    The bare ``tools/call`` route calls ``client_runtime_tool_names`` after
+    ``_ungranted_tool_reason`` skips a non-``AgentSpec`` stand-in, so it must
+    not raise on an object lacking ``local_tools``.
+    """
+
+    class _StandInSpec:
+        pass
+
+    assert _tool_dispatch.client_runtime_tool_names(_StandInSpec()) == frozenset()
+    assert _tool_dispatch.client_runtime_tool_names(None) == frozenset()
+
+
 @pytest.mark.asyncio
 async def test_sessions_native_path_injects_mcp_schemas() -> None:
     """``POST /v1/sessions/{conv}/events`` with a message body injects MCP schemas.

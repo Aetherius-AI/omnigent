@@ -1051,10 +1051,13 @@ def client_runtime_tool_names(agent_spec: AgentSpec | None) -> frozenset[str]:
     client to satisfy. The session MCP endpoint has no client to relay that
     to, so these names are neither advertised nor dispatchable there.
     """
-    if agent_spec is None:
-        return frozenset()
+    from omnigent.spec.types import AgentSpec as _AgentSpec
     from omnigent.spec.types import ToolRuntime
 
+    # Covers None and legacy/test resolver stand-ins, matching the dispatch
+    # gate so the tools/call route never raises on one.
+    if not isinstance(agent_spec, _AgentSpec):
+        return frozenset()
     return frozenset(lt.name for lt in agent_spec.local_tools if lt.runtime == ToolRuntime.CLIENT)
 
 
@@ -1100,9 +1103,7 @@ def build_mcp_local_tool_schemas(
         if not isinstance(name, str) or name not in granted:
             continue
         if "__" in name or name in client_names:
-            # ``__`` names route to the external MCP manager and
-            # client-runtime tools short-circuit to an action required;
-            # listing either would desync tools/list from tools/call.
+            # Neither is dispatchable here; listing would desync tools/list from tools/call.
             continue
         description = function.get("description")
         parameters = _string_object_dict(function.get("parameters"))
