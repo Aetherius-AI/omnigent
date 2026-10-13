@@ -114,14 +114,21 @@ def _wait_pane_state(
 
 
 def _attach_from_runner_shell(
-    page: Page, shell: Locator, *, socket: str, target: str, state_file: Path
+    request: pytest.FixtureRequest,
+    page: Page,
+    shell: Locator,
+    *,
+    socket: str,
+    target: str,
+    state_file: Path,
 ) -> dict[str, str]:
     """Start the pane-state writer, then attach the shell to the Claude terminal.
 
     Mirrors ``omnigent.harnesses.claude_native.main._attach_direct_tmux``:
     ``tmux -S <socket> -f /dev/null attach -t <target>`` with ``TMUX`` unset.
 
-    The state writer runs until ``<state_file>.stop`` exists.
+    The state writer runs until ``<state_file>.stop`` exists, which a test
+    finalizer creates.
 
     :returns: The pane state once the attach shows up as one more client.
     """
@@ -135,6 +142,7 @@ def _attach_from_runner_shell(
         f"mv -f '{state_file}.tmp' '{state_file}'; sleep 0.3; done ) > /dev/null 2>&1 &"
     )
     _type_shell_command(page, shell, monitor)
+    request.addfinalizer(stop_file.touch)
     before = _wait_pane_state(page, state_file, _PANE_STATE_TIMEOUT_S)
     tmux_error = err_file.read_text().strip() if err_file.exists() else ""
     assert before, (
@@ -228,9 +236,8 @@ def test_native_claude_composer_delivers_while_pane_in_copy_mode(
 
     shell = _open_new_shell(page)
     attached = _attach_from_runner_shell(
-        page, shell, socket=socket, target=target, state_file=state_file
+        request, page, shell, socket=socket, target=target, state_file=state_file
     )
-    request.addfinalizer(state_file.with_suffix(".stop").touch)
     _log.info("native attach from the runner shell is up; pane state %s", attached)
     route, state = _scroll_back_into_copy_mode(page, shell, state_file)
     if state.get("pane_in_mode") != "1":
