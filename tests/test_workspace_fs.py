@@ -633,12 +633,9 @@ def test_search_from_filesystem_root_keeps_paths_intact(monkeypatch: pytest.Monk
 
 
 def _home_with_repo(root: Path, *, tracked: int) -> Path:
-    """A non-git root (a home directory) holding a hidden cache and a committed repo.
-
-    ``root/.cache`` has six files named after the repo's untracked directory;
-    ``root/monorepo`` commits ``tracked`` files under ``aaa/`` and then gains the
-    untracked ``experimental/FINDINGS.md``.
-    """
+    """A non-git root (a home directory): ``.cache`` has six files named after the
+    repo's untracked directory; ``monorepo`` commits ``tracked`` files under ``aaa/``
+    and then gains the untracked ``experimental/FINDINGS.md``."""
     hidden = root / ".cache"
     hidden.mkdir()
     for i in range(6):
@@ -659,11 +656,8 @@ def _home_with_repo(root: Path, *, tracked: int) -> Path:
 
 
 def test_changes_lists_untracked_file_of_repo_inside_root(tmp_path: Path) -> None:
-    """The session is rooted at the home directory, the checkout one level down.
-
-    ``git status`` on the host lists the new directory, so the Changes tab
-    served from this root must list its file as created.
-    """
+    """With the session rooted at the home directory and the checkout one level
+    down, the Changes tab served from this root must list the new file as created."""
     _home_with_repo(tmp_path, tracked=3)
     reader = WorkspaceReader(tmp_path)
 

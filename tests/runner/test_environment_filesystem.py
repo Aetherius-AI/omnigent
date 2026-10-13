@@ -2078,10 +2078,9 @@ async def test_search_defers_hidden_subtrees_to_reach_the_visible_tree(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """At a home-like root, hidden directories sort first and can outnumber both
-    the scan budget and the result cap, so they walk after the visible tree: the
-    matches under ``.cache`` must neither keep the walk from reaching
-    ``repo/experimental`` nor push it out of a capped result."""
+    """Hidden directories sort first at a home-like root, so they walk after the
+    visible tree: matches under ``.cache`` must neither exhaust the budget before
+    ``repo/experimental`` is reached nor push it out of a capped result."""
     cache = tmp_path / ".cache" / "pip"
     cache.mkdir(parents=True)
     for i in range(40):

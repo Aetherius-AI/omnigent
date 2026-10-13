@@ -1623,10 +1623,9 @@ def test_nested_registry_without_repositories_tracks_agent_edits_only(tmp_path: 
 
 
 def test_nested_registry_reports_changes_of_repositories_below_the_root(tmp_path: Path) -> None:
-    """Checkouts one and two levels below a home-like root contribute their
-    ``git status`` with workspace-relative paths. Deeper, hidden, dependency and
-    symlinked directories are not scanned, and an agent edit inside a repository
-    is listed once, by git."""
+    """Checkouts one and two levels down contribute their ``git status`` with
+    workspace-relative paths; deeper, hidden, dependency and symlinked directories
+    are not scanned, and an agent edit inside a repository is listed once."""
     _commit_repo(tmp_path / "mono", "src/app.py")
     _commit_repo(tmp_path / "code" / "lib", "lib.py")
     _commit_repo(tmp_path / "deep" / "er" / "repo", "far.py")

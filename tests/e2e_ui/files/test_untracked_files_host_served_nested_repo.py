@@ -1,15 +1,9 @@
 """E2E: Files panel on an asleep host session whose workspace holds a large nested repo.
 
-Journey from the report: a host session rooted at the user's home directory, with
-a very large git checkout in a subdirectory and the runner asleep (files served
-live from the host). The user creates an untracked directory with a file inside
-the checkout, then looks for it in the Changes tab, the search box and the folder
-tree.
-
-The host is a real ``omnigent host`` daemon registered against the live server;
-its runner is let go idle so the panel is served over the host tunnel exactly as
-in production. The checkout is sized past the search scan budget, and a hidden
-directory under the root holds more name matches than the search result cap.
+The report's journey: a host session rooted at the user's home directory, a very
+large git checkout one level down, and the runner asleep so a real ``omnigent host``
+daemon serves the panel. The checkout is sized past the search scan budget, and a
+hidden directory under the root holds more name matches than the search result cap.
 """
 
 from __future__ import annotations
@@ -59,12 +53,9 @@ def _git_env() -> dict[str, str]:
 
 
 def seed_home_workspace(root: Path) -> Path:
-    """Seed a home-like, non-git workspace root and return its nested repo.
-
-    ``root/.cache`` holds ``_HIDDEN_MATCH_COUNT`` files named after the untracked
-    directory; ``root/monorepo`` is a committed git repo with ``_FILLER_COUNT``
-    tracked files plus the untracked ``experimental/FINDINGS.md``.
-    """
+    """Seed a home-like, non-git root: ``.cache`` holds ``_HIDDEN_MATCH_COUNT`` files
+    named after the untracked directory, ``monorepo`` commits ``_FILLER_COUNT`` files
+    and then gains the untracked ``experimental/FINDINGS.md``."""
     hidden = root / ".cache" / "pip"
     hidden.mkdir(parents=True)
     for i in range(_HIDDEN_MATCH_COUNT):
@@ -127,12 +118,9 @@ def _asleep_liveness(client: httpx.Client, session_id: str) -> dict[str, object]
 def asleep_host_session(
     base_url: str, root: Path, *, log: Callable[[str], None] = print
 ) -> Iterator[tuple[str, dict[str, object]]]:
-    """Yield ``(session_id, snapshot)`` for a host-bound session whose runner went idle.
-
-    Starts a real host daemon under ``root/host``, lets it launch the session's
-    runner, waits for that runner's idle shutdown, then waits past the SPA's
-    startup grace so the page reads the session as asleep rather than starting.
-    """
+    """Yield ``(session_id, snapshot)`` for a host-bound session whose runner went idle:
+    a real host daemon under ``root/host`` launches the runner, which idles out, and
+    the SPA's startup grace is waited out so the page reads the session as asleep."""
     workspace = root / "home"
     workspace.mkdir()
     seed_home_workspace(workspace)

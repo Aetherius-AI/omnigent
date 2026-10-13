@@ -317,9 +317,8 @@ def find_nested_git_roots(root: Path) -> list[Path]:
     """Return the repositories up to :data:`_NESTED_REPO_MAX_DEPTH` levels below *root*.
 
     Hidden directories and :data:`_SKIP_DIRS` are not entered, symlinks are
-    not followed, and a repository is not descended into. The scan lists at
-    most :data:`_NESTED_REPO_SCAN_BUDGET` directories breadth first, so
-    shallow repositories win when it runs out.
+    not followed, and a found repository is not descended into. At most
+    :data:`_NESTED_REPO_SCAN_BUDGET` directories are listed, breadth first.
 
     :param root: Resolved workspace root that is not itself inside a repository.
     :returns: Repository roots in breadth-first, name-sorted order.
@@ -1480,14 +1479,11 @@ class GitFilesystemRegistry(FilesystemRegistry):
 class NestedGitFilesystemRegistry(FilesystemRegistry):
     """Registry for a workspace that is not inside a git repository.
 
-    A session rooted at a home directory still holds its checkouts a level or
-    two down. Agent tool-call edits are tracked exactly as
-    :class:`AgentEditFilesystemRegistry` does, and every repository
-    :func:`find_nested_git_roots` finds contributes its ``git status``,
-    baselines and index with paths re-rooted at the workspace. Repositories
-    are rediscovered on each changed-files listing, so a checkout cloned
-    mid-session shows up on the next refresh; without any, this behaves as
-    the plain agent-edit registry.
+    Agent tool-call edits are tracked as :class:`AgentEditFilesystemRegistry`
+    does; every repository :func:`find_nested_git_roots` finds below the root
+    (a home directory holding checkouts) adds its ``git status``, baselines and
+    index with paths re-rooted at the workspace. Repositories are rediscovered
+    on each changed-files listing, so a checkout cloned mid-session shows up.
 
     :param watch_path: The workspace directory, e.g. ``Path("/home/alice")``.
     """
