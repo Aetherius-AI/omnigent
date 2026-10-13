@@ -808,3 +808,97 @@ async def test_inline_create_launch_timeout_cleans_up_worktree(
     assert conv is not None
     assert conv.host_id is None and conv.workspace is None and conv.git_branch is None
     assert WORKTREE_ROOT_LABEL_KEY not in conv.labels
+
+
+async def test_inline_create_launch_failure_tolerates_reread_error(
+    register_worktree_launch_host: RegisterHost,
+    client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient store error on the rollback's re-read must not 500 the create.
+    The removal never runs, so the response and the persisted row keep reporting
+    the binding and the root label for a later delete or archive to retry."""
+    cap = register_worktree_launch_host(launch_status="failed")
+    agent = await create_test_agent(client, name="wt-rereaderr-agent")
+
+    original_get = SqlAlchemyConversationStore.get_conversation
+    raised = {"done": False}
+
+    def _raising_get(self: SqlAlchemyConversationStore, conversation_id: str) -> Any:
+        conv = original_get(self, conversation_id)
+        # Raise once, on the rollback's re-read after the failed launch, standing
+        # in for a transient store error reading the row back.
+        if not raised["done"] and cap.launch and conv is not None and conv.runner_id is not None:
+            raised["done"] = True
+            raise RuntimeError("transient store error")
+        return conv
+
+    monkeypatch.setattr(SqlAlchemyConversationStore, "get_conversation", _raising_get)
+
+    resp = await _create_git_session(
+        client, agent["id"], {"branch_name": "feature/rereaderr", "base_branch": "main"}
+    )
+    assert resp.status_code == 201, resp.text
+    assert raised["done"], "the rollback never re-read the row, so the failure was not exercised"
+    assert cap.remove == [], (
+        f"the re-read failed before any removal, so none must be sent: {cap.remove}; "
+        f"unexpected={cap.unexpected}"
+    )
+    worktree_path = f"{_SOURCE_REPO}-worktrees/feature-rereaderr"
+    body = resp.json()
+    # The re-read failed, so the binding and root label stay for a later retry.
+    assert body["host_id"] == _HOST_ID and body["runner_id"] is not None, body
+    assert body["workspace"] == worktree_path and body["git_branch"] == "feature/rereaderr", body
+    assert body["labels"].get(WORKTREE_ROOT_LABEL_KEY) == worktree_root_fingerprint(
+        worktree_path
+    ), body
+
+    conv = SqlAlchemyConversationStore(db_uri).get_conversation(body["id"])
+    assert conv is not None
+    assert conv.host_id == _HOST_ID and conv.runner_id is not None
+    assert conv.workspace == worktree_path and conv.git_branch == "feature/rereaderr"
+    assert conv.labels.get(WORKTREE_ROOT_LABEL_KEY) == worktree_root_fingerprint(worktree_path)
+
+
+async def test_inline_create_launch_failure_tolerates_shared_worktree_check_error(
+    register_worktree_launch_host: RegisterHost,
+    client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient store error in the shared-worktree guard, which runs inside the
+    removal helper before the host round-trip, must not 500 the create. Removal is
+    unconfirmed, so the binding and root label stay for a later delete or archive."""
+    cap = register_worktree_launch_host(launch_status="failed")
+    agent = await create_test_agent(client, name="wt-sharederr-agent")
+
+    def _shared_boom(self: SqlAlchemyConversationStore, **kwargs: Any) -> bool:
+        raise RuntimeError("transient store error")
+
+    monkeypatch.setattr(
+        SqlAlchemyConversationStore, "has_other_live_session_in_workspace", _shared_boom
+    )
+
+    resp = await _create_git_session(
+        client, agent["id"], {"branch_name": "feature/sharederr", "base_branch": "main"}
+    )
+    assert resp.status_code == 201, resp.text
+    assert cap.remove == [], (
+        f"the guard failed before the host round-trip, so no removal must be sent: "
+        f"{cap.remove}; unexpected={cap.unexpected}"
+    )
+    worktree_path = f"{_SOURCE_REPO}-worktrees/feature-sharederr"
+    body = resp.json()
+    # The guard failed, so removal is unconfirmed and the binding and label stay.
+    assert body["host_id"] == _HOST_ID and body["runner_id"] is not None, body
+    assert body["workspace"] == worktree_path and body["git_branch"] == "feature/sharederr", body
+    assert body["labels"].get(WORKTREE_ROOT_LABEL_KEY) == worktree_root_fingerprint(
+        worktree_path
+    ), body
+
+    conv = SqlAlchemyConversationStore(db_uri).get_conversation(body["id"])
+    assert conv is not None
+    assert conv.host_id == _HOST_ID and conv.runner_id is not None
+    assert conv.workspace == worktree_path and conv.git_branch == "feature/sharederr"
+    assert conv.labels.get(WORKTREE_ROOT_LABEL_KEY) == worktree_root_fingerprint(worktree_path)
