@@ -2035,6 +2035,28 @@ async def test_mcp_execute_dispatches_builtin_tool_with_runner_workspace(
 
 
 @pytest.mark.asyncio
+async def test_mcp_execute_unknown_local_tool_returns_protocol_error() -> None:
+    """An unregistered tool must not look like a successful tool result."""
+    app, _ = await _build_app_for_spec(AgentSpec(spec_version=1, name="qa-agent"))
+    session_id = "77a8c01d832e4d0587d76028956eab07"
+    async with _runner_client(app) as client:
+        seeded = await client.post(
+            "/v1/sessions",
+            json={"session_id": session_id, "agent_id": "0e36e3219954d2deaef06b8e2a936f38"},
+        )
+        assert seeded.status_code == 201, seeded.text
+        response = await client.post(
+            f"/v1/sessions/{session_id}/mcp/execute",
+            json={"method": "tools/call", "params": {"name": "qa_missing_tool", "arguments": {}}},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "error": {"code": -32602, "message": "Unknown tool: qa_missing_tool"}
+    }
+
+
+@pytest.mark.asyncio
 async def test_mcp_execute_dispatches_full_namespaced_mcp_tool_name() -> None:
     """``/mcp/execute`` must not strip the MCP server prefix before dispatch."""
     app, mcp_manager, _harness_client, _server_client = _build_app_with_mcp_tool(

@@ -1036,6 +1036,15 @@ def _is_spec_local_python_tool(tool_name: str, agent_spec: AgentSpec | None) -> 
     )
 
 
+def is_known_mcp_local_tool(tool_name: str, agent_spec: AgentSpec | None) -> bool:
+    """Whether runner MCP dispatch has a handler for this local tool name."""
+    return (
+        tool_name in _ALL_LOCAL_TOOLS
+        or tool_name in _BROWSER_TOOLS
+        or _is_spec_local_python_tool(tool_name, agent_spec)
+    )
+
+
 async def _execute_local_python_tool(
     tool_name: str,
     args: str,
