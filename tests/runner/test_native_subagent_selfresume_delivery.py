@@ -1997,7 +1997,10 @@ async def test_deleting_the_parent_forgets_its_children_s_failure_details(
             conversation_id=PARENT_SESSION_ID,
         )
         assert subagent_work.get_subagent_work(CHILD_SESSION_ID) is None
+        assert CHILD_SESSION_ID in subagent_work._drained_delivered_subagent_children
         r = await client.delete(f"/v1/sessions/{PARENT_SESSION_ID}")
         assert r.status_code < 300, r.text
 
     assert CHILD_SESSION_ID not in app.state.native_pane_failures
+    assert CHILD_SESSION_ID not in subagent_work._drained_delivered_subagent_children
+    assert CHILD_SESSION_ID not in subagent_work._drained_subagent_dispatches
