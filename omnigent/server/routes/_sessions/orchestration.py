@@ -12784,7 +12784,7 @@ def _read_session_snapshot_inputs(
             except Exception:  # noqa: BLE001 - enrichment only; the snapshot retries best-effort
                 # Roll the shared session back so the reads above still commit cleanly.
                 rollback_shared_reads()
-                _logger.debug(
+                _logger.warning(
                     "Agent row read failed on snapshot build for session=%s",
                     session_id,
                     exc_info=True,

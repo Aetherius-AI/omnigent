@@ -1158,6 +1158,7 @@ def test_shared_read_scope_is_noop_outside(db_uri: str) -> None:
     maker = make_managed_session_maker(engine)
     with maker() as session:
         session.execute(text("SELECT 1"))
+    rollback_shared_reads()
     assert _shared_read_sessions.get() is None
 
 
@@ -1291,11 +1292,6 @@ def test_rollback_shared_reads_recovers_the_scope_after_a_failed_read(db_uri: st
         rollback_shared_reads()
         with maker() as session:
             assert session.execute(text("SELECT 1")).scalar() == 1
-    assert _shared_read_sessions.get() is None
-
-
-def test_rollback_shared_reads_is_a_noop_outside_a_scope() -> None:
-    rollback_shared_reads()
     assert _shared_read_sessions.get() is None
 
 
