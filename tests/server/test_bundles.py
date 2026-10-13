@@ -563,13 +563,13 @@ def test_validate_bundle_allows_public_http_mcp_server(
 def test_validate_bundle_rejects_non_http_scheme_mcp_url(
     monkeypatch: pytest.MonkeyPatch, shape: str
 ) -> None:
-    """An http-transport url must use the http(s) scheme the policy message promises.
+    """An http-transport url with a non-http scheme is rejected as invalid.
 
     A public hostname with a non-http scheme (``ftp://``, ``gopher://``) would
-    otherwise pass the host check yet contradict the error text.
+    otherwise pass the host check, so the scheme is validated explicitly.
     """
     _resolve_public(monkeypatch)
-    with pytest.raises(OmnigentError, match=r"must be a public http\(s\) endpoint") as exc:
+    with pytest.raises(OmnigentError, match=r"must be a valid http\(s\) endpoint") as exc:
         validate_agent_bundle(_mcp_bundle({"url": "ftp://mcp.example/sse"}, shape=shape))
     assert exc.value.code == ErrorCode.FORBIDDEN
     assert "'pwn'" in str(exc.value)

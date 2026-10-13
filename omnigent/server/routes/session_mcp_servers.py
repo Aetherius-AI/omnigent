@@ -287,11 +287,9 @@ def create_session_mcp_servers_router(
             new_spec = validate_agent_bundle(
                 new_bundle,
                 enforce_handler_allowlist=not local_single_user_enabled(),
-                # create/update already vet the added or changed server via
-                # assert_mcp_server_request_safe; re-checking the whole bundle
-                # would block managing or removing a pre-existing legacy stdio
-                # entry (including a nested sub-agent's) and deadlock a bundle
-                # declaring several.
+                # Per-request create/update already vet the changed server via
+                # assert_mcp_server_request_safe; re-validating the whole bundle would
+                # block removing pre-existing legacy stdio entries, including nested ones.
                 enforce_mcp_server_policy=False,
             )
             if new_spec.name != agent.name:

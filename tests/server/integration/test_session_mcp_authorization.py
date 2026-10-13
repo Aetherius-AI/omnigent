@@ -530,10 +530,9 @@ async def test_bundle_replacement_requires_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Only owners may replace a bundle, including prompt-only and nested MCP edits."""
-    # A shared server only accepts a stdio bundle in single-user mode, so seed
-    # (and keep running, for the owner-success path) under that flag. For a
-    # non-owner, drop it after seeding so the 403 exercises real shared-server
-    # authorization rather than the single-user owner-gate bypass.
+    # Stdio bundles need single-user mode to seed; keep the flag for the
+    # owner-success path, but drop it for non-owners so the 403 exercises
+    # real shared-server authorization, not the single-user bypass.
     legacy_stdio = transport == "stdio"
     if legacy_stdio:
         monkeypatch.setenv("OMNIGENT_LOCAL_SINGLE_USER", "1")

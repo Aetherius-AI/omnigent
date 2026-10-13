@@ -98,7 +98,12 @@ def reject_unsafe_mcp_server(name: str, transport: str, url: str | None) -> None
         except ValueError:
             # Malformed authority (e.g. an unclosed IPv6 literal `http://[::1`).
             scheme, host = "", None
-        if scheme not in ("http", "https") or not host or host_is_internal(host):
+        if scheme not in ("http", "https") or not host:
+            raise OmnigentError(
+                f"MCP server {name!r}: url must be a valid http(s) endpoint.",
+                code=ErrorCode.FORBIDDEN,
+            )
+        if host_is_internal(host):
             raise OmnigentError(
                 f"MCP server {name!r}: url must be a public http(s) endpoint; "
                 "loopback, private, shared, link-local and cloud-metadata "
