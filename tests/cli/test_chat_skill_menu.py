@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from omnigent import chat
 from omnigent.chat import _merge_host_skills
 from omnigent.spec.skill_sources import resolve_session_skills
 from omnigent.spec.types import AgentSpec, ExecutorSpec, SkillSpec
@@ -65,7 +66,7 @@ def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def test_claude_repl_menu_lists_plugin_and_project_skills_like_the_web_menu(
-    home: Path, workspace: Path, tmp_path: Path
+    home: Path, workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _write_skill(home / ".claude" / "skills", "user-tier-skill")
     _enable_plugin(home / ".claude", "figplug", "plug-skill")
@@ -73,9 +74,11 @@ def test_claude_repl_menu_lists_plugin_and_project_skills_like_the_web_menu(
     # ``omnigent run --harness`` materializes the spec outside the project.
     generated_root = tmp_path / "omnigent-override"
     generated_root.mkdir()
+    materialized = generated_root / "agent.yaml"
+    monkeypatch.setitem(chat._MATERIALIZED_OVERRIDE_DIRS, materialized.resolve(), generated_root)
     spec = _spec("claude-sdk")
 
-    repl = {s.name for s in _merge_host_skills(spec, generated_root / "agent.yaml")}
+    repl = {s.name for s in _merge_host_skills(spec, materialized)}
 
     assert repl == {"user-tier-skill", "figplug:plug-skill", "ws-proj-skill"}
     web = resolve_session_skills(spec, (workspace, generated_root), generated_root)
@@ -93,6 +96,22 @@ def test_native_claude_repl_menu_honours_claude_config_dir(
     names = {s.name for s in _merge_host_skills(_spec("claude-native"), workspace)}
 
     assert names == {"configdir-tier"}
+
+
+def test_native_claude_keeps_the_workspace_ancestor_walk_for_an_unmaterialized_spec(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `omnigent run agent.yaml` from the agent's own directory with no overrides
+    # keeps the original spec, so that directory is a workspace, not a bundle.
+    mono = tmp_path / "mono"
+    _write_skill(mono / ".agents" / "skills", "anc")
+    project = mono / "proj"
+    project.mkdir()
+    monkeypatch.chdir(project)
+
+    names = {s.name for s in _merge_host_skills(_spec("claude-native"), project / "agent.yaml")}
+
+    assert "anc" in names
 
 
 def test_codex_repl_menu_omits_skills_codex_never_registers(home: Path, workspace: Path) -> None:

@@ -4062,7 +4062,7 @@ async def run_repl(
     # ``.lexer`` through a ``DynamicLexer``, so setting it here is live.
     _prompt_session = getattr(host, "_prompt", None)
     if _prompt_session is not None:
-        _prompt_session.lexer = _BangInputLexer()
+        _prompt_session.lexer = _BangInputLexer(accent=fmt.accent)
 
     async def on_input(text: str, attachments: list[PendingAttachment] | None = None) -> None:
         nonlocal conversation_id, is_streaming
@@ -8661,11 +8661,6 @@ _BANG_INPUT_STYLE = f"fg:{_BANG_GREEN} bold"  # prompt-toolkit composer style
 _BANG_ECHO_MARKUP = f"bold {_BANG_GREEN}"
 
 
-# The terminal's brand accent; the web composer's overlay tints a command
-# token with its accent too.
-_SLASH_COMMAND_STYLE = f"fg:{RichBlockFormatter().accent}"
-
-
 class _BangInputLexer(Lexer):
     """
     Tint composer input that the REPL routes somewhere other than the agent.
@@ -8673,11 +8668,17 @@ class _BangInputLexer(Lexer):
     A line that begins with ``!`` (but not the ``!!`` literal-escape) runs in
     the shell via the passthrough; painting it in the omnigent-logo green is
     live feedback that bang mode is active. A leading slash-command token goes
-    to the dispatcher, so it takes the brand accent like the web composer's
-    highlight overlay, while the argument stays unstyled so a path or URL in
-    it reads normally. Any other input is a message to the agent and renders
-    unstyled.
+    to the dispatcher, so it takes the session formatter's brand accent like
+    the web composer's highlight overlay, while the argument stays unstyled so
+    a path or URL in it reads normally. Any other input is a message to the
+    agent and renders unstyled.
+
+    :param accent: The accent colour to tint a command token with; defaults
+        to the formatter's default accent.
     """
+
+    def __init__(self, accent: str | None = None) -> None:
+        self._command_style = f"fg:{accent or RichBlockFormatter().accent}"
 
     def lex_document(self, document: Document) -> Callable[[int], StyleAndTextTuples]:
         text = document.text
@@ -8697,7 +8698,7 @@ class _BangInputLexer(Lexer):
                 end = start + len(command)
                 return [
                     ("", line[:start]),
-                    (_SLASH_COMMAND_STYLE, line[start:end]),
+                    (self._command_style, line[start:end]),
                     ("", line[end:]),
                 ]
             return [("", line)]

@@ -22,6 +22,7 @@ from tests.e2e.omnigent._pexpect_harness import (
     STATE_RUNNING,
     clean_exit,
     ensure_repl_test_theme_env,
+    spawn_omnigent_run,
     strip_ansi,
     submit_prompt,
     wait_for_ready,
@@ -74,10 +75,15 @@ def _read_until(child: pexpect.spawn, pattern: str, *, timeout: float) -> str:
         try:
             raw += drain_for(child, 0.5)
         except pexpect.EOF:
-            break
+            raw += child.before or ""
+            exited = True
+        else:
+            exited = False
         plain = strip_ansi(raw)
         if re.search(pattern, plain):
             return plain
+        if exited:
+            break
     raise AssertionError(f"{pattern!r} not rendered within {timeout}s:\n{strip_ansi(raw)[-3000:]}")
 
 
@@ -115,31 +121,23 @@ def test_claude_repl_menu_lists_plugin_and_project_skills(
 ) -> None:
     project = tmp_path / "project"
     _seed_project(project)
-    child = pexpect.spawn(
-        sys.executable,
-        [
-            "-m",
-            "omnigent.cli",
-            "run",
-            "agent.yaml",
-            "--harness",
-            "claude-sdk",
-            "--model",
-            "claude-sonnet-4-5",
-            "--no-session",
-        ],
-        cwd=str(project),
-        env={**repl_env, "LINES": "40", "COLUMNS": "120"},
-        encoding="utf-8",
-        codec_errors="replace",
-        dimensions=(40, 120),
+    child = spawn_omnigent_run(
+        Path(sys.executable),
+        project / "agent.yaml",
+        model="claude-sonnet-4-5",
+        harness="claude-sdk",
+        env=repl_env,
+        cwd=project,
         timeout=120,
     )
     try:
         wait_for_ready(child, timeout=120)
 
         submit_prompt(child, "/help")
+        # The built-in groups print first; drain a little longer so the skill rows
+        # registered after them have arrived before parsing the listing.
         help_text = _read_until(child, r"/quit\s+Exit", timeout=20)
+        help_text += strip_ansi(drain_for(child, 2.0))
         listed = set(_HELP_ROW_RE.findall(help_text))
         assert "/user-tier-skill" in listed, help_text
         # The web composer lists these for the same session; the REPL must too.

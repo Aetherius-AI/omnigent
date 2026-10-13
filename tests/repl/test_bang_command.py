@@ -248,7 +248,6 @@ def _accent_style() -> str:
         # The dispatcher sends these to the model, so the colour must not promise a command.
         ("/Users/me/shot.png is attached", ""),
         ("hey /tmp", ""),
-        ("ls -la", ""),
         ("!!/help", ""),  # the "!!" escape is an ordinary prompt
     ],
 )

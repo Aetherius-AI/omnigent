@@ -3489,7 +3489,10 @@ def _merge_host_skills(
     :returns: Combined skill list, or empty list.
     """
     agent_root = spec_path if spec_path.is_dir() else spec_path.parent
-    return resolve_session_skills(agent_spec, (Path.cwd(), agent_root), agent_root)
+    # Only a rewritten copy under a temp dir is a bundle boundary; the user's
+    # own agent directory sits inside the workspace and keeps its ancestor walk.
+    bundle_dir = agent_root if spec_path.resolve() in _MATERIALIZED_OVERRIDE_DIRS else None
+    return resolve_session_skills(agent_spec, (Path.cwd(), agent_root), bundle_dir)
 
 
 def _fallback_label(agent_path: Path) -> str:
