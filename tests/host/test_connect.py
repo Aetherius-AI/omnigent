@@ -999,12 +999,23 @@ async def test_handle_launch_attributes_spawn_failure_to_host(
 
 
 @pytest.mark.parametrize("binding_token", ["token_abc", "", "   "])
-@pytest.mark.parametrize("harness", ["codex", "pi-native"])
+@pytest.mark.parametrize(
+    ("harness", "selected_pi_version", "harness_ready"),
+    [
+        ("codex", None, False),
+        ("pi-native", None, False),
+        ("pi-native", (0, 84, 1), False),
+        ("pi-native", (0, 84, 1), True),
+        ("pi-native", (0, 85, 1), False),
+    ],
+)
 async def test_handle_launch_refuses_unconfigured_harness(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     binding_token: str,
     harness: str,
+    selected_pi_version: tuple[int, int, int] | None,
+    harness_ready: bool,
 ) -> None:
     """
     Verify _handle_launch refuses to spawn when the frame's harness is
@@ -1023,10 +1034,21 @@ async def test_handle_launch_refuses_unconfigured_harness(
     # signature; the workspace exists so ONLY the harness check can fail.
     monkeypatch.setattr(
         "omnigent.host.connect.harness_is_configured",
-        lambda harness: False,
+        lambda harness: harness_ready,
     )
 
-    if harness == "pi-native":
+    if selected_pi_version is not None:
+        monkeypatch.setattr(
+            host, "_spawn_runner_proc", Mock(side_effect=AssertionError("Pi must not spawn"))
+        )
+        monkeypatch.setattr(
+            "omnigent.harnesses.pi_native.main.resolve_pi_executable", lambda: "/selected/pi"
+        )
+        monkeypatch.setattr(
+            "omnigent.harnesses.pi_native.main.pi_version",
+            lambda _executable: selected_pi_version,
+        )
+    elif harness == "pi-native":
 
         def missing_pi() -> str:
             raise click.ClickException("Pi is not installed")
@@ -1047,9 +1069,13 @@ async def test_handle_launch_refuses_unconfigured_harness(
     assert result.error_code == HARNESS_NOT_CONFIGURED_ERROR_CODE
     # The message is shown verbatim to the user — it must name the
     # harness, the host, and the remediation command.
-    assert repr(harness) in (result.error or "")
-    assert "test-laptop" in (result.error or "")
-    assert "omni setup" in (result.error or "")
+    if selected_pi_version == (0, 84, 1):
+        assert "installed Pi CLI (0.84.1)" in (result.error or "")
+        assert "Upgrade with:" in (result.error or "")
+    else:
+        assert repr(harness) in (result.error or "")
+        assert "test-laptop" in (result.error or "")
+        assert "omni setup" in (result.error or "")
     assert result.runner_id is None
     # No runner subprocess may exist after a refusal.
     assert host._runners == {}
@@ -1095,10 +1121,21 @@ async def test_handle_launch_native_cursor_message_points_at_cursor_installer(
 
 
 @pytest.mark.parametrize("discovery_pending", [False, True])
+@pytest.mark.parametrize(
+    ("harness", "pi_version"),
+    [
+        ("claude-sdk", None),
+        ("pi", (0, 84, 2)),
+        ("pi-native", (0, 85, 1)),
+        ("pi-native", None),
+    ],
+)
 async def test_handle_launch_configured_harness_proceeds_to_spawn(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     discovery_pending: bool,
+    harness: str,
+    pi_version: tuple[int, int, int] | None,
 ) -> None:
     """
     Verify a configured harness passes the check and the launch
@@ -1115,6 +1152,13 @@ async def test_handle_launch_configured_harness_proceeds_to_spawn(
         "omnigent.host.connect.harness_is_configured",
         lambda harness: True,
     )
+    if harness in {"pi", "pi-native"}:
+        monkeypatch.setattr(
+            "omnigent.harnesses.pi_native.main.resolve_pi_executable", lambda: "/selected/pi"
+        )
+        monkeypatch.setattr(
+            "omnigent.harnesses.pi_native.main.pi_version", lambda _executable: pi_version
+        )
     if discovery_pending:
 
         async def _blocked_discovery() -> None:
@@ -1142,7 +1186,7 @@ async def test_handle_launch_configured_harness_proceeds_to_spawn(
         request_id="req_configured",
         binding_token="token_def",
         workspace=str(workspace),
-        harness="claude-sdk",
+        harness=harness,
     )
     try:
         with patch("omnigent.host.connect.subprocess.Popen", side_effect=_fake_popen):
