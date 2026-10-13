@@ -1589,15 +1589,18 @@ async def test_codex_native_model_options_query_model_list(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stall_on_page", [1, 2], ids=["first-request", "later-page"])
+@pytest.mark.parametrize(
+    "stall_at", ["initialize", 1, 2], ids=["initialize", "first-request", "later-page"]
+)
 async def test_codex_native_model_options_stalled_model_list_fails_retryably(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    stall_on_page: int,
+    stall_at: str | int,
 ) -> None:
-    """A connected app-server that withholds a model/list page must not hold the
-    live picker request open forever: the model-options route stays bounded,
-    answers a retryable 503, and schedules no write-back of partial rows.
+    """An app-server that accepts the connection but withholds the initialize reply
+    or a model/list page must not hold the live picker request open forever: the
+    model-options route stays bounded, answers a retryable 503, and schedules no
+    write-back of partial rows.
     """
     from omnigent.harnesses.codex_native import app_server as codex_native_app_server
     from omnigent.runner import native_controls as native_controls_module
@@ -1607,13 +1610,7 @@ async def test_codex_native_model_options_stalled_model_list_fails_retryably(
         "omnigent.runtime.workflow._resolve_provider_for_build",
         lambda *_args, **_kwargs: None,
     )
-    # Keeps a bounded route fast; the current unbounded route never reads it.
-    monkeypatch.setattr(
-        native_controls_module,
-        "_CODEX_NATIVE_MODEL_OPTIONS_TIMEOUT_S",
-        0.5,
-        raising=False,
-    )
+    monkeypatch.setattr(native_controls_module, "_CODEX_NATIVE_MODEL_OPTIONS_TIMEOUT_S", 0.5)
     conv_id = "5b1e6d0c9f3a4e7b8c2d1f0a9e8b7c6d"
     monkeypatch.setattr(codex_native_bridge, "_BRIDGE_ROOT", tmp_path / "codex-bridge")
     codex_home = tmp_path / "codex-home"
@@ -1651,12 +1648,19 @@ async def test_codex_native_model_options_stalled_model_list_fails_retryably(
     )
 
     class _StallingClient(_RecordingCodexAppServerClient):
-        """Serve model/list pages but withhold ``stall_on_page`` with the socket open."""
+        """Serve the handshake and model/list pages but withhold ``stall_at`` with the
+        socket open.
+        """
+
+        async def connect(self) -> None:
+            if stall_at == "initialize":
+                await asyncio.Event().wait()
+            await super().connect()
 
         async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
             self.requests.append((method, params))
             page = 1 if params.get("cursor") is None else 2
-            if page == stall_on_page:
+            if page == stall_at:
                 await asyncio.Event().wait()
                 raise AssertionError("unreachable")
             if page == 1:
@@ -1701,8 +1705,8 @@ async def test_codex_native_model_options_stalled_model_list_fails_retryably(
             )
         except (TimeoutError, asyncio.TimeoutError):
             pytest.fail(
-                "codex-model-options stayed pending while the app-server stalled "
-                f"model/list (page {stall_on_page}); the route has no end-to-end deadline"
+                "codex-model-options stayed pending while the app-server stalled at "
+                f"{stall_at!r}; the route has no end-to-end deadline"
             )
         write_backs = [
             task
@@ -1715,7 +1719,7 @@ async def test_codex_native_model_options_stalled_model_list_fails_retryably(
     model_list_calls = [
         method for method, _params in fake_client.requests if method == "model/list"
     ]
-    assert len(model_list_calls) == stall_on_page
+    assert len(model_list_calls) == (0 if stall_at == "initialize" else stall_at)
     assert fake_client.closed
     assert write_backs == []
 

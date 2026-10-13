@@ -709,7 +709,10 @@ def build_native_controls(
             client_name="omnigent-codex-native-runner",
         )
         try:
-            await codex_client.connect()
+            # A connected-but-silent app-server must not hold the picker request open.
+            await asyncio.wait_for(
+                codex_client.connect(), timeout=_CODEX_NATIVE_MODEL_OPTIONS_TIMEOUT_S
+            )
             rows = await list_codex_model_options(
                 codex_client,
                 timeout_s=_CODEX_NATIVE_MODEL_OPTIONS_TIMEOUT_S,
