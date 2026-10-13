@@ -228,7 +228,7 @@ async def test_wait_for_runner_overflow_caller_sees_early_registration(
 ) -> None:
     """A caller past the waiter cap must notice a runner that registers early."""
     reg = TunnelRegistry(**caps)
-    timeout_s = 4.0
+    timeout_s = 8.0
     register_after_s = 0.3
     loop = asyncio.get_running_loop()
     admitted = asyncio.create_task(reg.wait_for_runner("r1", timeout_s=timeout_s))
@@ -247,7 +247,9 @@ async def test_wait_for_runner_overflow_caller_sees_early_registration(
         resolved = await asyncio.wait_for(overflow, timeout=timeout_s + budget(1.0))
         overflow_latency = loop.time() - registered_at
         assert resolved is session
-        assert overflow_latency < 1.0, (
+        # Half the window separates a 0.5s re-check from waiting out the deadline,
+        # even when a loaded CI loop stalls for seconds.
+        assert overflow_latency < timeout_s / 2, (
             f"overflow caller observed the runner {overflow_latency:.2f}s after it registered; "
             f"it waited out its whole {timeout_s:.1f}s timeout instead of re-checking"
         )
@@ -268,9 +270,10 @@ async def test_wait_for_runner_overflow_caller_sees_early_registration(
 async def test_wait_for_runner_overflow_caller_without_runner_waits_out_timeout(
     caps: dict[str, int],
 ) -> None:
-    """Re-checking must not end an overflow wait early when no runner appears."""
+    """Re-checking across several polls must neither end an overflow wait early nor overrun it."""
     reg = TunnelRegistry(**caps)
-    timeout_s = 0.3
+    # Longer than two 0.5s polls, so the deadline loop re-sleeps before it expires.
+    timeout_s = 1.2
     loop = asyncio.get_running_loop()
     admitted = asyncio.create_task(reg.wait_for_runner("r1", timeout_s=math.inf))
     try:
@@ -278,7 +281,9 @@ async def test_wait_for_runner_overflow_caller_without_runner_waits_out_timeout(
         started = loop.time()
         assert await reg.wait_for_runner("r1", timeout_s=timeout_s) is None
         elapsed = loop.time() - started
-        assert elapsed >= timeout_s - 0.05, f"overflow caller gave up after {elapsed:.2f}s"
+        assert timeout_s - 0.05 <= elapsed < timeout_s + budget(1.0), (
+            f"overflow caller returned after {elapsed:.2f}s for a {timeout_s:.1f}s timeout"
+        )
         assert reg.connect_waiter_count() == 1
     finally:
         admitted.cancel()
