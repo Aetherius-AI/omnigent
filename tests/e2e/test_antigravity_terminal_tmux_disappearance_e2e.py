@@ -35,6 +35,7 @@ _INPUT_READER = (
     'printf "ready\\n"; while IFS= read -r line; do printf "%s\\n" "$line" >> received.txt; done'
 )
 _SIGNATURE = "tmux unavailable after 3 consecutive probes for terminal antigravity:main"
+_RECOVERY_SIGNATURE = "Recreating reaped tmux socket for terminal antigravity:main"
 
 
 @pytest.fixture
@@ -81,6 +82,34 @@ def test_external_tmux_death_reports_the_required_terminal_exit(
         assert exit_fired.wait(_TIMEOUT_S), "watcher did not report terminal exit"
     assert not terminal.running
     assert any(_SIGNATURE in record.getMessage() for record in caplog.records)
+
+
+def test_reaped_private_socket_is_recovered_while_the_server_lives(
+    terminal: TerminalInstance, caplog: pytest.LogCaptureFixture
+) -> None:
+    exit_fired = threading.Event()
+    healthy_tick = threading.Event()
+    with caplog.at_level(logging.WARNING, logger=terminal_mod.__name__):
+        terminal.start_idle_watcher_thread(
+            on_exit=exit_fired.set, on_tick=healthy_tick.set, poll_interval_s=0.05
+        )
+        try:
+            assert healthy_tick.wait(_TIMEOUT_S)
+            # macOS periodic cleanup wipes the private socket directory while the
+            # tmux server and its pane are still alive.
+            shutil.rmtree(terminal.private_dir)
+            assert not terminal.socket_path.exists()
+
+            deadline = time.monotonic() + _TIMEOUT_S
+            while not terminal.socket_path.exists():
+                assert not exit_fired.is_set(), "a reaped socket ended a live terminal"
+                assert time.monotonic() < deadline, "watcher never recovered the socket"
+                time.sleep(0.02)
+            assert not exit_fired.is_set()
+            assert terminal.running
+        finally:
+            terminal._stop_idle_watcher_thread()
+    assert any(_RECOVERY_SIGNATURE in record.getMessage() for record in caplog.records)
 
 
 def _install_tmux_shim(directory: Path, monkeypatch: pytest.MonkeyPatch, script: str) -> str:
