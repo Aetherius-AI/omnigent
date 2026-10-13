@@ -1104,6 +1104,9 @@ export function ChatPage() {
       isWorking={isWorking}
       showsWorking={showsWorking}
       runnerOnline={runnerOnline}
+      lastTaskError={
+        activeSession?.status === "failed" ? (activeSession.lastTaskError ?? null) : null
+      }
       liveness={liveness}
       agentsError={agentsError}
       disabled={!agentId || agentsError !== null}
@@ -1246,6 +1249,8 @@ interface MainAgentSurfaceProps {
    * this is false and uses it to show the stopped-harness resume state.
    */
   runnerOnline: boolean | undefined;
+  /** Active session's last task error when it has failed; forwarded to MainTerminalView so the stopped-terminal state shows why. */
+  lastTaskError?: Session["lastTaskError"];
   /** Derived open-session liveness — drives the reconnect hint/banner. */
   liveness: SessionLiveness;
   agentsError: unknown;
@@ -1413,6 +1418,7 @@ const MainAgentSurface = memo(function MainAgentSurfaceImpl({
   isWorking,
   showsWorking,
   runnerOnline,
+  lastTaskError,
   liveness,
   agentsError,
   disabled,
@@ -1672,6 +1678,7 @@ const MainAgentSurface = memo(function MainAgentSurfaceImpl({
           initialTerminalKey={isActive ? terminalFirst?.terminalViewKey : null}
           visible={isShown}
           runnerOnline={isActive ? runnerOnline : undefined}
+          lastTaskError={isActive ? lastTaskError : undefined}
           onResume={isActive ? handleTerminalResume : undefined}
           onSurfaceElement={isActive ? setTerminalSurfaceEl : undefined}
           readOnly={entry.readOnly}
