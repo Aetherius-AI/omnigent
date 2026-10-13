@@ -249,12 +249,13 @@ def create_session_mcp_servers_router(
             root = Path(tmpdir) / "agent"
             extract_safe(bundle_bytes, root)
 
-            # Read the stored declarations without re-applying the upload guards
-            # so an entry that predates one (a stdio server on a now shared
-            # server) stays deletable; the edited bundle is re-validated below.
-            current_spec = agent_cache.load(
-                agent.id, agent.bundle_location, expand_env=agent.operator_authored
-            ).spec
+            # Skip the MCP policy so a legacy stdio entry (incl. nested) stays
+            # removable; the route vetted the added/changed server per request.
+            current_spec = validate_agent_bundle(
+                bundle_bytes,
+                enforce_handler_allowlist=not local_single_user_enabled(),
+                enforce_mcp_server_policy=False,
+            )
             current_names = {server.name for server in current_spec.mcp_servers}
             if mode == "create":
                 assert body is not None
@@ -287,9 +288,8 @@ def create_session_mcp_servers_router(
             new_spec = validate_agent_bundle(
                 new_bundle,
                 enforce_handler_allowlist=not local_single_user_enabled(),
-                # Per-request create/update already vet the changed server via
-                # assert_mcp_server_request_safe; re-validating the whole bundle would
-                # block removing pre-existing legacy stdio entries, including nested ones.
+                # Same policy skip as the pre-edit read: keep untouched legacy
+                # entries valid; the changed server was vetted per request.
                 enforce_mcp_server_policy=False,
             )
             if new_spec.name != agent.name:

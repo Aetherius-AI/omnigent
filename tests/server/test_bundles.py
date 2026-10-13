@@ -25,7 +25,7 @@ import pytest
 import yaml
 
 from omnigent.errors import ErrorCode, OmnigentError
-from omnigent.server.bundles import validate_agent_bundle
+from omnigent.server.bundles import reject_unsafe_mcp_server, validate_agent_bundle
 from omnigent.util import ssrf
 
 _SECRET_ENV_VAR = "OMNIGENT_W7_BUNDLE_SECRET"
@@ -559,18 +559,39 @@ def test_validate_bundle_allows_public_http_mcp_server(
     assert [server.url for server in servers] == ["https://mcp.example/sse"]
 
 
-@pytest.mark.parametrize("shape", ["sidecar", "inline", "subagent"])
-def test_validate_bundle_rejects_non_http_scheme_mcp_url(
-    monkeypatch: pytest.MonkeyPatch, shape: str
-) -> None:
+def test_validate_bundle_rejects_non_http_scheme_mcp_url() -> None:
     """An http-transport url with a non-http scheme is rejected as invalid.
 
-    A public hostname with a non-http scheme (``ftp://``, ``gopher://``) would
-    otherwise pass the host check, so the scheme is validated explicitly.
+    A non-http scheme (``ftp://``, ``gopher://``) is refused before any host
+    lookup; one declaration shape suffices as recursion is covered elsewhere.
     """
-    _resolve_public(monkeypatch)
     with pytest.raises(OmnigentError, match=r"must be a valid http\(s\) endpoint") as exc:
-        validate_agent_bundle(_mcp_bundle({"url": "ftp://mcp.example/sse"}, shape=shape))
+        validate_agent_bundle(_mcp_bundle({"url": "ftp://mcp.example/sse"}, shape="sidecar"))
+    assert exc.value.code == ErrorCode.FORBIDDEN
+    assert "'pwn'" in str(exc.value)
+
+
+def test_validate_bundle_rejects_empty_http_url() -> None:
+    """An http MCP server with an empty url is rejected, matching the request schema."""
+    with pytest.raises(OmnigentError, match=r"unsupported transport .* or missing url") as exc:
+        validate_agent_bundle(_mcp_bundle({"url": ""}, shape="sidecar"))
+    assert exc.value.code == ErrorCode.FORBIDDEN
+    assert "'pwn'" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "transport,url",
+    [("sse", "https://mcp.example/sse"), ("http", None), ("http", ""), ("", None)],
+    ids=["unknown-transport", "http-no-url", "http-empty-url", "empty-transport"],
+)
+def test_reject_unsafe_mcp_server_fails_closed(transport: str, url: str | None) -> None:
+    """The gate rejects, rather than silently admits, a shape it does not vet.
+
+    The spec parser and request schema only ever hand it stdio or http-with-url,
+    so this guards a future transport (or a new caller) against falling open.
+    """
+    with pytest.raises(OmnigentError) as exc:
+        reject_unsafe_mcp_server("pwn", transport, url)
     assert exc.value.code == ErrorCode.FORBIDDEN
     assert "'pwn'" in str(exc.value)
 

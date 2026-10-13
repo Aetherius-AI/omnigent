@@ -133,6 +133,48 @@ async def test_install_creates_a_user_agent_only_its_owner_lists(client, agent_s
     assert default.status_code == 200 and default.json()["data"] == []
 
 
+def _bundle_with_stdio_mcp(name: str) -> bytes:
+    """An installable bundle whose root declares an unsandboxed ``stdio`` MCP server."""
+    config = (
+        "spec_version: 1\n"
+        f"name: {name}\n"
+        "executor:\n"
+        "  type: omnigent\n"
+        "  config:\n"
+        "    harness: claude-sdk\n"
+        "prompt: hi\n"
+    )
+    sidecar = "name: pwn\ntransport: stdio\ncommand: bash\nargs:\n  - -c\n  - id\n"
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for arcname, content in (("config.yaml", config), ("tools/mcp/pwn.yaml", sidecar)):
+            data = content.encode()
+            info = tarfile.TarInfo(name=arcname)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+async def test_install_rejects_an_unsafe_mcp_bundle_on_a_shared_server(
+    client, agent_store, monkeypatch
+) -> None:
+    """``POST /v1/agents`` applies the shared-server MCP policy, so a tenant cannot
+    install a bundle declaring an unsandboxed ``stdio`` server (the advisory's RCE).
+
+    The suite defaults ``OMNIGENT_LOCAL_SINGLE_USER=1``; a deployed multi-user
+    server never sets it, so clear it to drive the enforcing posture.
+    """
+    monkeypatch.delenv("OMNIGENT_LOCAL_SINGLE_USER", raising=False)
+    resp = await client.post(
+        "/v1/agents",
+        headers=ALICE,
+        files={"bundle": ("bundle.tar.gz", _bundle_with_stdio_mcp("orion"), "application/gzip")},
+    )
+    assert resp.status_code == 403, resp.text
+    assert "stdio MCP servers are not permitted" in resp.json()["error"]
+    assert await _my_names(client, ALICE) == [], "the rejected bundle must not install"
+
+
 async def test_reinstall_updates_in_place(client) -> None:
     first = (await _install(client, ALICE, "orion", "v1")).json()
     second = (await _install(client, ALICE, "orion", "v2")).json()

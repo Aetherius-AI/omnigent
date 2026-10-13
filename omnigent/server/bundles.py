@@ -110,6 +110,13 @@ def reject_unsafe_mcp_server(name: str, transport: str, url: str | None) -> None
                 "addresses are not allowed.",
                 code=ErrorCode.FORBIDDEN,
             )
+        return
+    # Fail closed: the spec parser and request schema only admit stdio or
+    # http-with-url, so any other shape is an unvetted transport, not a pass.
+    raise OmnigentError(
+        f"MCP server {name!r}: unsupported transport {transport!r} or missing url.",
+        code=ErrorCode.FORBIDDEN,
+    )
 
 
 def _reject_uploaded_unsafe_mcp_servers(spec: AgentSpec) -> None:
