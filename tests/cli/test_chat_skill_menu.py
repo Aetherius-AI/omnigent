@@ -1,10 +1,8 @@
 """The REPL's slash-command menu offers what the web composer offers.
 
-``omnigent run`` registers ``_merge_host_skills`` as the REPL's skill commands;
-the host builds the web menu for the same session with ``resolve_session_skills``.
-These pin the REPL to that resolver: harness-aware tiers (Claude plugins,
-``CLAUDE_CONFIG_DIR``, Codex's own skill dirs) and the workspace searched ahead of
-a generated agent root.
+``_merge_host_skills`` feeds the REPL's skill commands; the host builds the web
+menu for the same session with ``resolve_session_skills``. These pin the two
+together across harness tiers and a generated agent root.
 """
 
 from __future__ import annotations

@@ -8459,14 +8459,9 @@ def _slash_command_token(text: str) -> str:
     """
     Return the leading slash-command token of *text*, or ``""`` if it has none.
 
-    Slash commands are short tokens like ``/help`` or ``/plugin:skill``. A
-    file path such as ``/Users/me/shot.png`` also opens with ``/`` but
-    carries more separators, so it stays an ordinary message. The dispatcher
-    and the composer tint share this predicate, so a tinted token is one the
-    dispatcher really does intercept.
-
-    :param text: Raw composer input, e.g. ``"/effort high"``.
-    :returns: The token including its ``/``, e.g. ``"/effort"``.
+    ``/help`` and ``/plugin:skill`` qualify; a path such as ``/Users/me/shot.png``
+    carries more separators and stays an ordinary message. The dispatcher and
+    the composer tint share this predicate.
     """
     parts = text.split(maxsplit=1)
     first_token = parts[0] if parts else ""

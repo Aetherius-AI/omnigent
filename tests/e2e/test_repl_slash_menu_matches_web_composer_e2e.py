@@ -1,14 +1,10 @@
 """The terminal REPL's slash-command menu offers what the web composer offers.
 
-For one session both composers answer "what can I type after ``/``". The web
-composer resolves a Claude session's commands through the harness-aware
-provider (host skills, the project's ``.claude/skills`` and every enabled
-Claude Code plugin's skills as ``<plugin>:<skill>``). The REPL built from
-``omnigent run <agent> --harness claude-sdk`` must list and dispatch the same
-commands instead of printing ``Unknown command``.
-
-Mock LLM only: the menu and the dispatcher's ``Unknown command`` reply are
-rendered locally, before any model call.
+The web composer resolves a Claude session's commands through the harness-aware
+provider (host skills, the project's ``.claude/skills`` and enabled plugin skills
+as ``<plugin>:<skill>``). The REPL built by ``omnigent run <agent> --harness
+claude-sdk`` must list and dispatch the same commands. Mock LLM only: the menu
+and the ``Unknown command`` reply are rendered locally.
 """
 
 from __future__ import annotations
@@ -71,11 +67,7 @@ def _seed_project(project: Path) -> None:
 
 
 def _read_until(child: pexpect.spawn, pattern: str, *, timeout: float) -> str:
-    """ANSI-stripped output accumulated until *pattern* matches the plain text.
-
-    Rows are rendered with style codes between columns, so matching on the
-    stripped text (not the raw PTY stream) keeps the patterns readable.
-    """
+    """ANSI-stripped output accumulated until *pattern* matches the plain text."""
     raw = ""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
