@@ -513,8 +513,7 @@ def test_failed_terminal_view_surfaces_runner_failure_cause(
     # Baseline: the failed session renders the generic stopped terminal state.
     expect(terminal_view).to_contain_text("The harness is not running.")
 
-    # The persisted failure cause must be visible on the Terminal surface, as
-    # the Chat view already surfaces it. It is hidden here today (the bug).
+    # The persisted failure cause must be visible, mirroring the Chat error pill.
     expect(terminal_view).to_contain_text("host authentication failed")
 
 
