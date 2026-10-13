@@ -44,6 +44,16 @@ class _HostRun:
     server_url: str
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_launch_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop a managed-host launch token so host starts here see an ordinary host.
+
+    With ``OMNIGENT_HOST_TOKEN`` set, the host-start commands skip the user
+    sign-in pre-flight; tests that want a launch-token host set it themselves.
+    """
+    monkeypatch.delenv("OMNIGENT_HOST_TOKEN", raising=False)
+
+
 def _persist_fake_daemon_claim(
     target: str,
     spawned: object,
@@ -359,7 +369,6 @@ def test_host_enable_preflight_follows_launch_token(
     from omnigent.host.service import HostService
 
     server = "https://myapp-1234.aws.databricksapps.com"
-    monkeypatch.delenv("OMNIGENT_HOST_TOKEN", raising=False)
     if launch_token is not None:
         monkeypatch.setenv("OMNIGENT_HOST_TOKEN", launch_token)
     preflight: list[tuple[str, bool]] = []

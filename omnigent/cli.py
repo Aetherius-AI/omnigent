@@ -3801,17 +3801,13 @@ def _ensure_databricks_server_auth(server: str, *, non_interactive: bool = False
 def _ensure_host_server_auth(server: str, *, non_interactive: bool) -> None:
     """Run the sign-in pre-flight for a host start unless a launch token covers it.
 
-    A server-managed sandbox host carries ``OMNIGENT_HOST_TOKEN``, which its
-    tunnel upgrade sends in place of a user bearer (see
-    :meth:`omnigent.host.connect.HostConnection._build_connect_headers`). Such
-    a host holds no user credentials, so probing ``/v1/me`` through the user
-    auth chain can only fail: a Databricks-fronted edge redirects the
-    unauthenticated probe to sign-in and the start would die with the
-    ``omnigent login`` hint before the token-authenticated tunnel is dialed.
+    A server-managed sandbox host authenticates its tunnel with
+    ``OMNIGENT_HOST_TOKEN`` and holds no user credentials, so the user sign-in
+    pre-flight could only send it to a login it cannot complete.
+    Session-creation clients (:func:`_ensure_backend`) keep the user pre-flight.
 
     :param server: Remote server base URL without a trailing slash.
     :param non_interactive: Forwarded to :func:`_ensure_databricks_server_auth`.
-    :raises click.ClickException: As :func:`_ensure_databricks_server_auth`.
     """
     from omnigent.host.identity import HOST_TOKEN_ENV_VAR
 

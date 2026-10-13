@@ -3129,6 +3129,25 @@ def test_ensure_backend_databricks_preflight_hints_headless(
     assert login_calls == []
 
 
+def test_ensure_backend_databricks_preflight_ignores_launch_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session-create client keeps the user preflight despite an inherited launch token.
+
+    Executors inside a managed sandbox see ``OMNIGENT_HOST_TOKEN``, but the
+    launch token only authenticates the host tunnel, not session creation.
+    """
+    monkeypatch.setenv("OMNIGENT_HOST_TOKEN", "launch-token")
+    login_calls = _patch_auth_preflight(monkeypatch, probe_status=302, tty=False)
+    monkeypatch.setattr(cli, "_ensure_host_daemon", lambda server: False)
+
+    with pytest.raises(click.ClickException) as exc:
+        _ensure_backend("https://myapp-1234.aws.databricksapps.com")
+
+    assert "omnigent login https://myapp-1234.aws.databricksapps.com" in str(exc.value)
+    assert login_calls == []
+
+
 def test_ensure_backend_databricks_preflight_skips_when_authenticated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3412,10 +3431,8 @@ def test_host_with_launch_token_skips_user_preflight(
     alone and hold no user credentials, so a Databricks-fronted server's
     sign-in redirect on the unauthenticated probe must not abort the start.
     """
-    import httpx
-
     monkeypatch.setenv("OMNIGENT_HOST_TOKEN", "launch-token")
-    monkeypatch.setattr(cli, "_workspace_api_server_url", lambda server: server.rstrip("/"))
+    login_calls = _patch_auth_preflight(monkeypatch, probe_status=302, tty=False)
     user_credential_lookups: list[str | None] = []
 
     def _spy_remote_headers(
@@ -3428,13 +3445,8 @@ def test_host_with_launch_token_skips_user_preflight(
         return {}
 
     monkeypatch.setattr("omnigent.chat._remote_headers", _spy_remote_headers)
-    monkeypatch.setattr(httpx, "get", lambda url, **kw: _databricks_probe_response(302))
     # A credential-less sandbox resolves no workspace token.
     monkeypatch.setattr(cli, "_databricks_workspace_auth_info", lambda workspace: None)
-    login_calls: list[str] = []
-    monkeypatch.setattr(
-        cli, "_databricks_login", lambda server, *args, **kwargs: login_calls.append(server)
-    )
     connected = _patch_foreground_host(monkeypatch, tmp_path)
 
     result = CliRunner().invoke(cli_group, ["host", _HOST_DATABRICKS_SERVER, "--non-interactive"])
