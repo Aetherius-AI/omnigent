@@ -12746,20 +12746,14 @@ def _read_session_snapshot_inputs(
     """Authorize a snapshot read and fetch its store inputs over one checkout.
 
     The access check, the conversation row and the bound agent row are every
-    store read ``GET /sessions/{id}`` needs before it consults a runner. One
-    :func:`shared_read_scope` around them costs a single pool checkout (and
-    one ``pool_pre_ping``) instead of one per store call. Synchronous so the
-    route runs it through :func:`asyncio.to_thread`; the scope closes before
-    any of the snapshot's network lookups.
+    store read ``GET /sessions/{id}`` needs before it consults a runner, so one
+    :func:`shared_read_scope` costs a single pool checkout (and ``pool_pre_ping``)
+    instead of one per store call. Synchronous for :func:`asyncio.to_thread`; the
+    scope closes before any of the snapshot's network lookups.
 
-    :param user_id: The authenticated user, or ``None`` when auth is disabled.
-    :param session_id: Session/conversation identifier, e.g. ``"conv_abc123"``.
-    :param permission_store: Permission store, or ``None`` to skip auth.
-    :param conversation_store: Store for the conversation row.
-    :param agent_store: Store for the bound agent row.
     :returns: The access result, the conversation (read here when the access
-        check did not), and the bound agent row — ``None`` when the session has
-        no agent binding or the row could not be read.
+        check did not), and the bound agent row, or ``None`` when the session
+        has no agent binding or the row could not be read.
     :raises OmnigentError: 401 / 403 / 404 from the access check, or 404 when
         the conversation does not exist.
     """

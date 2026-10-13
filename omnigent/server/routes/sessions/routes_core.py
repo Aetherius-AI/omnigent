@@ -386,11 +386,7 @@ def _codex_update_unconfirmed(result: _RunnerForwardResult) -> bool:
 
 @dataclasses.dataclass(frozen=True)
 class _SessionPageReads:
-    """Store reads behind one ``GET /sessions`` page, taken in a single read burst.
-
-    ``conv_ids`` is empty when the page lists no sessions; the per-row maps
-    are then left empty as well.
-    """
+    """Store reads behind one ``GET /sessions`` page, taken in a single read burst."""
 
     page: PagedList[Conversation]
     conv_ids: list[str] = dataclasses.field(default_factory=list)
