@@ -3744,8 +3744,7 @@ async def _publish_runner_recovered_status_impl(
     )
     session_stream.publish(session_id, event.model_dump())
     await _persist_session_status_error_labels(session_id, None, conversation_store)
-    # After the labels clear, so the parent's summary no longer carries the
-    # disconnect cause that would keep its rail entry rendered as failed.
+    # Runs after the labels clear so the parent's summary drops the disconnect cause.
     _publish_child_status_to_parent(session_id, "idle")
 
 
