@@ -806,7 +806,8 @@ async def test_hook_turn_end_rearms_a_poller_whose_file_still_says_busy(
     Claude's status file stays ``busy`` across a ``Stop`` (or ``StopFailure``)
     while a delegate keeps working and when Claude then resumes the session on
     its own. The file is written only on change, so without a re-arm the poller
-    would never re-publish ``running`` for that turn.
+    would never re-publish ``running`` for that turn. A ``Stop`` re-arms it by
+    itself; after a ``StopFailure`` the runner re-arms a dispatched child's.
     """
     config_dir = tmp_path / "claude"
     _write_claude_status_file(config_dir, status="busy")
@@ -825,12 +826,51 @@ async def test_hook_turn_end_rearms_a_poller_whose_file_still_says_busy(
     # The hook's turn end reaches the runner on /events and becomes the baseline.
     registry.note_external_session_status("conv_busy_after_stop", turn_end)
     assert not registry.session_turn_is_active("conv_busy_after_stop")
+    if turn_end == "failed":
+        registry.resync_status_poller("conv_busy_after_stop")
 
     # Claude's file still says busy: the next tick must re-assert running.
     on_tick()
     await asyncio.sleep(0)
     assert statuses == ["running", "running"]
     assert registry.session_turn_is_active("conv_busy_after_stop")
+
+
+@pytest.mark.asyncio
+async def test_hook_failure_leaves_a_still_busy_file_silent_for_a_top_level_session(
+    tmp_path: Path,
+) -> None:
+    """A ``StopFailure`` must not replay a stale ``busy`` as new activity.
+
+    The server keeps a failed session failed across a later ``idle`` but treats
+    ``running`` as a new turn, so re-reading an unchanged ``busy`` after the
+    failure would erase the failure. A top-level session has no settle to put
+    it back, so its poller is left alone until the file changes.
+    """
+    config_dir = tmp_path / "claude"
+    path = _write_claude_status_file(config_dir, status="busy")
+    callbacks, statuses, registry = await _observe_native_with_real_poller(
+        tmp_path, "conv_failed_top_level", config_dir=config_dir
+    )
+    on_tick = callbacks["on_tick"]
+    assert callable(on_tick)
+    on_tick()
+    await asyncio.sleep(0)
+    assert statuses == ["running"]
+
+    registry.note_external_session_status("conv_failed_top_level", "failed")
+    on_tick()
+    await asyncio.sleep(0)
+    assert statuses == ["running"], "a stale busy must not clear the sticky failure"
+    assert not registry.session_turn_is_active("conv_failed_top_level")
+
+    # Claude finally rewrites the file as idle: that change is published as before.
+    _write_claude_status_file(config_dir, status="idle")
+    stat = path.stat()
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+    on_tick()
+    await asyncio.sleep(0)
+    assert statuses == ["running", "idle"]
 
 
 @pytest.mark.asyncio

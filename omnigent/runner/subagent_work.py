@@ -451,6 +451,35 @@ def restamp_rearmed_subagent_work(entry: _SubagentWorkEntry, *, work_id: str) ->
     _confirm_subagent_rearm(entry)
 
 
+def _rearm_confirmed_by(entry: _SubagentWorkEntry, response_id: str | None) -> bool:
+    """Whether a terminal report naming *response_id* confirms *entry*'s re-armed turn.
+
+    A live re-armed entry is confirmed by any report. A finished entry a settle
+    restored still awaits the anticipated turn's report: any report but a replay
+    of its own (the same ``response_id``) confirms it.
+    """
+    if not entry.rearmed:
+        return False
+    if entry.status not in _SUBAGENT_TERMINAL_STATUSES:
+        return True
+    return response_id is None or response_id != entry.response_id
+
+
+def rearmed_turn_confirmed_by(child_session_id: str, *, response_id: str | None) -> bool:
+    """
+    Whether a terminal report for *child_session_id* would confirm a re-armed turn.
+
+    Lets the caller give that turn its own dispatch id on the child before the
+    report's result is delivered (see ``mark_subagent_work_terminal``).
+
+    :param child_session_id: Child session id, e.g. ``"conv_child456"``.
+    :param response_id: Id of the turn the report ends, when the forwarder named it.
+    :returns: ``True`` when the child's entry is a re-arm this report confirms.
+    """
+    entry = _subagent_work_by_child.get(child_session_id)
+    return entry is not None and _rearm_confirmed_by(entry, response_id)
+
+
 def note_subagent_child_activity(child_session_id: str) -> _SubagentWorkEntry | None:
     """
     Re-arm a finished dispatch whose child reports new work.
@@ -462,7 +491,11 @@ def note_subagent_child_activity(child_session_id: str) -> _SubagentWorkEntry | 
     the parent's turn end counts the child as running and the turn's terminal
     edge is delivered instead of deduplicated against the old result. A
     finished result the parent has not received yet is left in place; the next
-    terminal report replaces it.
+    terminal report replaces it. The turn runs under that id, whose delivery
+    receipt is already on the child, until a terminal report confirms it
+    (``mark_subagent_work_terminal``'s ``confirmed_work_id``) or an explicit
+    follow-up re-stamps it (:func:`restamp_rearmed_subagent_work`), so a
+    restart before the parent drains the new result can still recover it.
 
     :param child_session_id: Child session id, e.g. ``"conv_child456"``.
     :returns: The re-armed entry, or ``None`` when this edge did not restart a
@@ -832,6 +865,7 @@ def mark_subagent_work_terminal(
     output: str | None,
     only_if_work_id: str | None = None,
     response_id: str | None = None,
+    confirmed_work_id: str | None = None,
 ) -> _SubagentDeliveryAck:
     """
     Mark a sub-agent dispatch terminal and notify the parent inbox.
@@ -858,6 +892,10 @@ def mark_subagent_work_terminal(
         forwarder named it. After a settled re-arm it tells a replay of the
         finished turn's report (same id, absorbed) from the anticipated turn's
         own report (any other id, delivered).
+    :param confirmed_work_id: Fresh dispatch id the caller stamped on the child
+        for the re-armed turn this report confirms (see
+        :func:`rearmed_turn_confirmed_by`); the entry takes it so the result
+        and its drain receipt carry it. Ignored when no re-arm is confirmed.
     :returns: Delivery acknowledgement for this terminal report.
     :raises ValueError: If ``status`` is not terminal.
     """
@@ -892,9 +930,12 @@ def mark_subagent_work_terminal(
             reason=_SUBAGENT_DELIVERY_SUPERSEDED_DISPATCH,
         )
     if entry.status in _SUBAGENT_TERMINAL_STATUSES:
-        if entry.rearmed and (response_id is None or response_id != entry.response_id):
+        if _rearm_confirmed_by(entry, response_id):
             # The turn a settled re-arm anticipated reports after the grace
-            # window: a new result, not a replay of the finished one.
+            # window: a new result, not a replay of the finished one. An unnamed
+            # report counts as new: a duplicate beats a lost result.
+            if confirmed_work_id is not None:
+                entry.work_id = confirmed_work_id
             _record_terminal_report(entry, status=status, output=output, response_id=response_id)
             entry.delivered = False
             _confirm_subagent_rearm(entry)
@@ -932,6 +973,8 @@ def mark_subagent_work_terminal(
         if not keep_recorded:
             _record_terminal_report(entry, status=status, output=output, response_id=response_id)
         return _deliver_subagent_completion(entry)
+    if entry.rearmed and confirmed_work_id is not None:
+        entry.work_id = confirmed_work_id
     _record_terminal_report(entry, status=status, output=output, response_id=response_id)
     _confirm_subagent_rearm(entry)
     return _deliver_subagent_completion(entry)

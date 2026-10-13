@@ -1663,11 +1663,9 @@ async def _send_to_in_flight_child(
                 # needs its own id or a restart would skip its unread result.
                 _subagent_work.restamp_rearmed_subagent_work(live, work_id=work_id)
             else:
-                # No active tracked turn: the old turn ended and a fresh one
-                # started, or the in-flight turn was untracked locally
-                # (post-restart). Track it freshly so the completion is
-                # delivered, directly as "running" (never "launching") to stay
-                # clear of the launch-timeout reaper.
+                # No tracked turn (it ended, or is untracked post-restart): track
+                # it freshly as "running", never "launching", to stay clear of
+                # the launch-timeout reaper.
                 _subagent_work.register_child_session(
                     child_session_id,
                     parent_session_id=conversation_id,

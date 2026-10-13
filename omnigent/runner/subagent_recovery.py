@@ -26,7 +26,6 @@ from omnigent.runner.subagent_work import (
     _subagent_work_by_child,
     _SubagentRecoveryReadError,
     _SubagentWorkEntry,
-    forget_drained_subagent_delivery,
     get_subagent_work,
     list_subagent_work,
     register_subagent_work,
@@ -94,46 +93,52 @@ def build_subagent_recovery(
         """Return the child's work entry, rebuilding one for a report that still owes delivery.
 
         :param report_response_id: Id of the turn the arriving report ends, when
-            the forwarder named it; a drained dispatch whose re-arm settled is
-            rebuilt for any other turn's report, not for a replay of its own.
+            the forwarder named it; a replay of the drained turn's own report is
+            never rebuilt, while a settled re-arm is rebuilt for any other turn's.
         """
         existing = get_subagent_work(conv_id)
         if existing is not None:
             return existing
         drained = _drained_subagent_dispatches.get(conv_id)
-        if conv_id in _drained_delivered_subagent_children:
-            if (
-                drained is None
-                or not drained.rearmed
-                or (report_response_id is not None and report_response_id == drained.response_id)
-            ):
-                return None
-            # A re-arm that settled with no report: this report is the turn it
-            # anticipated, delivered once under the id stamped on the child.
-            forget_drained_subagent_delivery(conv_id)
+        if conv_id in _drained_delivered_subagent_children and (
+            drained is None or not drained.rearmed
+        ):
+            return None
+        if (
+            drained is not None
+            and report_response_id is not None
+            and report_response_id == drained.response_id
+        ):
+            return None
         # A child re-armed after a drain keeps its stamped dispatch id, so the
         # receipt written when this result is drained matches the child's label.
+        # Registering the entry clears the drain memory, so a rebuild that fails
+        # here keeps the replay guard above for the retried report.
         work_id = drained.work_id if drained is not None else None
         # The runner's own child record is authoritative; the server snapshot
         # is the fallback for a child adopted after a restart.
-        local = _register_subagent_work_from_child_record(conv_id, work_id=work_id)
-        if local is not None:
-            return local
-        try:
-            snapshot = await _session_snapshot(conv_id)
-        except Exception:  # noqa: BLE001 — best-effort recovery
-            return None
-        parent_id = snapshot.parent_session_id
-        if not parent_id or parent_id == conv_id:
-            return None
-        agent = snapshot.sub_agent_name or snapshot.agent_name or "sub-agent"
-        return register_subagent_work(
-            parent_session_id=parent_id,
-            child_session_id=conv_id,
-            agent=agent,
-            title=snapshot.sub_agent_name or "",
-            work_id=work_id,
-        )
+        rebuilt = _register_subagent_work_from_child_record(conv_id, work_id=work_id)
+        if rebuilt is None:
+            try:
+                snapshot = await _session_snapshot(conv_id)
+            except Exception:  # noqa: BLE001 — best-effort recovery
+                return None
+            parent_id = snapshot.parent_session_id
+            if not parent_id or parent_id == conv_id:
+                return None
+            agent = snapshot.sub_agent_name or snapshot.agent_name or "sub-agent"
+            rebuilt = register_subagent_work(
+                parent_session_id=parent_id,
+                child_session_id=conv_id,
+                agent=agent,
+                title=snapshot.sub_agent_name or "",
+                work_id=work_id,
+            )
+        # A report for a drained dispatch that is no replay ends a new turn: the
+        # rebuilt entry stands in for that turn's re-arm, so the report can give
+        # it its own id instead of the drained turn's receipted one.
+        rebuilt.rearmed = drained is not None
+        return rebuilt
 
     async def _parent_is_nested_subagent(entry: _SubagentWorkEntry) -> bool:
         """

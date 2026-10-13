@@ -172,6 +172,7 @@ from omnigent.runner.subagent_work import (
     _SUBAGENT_DELIVERY_MISSING_PARENT_INBOX,
     _SUBAGENT_TERMINAL_STATUSES,
     _WAKE_POST_MAX_ATTEMPTS,
+    SUBAGENT_DISPATCH_ID_LABEL_KEY,
     _child_session_parents,
     _ChildParentMeta,
     _deliver_subagent_completion,
@@ -192,7 +193,9 @@ from omnigent.runner.subagent_work import (
     list_subagent_work,
     mark_subagent_work_started,
     mark_subagent_work_terminal,
+    new_subagent_work_id,
     note_subagent_child_activity,
+    rearmed_turn_confirmed_by,
     settle_spurious_subagent_rearm,
     unregister_child_session,
     unregister_subagent_work_for_session,
@@ -4613,6 +4616,7 @@ def create_runner_app(
         output: str | None,
         only_if_work_id: str | None = None,
         response_id: str | None = None,
+        confirmed_work_id: str | None = None,
     ) -> _SubagentDeliveryAck:
         ack = mark_subagent_work_terminal(
             child_session_id,
@@ -4620,10 +4624,41 @@ def create_runner_app(
             output=output,
             only_if_work_id=only_if_work_id,
             response_id=response_id,
+            confirmed_work_id=confirmed_work_id,
         )
         if ack.entry is not None and ack.delivered_now:
             _schedule_subagent_wake(ack.entry)
         return ack
+
+    async def _stamp_confirmed_rearm(child_id: str, *, response_id: str | None) -> str | None:
+        """Give a re-armed turn its own dispatch id before its result enters the inbox.
+
+        The re-arm runs under the drained turn's id, whose receipt is already on
+        the child, so a restart before the parent drains the new result would
+        skip it. A terminal report that confirms the turn mints a fresh id and
+        stamps it on the child first; the registry applies it when it records
+        that report. Best effort: a failed stamp degrades restart recovery of
+        this one turn, never its live delivery.
+
+        :returns: The stamped id, or ``None`` when the report confirms no re-arm.
+        """
+        if not rearmed_turn_confirmed_by(child_id, response_id=response_id):
+            return None
+        from omnigent.runner.tool_dispatch import _patch_subagent_label
+
+        work_id = new_subagent_work_id()
+        stamp_error = await _patch_subagent_label(
+            server_client, child_id, SUBAGENT_DISPATCH_ID_LABEL_KEY, work_id
+        )
+        if stamp_error is not None:
+            _logger.warning(
+                "self-resumed sub-agent %s: dispatch-id stamp failed (%s); restart "
+                "recovery for this turn is degraded",
+                child_id,
+                stamp_error,
+                extra={"session_id": child_id},
+            )
+        return work_id
 
     # Seam for the entrypoint's launch reaper (and tests): terminal delivery
     # that also schedules the parent wake POST, not just the inbox insert.
@@ -6651,6 +6686,11 @@ def create_runner_app(
                 # them here too; the idle watchdog reads them for native turns.
                 _native_pane_status[conversation_id] = status
                 resource_registry.note_external_session_status(conversation_id, status)
+                if status == "failed" and conversation_id in _child_session_parents:
+                    # A dispatched child's file may still read busy after its
+                    # StopFailure: re-read it so a self-resume is seen; a stale
+                    # replay is settled and the failure restored.
+                    resource_registry.resync_status_poller(conversation_id)
                 child_status = (
                     "idle" if terminal_status == "completed" else terminal_status or status
                 )
@@ -6696,11 +6736,15 @@ def create_runner_app(
                     output = output or "[System: sub-agent interrupted]"
                 elif terminal_status == "failed":
                     output = output or "Error: native sub-agent turn failed"
+                confirmed = await _stamp_confirmed_rearm(
+                    conversation_id, response_id=report_response_id
+                )
                 delivery_ack = _mark_subagent_terminal_and_wake(
                     conversation_id,
                     status=terminal_status,
                     output=output if output is not None else "",
                     response_id=report_response_id,
+                    confirmed_work_id=confirmed,
                 )
             elif ambiguous_idle:
                 # This harness's forwarder marks genuine turn completions
@@ -6720,9 +6764,13 @@ def create_runner_app(
                 if delivery_ack.delivered_now:
                     _schedule_subagent_wake(entry)
             else:
+                confirmed = None
                 if status in ("idle", "failed"):
                     recovered_entry = await _ensure_subagent_work_entry(
                         conversation_id, report_response_id=report_response_id
+                    )
+                    confirmed = await _stamp_confirmed_rearm(
+                        conversation_id, response_id=report_response_id
                     )
                 if status == "idle" and interrupt_pending:
                     # Interrupt with no confirming edge, resolved to the CURRENT
@@ -6735,6 +6783,7 @@ def create_runner_app(
                         output=output,
                         only_if_work_id=interrupt_work_id,
                         response_id=report_response_id,
+                        confirmed_work_id=confirmed,
                     )
                 elif status == "idle":
                     _native_interrupt_runner.clear_pending_interrupt(conversation_id)
@@ -6743,6 +6792,7 @@ def create_runner_app(
                         status="completed",
                         output=output if output is not None else "",
                         response_id=report_response_id,
+                        confirmed_work_id=confirmed,
                     )
                 elif status == "failed":
                     _native_interrupt_runner.clear_pending_interrupt(conversation_id)
@@ -6751,6 +6801,7 @@ def create_runner_app(
                         status="failed",
                         output=output or "Error: native sub-agent turn failed",
                         response_id=report_response_id,
+                        confirmed_work_id=confirmed,
                     )
             if delivery_ack is not None:
                 if (
