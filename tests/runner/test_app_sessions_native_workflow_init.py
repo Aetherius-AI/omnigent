@@ -2344,6 +2344,7 @@ async def test_mcp_execute_unknown_bare_tool_returns_protocol_error(
     assert "result" not in payload, (
         f"unknown tool produced a successful envelope instead of an error: {payload!r}"
     )
+    assert payload["error"]["code"] == -32602, payload
     assert "sys_no_such_tool" in payload["error"]["message"]
 
 
