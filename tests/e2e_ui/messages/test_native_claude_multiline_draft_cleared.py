@@ -107,7 +107,9 @@ class _TerminalScreen:
         except ValueError:
             return
         if isinstance(message, dict) and message.get("type") == "resize":
-            self._screen.resize(int(message["rows"]), int(message["cols"]))
+            rows, cols = message.get("rows"), message.get("cols")
+            if rows and cols:
+                self._screen.resize(int(rows), int(cols))
 
     def _on_received(self, payload: str | bytes) -> None:
         if isinstance(payload, bytes):
@@ -321,7 +323,9 @@ def test_web_effort_change_replaces_multi_line_tui_draft(
             break
         page.wait_for_timeout(500)
     _save_evidence("effort-screen-after-change.txt", screen_text)
-    session = httpx.get(f"{base_url}/v1/sessions/{session_id}", timeout=15.0).json()
+    session_resp = httpx.get(f"{base_url}/v1/sessions/{session_id}", timeout=15.0)
+    session_resp.raise_for_status()
+    session = session_resp.json()
     _save_evidence(
         "effort-session-after-change.json",
         json.dumps({"reasoning_effort": session.get("reasoning_effort")}, indent=2),

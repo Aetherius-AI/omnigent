@@ -309,8 +309,10 @@ _PASTE_SETTLE_S = 0.1  # let the TUI commit a paste before the separate submit E
 _COMPOSER_KILL_TO_LINE_END = "\x1b[107;5u"
 _COMPOSER_KILL_TO_LINE_START = "\x1b[117;5u"
 # The box shows only a window of a draft taller than it (seven rows in a
-# 24-row terminal), so clearing repeats per window until this budget runs out.
+# 24-row terminal), so clearing repeats per window. A box that stops changing
+# for this long is stuck; even a shrinking one must empty within the cap.
 _COMPOSER_CLEAR_TIMEOUT_S = 2.0
+_COMPOSER_CLEAR_MAX_S = 20.0
 # How long to wait for the pasted draft to visibly land in Claude's
 # input box before sending the submit Enter. Claude Code coalesces
 # rapid stdin bursts into a paste, so an Enter sent while the TUI is
@@ -4278,10 +4280,11 @@ def _paste_and_submit(
         raise ClaudeUserPromptPending(
             "Answer the pending Claude question or permission request before sending a message."
         )
-    delivery_diagnostics.set_stage("pasting")
+    delivery_diagnostics.set_stage("clearing_composer")
     # Clear stale text first, or the paste lands inside the person's draft and
     # Enter submits both together.
     _clear_composer(socket_path, tmux_target)
+    delivery_diagnostics.set_stage("pasting")
     # Trailing newline absorbs a trailing "\" so it can't escape the submit Enter.
     # Delivered through a tmux buffer, NOT ``send-keys`` argv: tmux caps one
     # client→server command at ~16KB, so per-byte hex argv blew up with
@@ -5894,28 +5897,46 @@ def _clear_composer(socket_path: str, tmux_target: str) -> None:
     while presses beyond the draft do nothing. Clearing only the cursor's
     line would leave the rest of a multi-line draft to be submitted with the
     next message. The box shows at most a window of a tall draft, so a round
-    only clears the rows on screen; rounds repeat until a frame captured
-    after a burst shows the box empty. A torn capture is re-polled rather
-    than read as an empty box. Anything still in the box when
-    :data:`_COMPOSER_CLEAR_TIMEOUT_S` runs out fails the injection, since
+    only clears the rows on screen; rounds repeat while the box keeps
+    changing, until a frame captured after a burst shows it empty. A torn
+    capture is re-polled rather than read as an empty box. A box that stops
+    changing for :data:`_COMPOSER_CLEAR_TIMEOUT_S`, or is still not empty
+    after :data:`_COMPOSER_CLEAR_MAX_S`, fails the injection, since
     submitting would send the person's unsent draft to the model; Claude
     Code renders an empty box as a bare glyph, so surviving text is a draft.
 
     :param socket_path: Absolute path to the tmux socket.
     :param tmux_target: tmux pane target string, e.g. ``"main"``.
     :raises ClaudeTerminalDialog: If the box could not be read or emptied in
-        time; nothing was pasted or submitted.
+        time, or is in shell mode, where a paste would run as a command;
+        nothing was pasted or submitted.
     :raises RuntimeError: If a ``tmux`` invocation fails.
     """
-    deadline = time.monotonic() + _COMPOSER_CLEAR_TIMEOUT_S
+    started = last_change = time.monotonic()
+    previous: list[str] | None = None
     bursts = 0
     while True:
         pane = _capture_pane(socket_path, tmux_target)
         rows = _composer_box_rows(pane) if pane.strip() else None
-        # The row's text follows its composer glyph.
-        if bursts and rows is not None and len(rows) == 1 and not rows[0].strip()[1:].strip():
-            return
-        if time.monotonic() >= deadline:
+        if rows is not None:
+            first = rows[0].strip()
+            if first.startswith(_SHELL_MODE_GLYPH):
+                raise ClaudeTerminalDialog(
+                    "Claude Code's input box is in shell mode, so nothing was sent. "
+                    "Leave shell mode in the terminal, then retry."
+                )
+            # The row's text follows the chat glyph. A burst always precedes
+            # the check: a frame captured before the TUI drew the person's
+            # last keystroke would otherwise pass as empty.
+            if bursts and len(rows) == 1 and not first[1:].strip():
+                return
+        now = time.monotonic()
+        if rows is not None and rows != previous:
+            previous, last_change = rows, now
+        if (
+            now - last_change >= _COMPOSER_CLEAR_TIMEOUT_S
+            or now - started >= _COMPOSER_CLEAR_MAX_S
+        ):
             if rows is None:
                 raise ClaudeTerminalDialog(
                     "Claude Code's input box could not be read, so nothing was sent. "

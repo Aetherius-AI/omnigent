@@ -10501,6 +10501,22 @@ def test_inject_user_message_clears_a_draft_taller_than_the_input_box(
     assert [text.strip() for text in composer.submitted] == ["hello from the web"]
 
 
+def test_inject_user_message_keeps_clearing_while_a_tall_draft_shrinks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A draft needing more rounds than the stuck-box budget clears while each round shrinks it."""
+    draft = "\n".join(f"line {index:03d}" for index in range(1, 301))
+    bridge_dir = _picker_bridge_dir(tmp_path)
+    composer = _EditableComposer(draft, cursor=len(draft), visible_rows=7)
+    composer.install(monkeypatch)
+
+    inject_user_message(bridge_dir, content="hello from the web")
+
+    assert [text.strip() for text in composer.submitted] == ["hello from the web"]
+    assert claude_native_bridge.time.monotonic() > claude_native_bridge._COMPOSER_CLEAR_TIMEOUT_S
+
+
 class _StuckComposer(_EditableComposer):
     """A box the clearing keys never change."""
 
@@ -10509,6 +10525,82 @@ class _StuckComposer(_EditableComposer):
 
     def _kill_to_line_start(self) -> None:
         pass
+
+
+class _ReplacedAfterBurstComposer(_EditableComposer):
+    """A box that a clearing burst leaves in another state: shell mode or a dialog."""
+
+    def __init__(self, draft: str, *, cursor: int, replacement: str) -> None:
+        super().__init__(draft, cursor=cursor)
+        self.replacement = replacement
+        self.burst = False
+
+    def _run_tmux(self, socket_path: str, *args: str) -> None:
+        if args[0] == "send-keys" and "\x1b[107;5u" in args[-1]:
+            self.burst = True
+        super()._run_tmux(socket_path, *args)
+
+    def _capture_pane(self, socket_path: str, tmux_target: str) -> str:
+        pane = super()._capture_pane(socket_path, tmux_target)
+        if not self.burst:
+            return pane
+        if self.replacement == "shell-mode":
+            return pane.replace("❯", "!", 1)
+        return _EFFORT_DIALOG_PANE
+
+
+@pytest.mark.parametrize(
+    "inject", [_inject_message, _inject_effort], ids=["message", "slash-command"]
+)
+@pytest.mark.parametrize(
+    ("replacement", "reason"),
+    [("shell-mode", "shell mode"), ("dialog", "could not be read")],
+    ids=["shell-mode", "dialog"],
+)
+def test_a_box_replaced_during_clearing_sends_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    inject: Callable[[Path], None],
+    replacement: str,
+    reason: str,
+) -> None:
+    """A box that turns into shell mode or a dialog mid-clear fails before any paste."""
+    bridge_dir = _picker_bridge_dir(tmp_path)
+    composer = _ReplacedAfterBurstComposer(
+        _STALE_MULTILINE_DRAFT, cursor=3, replacement=replacement
+    )
+    composer.install(monkeypatch)
+
+    with pytest.raises(claude_native_bridge.ClaudeTerminalDialog, match=reason):
+        inject(bridge_dir)
+
+    assert composer.submitted == []
+    assert "hello" not in composer.text and "/effort" not in composer.text
+
+
+class _ChurningComposer(_StuckComposer):
+    """A box whose text changes on every capture but never empties."""
+
+    captures = 0
+
+    def _capture_pane(self, socket_path: str, tmux_target: str) -> str:
+        self.captures += 1
+        self.text = f"stuck {self.captures}"
+        return super()._capture_pane(socket_path, tmux_target)
+
+
+def test_clearing_a_box_that_keeps_changing_fails_at_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Progress extends the budget only up to the overall cap."""
+    composer = _ChurningComposer("stuck", cursor=0)
+    composer.install(monkeypatch)
+
+    with pytest.raises(claude_native_bridge.ClaudeTerminalDialog, match="could not be cleared"):
+        claude_native_bridge._clear_composer("/tmp/example/tmux.sock", "claude:0.0")
+
+    cap = claude_native_bridge._COMPOSER_CLEAR_MAX_S
+    assert cap <= claude_native_bridge.time.monotonic() < cap + 1
 
 
 @pytest.mark.parametrize("draft", ["stuck", "stuck\nstuck"], ids=["one-row", "two-rows"])

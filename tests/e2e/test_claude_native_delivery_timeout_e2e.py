@@ -119,12 +119,16 @@ def main():
                 continue
             if byte == 27:
                 # Drop a whole escape sequence (CSI-u clearing keys, the
-                # bracketed-paste markers) instead of echoing its tail as text.
-                if os.read(fd, 1) == b"[":
+                # bracketed-paste markers); a lone Escape's follower is input.
+                follower = os.read(fd, 1)
+                if follower == b"[":
                     while True:
                         final = os.read(fd, 1)
                         if not final or 0x40 <= final[0] <= 0x7E:
                             break
+                elif follower and follower[0] >= 0x20:
+                    chars.append(chr(follower[0]))
+                    render("".join(chars), transcript)
                 continue
             if byte < 0x20:
                 # Other control bytes are swallowed.
