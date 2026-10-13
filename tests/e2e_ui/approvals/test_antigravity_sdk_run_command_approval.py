@@ -54,12 +54,12 @@ pytestmark = pytest.mark.skipif(
 
 def _run_in_fresh_loop(coro: Coroutine[Any, Any, None]) -> None:
     """Run *coro* to completion in a dedicated thread with its own event loop."""
-    captured: dict[str, Exception] = {}
+    captured: dict[str, BaseException] = {}
 
     def _worker() -> None:
         try:
             asyncio.run(coro)
-        except Exception as exc:
+        except BaseException as exc:  # relayed to the test thread, which re-raises it
             captured["error"] = exc
 
     thread = threading.Thread(target=_worker)
@@ -163,7 +163,10 @@ class _MockGemini:
 
 
 def _fetch_host_row(base_url: str, host_name: str) -> dict[str, Any] | None:
-    hosts = httpx.get(f"{base_url}/v1/hosts", timeout=10.0).json().get("hosts", [])
+    try:
+        hosts = httpx.get(f"{base_url}/v1/hosts", timeout=10.0).json().get("hosts", [])
+    except (httpx.HTTPError, ValueError):
+        return None  # not reachable yet; the caller keeps polling until its deadline
     return next(
         (h for h in hosts if h.get("name") == host_name and h.get("status") == "online"),
         None,

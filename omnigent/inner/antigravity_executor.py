@@ -1042,6 +1042,9 @@ class AntigravityExecutor(Executor):
         policies: SDKPolicies = confirm_run_command(
             handler=self._make_run_command_confirmer(state)
         )
+        if not policies:
+            logger.warning("google-antigravity policy.confirm_run_command returned no policies")
+            return None
         return list(policies) if isinstance(policies, (list, tuple)) else [policies]
 
     def _make_run_command_confirmer(

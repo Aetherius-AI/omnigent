@@ -1751,3 +1751,20 @@ async def test_sdk_without_policy_module_keeps_sdk_default_policies(
 
     assert captured["configs"][0].policies is None
     assert any(isinstance(e, TurnComplete) for e in events)
+
+
+@pytest.mark.asyncio
+async def test_policy_factory_returning_nothing_keeps_sdk_default_policies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A policy factory returning nothing leaves ``policies`` unset rather than ``[None]``."""
+    captured = _install_fake_sdk(monkeypatch, scripts=[[_text_step("ok")]])
+    monkeypatch.setattr(
+        _FakePolicyModule, "confirm_run_command", staticmethod(lambda handler=None: None)
+    )
+    executor = AntigravityExecutor()
+
+    events = await _drain(executor, [{"role": "user", "content": "hi", "session_id": "s1"}])
+
+    assert captured["configs"][0].policies is None
+    assert any(isinstance(e, TurnComplete) for e in events)
