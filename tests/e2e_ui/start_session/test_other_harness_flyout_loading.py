@@ -1,11 +1,5 @@
-"""E2E: Edit on a harness in the landing picker keeps the open menu while its models load.
-
-The landing picker fetches a host model catalog only for the selected harness.
-Clicking Edit on a harness selects it and starts that fetch; the open menu must
-stay put, show "Loading models…", and list the models once they arrive, without
-a second click. Pi sits under the harness "Other..." flyout, whose open state
-lives in the submenu itself, so it is the most exposed case.
-"""
+"""Edit on a landing-picker harness keeps the open menu while its host catalog loads:
+"Loading models…" shows in place, then the models, with no second click needed."""
 
 from __future__ import annotations
 
@@ -47,15 +41,9 @@ Activation = Literal["pointer", "keyboard"]
 def test_other_harness_flyout_stays_open_while_models_load(
     seeded_session: tuple[str, str], activation: Activation
 ) -> None:
-    """Edit on an "Other..." harness lands on its model list after the catalog loads.
-
-    ``pointer`` clicks Edit on the Pi row. ``keyboard`` opens the flyout by hovering
-    "Other..." and reaches Edit with the arrow keys, so the cursor still rests on the
-    "Other..." row when Pi's model submenu opens over it.
-
-    :param seeded_session: ``(base_url, session_id)`` from the spawned server.
-    :param activation: How Edit on Pi is reached.
-    """
+    """Edit on an "Other..." harness lands on its model list; ``keyboard`` hovers
+    "Other..." then uses the arrow keys, so the cursor rests on that row when Pi's
+    model submenu opens over it."""
     base_url, session_id = seeded_session
     _run_in_fresh_loop(_drive_other_flyout_edit(base_url, session_id, activation))
 
@@ -63,10 +51,7 @@ def test_other_harness_flyout_stays_open_while_models_load(
 def test_inline_harness_edit_keeps_menu_while_models_load(
     seeded_session: tuple[str, str],
 ) -> None:
-    """Edit on an inline harness keeps the open menu mounted while its catalog loads.
-
-    :param seeded_session: ``(base_url, session_id)`` from the spawned server.
-    """
+    """Edit on an inline harness keeps the open menu mounted while its catalog loads."""
     base_url, session_id = seeded_session
     _run_in_fresh_loop(_drive_inline_edit(base_url, session_id))
 

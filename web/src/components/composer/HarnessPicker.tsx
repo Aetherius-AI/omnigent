@@ -131,11 +131,9 @@ function focusSelectedMenuItem(content: HTMLElement): void {
   selected?.focus();
 }
 
-/**
- * Pointer-leave handler for picker rows. A submenu opened from inside this menu
- * can appear under a resting cursor, which the browser reports as leaving the
- * row; left to Radix, that refocuses the menu and closes the open flyout.
- */
+// Pointer-leave handler for picker rows. A submenu opened from inside this menu
+// can appear under a resting cursor, which the browser reports as leaving the
+// row; left to Radix, that refocuses the menu and closes the open flyout.
 export function ignorePointerLeaveIntoSubmenu(event: PointerEvent<HTMLElement>): void {
   const ownMenu = event.currentTarget.closest('[role="menu"]');
   let menu =
