@@ -1117,8 +1117,9 @@ def build_mcp_local_tool_schemas(
     if len(_mcp_local_tool_schemas_cache) >= _GRANTED_TOOL_NAMES_CACHE_MAX:
         _mcp_local_tool_schemas_cache.clear()
     _mcp_local_tool_schemas_cache[cache_key] = (weakref.ref(agent_spec), result)
-    # Return a copy here and on cache hits so a caller mutating the list cannot
-    # corrupt the cached schemas for later tools/list calls on the same spec.
+    # Copy the list here and on cache hits so a caller adding or reordering
+    # entries cannot disturb the cache. Only list-level mutation is guarded; the
+    # sole caller spreads the schemas read-only, so the dicts need no deep copy.
     return list(result)
 
 
