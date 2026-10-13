@@ -766,15 +766,7 @@ _RESOLVED_ELSEWHERE_LABELS: dict[str, str] = {
 
 
 def _resolved_elsewhere_label(action: str | None, reason: str | None) -> str:
-    """
-    Describe how another client settled the ASK this REPL was prompting for.
-
-    :param action: MCP verdict carried by the resolved event, or ``None``
-        when nobody answered.
-    :param reason: Server-supplied reason for a verdict-less resolution,
-        e.g. ``"unanswered"`` when the prompt timed out.
-    :returns: The muted transcript line, e.g. ``"declined elsewhere"``.
-    """
+    """Transcript line for an ASK another client settled, e.g. ``"declined elsewhere"``."""
     if action in _RESOLVED_ELSEWHERE_LABELS:
         return _RESOLVED_ELSEWHERE_LABELS[action]
     if reason == "unanswered":
@@ -942,20 +934,16 @@ class _ApprovalState:
 
     def resolve_elsewhere(self, elicitation_id: str, action: str | None) -> bool:
         """
-        Settle the pending approval from another client's resolution
-        of the same elicitation.
+        Settle the pending approval from another client's resolution of
+        the same elicitation.
 
-        The server fans ``elicitation_resolved`` out for every
-        elicitation in the session — an earlier card answered on the
-        approval page, the REPL's own decline echoed back, an
-        abandoned prompt expiring — so only an event carrying this
-        ASK's id may release the gate. ``accept`` approves once;
-        anything else (decline, cancel, no verdict) refuses
-        fail-closed, because nobody approved this request.
+        The server publishes ``elicitation_resolved`` for every elicitation
+        in the session, so only an event carrying this ASK's id may release
+        the gate. ``accept`` approves once; a decline, cancel, or
+        verdict-less clear refuses fail-closed.
 
         :param elicitation_id: Id carried by the resolved event.
-        :param action: MCP verdict carried by the event, or ``None``
-            when the prompt was cleared without an answer.
+        :param action: MCP verdict carried by the event, or ``None``.
         :returns: ``True`` iff the pending approval was for this
             elicitation and has now been resolved.
         """
@@ -3697,11 +3685,9 @@ async def run_repl(
                 _maybe_log_tape_entry(tape_entry)
             return
 
-        # The server publishes ``elicitation_resolved`` for every
-        # elicitation settled in the session, from any client. Release the
-        # parked ``_ApprovalState`` future only for the ASK this REPL is
-        # prompting for, with the verdict the event carries; the hook's
-        # follow-up POST is then a no-op the server already ignores.
+        # ``elicitation_resolved`` fans out for every elicitation in the
+        # session, from any client; release the parked approval only for the
+        # ASK this REPL is prompting for, with the verdict the event carries.
         from omnigent.server.schemas import ElicitationResolvedEvent
 
         if isinstance(event, ElicitationResolvedEvent):

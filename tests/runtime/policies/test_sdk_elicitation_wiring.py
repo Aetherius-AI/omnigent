@@ -694,9 +694,8 @@ async def test_repl_state_cancel_refuses_closed() -> None:
 @pytest.mark.asyncio
 async def test_repl_hook_settles_only_its_own_elicitation_from_elsewhere() -> None:
     """
-    The hook registers the ctx's elicitation id, so a resolved event
-    for another elicitation in the session leaves the gate pending,
-    while one for this id releases it with the carried verdict.
+    The hook registers the ctx's elicitation id: a resolved event for another
+    elicitation leaves the gate pending; one for this id applies its verdict.
     """
     repl_mod = _load_repl_module()
     state = repl_mod._ApprovalState()

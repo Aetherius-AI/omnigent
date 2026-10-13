@@ -1806,15 +1806,12 @@ def test_repl_ignores_unrelated_elicitation_resolved(
     A pending policy ASK settles only through the user's verdict or another
     client's resolution of that same elicitation.
 
-    The server fans ``response.elicitation_resolved`` out to every subscriber
-    for every elicitation in the session, so the REPL also sees an earlier
-    card being resolved on the approval page. That event carries a different
-    ``elicitation_id`` (and a ``decline``), which is not an answer to the card
-    in front of the user: the ASK must stay pending and the gated turn must
-    not reach the LLM. Declining the pending card itself from another client
-    does release the gate, as the refusal it carries.
-
-    Offline-safe: no path here approves a turn, so the LLM is never called.
+    ``response.elicitation_resolved`` fans out for every elicitation in the
+    session. An event for an earlier card (different id, here a decline) is
+    not an answer to the card in front of the user: the ASK must stay pending
+    and the gated turn must not reach the LLM. Declining the pending card
+    itself from another client releases it as a refusal. No path here
+    approves a turn, so the LLM is never called.
     """
     _configure_mock_text(mock_llm_server_url, ["should not be reached"], match="unrelated-resolve")
     child = pexpect.spawn(
