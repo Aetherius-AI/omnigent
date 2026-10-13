@@ -7,7 +7,12 @@ import { UsageBreakdownCharts } from "@/components/usage/UsageBreakdownCharts";
 import { UsageSessionTable } from "@/components/usage/UsageSessionTable";
 import { useUsageReport } from "@/hooks/useUsageReport";
 import { formatSessionCostUsd } from "@/lib/formatCost";
-import type { DailyCost } from "@/lib/usageApi";
+import {
+  aggregateHarnessBreakdown,
+  aggregateModelBreakdown,
+  type DailyCost,
+  type SessionUsage,
+} from "@/lib/usageApi";
 import { cn } from "@/lib/utils";
 
 type RangeKey = "7d" | "30d" | "90d" | "all" | "custom";
@@ -61,6 +66,17 @@ function filterDailyCosts(
   });
 }
 
+function filterSessions(
+  sessions: SessionUsage[],
+  since: string | null,
+  until: string | null,
+): SessionUsage[] {
+  if (!since && !until) return sessions;
+  const sinceEpoch = since ? new Date(since + "T00:00:00Z").getTime() / 1000 : 0;
+  const untilEpoch = until ? new Date(until + "T23:59:59Z").getTime() / 1000 : Infinity;
+  return sessions.filter((s) => s.updatedAt >= sinceEpoch && s.updatedAt <= untilEpoch);
+}
+
 export function UsagePage() {
   const [rangeKey, setRangeKey] = useState<RangeKey>("30d");
   const [customStart, setCustomStart] = useState(() => daysAgoIso(30));
@@ -75,6 +91,10 @@ export function UsagePage() {
 
   const firstPage = data?.pages[0];
 
+  // A pre-pagination server ignores the new query params and omits the
+  // breakdown fields, so the page filters and aggregates its response itself.
+  const legacy = firstPage?.legacy ?? false;
+
   // Paging on a mutable updated_at can repeat a session across pages; keep its first occurrence.
   const allSessions = useMemo(() => {
     const flat = data?.pages.flatMap((page) => page.sessions) ?? [];
@@ -86,25 +106,42 @@ export function UsagePage() {
     });
   }, [data]);
 
+  // A legacy server returns every session unfiltered; narrow to the window here.
+  const sessions = useMemo(
+    () => (legacy ? filterSessions(allSessions, since, until) : allSessions),
+    [legacy, allSessions, since, until],
+  );
+
   const filteredCosts = useMemo(
     () => (firstPage ? filterDailyCosts(firstPage.dailyCosts, since, until) : []),
     [firstPage, since, until],
   );
 
-  // The server aggregates breakdowns across all sessions and sends them on the first page only.
+  // A current server sends range-scoped breakdowns on the first page; a legacy
+  // one sends none, so aggregate the windowed sessions locally instead.
   const { harnessBreakdown, modelBreakdown } = useMemo(() => {
+    if (legacy) {
+      return {
+        harnessBreakdown: aggregateHarnessBreakdown(sessions),
+        modelBreakdown: aggregateModelBreakdown(sessions),
+      };
+    }
     return {
       harnessBreakdown: firstPage?.harnessBreakdown ?? {},
       modelBreakdown: firstPage?.modelBreakdown ?? {},
     };
-  }, [firstPage]);
+  }, [legacy, sessions, firstPage]);
 
   // The daily rollup is the authoritative spend ledger for the window, so the
-  // total stays fixed no matter how many session pages have been loaded.
-  const totalCost = useMemo(
-    () => filteredCosts.reduce((sum, d) => sum + d.costUsd, 0),
-    [filteredCosts],
-  );
+  // total stays fixed no matter how many session pages have been loaded. A
+  // legacy server without a windowed rollup falls back to the session sum.
+  const totalCost = useMemo(() => {
+    const fromDaily = filteredCosts.reduce((sum, d) => sum + d.costUsd, 0);
+    if (legacy && fromDaily === 0) {
+      return sessions.reduce((sum, s) => sum + s.costUsd, 0);
+    }
+    return fromDaily;
+  }, [filteredCosts, legacy, sessions]);
 
   return (
     <PageScroll>
@@ -195,7 +232,7 @@ export function UsagePage() {
               </p>
               <p className="mt-0.5 text-xs text-muted-foreground">
                 <span>
-                  {allSessions.length} session{allSessions.length !== 1 && "s"}
+                  {sessions.length} session{sessions.length !== 1 && "s"}
                 </span>
                 {hasNextPage && " loaded"}
               </p>
@@ -215,7 +252,7 @@ export function UsagePage() {
 
             <section>
               <h2 className="mb-3 text-sm font-medium text-muted-foreground">Sessions</h2>
-              <UsageSessionTable sessions={allSessions} />
+              <UsageSessionTable sessions={sessions} />
               {hasNextPage && (
                 <div className="mt-4 flex justify-center">
                   <button

@@ -1,5 +1,15 @@
 import { authenticatedFetch } from "./identity";
 
+// A session referenced by the pagination cursor was deleted between page
+// fetches, so the server returns 400 `stale_cursor`. Thrown as a distinct type
+// so the Usage page can restart pagination from the first page.
+export class StaleCursorError extends Error {
+  constructor() {
+    super("Usage session cursor is stale");
+    this.name = "StaleCursorError";
+  }
+}
+
 // ── Wire types (snake_case from server) ─────────────────────────
 
 interface DailyCostWire {
@@ -27,10 +37,12 @@ interface UsageReportWire {
   total_cost_usd: number;
   daily_costs: DailyCostWire[];
   sessions: SessionUsageWire[];
-  sessions_has_more: boolean;
-  sessions_last_id: string | null;
-  harness_breakdown: Record<string, number>;
-  model_breakdown: Record<string, number>;
+  // Pre-pagination servers omit these fields entirely; the client distinguishes
+  // their absence from a legitimately empty map to detect a legacy response.
+  sessions_has_more?: boolean;
+  sessions_last_id?: string | null;
+  harness_breakdown?: Record<string, number>;
+  model_breakdown?: Record<string, number>;
 }
 
 // ── App types (camelCase) ───────────────────────────────────────
@@ -64,6 +76,9 @@ export interface UsageReport {
   sessionsLastId: string | null;
   harnessBreakdown: Record<string, number>;
   modelBreakdown: Record<string, number>;
+  // The server predates pagination/breakdowns, so the page must filter and
+  // aggregate the complete response locally.
+  legacy: boolean;
 }
 
 // ── Fetch ───────────────────────────────────────────────────────
@@ -85,8 +100,20 @@ export async function fetchUsageReport(params?: FetchUsageReportParams): Promise
   const url = query ? `/v1/usage?${query}` : "/v1/usage";
 
   const res = await authenticatedFetch(url);
-  if (!res.ok) throw new Error(`Usage fetch failed: ${res.status}`);
+  if (!res.ok) {
+    if (res.status === 400) {
+      const body = (await res.json().catch(() => null)) as {
+        error?: { code?: string };
+      } | null;
+      if (body?.error?.code === "stale_cursor") throw new StaleCursorError();
+    }
+    throw new Error(`Usage fetch failed: ${res.status}`);
+  }
   const wire: UsageReportWire = await res.json();
+  const legacy =
+    wire.sessions_has_more === undefined &&
+    wire.harness_breakdown === undefined &&
+    wire.model_breakdown === undefined;
   return {
     costToday: wire.cost_today,
     costLast7d: wire.cost_last_7d,
@@ -109,5 +136,31 @@ export async function fetchUsageReport(params?: FetchUsageReportParams): Promise
     sessionsLastId: wire.sessions_last_id ?? null,
     harnessBreakdown: wire.harness_breakdown ?? {},
     modelBreakdown: wire.model_breakdown ?? {},
+    legacy,
   };
+}
+
+// ── Legacy-response aggregation ─────────────────────────────────
+// A pre-pagination server returns every session without breakdown maps. These
+// mirror the server's first-page aggregation so a new client still charts spend
+// against an older server. Sessions without a resolved harness bucket under
+// "Unknown" so their spend still appears.
+
+export function aggregateHarnessBreakdown(sessions: SessionUsage[]): Record<string, number> {
+  const breakdown: Record<string, number> = {};
+  for (const session of sessions) {
+    const harness = session.harness ?? "Unknown";
+    breakdown[harness] = (breakdown[harness] ?? 0) + session.costUsd;
+  }
+  return breakdown;
+}
+
+export function aggregateModelBreakdown(sessions: SessionUsage[]): Record<string, number> {
+  const breakdown: Record<string, number> = {};
+  for (const session of sessions) {
+    for (const [model, cost] of Object.entries(session.models)) {
+      breakdown[model] = (breakdown[model] ?? 0) + cost;
+    }
+  }
+  return breakdown;
 }
