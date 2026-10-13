@@ -5052,6 +5052,7 @@ async def test_sys_session_send_by_id_names_child_from_snapshot(
             "title": snapshot_title or "",
             "tool": expected_agent,
             "session_name": expected_title,
+            "wrapper_label": None,
         }
     ]
     # The launching event is the Agents rail's live row for the child.

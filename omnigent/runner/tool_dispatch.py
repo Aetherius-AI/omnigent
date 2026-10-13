@@ -1585,7 +1585,10 @@ async def _send_to_in_flight_child(
       is never torn down);
     * post succeeds and the child's tracked turn is **still active** — the
       message was buffered into it, so its single existing work entry is reused
-      verbatim (no re-stamp) and that one completion delivers under it;
+      verbatim (no re-stamp) and that one completion delivers under it. A turn
+      Claude Code resumed on its own was re-armed under the drained turn's
+      receipted id; it keeps its entry but is re-stamped with a fresh id so a
+      restart can still recover the follow-up's unread result;
     * post succeeds and no tracked turn is active — the old turn already ended
       and the server started a new one, or the child was in-flight but untracked
       locally (e.g. after a runner restart). Either way a fresh entry is
@@ -1647,34 +1650,42 @@ async def _send_to_in_flight_child(
 
     async with _subagent_work.in_flight_send_lock(child_session_id):
         entry = _subagent_work.get_subagent_work(child_session_id)
-        if entry is not None and entry.status in ("running", "waiting"):
+        live = entry if entry is not None and entry.status in ("running", "waiting") else None
+        if live is not None and not live.rearmed:
             # The tracked turn is still active, so the post was buffered into it.
             # Reuse the one entry so its single completion delivers under it;
             # re-stamping/replacing here is what would orphan that completion.
-            work_id = entry.work_id
+            work_id = live.work_id
         else:
-            # No active tracked turn: the old turn ended and a fresh one started,
-            # or the in-flight turn was untracked locally (post-restart). Track
-            # it freshly so the completion is delivered, directly as "running"
-            # (never "launching") to stay clear of the launch-timeout reaper.
             work_id = _subagent_work.new_subagent_work_id()
-            _subagent_work.register_child_session(
-                child_session_id,
-                parent_session_id=conversation_id,
-                title=child_display_title,
-                tool=agent,
-                session_name=title,
-            )
-            fresh = _subagent_work.register_subagent_work(
-                parent_session_id=conversation_id,
-                child_session_id=child_session_id,
-                agent=agent,
-                title=title,
-                wrapper_label=wrapper_label,
-                created_by=created_by,
-                work_id=work_id,
-            )
-            fresh.status = "running"
+            if live is not None:
+                # Re-armed under the drained turn's receipted id: the follow-up
+                # needs its own id or a restart would skip its unread result.
+                _subagent_work.restamp_rearmed_subagent_work(live, work_id=work_id)
+            else:
+                # No active tracked turn: the old turn ended and a fresh one
+                # started, or the in-flight turn was untracked locally
+                # (post-restart). Track it freshly so the completion is
+                # delivered, directly as "running" (never "launching") to stay
+                # clear of the launch-timeout reaper.
+                _subagent_work.register_child_session(
+                    child_session_id,
+                    parent_session_id=conversation_id,
+                    title=child_display_title,
+                    tool=agent,
+                    session_name=title,
+                    wrapper_label=wrapper_label,
+                )
+                fresh = _subagent_work.register_subagent_work(
+                    parent_session_id=conversation_id,
+                    child_session_id=child_session_id,
+                    agent=agent,
+                    title=title,
+                    wrapper_label=wrapper_label,
+                    created_by=created_by,
+                    work_id=work_id,
+                )
+                fresh.status = "running"
             # Best-effort dispatch-id stamp for restart recovery only; the
             # in-memory entry above already makes the completion deliverable, so
             # a stamp failure degrades recovery but never live delivery.
@@ -3040,6 +3051,7 @@ async def _execute_subagent_tool(
         title=f"{sub_agent_name}:{session_name}",
         tool=sub_agent_name,
         session_name=session_name,
+        wrapper_label=child_wrapper_label,
     )
     _subagent_work.register_subagent_work(
         parent_session_id=conversation_id,
@@ -3253,6 +3265,7 @@ async def _send_to_existing_session(
         title=display_title or "",
         tool=agent_label,
         session_name=instance_title,
+        wrapper_label=_session_wrapper_label(snap_data),
     )
     _subagent_work.register_subagent_work(
         parent_session_id=conversation_id,
@@ -3399,6 +3412,7 @@ def _finalize_created_session(
         title=label,
         tool=agent_label,
         session_name=label,
+        wrapper_label=_session_wrapper_label(data),
     )
     evt = SessionCreatedEvent(
         type="session.created",

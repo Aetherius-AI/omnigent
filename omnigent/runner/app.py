@@ -1642,10 +1642,14 @@ def create_runner_app(
         if entry is None:
             return
         parent_id = entry.parent_session_id
-        # A parent mid-turn derives ``waiting`` at its own turn end; a native
-        # parent's status is owned by its terminal (``_publish_turn_status`` skips
-        # it). No status published in this process means no turn in flight here.
-        if parent_id in _active_turns or _native_pane_status.get(parent_id) not in (None, "idle"):
+        # Only an idle SDK parent is shown waiting here: a native parent's status
+        # is owned by its terminal, and a parent mid-turn derives ``waiting`` at
+        # its own turn end. No status published in this process means idle.
+        if (
+            _is_native_harness(parent_id)
+            or parent_id in _active_turns
+            or _native_pane_status.get(parent_id) not in (None, "idle")
+        ):
             return
         _publish_turn_status(parent_id, "waiting")
 
@@ -1674,13 +1678,19 @@ def create_runner_app(
             reverted = settle_spurious_subagent_rearm(child_id)
             if reverted is None:
                 return
+            if reverted.rearmed_over is not None and reverted.rearmed_over.status == "failed":
+                # The stale replay showed the child running, then idle; put its
+                # confirmed failure back.
+                _publish_event(child_id, {"type": "session.status", "status": "failed"})
             parent_id = reverted.parent_session_id
-            # The parent reads waiting only because of re-armed children; once the
-            # last of them settles with no turn of its own in flight, it is idle.
+            # An SDK parent reads waiting (``running`` on an older server) only
+            # because of re-armed children; once the last of them settles with no
+            # turn of its own in flight, it is idle. A native parent was never shown it.
             if (
-                parent_id not in _active_turns
+                not _is_native_harness(parent_id)
+                and parent_id not in _active_turns
                 and parent_id not in _live_response_id
-                and _native_pane_status.get(parent_id) == _effective_waiting_status()
+                and _native_pane_status.get(parent_id) in ("waiting", "running")
                 and not any(
                     e.status in ("launching", "running", "waiting")
                     for e in list_subagent_work(parent_id)
@@ -1710,10 +1720,9 @@ def create_runner_app(
         if status in ("running", "waiting", "idle") and (
             _session_harness_name(session_id) == "claude-native"
         ):
-            # Claude's status-file poller publishes a claude-native child's
-            # ``running`` here, never on ``/events``, and only its stale ``busy``
-            # needs settling. Other harnesses' pane repaints also arrive here and
-            # neither mark nor end a turn.
+            # Only Claude's status-file poller publishes a child's ``running`` here
+            # (never on ``/events``) and only its stale ``busy`` needs settling;
+            # other harnesses' pane repaints neither mark nor end a turn.
             if status == "idle":
                 _settle_subagent_rearm_later(session_id)
             else:
@@ -4603,12 +4612,14 @@ def create_runner_app(
         status: str,
         output: str | None,
         only_if_work_id: str | None = None,
+        response_id: str | None = None,
     ) -> _SubagentDeliveryAck:
         ack = mark_subagent_work_terminal(
             child_session_id,
             status=status,
             output=output,
             only_if_work_id=only_if_work_id,
+            response_id=response_id,
         )
         if ack.entry is not None and ack.delivered_now:
             _schedule_subagent_wake(ack.entry)
@@ -6604,6 +6615,14 @@ def create_runner_app(
             status = data.get("status") if isinstance(data, dict) else None
             forwarded_output = data.get("output") if isinstance(data, dict) else None
             output = forwarded_output if isinstance(forwarded_output, str) else None
+            # The forwarder names the turn a Stop ends; a report after a settled
+            # re-arm is a replay only when it names the finished turn again.
+            forwarded_response = data.get("response_id") if isinstance(data, dict) else None
+            report_response_id = (
+                forwarded_response
+                if isinstance(forwarded_response, str) and forwarded_response
+                else None
+            )
             delivery_ack: _SubagentDeliveryAck | None = None
             recovered_entry: _SubagentWorkEntry | None = None
             terminal_status = None
@@ -6611,7 +6630,9 @@ def create_runner_app(
                 recovered_entry = get_subagent_work(conversation_id)
                 turn_outcome = data.get("turn_outcome") if isinstance(data, dict) else None
                 if turn_outcome in ("completed", "cancelled", "failed"):
-                    recovered_entry = await _ensure_subagent_work_entry(conversation_id)
+                    recovered_entry = await _ensure_subagent_work_entry(
+                        conversation_id, report_response_id=report_response_id
+                    )
                     terminal_status = turn_outcome
                     if turn_outcome == "cancelled" and recovered_entry is not None:
                         recovered_entry.cancellation_confirmed = True
@@ -6679,6 +6700,7 @@ def create_runner_app(
                     conversation_id,
                     status=terminal_status,
                     output=output if output is not None else "",
+                    response_id=report_response_id,
                 )
             elif ambiguous_idle:
                 # This harness's forwarder marks genuine turn completions
@@ -6699,7 +6721,9 @@ def create_runner_app(
                     _schedule_subagent_wake(entry)
             else:
                 if status in ("idle", "failed"):
-                    recovered_entry = await _ensure_subagent_work_entry(conversation_id)
+                    recovered_entry = await _ensure_subagent_work_entry(
+                        conversation_id, report_response_id=report_response_id
+                    )
                 if status == "idle" and interrupt_pending:
                     # Interrupt with no confirming edge, resolved to the CURRENT
                     # dispatch (``resolve_pending_interrupt`` only reports pending
@@ -6710,6 +6734,7 @@ def create_runner_app(
                         status="cancelled",
                         output=output,
                         only_if_work_id=interrupt_work_id,
+                        response_id=report_response_id,
                     )
                 elif status == "idle":
                     _native_interrupt_runner.clear_pending_interrupt(conversation_id)
@@ -6717,6 +6742,7 @@ def create_runner_app(
                         conversation_id,
                         status="completed",
                         output=output if output is not None else "",
+                        response_id=report_response_id,
                     )
                 elif status == "failed":
                     _native_interrupt_runner.clear_pending_interrupt(conversation_id)
@@ -6724,6 +6750,7 @@ def create_runner_app(
                         conversation_id,
                         status="failed",
                         output=output or "Error: native sub-agent turn failed",
+                        response_id=report_response_id,
                     )
             if delivery_ack is not None:
                 if (

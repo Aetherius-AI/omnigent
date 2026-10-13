@@ -11,6 +11,7 @@ runner-local status publisher the status-file poller uses, and the real
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Iterator
 from typing import Any
 
@@ -25,6 +26,8 @@ from tests.runner.helpers import NullServerClient
 PARENT_SESSION_ID = "conv_parent_orchestrator"
 CHILD_SESSION_ID = "conv_child_reviewer"
 SECOND_CHILD_SESSION_ID = "conv_child_reviewer_two"
+# The ``omnigent.wrapper`` label a claude-native sub-agent session carries.
+CLAUDE_SUBAGENT_WRAPPER = "claude-code-native-ui-subagent"
 
 
 _REGISTRY_MAPS = (
@@ -34,7 +37,7 @@ _REGISTRY_MAPS = (
     (runner_app, "_session_event_queues_ref"),
     (subagent_work, "_child_session_parents"),
     (subagent_work, "_drained_delivered_subagent_children"),
-    (subagent_work, "_drained_subagent_work_ids"),
+    (subagent_work, "_drained_subagent_dispatches"),
     (subagent_work, "_subagent_recovery_done"),
     (subagent_work, "_subagent_recovery_locks"),
 )
@@ -110,7 +113,57 @@ class _ChildSnapshotServerClient(NullServerClient):
         return self._Response()
 
 
-_HARNESS_BY_AGENT = {"ag_sdk_parent": "claude-sdk", "ag_native_parent": "claude-native"}
+class _RecordingServerClient(_ChildSnapshotServerClient):
+    """Record the runner's label writes and event posts, and serve restart recovery.
+
+    ``labels`` mirrors the child's server-side labels as the runner stamps and
+    receipts them; ``child_status`` / ``child_output`` are what a restarted runner
+    reads back through ``child_sessions`` and ``items``.
+    """
+
+    def __init__(self) -> None:
+        self.labels: dict[str, str] = {}
+        self.posts: list[tuple[str, Any]] = []
+        self.child_status = "completed"
+        self.child_output = ""
+
+    async def get(self, url: str, **kwargs: Any) -> Any:
+        path = url.rstrip("/")
+        if path.endswith(f"/v1/sessions/{PARENT_SESSION_ID}/child_sessions"):
+            child = {
+                "id": CHILD_SESSION_ID,
+                "tool": "reviewer",
+                "session_name": "review",
+                "current_task_status": self.child_status,
+                "labels": dict(self.labels),
+            }
+            return self._Resp({"data": [child], "has_more": False})
+        if path.endswith(f"/v1/sessions/{CHILD_SESSION_ID}/items"):
+            message = {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": self.child_output}],
+            }
+            return self._Resp({"data": [message], "has_more": False})
+        return await super().get(url, **kwargs)
+
+    async def post(self, url: str, **kwargs: Any) -> Any:
+        self.posts.append((url, kwargs.get("json")))
+        return await super().post(url, **kwargs)
+
+    async def patch(self, url: str, **kwargs: Any) -> Any:
+        del url
+        body = kwargs.get("json") or {}
+        self.labels.update(body.get("labels") or {})
+        return self._Response()
+
+
+_HARNESS_BY_AGENT = {
+    "ag_sdk_parent": "claude-sdk",
+    "ag_native_parent": "claude-native",
+    "ag_codex_parent": "codex-native",
+    "ag_antigravity_parent": "antigravity-native",
+}
 
 
 async def _resolver(agent_id: str, session_id: str | None = None) -> AgentSpec:
@@ -142,12 +195,12 @@ async def _await_settle(app: Any, child_id: str) -> None:
 
 
 def _dispatch_worker(
-    server: NullServerClient,
+    server: NullServerClient, *, wrapper_label: str | None = None
 ) -> tuple[Any, asyncio.Queue[dict[str, Any]], str]:
     """Build the runner app with the orchestrator's inbox and one dispatched worker.
 
     Mirrors what ``sys_session_send`` leaves behind: the child->parent record
-    and the dispatch entry.
+    and the dispatch entry, both carrying the child's wrapper label when known.
 
     :returns: ``(app, parent_inbox, work_id)``.
     """
@@ -164,12 +217,14 @@ def _dispatch_worker(
         title="reviewer:review",
         tool="reviewer",
         session_name="review",
+        wrapper_label=wrapper_label,
     )
     entry = subagent_work.register_subagent_work(
         parent_session_id=PARENT_SESSION_ID,
         child_session_id=CHILD_SESSION_ID,
         agent="reviewer",
         title="review the diff",
+        wrapper_label=wrapper_label,
     )
     _pin_child_harness(app)
     return app, inbox, entry.work_id
@@ -183,18 +238,26 @@ def _pane_status_publisher(app: Any) -> Any:
 
 
 async def _post_status(
-    client: Any, *, status: str, output: str | None = None, turn_completed: bool | None = None
+    client: Any,
+    *,
+    status: str,
+    output: str | None = None,
+    turn_completed: bool | None = None,
+    response_id: str | None = None,
 ) -> Any:
     """POST an ``external_session_status`` edge to the child, as the forwarder does.
 
-    A claude-native ``Stop`` carries ``turn_completed``; a bare ``idle`` is the
-    pane watcher's quiescence edge and is never a completion on its own.
+    A claude-native ``Stop`` carries ``turn_completed`` and names the turn it
+    ends with ``response_id``; a bare ``idle`` is the pane watcher's quiescence
+    edge and is never a completion on its own.
     """
     data: dict[str, Any] = {"status": status}
     if output is not None:
         data["output"] = output
     if turn_completed is not None:
         data["turn_completed"] = turn_completed
+    if response_id is not None:
+        data["response_id"] = response_id
     return await client.post(
         f"/v1/sessions/{CHILD_SESSION_ID}/events",
         json={"type": "external_session_status", "data": data},
@@ -225,15 +288,33 @@ def _drain_queue(inbox: asyncio.Queue[Any]) -> list[dict[str, Any]]:
     return items
 
 
-def _parent_status_events() -> list[str]:
-    """Pop the ``session.status`` values published on the orchestrator's own stream."""
-    queue = runner_app._session_event_queues_ref.get(PARENT_SESSION_ID)
-    statuses: list[str] = []
+def _pop_stream_events(session_id: str) -> list[dict[str, Any]]:
+    """Pop every event published on *session_id*'s own stream."""
+    queue = runner_app._session_event_queues_ref.get(session_id)
+    events: list[dict[str, Any]] = []
     while queue is not None and not queue.empty():
         event = queue.get_nowait()
-        if isinstance(event, dict) and event.get("type") == "session.status":
-            statuses.append(str(event.get("status")))
-    return statuses
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+def _status_events(events: list[dict[str, Any]]) -> list[str]:
+    return [str(e.get("status")) for e in events if e.get("type") == "session.status"]
+
+
+def _parent_status_events() -> list[str]:
+    """Pop the ``session.status`` values published on the orchestrator's own stream."""
+    return _status_events(_pop_stream_events(PARENT_SESSION_ID))
+
+
+def _child_row_statuses(events: list[dict[str, Any]]) -> list[str]:
+    """The worker's ``current_task_status`` values mirrored onto the orchestrator's stream."""
+    return [
+        str(e["child"]["current_task_status"])
+        for e in events
+        if e.get("type") == "session.child_session.updated"
+    ]
 
 
 def _assert_fresh_result(second: list[dict[str, Any]], *, work_id: str) -> None:
@@ -514,7 +595,7 @@ async def test_spurious_running_edge_is_settled_when_the_file_reads_idle_again(
 
         assert subagent_work.get_subagent_work(CHILD_SESSION_ID) is None
         assert CHILD_SESSION_ID in subagent_work._drained_delivered_subagent_children
-        assert subagent_work._drained_subagent_work_ids[CHILD_SESSION_ID] == work_id
+        assert subagent_work._drained_subagent_dispatches[CHILD_SESSION_ID].work_id == work_id
         assert _parent_status_events() == ["idle"], (
             "the orchestrator must stop reading waiting on a turn that never happened"
         )
@@ -563,14 +644,21 @@ async def test_turn_end_within_the_grace_window_keeps_the_rearmed_result(
 
 
 @pytest.mark.asyncio
-async def test_spurious_running_edge_restores_a_delivered_result_the_parent_has_not_read(
-    _clean_subagent_registry: None, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("late_response_id", ["resp_round_two", None])
+@pytest.mark.parametrize("drained", [True, False])
+async def test_turn_end_after_the_grace_window_still_delivers_the_rearmed_result(
+    _clean_subagent_registry: None,
+    monkeypatch: pytest.MonkeyPatch,
+    drained: bool,
+    late_response_id: str | None,
 ) -> None:
-    """Round one was delivered but not drained when a stale ``busy`` re-armed the child.
+    """A ``Stop`` delayed past the grace window is a real result, not a duplicate.
 
-    Settling puts the delivered entry back, so the orchestrator's later drain
-    still finds the dispatch it is receipting and a duplicate report of round
-    one is still answered as already delivered.
+    The forwarder backs off for up to 30 s under an outage, so a self-resumed
+    turn's completion can land after its re-arm settled. The settled state (the
+    drain memory or the delivered entry) remembers that re-arm, so a report that
+    names another turn, or none, is delivered exactly once instead of being
+    answered "already delivered"; only a replay of round one's own report is.
     """
     held = _HeldSleep()
     monkeypatch.setattr(subagent_work, "_wake_retry_sleep", held)
@@ -580,7 +668,92 @@ async def test_spurious_running_edge_restores_a_delivered_result_the_parent_has_
 
     async with _runner_client(app) as client:
         r1 = await _post_status(
-            client, status="idle", output="round one: found the bug", turn_completed=True
+            client,
+            status="idle",
+            output="round one: found the bug",
+            turn_completed=True,
+            response_id="resp_round_one",
+        )
+        assert r1.status_code == 204 and inbox.qsize() == 1
+        if drained:
+            await tool_dispatch._drain_inbox(
+                inbox,
+                server_client=server,  # type: ignore[arg-type]
+                conversation_id=PARENT_SESSION_ID,
+            )
+        publish_pane_status(CHILD_SESSION_ID, "running", None)
+        publish_pane_status(CHILD_SESSION_ID, "idle", None)
+        await _let_settle_run()
+        held.release.set()
+        await _await_settle(app, CHILD_SESSION_ID)
+        assert (subagent_work.get_subagent_work(CHILD_SESSION_ID) is None) is drained
+
+        # Round one's own Stop replayed after the settle is still a duplicate.
+        r_replay = await _post_status(
+            client,
+            status="idle",
+            output="round one: found the bug",
+            turn_completed=True,
+            response_id="resp_round_one",
+        )
+        assert r_replay.status_code == 204
+        assert inbox.qsize() == (0 if drained else 1)
+
+        # The self-resumed turn's Stop lands only now.
+        r2 = await _post_status(
+            client,
+            status="idle",
+            output="round two: should I open the PR?",
+            turn_completed=True,
+            response_id=late_response_id,
+        )
+        assert r2.status_code == 204
+        items = _drain_queue(inbox)
+        assert len(items) == (1 if drained else 2), (
+            "the settled re-arm answered the late completion 'already delivered'"
+        )
+        _assert_fresh_result(items[-1:], work_id=work_id)
+
+        # That welcome is spent: a repeat of the same Stop is a duplicate again.
+        r_dup = await _post_status(
+            client,
+            status="idle",
+            output="round two: should I open the PR?",
+            turn_completed=True,
+            response_id=late_response_id,
+        )
+        assert r_dup.status_code == 204
+        assert inbox.empty()
+        live = subagent_work.get_subagent_work(CHILD_SESSION_ID)
+        assert live is not None and live.status == "completed" and live.delivered
+        assert not live.rearmed
+        assert CHILD_SESSION_ID not in subagent_work._drained_delivered_subagent_children
+
+
+@pytest.mark.asyncio
+async def test_spurious_running_edge_restores_a_delivered_result_the_parent_has_not_read(
+    _clean_subagent_registry: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round one was delivered but not drained when a stale ``busy`` re-armed the child.
+
+    Settling puts the delivered entry back, so the orchestrator's later drain
+    still finds the dispatch it is receipting and a replay of round one's own
+    report (the forwarder re-sending the same turn's Stop) is still answered as
+    already delivered.
+    """
+    held = _HeldSleep()
+    monkeypatch.setattr(subagent_work, "_wake_retry_sleep", held)
+    server = _ChildSnapshotServerClient()
+    app, inbox, work_id = _dispatch_worker(server)
+    publish_pane_status = _pane_status_publisher(app)
+
+    async with _runner_client(app) as client:
+        r1 = await _post_status(
+            client,
+            status="idle",
+            output="round one: found the bug",
+            turn_completed=True,
+            response_id="resp_round_one",
         )
         assert r1.status_code == 204
         delivered = subagent_work.get_subagent_work(CHILD_SESSION_ID)
@@ -596,7 +769,11 @@ async def test_spurious_running_edge_restores_a_delivered_result_the_parent_has_
         assert subagent_work.get_subagent_work(CHILD_SESSION_ID) is delivered
         assert delivered.work_id == work_id and delivered.status == "completed"
         r_dup = await _post_status(
-            client, status="idle", output="round one: found the bug", turn_completed=True
+            client,
+            status="idle",
+            output="round one: found the bug",
+            turn_completed=True,
+            response_id="resp_round_one",
         )
         assert r_dup.status_code == 204
         assert inbox.qsize() == 1, "the duplicate report must not deliver round one twice"
@@ -604,22 +781,32 @@ async def test_spurious_running_edge_restores_a_delivered_result_the_parent_has_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("agent_id", "expected"),
-    [("ag_sdk_parent", ["waiting"]), ("ag_native_parent", [])],
+    ("agent_id", "rearm_events", "settle_events"),
+    [
+        ("ag_sdk_parent", ["waiting"], ["idle"]),
+        ("ag_native_parent", [], []),
+        ("ag_codex_parent", [], []),
+        ("ag_antigravity_parent", [], []),
+    ],
 )
 async def test_selfresume_waiting_edge_follows_the_parent_harness(
     _clean_subagent_registry: None,
     monkeypatch: pytest.MonkeyPatch,
     agent_id: str,
-    expected: list[str],
+    rearm_events: list[str],
+    settle_events: list[str],
 ) -> None:
-    """An idle SDK parent is shown waiting; a native parent's status stays with its terminal.
+    """An idle SDK parent is shown waiting, then idle again; a native parent is left alone.
 
-    The parent's harness comes from its initialized spec, as in production:
-    ``_publish_turn_status`` publishes for an SDK parent and defers to the
-    terminal-owned status of a native one.
+    The parent's harness comes from its initialized spec, as in production. The
+    synthetic edge is gated on that harness, not on what ``_publish_turn_status``
+    drops: it lets ``waiting`` through for codex-native and antigravity-native
+    parents while suppressing ``idle``, so publishing it for them would leave
+    such a parent waiting forever once the re-arm settles.
     """
     monkeypatch.setattr(runner_app, "_server_version", "0.16.0")
+    held = _HeldSleep()
+    monkeypatch.setattr(subagent_work, "_wake_retry_sleep", held)
     server = _ChildSnapshotServerClient()
     app = create_runner_app(
         process_manager=_FakeProcessManager(_ScriptedHarnessClient([])),  # type: ignore[arg-type]
@@ -654,8 +841,18 @@ async def test_selfresume_waiting_edge_follows_the_parent_harness(
 
         publish_pane_status(CHILD_SESSION_ID, "running", None)
         await asyncio.sleep(0)
+        assert _parent_status_events() == rearm_events
 
-    assert _parent_status_events() == expected
+        # The file reads idle again with no Stop: the re-arm settles.
+        publish_pane_status(CHILD_SESSION_ID, "idle", None)
+        await _let_settle_run()
+        held.release.set()
+        await _await_settle(app, CHILD_SESSION_ID)
+        assert subagent_work.get_subagent_work(CHILD_SESSION_ID) is None
+        assert _parent_status_events() == settle_events
+        assert app.state.native_pane_status[PARENT_SESSION_ID] == "idle", (
+            "the parent was left waiting on a turn that never happened"
+        )
 
 
 @pytest.mark.asyncio
@@ -868,3 +1065,170 @@ async def test_pane_idle_of_another_native_harness_does_not_settle_an_events_rea
         )
         assert r2_idle.status_code == 204
         _assert_fresh_result(_drain_queue(inbox), work_id=work_id)
+
+
+@pytest.mark.asyncio
+async def test_follow_up_into_a_selfresumed_turn_is_recovered_after_a_restart(
+    _clean_subagent_registry: None,
+) -> None:
+    """A ``sys_session_send`` into a re-armed turn gets a dispatch id of its own.
+
+    The re-arm reuses round one's id, whose delivery receipt is already on the
+    child. Reusing it for the follow-up too would leave ``dispatch_id ==
+    delivered_id`` on the child, so a runner restart before the orchestrator
+    drains the follow-up's result would skip it as already delivered.
+    """
+    server = _RecordingServerClient()
+    app, inbox, work_id = _dispatch_worker(server)
+    server.labels[subagent_work.SUBAGENT_DISPATCH_ID_LABEL_KEY] = work_id
+    publish_pane_status = _pane_status_publisher(app)
+
+    async with _runner_client(app) as client:
+        await _deliver_and_drain_round_one(client, inbox, server)
+        assert server.labels[subagent_work.SUBAGENT_DELIVERED_ID_LABEL_KEY] == work_id
+
+        publish_pane_status(CHILD_SESSION_ID, "running", None)
+        handle = await tool_dispatch._send_to_in_flight_child(
+            CHILD_SESSION_ID,
+            "also check the tests",
+            server_client=server,  # type: ignore[arg-type]
+            conversation_id=PARENT_SESSION_ID,
+            agent="reviewer",
+            title="review the diff",
+            child_display_title="reviewer:review",
+            wrapper_label=None,
+        )
+        assert json.loads(handle)["status"] == "running"
+        live = subagent_work.get_subagent_work(CHILD_SESSION_ID)
+        assert live is not None and live.status == "running" and not live.rearmed
+        follow_up_id = live.work_id
+        assert follow_up_id != work_id, (
+            "the follow-up reused round one's receipted dispatch id, so a restart "
+            "would skip its unread result"
+        )
+        assert server.labels[subagent_work.SUBAGENT_DISPATCH_ID_LABEL_KEY] == follow_up_id
+
+        r2 = await _post_status(
+            client, status="idle", output="round two: tests pass too", turn_completed=True
+        )
+        assert r2.status_code == 204
+        assert inbox.qsize() == 1
+
+    # The runner restarts before the orchestrator drains that result: the inbox
+    # and registries are gone, and recovery reads the child's labels back.
+    for registry in (
+        subagent_work._subagent_work_by_child,
+        subagent_work._subagent_work_by_parent,
+        subagent_work._drained_delivered_subagent_children,
+        subagent_work._drained_subagent_dispatches,
+        subagent_work._child_session_parents,
+    ):
+        registry.clear()
+    recovered_inbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    subagent_work._session_inboxes_ref[PARENT_SESSION_ID] = recovered_inbox
+    server.child_output = "round two: tests pass too"
+    woken: list[Any] = []
+    await subagent_work._recover_subagent_results_from_server(
+        server_client=server,  # type: ignore[arg-type]
+        parent_id=PARENT_SESSION_ID,
+        schedule_wake=woken.append,
+    )
+    recovered = _drain_queue(recovered_inbox)
+    assert [item["work_id"] for item in recovered] == [follow_up_id]
+    assert "round two" in recovered[0]["output"]
+    assert len(woken) == 1
+
+
+@pytest.mark.asyncio
+async def test_rebuilt_drained_worker_keeps_its_wrapper_for_cancellation(
+    _clean_subagent_registry: None,
+) -> None:
+    """A drained Claude worker that resumes is still hard-stopped by ``sys_cancel_task``.
+
+    The re-armed entry is rebuilt from the runner's child record, so that record
+    must carry the wrapper label; without it ``native_cancel_capability(None)``
+    sends ``interrupt``, which ends the turn but leaves the worker alive.
+    """
+    server = _RecordingServerClient()
+    app, inbox, _work_id = _dispatch_worker(server, wrapper_label=CLAUDE_SUBAGENT_WRAPPER)
+    publish_pane_status = _pane_status_publisher(app)
+
+    async with _runner_client(app) as client:
+        await _deliver_and_drain_round_one(client, inbox, server)
+        publish_pane_status(CHILD_SESSION_ID, "running", None)
+        live = subagent_work.get_subagent_work(CHILD_SESSION_ID)
+        assert live is not None and live.rearmed
+        assert live.wrapper_label == CLAUDE_SUBAGENT_WRAPPER
+
+        result = json.loads(
+            await tool_dispatch._cancel_subagent_task(
+                {"task_id": CHILD_SESSION_ID},
+                conversation_id=PARENT_SESSION_ID,
+                server_client=server,  # type: ignore[arg-type]
+            )
+        )
+
+    assert result["cancel_requested"] is True
+    child_events = [
+        body
+        for url, body in server.posts
+        if url.endswith(f"/v1/sessions/{CHILD_SESSION_ID}/events")
+    ]
+    assert child_events == [{"type": "stop_session", "data": {}}], (
+        "a Claude worker rebuilt without its wrapper is only interrupted, not stopped"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("drained", [False, True])
+async def test_settling_a_stale_replay_restores_a_confirmed_failure(
+    _clean_subagent_registry: None, monkeypatch: pytest.MonkeyPatch, drained: bool
+) -> None:
+    """A ``StopFailure`` the status file lags behind must still read as failed.
+
+    The poller's resync after the failed edge can replay the file's leftover
+    ``busy`` as ``running`` (clearing the sticky failure) and then ``idle``
+    (completed). When that re-arm settles, the worker's confirmed failure must
+    be shown again, whether or not the orchestrator already drained it.
+    """
+    held = _HeldSleep()
+    monkeypatch.setattr(subagent_work, "_wake_retry_sleep", held)
+    server = _ChildSnapshotServerClient()
+    app, inbox, _work_id = _dispatch_worker(server)
+    publish_pane_status = _pane_status_publisher(app)
+
+    async with _runner_client(app) as client:
+        publish_pane_status(CHILD_SESSION_ID, "running", None)
+        r = await _post_status(client, status="failed", output="Error: API 500")
+        assert r.status_code == 204
+        failed = subagent_work.get_subagent_work(CHILD_SESSION_ID)
+        assert failed is not None and failed.status == "failed" and failed.delivered
+        if drained:
+            await tool_dispatch._drain_inbox(
+                inbox,
+                server_client=server,  # type: ignore[arg-type]
+                conversation_id=PARENT_SESSION_ID,
+            )
+            assert subagent_work.get_subagent_work(CHILD_SESSION_ID) is None
+        assert _child_row_statuses(_pop_stream_events(PARENT_SESSION_ID))[-1] == "failed"
+        _pop_stream_events(CHILD_SESSION_ID)
+
+        # The file still reads busy after the StopFailure, then idle.
+        publish_pane_status(CHILD_SESSION_ID, "running", None)
+        publish_pane_status(CHILD_SESSION_ID, "idle", None)
+        await _let_settle_run()
+        assert held.calls == [runner_app._SUBAGENT_REARM_SETTLE_GRACE_S]
+        held.release.set()
+        await _await_settle(app, CHILD_SESSION_ID)
+
+        assert _status_events(_pop_stream_events(CHILD_SESSION_ID))[-1] == "failed", (
+            "the rolled-back replay left the worker showing completed"
+        )
+        assert _child_row_statuses(_pop_stream_events(PARENT_SESSION_ID))[-1] == "failed"
+        assert app.state.native_pane_status[CHILD_SESSION_ID] == "failed"
+        if drained:
+            assert subagent_work.get_subagent_work(CHILD_SESSION_ID) is None
+            assert subagent_work._drained_subagent_dispatches[CHILD_SESSION_ID].status == "failed"
+        else:
+            assert subagent_work.get_subagent_work(CHILD_SESSION_ID) is failed
+            assert failed.status == "failed"
