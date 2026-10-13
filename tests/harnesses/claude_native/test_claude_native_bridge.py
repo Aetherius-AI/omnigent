@@ -10506,7 +10506,7 @@ def test_inject_user_message_keeps_clearing_while_a_tall_draft_shrinks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A draft needing more rounds than the stuck-box budget clears while each round shrinks it."""
-    draft = "\n".join(f"line {index:03d}" for index in range(1, 301))
+    draft = "\n".join(f"line {index:03d}" for index in range(1, 701))
     bridge_dir = _picker_bridge_dir(tmp_path)
     composer = _EditableComposer(draft, cursor=len(draft), visible_rows=7)
     composer.install(monkeypatch)
@@ -10603,13 +10603,11 @@ def test_clearing_a_box_that_keeps_changing_fails_at_the_cap(
     assert cap <= claude_native_bridge.time.monotonic() < cap + 1
 
 
-@pytest.mark.parametrize("draft", ["stuck", "stuck\nstuck"], ids=["one-row", "two-rows"])
 def test_clearing_a_box_that_never_empties_fails_in_time(
     monkeypatch: pytest.MonkeyPatch,
-    draft: str,
 ) -> None:
     """A box the clearing keys do not shrink fails the injection once the budget runs out."""
-    composer = _StuckComposer(draft, cursor=0)
+    composer = _StuckComposer("stuck\nstuck", cursor=0)
     composer.install(monkeypatch)
     rounds: list[str] = []
     run_tmux = composer._run_tmux

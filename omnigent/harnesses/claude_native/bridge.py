@@ -310,8 +310,9 @@ _COMPOSER_KILL_TO_LINE_END = "\x1b[107;5u"
 _COMPOSER_KILL_TO_LINE_START = "\x1b[117;5u"
 # The box shows only a window of a draft taller than it (seven rows in a
 # 24-row terminal), so clearing repeats per window. A box that stops changing
-# for this long is stuck; even a shrinking one must empty within the cap.
-_COMPOSER_CLEAR_TIMEOUT_S = 2.0
+# for this long is stuck (a stalled TUI gets the same grace as at submit);
+# even a shrinking one must empty within the cap.
+_COMPOSER_CLEAR_TIMEOUT_S = 10.0
 _COMPOSER_CLEAR_MAX_S = 20.0
 # How long to wait for the pasted draft to visibly land in Claude's
 # input box before sending the submit Enter. Claude Code coalesces

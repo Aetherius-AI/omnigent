@@ -1,12 +1,10 @@
-"""A multi-line draft left in the Claude TUI must not ride along with web-originated input.
+"""Web messages and setting changes must not submit an unsent multi-line terminal draft.
 
-The embedded terminal and the web chat share one Claude Code input box. Before
-the bridge pastes a web-composer message or types a web-initiated slash command
-(``/effort high``) it clears the box, but with line-scoped keys: whatever the
-person left on the other lines of a multi-line draft stays and is submitted
-together with the injected text. Both journeys here type the draft through the
-real xterm, trigger from the web UI, and read back what Claude Code actually
-submitted to the (mock) model.
+The embedded terminal and the web chat share one Claude Code input box, which the
+bridge must empty before it pastes a web-composer message or types a web-initiated
+slash command (``/effort high``). Both journeys here type a three-line draft
+through the real xterm, trigger from the web UI, and read back what Claude Code
+actually submitted to the (mock) model.
 
 The TUI screen is read by replaying the terminal-attach WebSocket frames the
 browser receives through a ``pyte`` screen: the runner's tmux socket lives in

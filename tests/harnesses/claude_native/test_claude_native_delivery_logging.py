@@ -31,6 +31,7 @@ _EMPTY_BOX = "──────\n❯ \n──────\n"
         ("startup_error", "not_started", "error"),
         ("pending_before_paste", "not_started", "error"),
         ("pending_before_submit", "not_started", "error"),
+        ("clearing_failure", "not_started", "error"),
         ("cancelled", "not_started", "interrupted"),
     ],
 )
@@ -47,7 +48,8 @@ def test_delivery_diagnostics(
         secret = "/private-customer-command"
     content = "\n" + secret if scenario == "blank_line" else secret
     elapsed = 0.0
-    pane = _EMPTY_BOX
+    # A draft the fake never clears, so the bridge gives up before pasting.
+    pane = f"──────\n❯ {secret}\n──────\n" if scenario == "clearing_failure" else _EMPTY_BOX
     enters = 0
     pending_checks = 0
 
@@ -212,6 +214,10 @@ def test_delivery_diagnostics(
         assert attrs["stage"] == "waiting_for_prompt"
     elif scenario == "transport_error":
         assert attrs["stage"] == "pasting"
+    elif scenario == "clearing_failure":
+        assert attrs["stage"] == "clearing_composer"
+        assert attrs["submit_sent"] is False
+        assert enters == 0
     elif scenario.startswith("pending_"):
         assert attrs["stage"] == "checking_pending_prompt"
         assert attrs["submit_sent"] is False
