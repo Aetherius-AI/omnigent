@@ -17,6 +17,7 @@ from omnigent.harnesses.opencode_native.app_server import (
     check_opencode_version,
     filtered_server_env,
     find_opencode_cli,
+    loopback_no_proxy_env,
     opencode_terminal_env,
     parse_opencode_version,
 )
@@ -146,6 +147,25 @@ def test_filtered_server_env_drops_global_opencode_config(
     assert env["XDG_CONFIG_HOME"] == str(tmp_path / "xdg-config")
 
 
+def test_loopback_no_proxy_env_merges_existing_exceptions() -> None:
+    env = loopback_no_proxy_env("127.0.0.1", {"NO_PROXY": "corp.example, 127.0.0.1"})
+    assert env["NO_PROXY"] == "corp.example,127.0.0.1,localhost"
+    assert env["no_proxy"] == "127.0.0.1,localhost"
+
+
+def test_filtered_server_env_exempts_loopback_from_proxy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:3128")
+    monkeypatch.setenv("NO_PROXY", "corp.example")
+    monkeypatch.delenv("no_proxy", raising=False)
+    env = filtered_server_env(bridge_dir=tmp_path, auth_secret="pw")
+    # Remote traffic keeps the proxy; loopback (the runner relay) bypasses it.
+    assert env["HTTPS_PROXY"] == "http://proxy.example:3128"
+    assert env["NO_PROXY"] == "corp.example,127.0.0.1,localhost"
+    assert env["no_proxy"] == "127.0.0.1,localhost"
+
+
 def _server(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> OpenCodeNativeServer:
     monkeypatch.setattr(appsrv.shutil, "which", lambda name: f"/usr/bin/{name}")
     return OpenCodeNativeServer(
@@ -171,10 +191,15 @@ def test_base_url_and_auth_headers(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
 
 
 def test_terminal_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("NO_PROXY", "corp.example")
+    monkeypatch.delenv("no_proxy", raising=False)
     server = _server(monkeypatch, tmp_path)
     env = opencode_terminal_env(server)
     assert env["OPENCODE_SERVER_PASSWORD"] == server.auth_secret
     assert env["XDG_DATA_HOME"] == str(server.xdg_data_home)
+    # The attach pane inherits the runner's proxy env; the serve host must be exempt.
+    assert env["NO_PROXY"] == "corp.example,127.0.0.1,localhost"
+    assert env["no_proxy"] == "127.0.0.1,localhost"
 
 
 async def test_start_polls_until_ready(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
