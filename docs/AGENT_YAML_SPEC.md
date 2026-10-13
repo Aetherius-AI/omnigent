@@ -594,10 +594,11 @@ declare `stdio` MCP servers (the runner would spawn the command unsandboxed on
 shared infrastructure) or `http` MCP servers whose `url` targets a loopback,
 private, link-local or cloud-metadata address. Uploads are rejected with the
 same error the session MCP-server API returns for these declarations. Owners of
-an existing uploaded agent that declares a `stdio` server at the root can still
-delete that entry or replace it with an `http` server through the MCP-server
-API. That API does not reach nested sub-agents; a sub-agent's legacy `stdio`
-entry must be removed by uploading a corrected bundle. Operator-authored bundles
+an existing uploaded agent whose root declares a `stdio` server, or an `http`
+server with an internal `url`, can still delete that entry or replace it with a
+public `http` server through the MCP-server API. That API does not reach nested
+sub-agents; such a legacy entry on a sub-agent must be removed by uploading a
+corrected bundle. Operator-authored bundles
 on trusted single-user/local servers are unaffected.
 
 ### MCP server

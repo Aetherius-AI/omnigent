@@ -91,6 +91,13 @@ def _mcp_config(transport: Literal["http", "stdio"], *, changed: bool = False) -
     return config
 
 
+_INTERNAL_HTTP_MCP: dict[str, Any] = {
+    "name": "service",
+    "transport": "http",
+    "url": "http://169.254.169.254/latest/meta-data/",
+}
+
+
 def _bundle(
     mcp: dict[str, Any] | None = None,
     *,
@@ -209,14 +216,16 @@ async def test_mcp_crud_requires_owner(
     assert len(listed.json()["data"]) == (0 if level == LEVEL_OWNER else 1)
 
 
-async def _create_legacy_stdio_session(
+async def _create_legacy_mcp_session(
     client: httpx.AsyncClient,
     db_uri: str,
     level: int,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    mcp: dict[str, Any] | None = None,
 ) -> tuple[bytes, str, dict[str, str]]:
-    """Seed a stdio entry as a trusted upload; a shared server no longer accepts one."""
-    initial = _bundle(_mcp_config("stdio"))
+    """Seed an entry a shared server now refuses, via a trusted single-user upload."""
+    initial = _bundle(mcp if mcp is not None else _mcp_config("stdio"))
     monkeypatch.setenv("OMNIGENT_LOCAL_SINGLE_USER", "1")
     session_id, headers = await _create_session(client, db_uri, initial, level)
     monkeypatch.delenv("OMNIGENT_LOCAL_SINGLE_USER")
@@ -231,7 +240,7 @@ async def test_shared_stdio_policy_preserves_owner_only_removal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Shared servers reject stdio registration while owners can remove old entries."""
-    initial, session_id, headers = await _create_legacy_stdio_session(
+    initial, session_id, headers = await _create_legacy_mcp_session(
         client, db_uri, level, monkeypatch
     )
     url = f"/v1/sessions/{session_id}/agent/mcp-servers"
@@ -256,14 +265,22 @@ async def test_shared_stdio_policy_preserves_owner_only_removal(
     assert len(listed.json()["data"]) == (0 if level == LEVEL_OWNER else 1)
 
 
-async def test_owner_can_migrate_legacy_stdio_entry_to_http(
+@pytest.mark.parametrize(
+    "legacy",
+    [
+        pytest.param(_mcp_config("stdio"), id="stdio"),
+        pytest.param(_INTERNAL_HTTP_MCP, id="internal-http"),
+    ],
+)
+async def test_owner_can_migrate_legacy_mcp_entry_to_http(
     client: httpx.AsyncClient,
     db_uri: str,
+    legacy: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Replacing an old stdio entry with an http server is the migration path."""
-    _, session_id, headers = await _create_legacy_stdio_session(
-        client, db_uri, LEVEL_OWNER, monkeypatch
+    """Replacing a legacy stdio or internal-http entry with a public http server migrates it."""
+    _, session_id, headers = await _create_legacy_mcp_session(
+        client, db_uri, LEVEL_OWNER, monkeypatch, mcp=legacy
     )
     url = f"/v1/sessions/{session_id}/agent/mcp-servers"
     updated = await client.put(f"{url}/service", headers=headers, json=_mcp_config("http"))
@@ -383,30 +400,11 @@ async def test_subagent_legacy_stdio_does_not_block_root_mcp_edit(
     assert "stdio MCP servers are not permitted" in rejected.text
 
 
-_INTERNAL_HTTP_MCP: dict[str, Any] = {
-    "name": "service",
-    "transport": "http",
-    "url": "http://169.254.169.254/latest/meta-data/",
-}
-
-
-@pytest.mark.parametrize("nested", [False, True], ids=["root", "subagent"])
-@pytest.mark.parametrize(
-    "mcp,expected",
-    [
-        pytest.param(_mcp_config("stdio"), "stdio MCP servers are not permitted", id="stdio"),
-        pytest.param(_INTERNAL_HTTP_MCP, "must be a public http(s) endpoint", id="internal-http"),
-    ],
-)
-async def test_shared_server_rejects_unsafe_mcp_in_uploaded_bundles(
+async def test_shared_server_rejects_stdio_mcp_on_session_create(
     client: httpx.AsyncClient,
-    db_uri: str,
-    nested: bool,
-    mcp: dict[str, Any],
-    expected: str,
 ) -> None:
-    """Bundle uploads apply the stdio / SSRF policy the MCP-server routes enforce."""
-    unsafe = _bundle(mcp, nested=nested)
+    """Creating a session from a bundle that declares a stdio MCP server is refused."""
+    unsafe = _bundle(_mcp_config("stdio"))
     created = await client.post(
         "/v1/sessions",
         headers=_OWNER,
@@ -414,17 +412,24 @@ async def test_shared_server_rejects_unsafe_mcp_in_uploaded_bundles(
         files={"bundle": ("agent.tar.gz", unsafe, "application/gzip")},
     )
     assert created.status_code == 403, created.text
-    assert expected in created.text and "'service'" in created.text
+    assert "stdio MCP servers are not permitted" in created.text and "'service'" in created.text
 
-    initial = _bundle(nested=nested)
+
+async def test_shared_server_rejects_internal_http_mcp_on_bundle_replace(
+    client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """Replacing a bundle with a nested internal-http MCP server is refused and not stored."""
+    initial = _bundle(nested=True)
     session_id, headers = await _create_session(client, db_uri, initial, LEVEL_OWNER)
+    unsafe = _bundle(_INTERNAL_HTTP_MCP, nested=True)
     replaced = await client.put(
         f"/v1/sessions/{session_id}/agent",
         headers=headers,
         files={"bundle": ("agent.tar.gz", unsafe, "application/gzip")},
     )
     assert replaced.status_code == 403, replaced.text
-    assert expected in replaced.text
+    assert "must be a public http(s) endpoint" in replaced.text and "'service'" in replaced.text
     assert await _download_bundle(client, session_id) == initial
 
 

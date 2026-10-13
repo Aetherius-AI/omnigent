@@ -158,12 +158,8 @@ def _bundle_with_stdio_mcp(name: str) -> bytes:
 async def test_install_rejects_an_unsafe_mcp_bundle_on_a_shared_server(
     client, agent_store, monkeypatch
 ) -> None:
-    """``POST /v1/agents`` applies the shared-server MCP policy, so a tenant cannot
-    install a bundle declaring an unsandboxed ``stdio`` server (the advisory's RCE).
-
-    The suite defaults ``OMNIGENT_LOCAL_SINGLE_USER=1``; a deployed multi-user
-    server never sets it, so clear it to drive the enforcing posture.
-    """
+    """Shared servers reject installed bundles containing stdio MCP servers."""
+    # The suite defaults to single-user; a deployed multi-user server never does.
     monkeypatch.delenv("OMNIGENT_LOCAL_SINGLE_USER", raising=False)
     resp = await client.post(
         "/v1/agents",
