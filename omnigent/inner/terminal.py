@@ -2811,10 +2811,8 @@ class TerminalInstance:
                 # so a planted symlink cannot capture a freshly created dir.
                 with contextlib.suppress(FileExistsError):
                     os.mkdir(self.private_dir, 0o700)
-                # Operate through an O_NOFOLLOW descriptor so a symlink swapped
-                # in at this predictable name on a shared /tmp can never
-                # redirect the ownership check, chmod, or owner-claim write into
-                # a victim-owned directory.
+                # Use the verified directory descriptor so a swapped symlink
+                # cannot redirect the ownership check, chmod, or owner-claim write.
                 dir_fd = os.open(self.private_dir, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY)
                 try:
                     if os.fstat(dir_fd).st_uid != os.geteuid():
@@ -2844,6 +2842,17 @@ class TerminalInstance:
                 if time.monotonic() >= deadline:
                     return False
                 time.sleep(_SOCKET_RECOVERY_POLL_SECONDS)
+            bridge = self._clipboard_bridge
+            if bridge is not None and not bridge.socket_path.exists():
+                # The reap took the clipboard bridge's socket and helper with the
+                # directory; the terminal reconnects but copy/paste stays
+                # degraded until the session is resumed.
+                logger.warning(
+                    "Clipboard bridge not restored for terminal %s:%s after socket "
+                    "recovery; copy/paste stays degraded until resume",
+                    self.name,
+                    self.session_key,
+                )
             return True
 
     def _recover_private_socket_sync(self) -> bool:

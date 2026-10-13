@@ -3624,6 +3624,39 @@ def test_socket_recovery_refuses_a_symlink_swapped_in_before_the_fd_open(
     assert killed == []
 
 
+def test_socket_recovery_logs_clipboard_degradation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A reap that also took the clipboard socket is logged as degraded.
+
+    Recovery restores the tmux socket but not the clipboard bridge, so the
+    silent loss of copy/paste is recorded rather than reported as healthy.
+    """
+    socket_path = tmp_path / "tmux.sock"
+    instance = TerminalInstance(
+        name="runtime",
+        session_key="main",
+        socket_path=socket_path,
+        private_dir=tmp_path,
+        running=True,
+    )
+    instance._tmux_server_pid = os.getpid()
+    instance._clipboard_bridge = terminal_mod.TerminalClipboardBridge(tmp_path, socket_path)
+    assert not instance._clipboard_bridge.socket_path.exists()
+    monkeypatch.setattr(instance, "_tmux_server_process_alive", lambda: True)
+
+    def fake_kill(pid: int, sig: int) -> None:
+        socket_path.touch()  # tmux recreates its -S socket, not the clip socket
+
+    monkeypatch.setattr(terminal_mod.os, "kill", fake_kill)
+    monkeypatch.setattr(terminal_mod, "_SOCKET_RECOVERY_WAIT_SECONDS", 1.0)
+    monkeypatch.setattr(terminal_mod, "_SOCKET_RECOVERY_POLL_SECONDS", 0.005)
+
+    with caplog.at_level(logging.WARNING, logger=terminal_mod.__name__):
+        assert instance._recover_private_socket() is True
+    assert any("clipboard" in record.getMessage().lower() for record in caplog.records)
+
+
 def test_socket_recovery_rejects_a_recycled_server_pid(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
