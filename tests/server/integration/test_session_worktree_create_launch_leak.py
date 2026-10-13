@@ -115,8 +115,9 @@ async def register_worktree_launch_host(
     db_uri: str,
 ) -> AsyncIterator[RegisterHost]:
     """Yield a factory registering a fake host that answers and captures
-    stat/create/launch/list/remove frames. ``launch_status`` and
-    ``remove_status`` model the host's verdicts; ``workspace_subdir``
+    stat/create/launch/list/remove frames. ``launch_status`` models the host's
+    launch verdict (``"timeout"`` fails the launch future the way the 30s wait
+    does); ``remove_status`` models the removal verdict; ``workspace_subdir``
     relocates the picked subdir into the worktree; ``disconnect_after_launch``
     drops the host right after it answers the launch frame."""
     conns: list[HostConnection] = []
@@ -183,14 +184,19 @@ async def register_worktree_launch_host(
                     cap.launch.append(frame)
                     fut = conn.pending_launches.pop(frame.request_id, None)
                     if fut is not None and not fut.done():
-                        launched = launch_status == "launched"
-                        fut.set_result(
-                            {
-                                "status": launch_status,
-                                "runner_id": "runner_from_host" if launched else None,
-                                "error": None if launched else "boom",
-                            }
-                        )
+                        if launch_status == "timeout":
+                            # Model the 30s launch wait expiring: the create's wait
+                            # sees the same error its timeout branch raises.
+                            fut.set_exception(asyncio.TimeoutError("host launch timed out"))
+                        else:
+                            launched = launch_status == "launched"
+                            fut.set_result(
+                                {
+                                    "status": launch_status,
+                                    "runner_id": "runner_from_host" if launched else None,
+                                    "error": None if launched else "boom",
+                                }
+                            )
                     if disconnect_after_launch:
                         app.state.host_registry.deregister(
                             conn.host_id, workspace_id=conn.workspace_id, conn=conn
@@ -540,11 +546,13 @@ async def test_inline_create_launch_failure_skips_rollback_when_runner_rebound(
 async def test_inline_create_launch_failure_tolerates_binding_cleanup_error(
     register_worktree_launch_host: RegisterHost,
     client: httpx.AsyncClient,
+    db_uri: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A transient store error while clearing the binding after a confirmed
-    worktree removal must not 500 the create; the caller still receives the
-    created, unbound session."""
+    worktree removal must not 500 the create. The worktree is already gone, so
+    the response and the persisted row keep reporting the binding instead of a
+    false unbound result, and retain the root label for a later retry."""
     cap = register_worktree_launch_host(launch_status="failed")
     agent = await create_test_agent(client, name="wt-clearerr-agent")
 
@@ -561,6 +569,168 @@ async def test_inline_create_launch_failure_tolerates_binding_cleanup_error(
         f"the worktree must still be removed before the clear failed: {cap.remove}; "
         f"unexpected={cap.unexpected}"
     )
+    worktree_path = f"{_SOURCE_REPO}-worktrees/feature-clearerr"
+    body = resp.json()
+    # The clear failed, so the still-persisted binding must be reported, not a
+    # misleading unbound result, and the root label kept for a later retry.
+    assert body["host_id"] == _HOST_ID and body["runner_id"] is not None, body
+    assert body["workspace"] == worktree_path and body["git_branch"] == "feature/clearerr", body
+    assert body["labels"].get(WORKTREE_ROOT_LABEL_KEY) == worktree_root_fingerprint(
+        worktree_path
+    ), body
+
+    conv = SqlAlchemyConversationStore(db_uri).get_conversation(body["id"])
+    assert conv is not None
+    assert conv.host_id == _HOST_ID and conv.runner_id is not None
+    assert conv.workspace == worktree_path and conv.git_branch == "feature/clearerr"
+    assert conv.labels.get(WORKTREE_ROOT_LABEL_KEY) == worktree_root_fingerprint(worktree_path)
+
+
+async def test_inline_create_launch_failure_skips_grant_when_session_vanished(
+    register_worktree_launch_host: RegisterHost,
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A concurrent delete can drop the row during the rollback's re-read. The
+    create must then skip both the worktree removal and the default-public
+    grant, instead of leaving a public grant behind for a vanished session."""
+    cap = register_worktree_launch_host(launch_status="failed")
+    agent = await create_test_agent(client, name="wt-vanish-agent")
+
+    original_get = SqlAlchemyConversationStore.get_conversation
+    vanished = {"done": False}
+
+    def _vanishing_get(self: SqlAlchemyConversationStore, conversation_id: str) -> Any:
+        conv = original_get(self, conversation_id)
+        # Drop the row once, on the rollback's re-read after the failed launch,
+        # to mimic a DELETE landing mid-create.
+        if not vanished["done"] and cap.launch and conv is not None and conv.runner_id is not None:
+            vanished["done"] = True
+            return None
+        return conv
+
+    monkeypatch.setattr(SqlAlchemyConversationStore, "get_conversation", _vanishing_get)
+
+    from omnigent.server.routes.sessions import routes_core
+
+    granted: list[str] = []
+
+    async def _spy_grant(
+        app_state: Any,
+        permission_store: Any,
+        session_id: str,
+        **kwargs: Any,
+    ) -> None:
+        granted.append(session_id)
+
+    monkeypatch.setattr(routes_core, "_grant_default_public", _spy_grant)
+
+    resp = await _create_git_session(
+        client, agent["id"], {"branch_name": "feature/vanish", "base_branch": "main"}
+    )
+    assert resp.status_code == 201, resp.text
+    assert vanished["done"], "the rollback never re-read the row, so the vanish was not exercised"
+    assert cap.remove == [], (
+        "a vanished row has no worktree to roll back, so no removal must be sent: "
+        f"{cap.remove}; unexpected={cap.unexpected}"
+    )
+    assert granted == [], (
+        f"no default-public grant may be written for a vanished session: granted={granted}"
+    )
+
+
+async def test_inline_create_launch_failure_holds_relaunch_lock_across_rollback(
+    register_worktree_launch_host: RegisterHost,
+    client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rollback runs under the per-conversation relaunch lock across the
+    ownership check, worktree removal, and binding clear, so a concurrent
+    first-message relaunch cannot rebind a new runner mid-rollback and have its
+    fresh worktree removed."""
+    from omnigent.server.routes._sessions.helpers import relaunch_lock_for
+    from omnigent.server.routes.sessions import routes_core
+
+    cap = register_worktree_launch_host(launch_status="failed")
+    agent = await create_test_agent(client, name="wt-lock-agent")
+
+    in_removal = asyncio.Event()
+    proceed = asyncio.Event()
+    observed: dict[str, Any] = {}
+
+    async def _barrier_remove(*args: Any, **kwargs: Any) -> bool:
+        # Past the ownership check now; a concurrent relaunch must stay blocked.
+        conv_id = kwargs["exclude_conversation_id"]
+        observed["conv_id"] = conv_id
+        observed["locked_at_removal"] = relaunch_lock_for(conv_id).locked()
+        in_removal.set()
+        await proceed.wait()
+        return True
+
+    monkeypatch.setattr(routes_core, "_remove_session_worktree_best_effort", _barrier_remove)
+
+    create = asyncio.create_task(
+        _create_git_session(
+            client, agent["id"], {"branch_name": "feature/lock", "base_branch": "main"}
+        )
+    )
+    await asyncio.wait_for(in_removal.wait(), timeout=5)
+    conv_id = observed["conv_id"]
+    assert observed["locked_at_removal"] is True, "rollback must hold the relaunch lock"
+    assert relaunch_lock_for(conv_id).locked() is True
+
+    got_lock = asyncio.Event()
+
+    async def _relaunch_waiter() -> None:
+        async with relaunch_lock_for(conv_id):
+            got_lock.set()
+
+    waiter = asyncio.create_task(_relaunch_waiter())
+    # The lock is held by the rollback, so the waiter can never acquire it here.
+    await asyncio.sleep(0.05)
+    assert not got_lock.is_set(), "a concurrent relaunch acquired the lock during the rollback"
+
+    proceed.set()
+    resp = await asyncio.wait_for(create, timeout=5)
+    await asyncio.wait_for(got_lock.wait(), timeout=5)
+    await waiter
+
+    assert resp.status_code == 201, resp.text
     body = resp.json()
     assert body["host_id"] is None and body["runner_id"] is None, body
-    assert body["workspace"] is None and body["git_branch"] is None, body
+    assert len(cap.launch) == 1, f"expected one launch_runner frame; unexpected={cap.unexpected}"
+    assert cap.remove == [], f"the barrier stands in for real removal: {cap.remove}"
+
+    conv = SqlAlchemyConversationStore(db_uri).get_conversation(body["id"])
+    assert conv is not None
+    assert conv.host_id is None and conv.workspace is None and conv.git_branch is None
+
+
+async def test_inline_create_launch_timeout_cleans_up_worktree(
+    register_worktree_launch_host: RegisterHost,
+    client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """A launch whose wait expires is treated as a failure, so the create rolls
+    back the worktree it made and clears the binding, the same as an explicit
+    host-reported launch failure."""
+    cap = register_worktree_launch_host(launch_status="timeout")
+    agent = await create_test_agent(client, name="wt-timeout-agent")
+
+    resp = await _create_git_session(
+        client, agent["id"], {"branch_name": "feature/timeout", "base_branch": "main"}
+    )
+    assert resp.status_code == 201, resp.text
+    assert len(cap.launch) == 1, f"expected one launch_runner frame; unexpected={cap.unexpected}"
+    worktree_path = f"{_SOURCE_REPO}-worktrees/feature-timeout"
+    assert len(cap.remove) == 1, (
+        f"a launch timeout must roll back the new worktree: {cap.remove}; "
+        f"unexpected={cap.unexpected}"
+    )
+    assert cap.remove[0].worktree_path == worktree_path
+
+    conv = SqlAlchemyConversationStore(db_uri).get_conversation(resp.json()["id"])
+    assert conv is not None
+    assert conv.host_id is None and conv.workspace is None and conv.git_branch is None
+    assert WORKTREE_ROOT_LABEL_KEY not in conv.labels

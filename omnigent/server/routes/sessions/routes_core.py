@@ -866,81 +866,109 @@ def register_core_routes(
                     and conv.git_branch is not None
                 ):
                     from omnigent.server.routes._host_worktree import WORKTREE_ROOT_LABEL_KEY
+                    from omnigent.server.routes._sessions.helpers import relaunch_lock_for
 
-                    # Re-read first: a concurrent first-message relaunch can rebind
-                    # a new runner on this session, so skip the rollback unless our
-                    # failed launch's runner is still the bound one.
-                    latest = await asyncio.to_thread(conversation_store.get_conversation, resp.id)
-                    if latest is None or latest.runner_id != runner_id:
-                        _logger.info(
-                            "Skipping launch-failure worktree rollback for session %s: "
-                            "a newer runner is bound",
-                            resp.id,
+                    # Serialize with the first-message relaunch on its own lock, then
+                    # re-read: roll back only while our failed launch's runner is still
+                    # bound, never a worktree a live runner uses or its fresh binding.
+                    async with relaunch_lock_for(resp.id):
+                        latest = await asyncio.to_thread(
+                            conversation_store.get_conversation, resp.id
                         )
-                    else:
-                        # Nothing reaps worktrees, so roll back the one this create
-                        # made, as the bind and delete paths do; the helper resolves
-                        # the recorded root and spares directories other sessions use.
-                        removed = await _remove_session_worktree_best_effort(
-                            host_id=launch_host_id,
-                            worktree_path=conv.workspace,
-                            branch=conv.git_branch,
-                            # Never -D a pre-existing branch the user checked out.
-                            delete_branch=not body.git.existing_branch,
-                            host_registry=getattr(request.app.state, "host_registry", None),
-                            reason="create-launch-failure",
-                            conversation_store=conversation_store,
-                            exclude_conversation_id=resp.id,
-                            expected_root_fingerprint=conv.labels.get(WORKTREE_ROOT_LABEL_KEY),
-                        )
-                        if removed:
-                            # The worktree is already gone, so clearing the binding
-                            # is best-effort: a concurrent delete may have dropped the
-                            # row and transient store errors must not fail the create.
-                            try:
-                                conv = await asyncio.to_thread(
-                                    conversation_store.clear_host_binding, resp.id
-                                )
-                                await asyncio.to_thread(
-                                    conversation_store.delete_label,
-                                    resp.id,
-                                    WORKTREE_ROOT_LABEL_KEY,
-                                )
-                            except ConversationNotFoundError:
-                                _logger.warning(
-                                    "Session %s vanished while clearing its host binding "
-                                    "after a launch-failure worktree rollback",
-                                    resp.id,
-                                )
-                                # The row is gone; don't let the grant below write
-                                # a public grant for a session that no longer exists.
-                                conv = None
-                                session_vanished = True
-                            except Exception:
-                                _logger.warning(
-                                    "Best-effort binding cleanup failed for session %s "
-                                    "after its launch-failure worktree rollback",
-                                    resp.id,
-                                    exc_info=True,
-                                )
-                                # Treat the session as unbound for the grant below,
-                                # matching the response we still return.
-                                conv = None
-                            resp.runner_id = None
-                            resp.host_id = None
-                            resp.workspace = None
-                            resp.git_branch = None
-                            resp.labels.pop(WORKTREE_ROOT_LABEL_KEY, None)
-                            launch_host_id = None
-                        else:
-                            # Unconfirmed removal: keep the binding and root label so
-                            # an opt-in delete or archive can retry the cleanup.
+                        if latest is None:
                             _logger.warning(
-                                "Worktree %s for session %s was not removed after its launch "
-                                "failed; keeping the binding so a later delete or archive can retry",
-                                conv.workspace,
+                                "Session %s vanished before its launch-failure worktree rollback",
                                 resp.id,
                             )
+                            # The row is gone; don't let the grant below write a
+                            # public grant for a session that no longer exists.
+                            conv = None
+                            session_vanished = True
+                        elif latest.runner_id != runner_id:
+                            _logger.info(
+                                "Skipping launch-failure worktree rollback for session %s: "
+                                "a newer runner is bound",
+                                resp.id,
+                            )
+                        elif latest.workspace is None or latest.git_branch is None:
+                            # The binding lost its worktree between create and the
+                            # re-read, so there is nothing to roll back.
+                            _logger.info(
+                                "Skipping launch-failure worktree rollback for session "
+                                "%s: no bound worktree remains",
+                                resp.id,
+                            )
+                        else:
+                            # Nothing reaps worktrees, so roll back the one this create
+                            # made, as the bind and delete paths do; the helper resolves
+                            # the recorded root and spares directories other sessions use.
+                            removed = await _remove_session_worktree_best_effort(
+                                host_id=launch_host_id,
+                                worktree_path=latest.workspace,
+                                branch=latest.git_branch,
+                                # Never -D a pre-existing branch the user checked out.
+                                delete_branch=not body.git.existing_branch,
+                                host_registry=getattr(request.app.state, "host_registry", None),
+                                reason="create-launch-failure",
+                                conversation_store=conversation_store,
+                                exclude_conversation_id=resp.id,
+                                expected_root_fingerprint=latest.labels.get(
+                                    WORKTREE_ROOT_LABEL_KEY
+                                ),
+                            )
+                            if removed:
+                                # The worktree is already gone, so clearing the binding
+                                # is best-effort: a concurrent delete may have dropped
+                                # the row and transient store errors must not fail create.
+                                cleared = False
+                                try:
+                                    conv = await asyncio.to_thread(
+                                        conversation_store.clear_host_binding, resp.id
+                                    )
+                                    await asyncio.to_thread(
+                                        conversation_store.delete_label,
+                                        resp.id,
+                                        WORKTREE_ROOT_LABEL_KEY,
+                                    )
+                                    cleared = True
+                                except ConversationNotFoundError:
+                                    _logger.warning(
+                                        "Session %s vanished while clearing its host "
+                                        "binding after a launch-failure worktree rollback",
+                                        resp.id,
+                                    )
+                                    # The row is gone; report it unbound and skip the grant.
+                                    conv = None
+                                    session_vanished = True
+                                    cleared = True
+                                except Exception:
+                                    # The worktree is gone but the binding persists; keep the
+                                    # response honest and leave the root label so a later
+                                    # delete or archive can reconcile the row.
+                                    _logger.warning(
+                                        "Best-effort binding cleanup failed for session %s "
+                                        "after its launch-failure worktree rollback; the stored "
+                                        "session still references the removed worktree",
+                                        resp.id,
+                                        exc_info=True,
+                                    )
+                                if cleared:
+                                    resp.runner_id = None
+                                    resp.host_id = None
+                                    resp.workspace = None
+                                    resp.git_branch = None
+                                    resp.labels.pop(WORKTREE_ROOT_LABEL_KEY, None)
+                                    launch_host_id = None
+                            else:
+                                # Unconfirmed removal: keep the binding and root label
+                                # so an opt-in delete or archive can retry the cleanup.
+                                _logger.warning(
+                                    "Worktree %s for session %s was not removed after its "
+                                    "launch failed; keeping the binding so a later delete "
+                                    "or archive can retry",
+                                    latest.workspace,
+                                    resp.id,
+                                )
 
         # Default-public grant only once every launch step has been accepted, so a
         # rejected request never leaves a public session behind. Sub-agent

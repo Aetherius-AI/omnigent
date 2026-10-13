@@ -5766,6 +5766,18 @@ _RELAUNCH_MEMO_MAX = 512
 _detached_supersede_stops: set[asyncio.Task[None]] = set()
 
 
+def relaunch_lock_for(conversation_id: str) -> asyncio.Lock:
+    """
+    Return the per-conversation lock that serializes runner (re)launches.
+
+    The create-time launch-failure rollback takes this same lock before it
+    re-reads the binding and removes the worktree, so a concurrent
+    first-message relaunch cannot rebind a new runner — and have its fresh
+    worktree deleted — between that re-read and the unbind.
+    """
+    return _relaunch_locks.setdefault(conversation_id, asyncio.Lock())
+
+
 def _spawn_superseded_runner_stop(
     session_id: str,
     host_id: str,
@@ -5848,7 +5860,7 @@ async def _launch_runner_on_host_impl(
     :returns: The :class:`_HostLaunchAttempt` — the new runner id plus any
         structured refusal from the host.
     """
-    lock = _relaunch_locks.setdefault(conv.id, asyncio.Lock())
+    lock = relaunch_lock_for(conv.id)
     async with lock:
         # Re-read under the lock: a binding that moved past the caller's
         # snapshot means another flight just relaunched (concurrently, or
