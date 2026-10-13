@@ -80,9 +80,11 @@ def test_usage_page_route_and_navigation_are_available_when_feature_is_on(
 
     expect(page.get_by_test_id("usage-nav")).to_be_visible(timeout=30_000)
     expect(page.get_by_role("heading", name="Usage", exact=True)).to_be_visible()
-    # Check for total cost display (multiple $0.00 may exist due to breakdown charts)
-    expect(page.get_by_text("Total cost")).to_be_visible()
-    expect(page.get_by_text("0 sessions")).to_be_visible()
+    # Scope the $0.00 amount to the Total cost card so the breakdown charts'
+    # axis ticks cannot satisfy the assertion.
+    total_cost_card = page.get_by_text("Total cost").locator("xpath=..")
+    expect(total_cost_card.get_by_text("$0.00")).to_be_visible()
+    expect(total_cost_card.get_by_text("0 sessions")).to_be_visible()
 
 
 def test_session_table_shows_other_harnesses_badge(
