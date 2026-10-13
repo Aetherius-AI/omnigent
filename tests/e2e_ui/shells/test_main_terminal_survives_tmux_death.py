@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -69,42 +70,44 @@ def _tmux(socket_path: str, *args: str) -> subprocess.CompletedProcess[str]:
         )
 
 
-def _wait_for_pane_output(socket_path: str, timeout_s: float = 30.0) -> str:
+def _wait_for_pane(
+    socket_path: str, accept: Callable[[str], bool], failure: str, timeout_s: float
+) -> str:
+    """Poll the pane until ``accept`` passes its text; a failed capture reads as empty."""
     deadline = time.monotonic() + timeout_s
-    while True:
-        captured = _tmux(socket_path, "capture-pane", "-p")
-        if captured.returncode == 0 and captured.stdout.strip():
-            return captured.stdout
-        assert time.monotonic() < deadline, "REPL never rendered into its tmux pane"
-        time.sleep(0.5)
-
-
-def _wait_for_pane_contains(socket_path: str, needle: str, timeout_s: float = 60.0) -> str:
-    deadline = time.monotonic() + timeout_s
-    text = ""
     while True:
         captured = _tmux(socket_path, "capture-pane", "-p")
         text = captured.stdout if captured.returncode == 0 else ""
-        if needle in text:
+        if accept(text):
             return text
-        assert time.monotonic() < deadline, f"pane never showed {needle!r}; last frame:\n{text}"
+        assert time.monotonic() < deadline, f"{failure}; last frame:\n{text}"
         time.sleep(0.5)
+
+
+def _wait_for_pane_output(socket_path: str, timeout_s: float = 30.0) -> str:
+    return _wait_for_pane(
+        socket_path,
+        lambda text: bool(text.strip()),
+        "REPL never rendered into its tmux pane",
+        timeout_s,
+    )
+
+
+def _wait_for_pane_contains(socket_path: str, needle: str, timeout_s: float = 60.0) -> str:
+    return _wait_for_pane(
+        socket_path, lambda text: needle in text, f"pane never showed {needle!r}", timeout_s
+    )
 
 
 def _wait_for_pane_matches(
     socket_path: str, pattern: re.Pattern[str], timeout_s: float = 60.0
 ) -> str:
-    deadline = time.monotonic() + timeout_s
-    text = ""
-    while True:
-        captured = _tmux(socket_path, "capture-pane", "-p")
-        text = captured.stdout if captured.returncode == 0 else ""
-        if pattern.search(text):
-            return text
-        assert time.monotonic() < deadline, (
-            f"pane never matched {pattern.pattern!r}; last frame:\n{text}"
-        )
-        time.sleep(0.5)
+    return _wait_for_pane(
+        socket_path,
+        lambda text: pattern.search(text) is not None,
+        f"pane never matched {pattern.pattern!r}",
+        timeout_s,
+    )
 
 
 def _reach_repl_prompt(page: Page, helper: Any, socket_path: str) -> None:

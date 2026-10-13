@@ -57,7 +57,6 @@ from omnigent.runner.app import (
     _auto_create_cursor_terminal,
     _auto_create_kiro_terminal,
     _auto_create_pi_terminal,
-    _auto_create_repl_terminal,
     _codex_native_launch_config,
     _KiroNativeLaunchConfig,
     _load_claude_launch_metadata,
@@ -70,7 +69,6 @@ from omnigent.runner.app import (
 from omnigent.runner.resource_registry import (
     CLAUDE_NATIVE_TERMINAL_ROLE,
     KIRO_NATIVE_TERMINAL_ROLE,
-    OMNIGENT_REPL_TERMINAL_ROLE,
     PI_NATIVE_TERMINAL_ROLE,
     SessionResourceRegistry,
 )
@@ -283,74 +281,6 @@ async def test_auto_create_pi_terminal_launches_required_terminal(
     )
     tool_names = {tool["name"] for tool in config["tools"]}
     assert {"list_comments", "sys_session_list"} <= tool_names
-    # The fresh terminal is surfaced on the live stream for the Terminal toggle.
-    assert any(evt.get("type") == "session.resource.created" for evt in published)
-
-
-async def test_auto_create_repl_terminal_keeps_tmux_alive_after_exit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The runner-hosted SDK REPL terminal (``tui:main``) must survive its exit.
-
-    The embedded ``omnigent attach`` REPL is the sole process in a private
-    single-pane tmux server. Without ``keep_alive_after_exit`` tmux reaps the
-    lone-pane server the instant the REPL exits, so ``tui:main`` vanishes and
-    the idle watcher logs ``tmux unavailable``. Like the other native terminals,
-    the REPL must launch with ``keep_alive_after_exit=True`` so its exit leaves
-    a diagnosable dead pane instead.
-    """
-    monkeypatch.setenv("OMNIGENT_RUNNER_WORKSPACE", str(tmp_path))
-    monkeypatch.setenv("RUNNER_SERVER_URL", "http://127.0.0.1:8000")
-
-    captured: dict[str, Any] = {}
-
-    class _FakeResourceRegistry:
-        """Records the launch; exposes ONLY the auxiliary-terminal launch API."""
-
-        terminal_registry = None
-
-        async def launch_auxiliary_terminal(
-            self,
-            *,
-            session_id: str,
-            terminal_name: str,
-            session_key: str,
-            spec: Any,
-            parent_os_env: Any = None,
-            resource_role: str | None = None,
-            cwd_override: str | None = None,
-            sandbox_override: str | None = None,
-        ) -> SessionResourceView:
-            """Record the launch and return a terminal resource view."""
-            captured["terminal_name"] = terminal_name
-            captured["session_key"] = session_key
-            captured["resource_role"] = resource_role
-            captured["spec"] = spec
-            return SessionResourceView(
-                id="terminal_tui_main",
-                type="terminal",
-                session_id=session_id,
-                name="tui:main",
-                metadata={"terminal_name": "tui", "session_key": "main", "running": True},
-            )
-
-    published: list[dict[str, Any]] = []
-
-    await _auto_create_repl_terminal(
-        "47f049b9d13df4db397c7f46859b825f",
-        _FakeResourceRegistry(),  # type: ignore[arg-type]
-        lambda _sid, evt: published.append(evt),
-        server_client=NullServerClient(),  # type: ignore[arg-type]
-    )
-
-    # Auxiliary lifecycle, correct terminal identity (the SDK REPL ``tui:main``).
-    assert captured["terminal_name"] == "tui"
-    assert captured["session_key"] == "main"
-    assert captured["resource_role"] == OMNIGENT_REPL_TERMINAL_ROLE
-    assert captured["spec"].args[:3] == ["-m", "omnigent", "attach"]
-    # Keep the exited pane so tui:main does not vanish and the idle watcher can
-    # report a diagnosable exit instead of the "tmux unavailable" cascade.
-    assert captured["spec"].keep_alive_after_exit is True
     # The fresh terminal is surfaced on the live stream for the Terminal toggle.
     assert any(evt.get("type") == "session.resource.created" for evt in published)
 
