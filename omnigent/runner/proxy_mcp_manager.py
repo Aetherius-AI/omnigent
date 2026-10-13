@@ -431,10 +431,10 @@ class ProxyMcpManager:
                     request_id += 1
                     payload = cast("_JsonObject", {**payload, "id": request_id})
                     continue
-                # -32000 is the MCP convention for server-defined errors (tool
-                # denials, tool errors).  Return as a JSON error string so the
-                # harness feeds the refusal back to the LLM rather than raising.
-                if code == -32000:
+                # -32000 (tool denial/error) and -32602 (a bare name outside the
+                # granted surface) are refusals: return the message as a JSON
+                # error string so the harness feeds it to the LLM, not raise.
+                if code in (-32000, -32602):
                     return json.dumps({"error": msg})
                 raise RuntimeError(
                     f"MCP proxy protocol error {code} for tool {tool_name!r}: {msg}"

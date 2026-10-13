@@ -8,7 +8,8 @@ Covers:
 - ``call_tool`` happy path: text content extracted from result
 - ``call_tool`` isError=True → JSON error string (not raised)
 - ``call_tool`` -32000 RPC error → JSON error string (soft error, not raised)
-- ``call_tool`` non-32000 RPC error → raises RuntimeError
+- ``call_tool`` -32602 refusal → JSON error string (soft error, not raised)
+- ``call_tool`` other RPC error codes → raise RuntimeError
 - ``call_tool`` network failure → raises RuntimeError
 """
 
@@ -658,6 +659,36 @@ async def test_call_tool_minus_32000_returns_json_error_not_raises() -> None:
     parsed = json.loads(output)
     assert parsed == {"error": "Policy DENIED: push to main blocked"}, (
         "-32000 must be returned as a soft JSON error, not raised"
+    )
+
+
+@pytest.mark.asyncio
+async def test_call_tool_minus_32602_returns_json_error_not_raises() -> None:
+    """RPC code -32602 (bare name outside the granted surface) must return a
+    JSON string, not raise.
+
+    The runner refuses an ungranted or non-dispatchable bare tool with -32602.
+    Like a -32000 denial it should reach the LLM as a tool-result error rather
+    than crash the harness with a RuntimeError.
+    """
+    rpc_error = _json_resp(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {
+                "code": -32602,
+                "message": "tool 'sys_os_read' is not enabled for this agent",
+            },
+        }
+    )
+    transport = _StubTransport([rpc_error])
+    manager = _make_manager(transport)
+
+    output = await manager.call_tool(_make_spec("github"), "sys_os_read", {})
+
+    parsed = json.loads(output)
+    assert parsed == {"error": "tool 'sys_os_read' is not enabled for this agent"}, (
+        "-32602 refusals must be returned as a soft JSON error, not raised"
     )
 
 
