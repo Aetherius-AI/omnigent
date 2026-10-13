@@ -289,6 +289,8 @@ export function MonacoDiffViewer({
     return {
       readOnly: true, // modified side: view + select + comment, no editing
       originalEditable: false,
+      // Bound expensive character refinement; Monaco returns coarser hunks on timeout.
+      maxComputationTime: 1000,
       renderSideBySide: layout === "split",
       // Below `renderSideBySideInlineBreakpoint` (900px) Monaco collapses
       // side-by-side into inline — a legitimate constraint for a usable diff.

@@ -327,6 +327,96 @@ def _seed_citation_file(
     )
 
 
+@pytest.mark.parametrize("layout", ["unified", "split", "mobile"])
+@pytest.mark.parametrize("dense", [True, False], ids=["dense", "sparse"])
+def test_large_diff_has_bounded_computation(
+    page: Page, seeded_session: BrowserSession, layout: str, dense: bool
+) -> None:
+    before = [f'entry_{i}: str = "original value {i}"' for i in range(5000)]
+    after = [
+        line.replace("original", "changed") if dense or i % 500 == 0 else line
+        for i, line in enumerate(before)
+    ]
+    _seed_citation_file(page, seeded_session)
+    base_url, session_id = seeded_session
+    environment_url = f"{base_url}/v1/sessions/{session_id}/resources/environments/default"
+    seeded_session.contract.json(
+        f"/v1/sessions/{session_id}/resources/environments/default/diff/{_FILE_PATH}",
+        {"path": _FILE_PATH, "before": "\n".join(before), "after": "\n".join(after)},
+    )
+    seeded_session.contract.route(
+        f"{environment_url}/filesystem/{_FILE_PATH}",
+        lambda route: route.fulfill(
+            json={
+                "path": _FILE_PATH,
+                "content": "\n".join(after),
+                "encoding": "utf-8",
+                "content_type": "text/plain",
+                "bytes": len("\n".join(after)),
+            }
+        ),
+    )
+    # Observe the actual worker budget and result, without replacing its computation.
+    page.add_init_script("""(() => {
+      window.diffComputations = [];
+      const NativeWorker = window.Worker;
+      window.Worker = class extends NativeWorker {
+        constructor(...args) {
+          super(...args);
+          this.pendingDiffs = new Map();
+          this.addEventListener('message', ({data}) => {
+            const record = this.pendingDiffs.get(data?.seq);
+            if (!record) return;
+            record.durationMs = performance.now() - record.started;
+            record.result = data.res;
+            this.pendingDiffs.delete(data.seq);
+          });
+        }
+        postMessage(message, ...args) {
+          if (message?.method === '$computeDiff') {
+            const record = {
+              started: performance.now(),
+              options: message.args[2],
+              algorithm: message.args[3],
+            };
+            window.diffComputations.push(record);
+            this.pendingDiffs.set(message.req, record);
+          }
+          return super.postMessage(message, ...args);
+        }
+      };
+    })()""")
+    if layout == "mobile":
+        page.set_viewport_size({"width": 390, "height": 844})
+        page.goto(f"{base_url}/c/{session_id}?file={_FILE_PATH}&diff=1")
+        viewer = page.locator('[data-testid="file-viewer"]:visible')
+    else:
+        viewer = _open_monaco(page, seeded_session, layout)
+    page.wait_for_function(
+        "window.diffComputations.length > 0 && window.diffComputations.every(r => r.result)",
+        timeout=30_000,
+    )
+    expect(viewer.locator(".monaco-diff-editor")).to_have_count(1)
+    expect(viewer.locator(".line-insert, .char-insert").first).to_be_visible()
+    computations = page.evaluate("window.diffComputations")
+    assert len(computations) == 1
+    computation = computations[0]
+    print(f"{layout} dense={dense}: {json.dumps(computation)}")
+    assert computation["algorithm"] == "advanced"
+    assert 0 < computation["options"]["maxComputationTimeMs"] <= 1000
+    changes = computation["result"]["changes"]
+    reconstructed = before.copy()
+    for original_start, original_end, modified_start, modified_end, *_ in reversed(changes):
+        reconstructed[original_start - 1 : original_end - 1] = after[
+            modified_start - 1 : modified_end - 1
+        ]
+    assert reconstructed == after
+    if not dense:
+        assert not computation["result"]["quitEarly"]
+        assert len(changes) == 10
+        assert all(change[4] for change in changes), "Sparse edits keep character highlighting"
+
+
 @pytest.mark.parametrize("initial_width", [1600, 390])
 def test_diff_computes_once_per_viewport(
     page: Page, seeded_session: BrowserSession, initial_width: int
