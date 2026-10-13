@@ -649,10 +649,10 @@ async def test_inline_create_launch_failure_skips_grant_when_session_vanished(
     client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When the rollback's re-read finds the row gone, the create must skip both
-    the worktree removal and the default-public grant, instead of leaving a
-    public grant behind for a session that no longer exists. The re-read is
-    stubbed to return ``None`` once, standing in for a concurrent delete."""
+    """When the rollback's re-read finds the row gone, the create must suppress
+    the default-public grant it would otherwise write, so a concurrently deleted
+    session is never left publicly shared. The re-read is stubbed to return
+    ``None`` once; with no row to roll back, no worktree removal is attempted."""
     cap = register_worktree_launch_host(launch_status="failed")
     agent = await create_test_agent(client, name="wt-vanish-agent")
 
@@ -752,6 +752,11 @@ async def test_inline_create_launch_failure_holds_relaunch_lock_across_rollback(
         waiter = asyncio.create_task(_relaunch_waiter())
         await asyncio.wait_for(waiter_started.wait(), timeout=5)
         await asyncio.sleep(0.05)
+        # The rollback still holds the lock here, so the waiter is deterministically
+        # excluded; the sleep only gives a buggy, lock-free rollback time to slip.
+        assert relaunch_lock_for(conv_id).locked(), (
+            "rollback released the relaunch lock mid-removal"
+        )
         assert not got_lock.is_set(), "a concurrent relaunch acquired the lock during the rollback"
 
         proceed.set()
@@ -902,3 +907,46 @@ async def test_inline_create_launch_failure_tolerates_shared_worktree_check_erro
     assert conv.host_id == _HOST_ID and conv.runner_id is not None
     assert conv.workspace == worktree_path and conv.git_branch == "feature/sharederr"
     assert conv.labels.get(WORKTREE_ROOT_LABEL_KEY) == worktree_root_fingerprint(worktree_path)
+
+
+async def test_inline_create_launch_failure_reconciles_binding_when_cleanup_readback_fails(
+    register_worktree_launch_host: RegisterHost,
+    client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``clear_host_binding`` commits the unbind before reading the row back, so a
+    failure after that commit must not report a stale bound session. The create
+    re-reads the row and returns the unbound result that was actually persisted."""
+    cap = register_worktree_launch_host(launch_status="failed")
+    agent = await create_test_agent(client, name="wt-readbackerr-agent")
+
+    original_clear = SqlAlchemyConversationStore.clear_host_binding
+
+    def _clear_then_boom(self: SqlAlchemyConversationStore, conversation_id: str) -> Any:
+        # Let the real unbind commit, then fail as a post-commit readback would.
+        original_clear(self, conversation_id)
+        raise RuntimeError("post-commit readback error")
+
+    monkeypatch.setattr(SqlAlchemyConversationStore, "clear_host_binding", _clear_then_boom)
+
+    resp = await _create_git_session(
+        client, agent["id"], {"branch_name": "feature/readbackerr", "base_branch": "main"}
+    )
+    assert resp.status_code == 201, resp.text
+    assert len(cap.remove) == 1, (
+        f"the worktree must still be removed before the clear readback failed: "
+        f"{cap.remove}; unexpected={cap.unexpected}"
+    )
+    body = resp.json()
+    # The unbind committed, so the reconciled response reports the session
+    # unbound, matching persisted state, despite the clear call raising.
+    assert body["host_id"] is None and body["runner_id"] is None, body
+    assert body["workspace"] is None and body["git_branch"] is None, body
+    assert WORKTREE_ROOT_LABEL_KEY not in body["labels"], body
+
+    conv = SqlAlchemyConversationStore(db_uri).get_conversation(body["id"])
+    assert conv is not None
+    assert conv.host_id is None and conv.runner_id is None
+    assert conv.workspace is None and conv.git_branch is None
+    assert WORKTREE_ROOT_LABEL_KEY not in conv.labels

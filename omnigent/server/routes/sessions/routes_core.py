@@ -942,17 +942,41 @@ def register_core_routes(
                                         session_vanished = True
                                         unbound = True
                                     except Exception:
-                                        # Unbind failed; the response and row still carry the
-                                        # binding to the removed worktree, and the root label
-                                        # stays for an opt-in delete or archive to clean up.
+                                        # clear_host_binding commits before its readback, so
+                                        # this failure may have already unbound the row;
+                                        # reconcile from persisted state, not the raised call.
                                         _logger.warning(
                                             "Best-effort host-binding cleanup failed for "
                                             "session %s after its launch-failure worktree "
-                                            "rollback; the stored session still references "
-                                            "the removed worktree",
+                                            "rollback; reconciling the response against the "
+                                            "stored row",
                                             resp.id,
                                             exc_info=True,
                                         )
+                                        try:
+                                            reconciled = await asyncio.to_thread(
+                                                conversation_store.get_conversation, resp.id
+                                            )
+                                        except Exception:
+                                            # Re-read also failed; keep the stored binding
+                                            # best-effort for a later delete to reconcile.
+                                            _logger.warning(
+                                                "Could not re-read session %s to reconcile "
+                                                "its binding after a failed host-binding "
+                                                "cleanup; leaving the stored binding as is",
+                                                resp.id,
+                                                exc_info=True,
+                                            )
+                                        else:
+                                            if reconciled is None:
+                                                conv = None
+                                                session_vanished = True
+                                                unbound = True
+                                            elif reconciled.host_id is None:
+                                                conv = reconciled
+                                                unbound = True
+                                            else:
+                                                conv = reconciled
                                     if unbound:
                                         resp.runner_id = None
                                         resp.host_id = None
