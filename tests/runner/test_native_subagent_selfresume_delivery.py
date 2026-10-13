@@ -198,7 +198,10 @@ async def _await_settle(app: Any, child_id: str) -> None:
     if task is None:
         await asyncio.sleep(0)
         return
-    await asyncio.wait({task}, timeout=5)
+    _done, pending = await asyncio.wait({task}, timeout=5)
+    assert not pending, "the re-arm settle did not finish within 5 s"
+    if not task.cancelled():
+        task.result()
 
 
 def _dispatch_worker(
@@ -1931,7 +1934,7 @@ async def test_unregistering_a_child_keeps_a_send_lock_someone_holds(
 
     ``asyncio.Lock.locked()`` reads ``False`` between a release and the woken
     waiter's re-acquire, so a guarded waiter must count as a user too; the lock
-    is forgotten only once nobody relies on it (here, with the parent session).
+    is forgotten once nobody relies on it and the child has no entry left.
     """
     subagent_work.register_child_session(
         CHILD_SESSION_ID,
@@ -1971,8 +1974,9 @@ async def test_unregistering_a_child_keeps_a_send_lock_someone_holds(
     )
     proceed.set()
     await waiter
-    subagent_work.unregister_subagent_work_for_session(PARENT_SESSION_ID)
-    assert CHILD_SESSION_ID not in subagent_work._in_flight_send_locks
+    assert CHILD_SESSION_ID not in subagent_work._in_flight_send_locks, (
+        "the last user left an unregistered child's lock behind"
+    )
 
 
 @pytest.mark.asyncio

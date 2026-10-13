@@ -272,13 +272,9 @@ def new_subagent_work_id() -> str:
     return f"subagent_{uuid.uuid4().hex[:12]}"
 
 
-# Per-child locks serializing the classify+register step of an in-flight
-# sub-agent send (see ``tool_dispatch._send_to_in_flight_child``), a terminal
-# report's confirmation stamp and the grace settle, so none of them acts on the
-# child's entry while another is mid-flight. Co-located with the work registries
-# so they are torn down alongside them, but never while a holder or waiter still
-# relies on one: ``asyncio.Lock.locked()`` reads False between a release and the
-# woken waiter's re-acquire, so users are counted explicitly instead.
+# Per-child locks serializing an in-flight send's classify+register step, a
+# terminal report's confirmation stamp and the grace settle. Torn down with the
+# work registries once no holder or waiter relies on one (``in_flight_send_guard``).
 _in_flight_send_locks: dict[str, asyncio.Lock] = {}
 _in_flight_send_lock_users: dict[str, int] = {}
 
@@ -302,6 +298,11 @@ async def in_flight_send_guard(child_session_id: str) -> AsyncIterator[None]:
     """
     Hold the child's send lock, counted as its user from the wait to the release.
 
+    ``asyncio.Lock.locked()`` reads ``False`` between a release and the woken
+    waiter's re-acquire, so the user count, not the lock state, decides when
+    cleanup may forget the lock. The last user to leave forgets it when the
+    child has no work entry left to guard.
+
     :param child_session_id: Child session id, e.g. ``"conv_child456"``.
     """
     _in_flight_send_lock_users[child_session_id] = (
@@ -316,6 +317,8 @@ async def in_flight_send_guard(child_session_id: str) -> AsyncIterator[None]:
             _in_flight_send_lock_users[child_session_id] = remaining
         else:
             _in_flight_send_lock_users.pop(child_session_id, None)
+            if child_session_id not in _subagent_work_by_child:
+                _drop_in_flight_send_lock(child_session_id)
 
 
 def _drop_in_flight_send_lock(child_session_id: str) -> None:
@@ -685,9 +688,12 @@ def unregister_subagent_work_for_session(session_id: str) -> None:
         _drained_delivered_subagent_children.discard(child_id)
         _drained_subagent_dispatches.pop(child_id, None)
         _drop_in_flight_send_lock(child_id)
-    # Drained children left the work registry but may still hold a lock.
+    # Drained children left the work registry but keep their drain memory and
+    # may still hold a lock.
     for child_id, meta in list(_child_session_parents.items()):
         if meta.parent_id == session_id:
+            _drained_delivered_subagent_children.discard(child_id)
+            _drained_subagent_dispatches.pop(child_id, None)
             _drop_in_flight_send_lock(child_id)
     _subagent_work_by_parent.pop(session_id, None)
 
