@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 import pytest
-from playwright.sync_api import Page, expect
+from playwright.sync_api import Page, Route, expect
 
 from omnigent.harnesses.kiro_native.bridge import acp_record_path
 from omnigent.harnesses.kiro_native.permissions import kiro_permission_elicitation_id
@@ -26,7 +26,7 @@ from .test_message_render_parity import _ensure_chat_view, _send
 kiro_shim_session = _kiro_shim_session
 
 
-def _shim(mode: str) -> str:
+def _shim(mode: str, *, dropped_enters: int = 1) -> str:
     source = _FAKE_KIRO_SOURCE.replace(
         'COMMANDS = ("alpha", "beta", "gamma")', 'COMMANDS = ("alpha", "alpha")'
     )
@@ -36,10 +36,10 @@ def _shim(mode: str) -> str:
         if self.active is not None:
             with open(RECORD_PATH + ".enters", "a") as handle:
                 handle.write(self.active["id"] + "\\n")
-            if not getattr(self, "first_enter_seen", False):
-                self.first_enter_seen = True
-                if {mode!r} == "drop":
-                    return
+            self.enter_count = getattr(self, "enter_count", 0) + 1
+            if {mode!r} == "drop" and self.enter_count <= {dropped_enters}:
+                return
+            if {mode!r} == "delay" and self.enter_count == 1:
                 import time
                 time.sleep(9)
 """,
@@ -123,8 +123,9 @@ def test_kiro_manual_retry(
 
 @pytest.mark.timeout(180)
 @pytest.mark.parametrize("kiro_shim_session", [_shim("delay")], indirect=True, ids=["late-enter"])
+@pytest.mark.parametrize("reconnect", [False, True], ids=["connected", "reconnect"])
 def test_kiro_late_confirmation_removes_retry(
-    kiro_shim_session: tuple[str, str, Path], page: Page
+    kiro_shim_session: tuple[str, str, Path], page: Page, reconnect: bool
 ) -> None:
     base_url, session_id, bridge_dir = kiro_shim_session
     record_file = acp_record_path(bridge_dir)
@@ -136,6 +137,12 @@ def test_kiro_late_confirmation_removes_retry(
     approve.click()
     retry = page.get_by_role("button", name="Retry sending approval")
     expect(retry).to_be_visible(timeout=12_000)
+    if reconnect:
+        page.context.set_offline(True)
+        try:
+            _wait_for(lambda: "perm-req-1-1" in _recorder_response_ids(record_file), timeout_s=15)
+        finally:
+            page.context.set_offline(False)
     expect(retry).not_to_be_visible(timeout=12_000)
     expect(page.get_by_text("Resolved in Kiro")).to_be_visible()
     expect(approve).to_be_visible(timeout=15_000)
@@ -144,3 +151,88 @@ def test_kiro_late_confirmation_removes_retry(
     assert record_file.with_suffix(record_file.suffix + ".enters").read_text().splitlines() == [
         "perm-req-1-1"
     ]
+
+
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize(
+    "kiro_shim_session",
+    [_shim("drop", dropped_enters=2)],
+    indirect=True,
+    ids=["two-lost-enters"],
+)
+def test_kiro_two_tabs_cannot_repeat_an_old_retry(
+    kiro_shim_session: tuple[str, str, Path], page: Page
+) -> None:
+    base_url, session_id, bridge_dir = kiro_shim_session
+    record_file = acp_record_path(bridge_dir)
+    enters_file = record_file.with_suffix(record_file.suffix + ".enters")
+    first_id = "perm-req-1-1"
+    eid = kiro_permission_elicitation_id(session_id, first_id)
+    detail_url = f"{base_url}/v1/sessions/{session_id}/elicitations/{eid}"
+    resolve_url = f"{detail_url}/resolve"
+    page.goto(f"{base_url}/c/{session_id}")
+    _ensure_chat_view(page)
+    _send(page, "Run two identical commands requiring separate approvals.")
+    page.get_by_role("button", name="Approve", exact=True).click(timeout=120_000)
+    retry = page.get_by_role("button", name="Retry sending approval")
+    expect(retry).to_be_visible(timeout=12_000)
+
+    stale_detail = page.request.get(detail_url).json()
+    held_requests: list[Route] = []
+    other = page.context.new_page()
+    try:
+        # Keep the second tab on an old poll response while the server advances.
+        other.route(detail_url, lambda route: route.fulfill(json=stale_detail))
+        other.goto(f"{base_url}/approve/{session_id}/{eid}")
+        other_retry = other.get_by_role("button", name="Retry sending approval")
+        expect(other_retry).to_be_visible()
+        page.route(resolve_url, lambda route: held_requests.append(route))
+        other.route(resolve_url, lambda route: held_requests.append(route))
+        retry.click()
+        other_retry.click()
+        expect(retry).not_to_be_visible()
+        expect(other_retry).not_to_be_visible()
+        assert len(held_requests) == 2
+        assert held_requests[0].request.post_data_json == held_requests[1].request.post_data_json
+        with page.expect_response(resolve_url) as first_response:
+            held_requests[0].continue_()
+        with other.expect_response(resolve_url) as duplicate_response:
+            held_requests[1].continue_()
+        assert first_response.value.status == 202
+        assert duplicate_response.value.status == 202
+        page.unroute(resolve_url)
+        other.unroute(resolve_url)
+        expect(retry).to_be_enabled(timeout=12_000)
+        expect(other_retry).to_be_enabled(timeout=12_000)
+        latest_detail = page.request.get(detail_url).json()
+        assert (
+            latest_detail["native_delivery"]["attempt"]
+            != stale_detail["native_delivery"]["attempt"]
+        )
+        assert enters_file.read_text().splitlines() == [first_id, first_id]
+
+        # The visible stale button must not answer this or the next request.
+        with other.expect_response(resolve_url) as stale_response:
+            other_retry.click()
+        assert stale_response.value.status == 400
+        page.wait_for_timeout(1_000)
+        assert enters_file.read_text().splitlines() == [first_id, first_id]
+        assert _recorder_response_ids(record_file) == set()
+
+        other.unroute(detail_url)
+        other.reload()
+        expect(other_retry).to_be_visible()
+        other_retry.click()
+        _wait_for(lambda: first_id in _recorder_response_ids(record_file), timeout_s=15)
+        expect(retry).not_to_be_visible(timeout=15_000)
+        expect(other.get_by_text("Elicitation resolved", exact=True)).to_be_visible(timeout=15_000)
+        second_eid = kiro_permission_elicitation_id(session_id, "perm-req-1-2")
+        _wait_for(
+            lambda: second_eid in json.dumps(_pending_elicitations(base_url, session_id)),
+            timeout_s=15,
+        )
+        page.wait_for_timeout(1_000)
+        assert _recorder_response_ids(record_file) == {first_id}
+        assert enters_file.read_text().splitlines() == [first_id, first_id, first_id]
+    finally:
+        other.close()

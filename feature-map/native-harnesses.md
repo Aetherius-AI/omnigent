@@ -250,7 +250,11 @@ Cross-harness journeys:
   distinct request IDs; only the first may be answered.
   `tests/e2e_ui/messages/test_kiro_permission_retry.py::test_kiro_late_confirmation_removes_retry`
   delays input consumption with real elapsed time and checks that late
-  confirmation removes Retry without sending another Enter.
+  confirmation removes Retry without sending another Enter, including when the
+  browser disconnects before confirmation and then reconnects.
+  `tests/e2e_ui/messages/test_kiro_permission_retry.py::test_kiro_two_tabs_cannot_repeat_an_old_retry`
+  checks simultaneous retries from chat and a standalone tab, rejection of a
+  stale retry after another attempt, and recovery after refreshing the stale tab.
   Child-session routing uses the shared approval card; server ownership and
   receipt races are covered by
   `tests/server/integration/test_kiro_permission_delivery.py`.
