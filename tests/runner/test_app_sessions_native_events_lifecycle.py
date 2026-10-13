@@ -38,7 +38,7 @@ from tests.runner.conftest import (
     _runner_client,
     _ScriptedHarnessClient,
 )
-from tests.runner.helpers import NullServerClient
+from tests.runner.helpers import NullServerClient, make_test_terminal_instance
 from tests.runner.native_helpers import _harness_spec
 
 
@@ -4715,9 +4715,24 @@ async def _await_repl_terminal_recover(conv_id: str) -> None:
         await asyncio.gather(*pending)
 
 
+def _seed_repl_replacement(resource_registry: Any, session_id: str, tmp_path: Path) -> Any:
+    """Register a running ``tui:main`` stub carrying the REPL role, as a launch would."""
+    from omnigent.runner.resource_registry import OMNIGENT_REPL_TERMINAL_ROLE
+
+    instance = make_test_terminal_instance("tui", "main", tmp_path, running=True)
+    registry = resource_registry.terminal_registry
+    registry._by_conversation.setdefault(session_id, {})[("tui", "main")] = instance
+    resource_registry.retain_terminal_role(
+        session_id, "terminal_tui_main", OMNIGENT_REPL_TERMINAL_ROLE
+    )
+    return instance
+
+
 @pytest.mark.asyncio
 async def test_auxiliary_repl_exit_recreates_embedded_terminal(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """An unexpected ``tui:main`` death rebuilds the embedded REPL terminal.
 
@@ -4733,9 +4748,13 @@ async def test_auxiliary_repl_exit_recreates_embedded_terminal(
 
     conv_id = uuid.uuid4().hex
     recreated: list[str] = []
+    replacements: list[Any] = []
 
-    async def _fake_auto_create_repl_terminal(session_id: str, *args: Any, **kwargs: Any) -> None:
+    async def _fake_auto_create_repl_terminal(
+        session_id: str, resource_registry: Any, *args: Any, **kwargs: Any
+    ) -> None:
         recreated.append(session_id)
+        replacements.append(_seed_repl_replacement(resource_registry, session_id, tmp_path))
 
     monkeypatch.setattr(
         "omnigent.runner.resource_routes._auto_create_repl_terminal",
@@ -4782,10 +4801,18 @@ async def test_auxiliary_repl_exit_recreates_embedded_terminal(
     ]
     # A live SDK session losing its embedded pane is not a session failure.
     assert not [event for event in events if event.get("type") == "session.status"]
+    # The launch registered a running replacement, so recovery succeeded: the
+    # inventory holds the new pane and no recovery failure was logged.
+    assert (
+        app.state.session_resource_registry.terminal_registry.get(conv_id, "tui", "main")
+        is replacements[0]
+    )
+    assert "Could not recover REPL terminal" not in caplog.text
 
 
 @pytest.mark.asyncio
 async def test_auxiliary_repl_exit_recreate_is_rate_limited(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A crash-looping REPL terminal stops being auto-recreated at the cap.
@@ -4808,9 +4835,13 @@ async def test_auxiliary_repl_exit_recreate_is_rate_limited(
 
     conv_id = uuid.uuid4().hex
     recreated: list[str] = []
+    replacements: list[Any] = []
 
-    async def _fake_auto_create_repl_terminal(session_id: str, *args: Any, **kwargs: Any) -> None:
+    async def _fake_auto_create_repl_terminal(
+        session_id: str, resource_registry: Any, *args: Any, **kwargs: Any
+    ) -> None:
         recreated.append(session_id)
+        replacements.append(_seed_repl_replacement(resource_registry, session_id, tmp_path))
 
     monkeypatch.setattr(
         "omnigent.runner.resource_routes._auto_create_repl_terminal",
@@ -4828,6 +4859,13 @@ async def test_auxiliary_repl_exit_recreate_is_rate_limited(
 
     try:
         for _ in range(_REPL_RECREATE_LIMIT + 1):
+            # Model the registry's exit handling: the dying pane stops running
+            # and its role marker is popped before the exit is published.
+            if replacements:
+                replacements[-1].running = False
+            app.state.session_resource_registry._terminal_roles.pop(
+                (conv_id, "terminal_tui_main"), None
+            )
             publish_exit(
                 TerminalExitEvent(
                     session_id=conv_id,
@@ -4852,8 +4890,9 @@ async def test_auxiliary_repl_exit_recreate_is_rate_limited(
         len([event for event in events if event.get("type") == "session.resource.deleted"])
         == _REPL_RECREATE_LIMIT + 1
     )
-    # The capped exit restores the REPL role the exit popped, so a user attach
-    # can still rebuild the pane on demand (the warning's recovery path).
+    # Every rebuild above succeeded and each exit popped the role, so the role
+    # present now was restored by the capped exit: a user attach can still
+    # rebuild the pane on demand (the warning's recovery path).
     assert (
         app.state.session_resource_registry.terminal_resource_role(conv_id, "terminal_tui_main")
         == OMNIGENT_REPL_TERMINAL_ROLE
@@ -5101,9 +5140,14 @@ async def test_auxiliary_repl_exit_failed_rebuild_retains_role(
             )
         )
         await _await_repl_terminal_recover(conv_id)
+        events = _drain_session_event_queue(_session_event_queues_ref.get(conv_id))
     finally:
         _session_event_queues_ref.pop(conv_id, None)
 
+    # The failed rebuild still releases the spinner it announced.
+    assert [
+        event["pending"] for event in events if event.get("type") == "session.terminal_pending"
+    ] == [True, False]
     # The rebuild raised but the session is still live, so the role is restored
     # for an attach-driven retry rather than left popped and unrecoverable.
     assert (

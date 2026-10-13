@@ -20,7 +20,7 @@ from typing import Any
 
 import httpx
 import pytest
-from playwright.sync_api import Page, expect
+from playwright.sync_api import Locator, Page, expect
 
 from omnigent.process_logging import process_log_dir
 from tests.e2e_ui.conftest import configure_mock_llm, reset_mock_llm
@@ -137,7 +137,7 @@ def _wait_for_repl_exit(socket_path: str, timeout_s: float = 30.0) -> None:
     deadline = time.monotonic() + timeout_s
     while True:
         probe = _tmux(socket_path, "list-panes", "-F", "#{pane_dead}")
-        if probe.returncode != 0 or probe.stdout.strip().startswith("1"):
+        if probe.returncode != 0 or "1" in probe.stdout.split():
             return
         assert time.monotonic() < deadline, (
             "the REPL did not exit after /quit; pane shows:\n"
@@ -156,12 +156,13 @@ def _runner_logs_since(offsets: dict[Path, int], session_id: str) -> str:
 
     Workers share the runner log directory under one HOME. Only chunks whose
     new content mentions this session are returned, kept whole because the
-    tmux-unavailable line is not itself session-tagged.
+    tmux-unavailable line is not itself session-tagged. A log file that first
+    appears after the snapshot is read from its start.
     """
     chunks = []
-    for path in sorted(offsets):
+    for path in sorted(process_log_dir("runner").glob("runner*.log")):
         with path.open(encoding="utf-8", errors="replace") as handle:
-            handle.seek(offsets[path])
+            handle.seek(offsets.get(path, 0))
             chunk = handle.read()
         if session_id in chunk:
             chunks.append(chunk)
@@ -172,17 +173,14 @@ def _terminal_states(terminal: Any) -> list[str | None]:
     return terminal.evaluate_all("(elements) => elements.map((el) => el.dataset.state)")
 
 
-def test_repl_terminal_survives_tmux_server_death(
-    page: Page, seeded_session: tuple[str, str], mock_llm_server_url: str
-) -> None:
-    base_url, session_id = seeded_session
-    # The mock LLM server is session-scoped; drop any "Say hello" queue a
-    # sibling test left behind so this session's turn routes to ours.
-    reset_mock_llm(mock_llm_server_url)
-    configure_mock_llm(
-        mock_llm_server_url, [{"text": _REPLY}], key="repl-tmux-death", match="Say hello"
-    )
+def _open_connected_terminal(
+    page: Page, base_url: str, session_id: str
+) -> tuple[Locator, Locator, dict[str, Any]]:
+    """Run one mock turn, open the Terminal view, and wait for a live REPL pane.
 
+    Returns the visible main-terminal container, its xterm view, and the REPL
+    terminal's inventory entry, with the session idle and the pane rendering.
+    """
     page.goto(f"{base_url}/c/{session_id}")
     composer = page.get_by_label("Message the agent")
     expect(composer).to_be_visible(timeout=60_000)
@@ -199,9 +197,24 @@ def test_repl_terminal_survives_tmux_server_death(
 
     before = _repl_terminal(base_url, session_id)
     assert before is not None, "runner did not register the REPL terminal"
-    socket_path = str(before["metadata"]["tmux_socket"])
-    _wait_for_pane_output(socket_path)
+    _wait_for_pane_output(str(before["metadata"]["tmux_socket"]))
     assert _session_status(base_url, session_id) == "idle"
+    return main_terminal, terminal, before
+
+
+def test_repl_terminal_survives_tmux_server_death(
+    page: Page, seeded_session: tuple[str, str], mock_llm_server_url: str
+) -> None:
+    base_url, session_id = seeded_session
+    # The mock LLM server is session-scoped; drop any "Say hello" queue a
+    # sibling test left behind so this session's turn routes to ours.
+    reset_mock_llm(mock_llm_server_url)
+    configure_mock_llm(
+        mock_llm_server_url, [{"text": _REPLY}], key="repl-tmux-death", match="Say hello"
+    )
+
+    main_terminal, terminal, before = _open_connected_terminal(page, base_url, session_id)
+    socket_path = str(before["metadata"]["tmux_socket"])
 
     killed = _tmux(socket_path, "kill-server")
     assert killed.returncode == 0, killed.stderr
@@ -252,25 +265,8 @@ def test_repl_terminal_survives_repl_quit(
     # Session setup is done; open the (possibly recorded) page only now.
     page: Page = request.getfixturevalue("page")
 
-    page.goto(f"{base_url}/c/{session_id}")
-    composer = page.get_by_label("Message the agent")
-    expect(composer).to_be_visible(timeout=60_000)
-    composer.fill("Say hello")
-    page.get_by_role("button", name="Send", exact=True).click()
-    expect(page.locator(_ASSISTANT).filter(has_text=_REPLY)).to_have_count(1, timeout=60_000)
-
-    terminal_button = page.get_by_test_id("view-mode-terminal")
-    expect(terminal_button).to_be_enabled(timeout=60_000)
-    terminal_button.click()
-    main_terminal = page.locator('[data-testid="main-terminal-view"][data-visible="true"]')
-    terminal = main_terminal.get_by_test_id("terminal-view")
-    expect(terminal).to_have_attribute("data-state", "connected", timeout=120_000)
-
-    before = _repl_terminal(base_url, session_id)
-    assert before is not None, "runner did not register the REPL terminal"
+    main_terminal, terminal, before = _open_connected_terminal(page, base_url, session_id)
     before_socket = str(before["metadata"]["tmux_socket"])
-    _wait_for_pane_output(before_socket)
-    assert _session_status(base_url, session_id) == "idle"
 
     # xterm forwards keystrokes to the pty through its hidden input element.
     helper = terminal.locator("textarea.xterm-helper-textarea")
