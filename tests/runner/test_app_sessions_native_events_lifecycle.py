@@ -3493,7 +3493,6 @@ async def test_auxiliary_repl_exit_recreates_embedded_terminal(
     announce the rebuild via ``session.terminal_pending`` before the deletion
     lands and recreate the terminal.
     """
-    from omnigent.runner import app as runner_app
     from omnigent.runner.app import _session_event_queues_ref
     from omnigent.runner.resource_registry import TerminalExitEvent, TerminalLifecycle
 
@@ -3503,7 +3502,10 @@ async def test_auxiliary_repl_exit_recreates_embedded_terminal(
     async def _fake_auto_create_repl_terminal(session_id: str, *args: Any, **kwargs: Any) -> None:
         recreated.append(session_id)
 
-    monkeypatch.setattr(runner_app, "_auto_create_repl_terminal", _fake_auto_create_repl_terminal)
+    monkeypatch.setattr(
+        "omnigent.runner.resource_routes._auto_create_repl_terminal",
+        _fake_auto_create_repl_terminal,
+    )
     app = create_runner_app(
         process_manager=_FakeProcessManager(_ScriptedHarnessClient([])),  # type: ignore[arg-type]
         server_client=NullServerClient(),  # type: ignore[arg-type]
@@ -3555,7 +3557,6 @@ async def test_auxiliary_repl_exit_recreate_is_rate_limited(
     loop must stop after the cap instead of spinning forever; a fresh terminal
     attach still recreates the pane on demand.
     """
-    from omnigent.runner import app as runner_app
     from omnigent.runner.app import _session_event_queues_ref
     from omnigent.runner.resource_registry import TerminalExitEvent, TerminalLifecycle
 
@@ -3565,7 +3566,10 @@ async def test_auxiliary_repl_exit_recreate_is_rate_limited(
     async def _fake_auto_create_repl_terminal(session_id: str, *args: Any, **kwargs: Any) -> None:
         recreated.append(session_id)
 
-    monkeypatch.setattr(runner_app, "_auto_create_repl_terminal", _fake_auto_create_repl_terminal)
+    monkeypatch.setattr(
+        "omnigent.runner.resource_routes._auto_create_repl_terminal",
+        _fake_auto_create_repl_terminal,
+    )
     app = create_runner_app(
         process_manager=_FakeProcessManager(_ScriptedHarnessClient([])),  # type: ignore[arg-type]
         server_client=NullServerClient(),  # type: ignore[arg-type]

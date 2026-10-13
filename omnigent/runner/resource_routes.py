@@ -97,6 +97,7 @@ class ResourceRoutes:
     ensure_native_terminal_for_turn: Callable[[str, str | None], Coroutine[Any, Any, None]]
     require_os_env: Callable[[str], Coroutine[Any, Any, AgentSpec | None]]
     resolve_conversation_id: Callable[[str], Coroutine[Any, Any, str | None]]
+    recreate_repl_terminal: Callable[[str, str], Coroutine[Any, Any, TerminalListEntry | None]]
 
 
 def register_resource_routes(
@@ -1679,4 +1680,5 @@ def register_resource_routes(
         ensure_native_terminal_for_turn=_ensure_native_terminal_for_turn,
         require_os_env=_require_os_env,
         resolve_conversation_id=_resolve_conversation_id,
+        recreate_repl_terminal=_recreate_repl_terminal,
     )

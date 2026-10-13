@@ -1778,7 +1778,9 @@ def create_runner_app(
 
         async def _recover() -> None:
             try:
-                entry = await _recreate_repl_terminal(event.session_id, event.terminal_id)
+                entry = await _resource_routes.recreate_repl_terminal(
+                    event.session_id, event.terminal_id
+                )
                 if entry is None:
                     _logger.error(
                         "Could not recover REPL terminal %s for %s after its tmux backing died",
