@@ -7319,6 +7319,12 @@ async def _dispatch_session_event_to_runner_impl(
         if web_stable_id is not None:
             live_pending_id = pending_inputs.find_by_stable_id(session_id, web_stable_id)
             if live_pending_id is not None:
+                log_input_event(
+                    _logger,
+                    "native_input_retry_deduplicated",
+                    session_id=session_id,
+                    attributes=pending_inputs.delivery_attributes_for(session_id, live_pending_id),
+                )
                 return _SessionEventDispatchResult(item_id=None, pending_id=live_pending_id)
             committed_item_id = await asyncio.to_thread(
                 conversation_store.find_web_submission_item_id, session_id, web_stable_id
