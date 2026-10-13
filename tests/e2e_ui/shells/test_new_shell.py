@@ -430,9 +430,8 @@ def test_failed_terminal_view_surfaces_runner_failure_cause(
     When the runner fails to start (``runner_failed_to_start`` recorded as a
     session-level ``last_task_error`` with no transcript item), the Terminal
     view must tell the user why — the same actionable cause the Chat view
-    surfaces via its error pill. Today the Terminal surface shows only the
-    generic stopped copy, so a user who defaults to Terminal cannot tell the
-    session failed, let alone why.
+    surfaces via its error pill — so a user who defaults to Terminal can
+    tell the session failed and why.
     """
     base_url, session_id = terminal_session
 

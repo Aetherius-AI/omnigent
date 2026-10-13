@@ -271,9 +271,9 @@ describe("MainTerminalView — terminal-first SDK sessions", () => {
     });
 
     expect(screen.getByText("The harness is not running.")).toBeInTheDocument();
-    expect(
-      screen.getByText("runner process exited before connecting; host authentication failed"),
-    ).toBeInTheDocument();
+    expect(screen.getByTestId("terminal-failure-cause")).toHaveTextContent(
+      "runner process exited before connecting; host authentication failed",
+    );
     expect(screen.getByRole("button", { name: "Resume session" })).toBeInTheDocument();
   });
 
