@@ -2464,7 +2464,9 @@ async def test_mcp_execute_omits_local_tool_name_containing_double_underscore(
     assert "result" not in payload, (
         f"a '__'-named local tool produced a successful envelope: {payload!r}"
     )
-    assert payload["error"]["code"] < 0
+    # The ``__`` name routes to the external MCP manager, which has no server
+    # serving it, so dispatch fails with the MCP-manager error code.
+    assert payload["error"]["code"] == -32000, payload
 
 
 def _nb2_echo_callable(text: str = "") -> str:
@@ -2500,6 +2502,21 @@ def test_build_mcp_local_tool_schemas_lists_callable_omits_file_local() -> None:
     assert "file_local_tool" not in names, (
         "a file-local tool needs the agent workdir to load, so it is not advertised"
     )
+
+
+def test_build_mcp_local_tool_schemas_ignores_non_agent_spec_stand_in() -> None:
+    """A resolver stand-in that is not an ``AgentSpec`` yields no local schemas.
+
+    ``_unwrap_resolved_spec`` passes legacy or test resolver objects through
+    unchanged, so ``tools/list`` must not try to build a ``ToolManager`` from
+    one and fail the whole listing (including external MCP schemas).
+    """
+
+    class _StandInSpec:
+        mcp_servers: list[object] = []
+        local_tools: list[object] = []
+
+    assert _tool_dispatch.build_mcp_local_tool_schemas(_StandInSpec()) == []
 
 
 @pytest.mark.asyncio

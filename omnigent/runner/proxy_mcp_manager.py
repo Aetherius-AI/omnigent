@@ -270,10 +270,8 @@ class ProxyMcpManager:
         server_prefixes = tuple(f"{server.name}__" for server in spec.mcp_servers)
         for tool in tools_list:
             name = tool.get("name")
-            # The proxy catalog also lists the session's runner-local tools, which
-            # the runner registers directly. Keep only tools namespaced under a
-            # configured MCP server; a bare or local name (even one containing
-            # ``__``) is not an external MCP tool.
+            # The proxy catalog also lists runner-local tools; keep only names
+            # namespaced under a configured MCP server (bare ``__`` names are local).
             if not isinstance(name, str) or not name or not name.startswith(server_prefixes):
                 continue
             # The Omnigent server returns ``inputSchema`` (JSON Schema from MCP).

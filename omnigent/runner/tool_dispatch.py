@@ -930,6 +930,13 @@ _granted_tool_names_cache: dict[
 ] = {}
 _GRANTED_TOOL_NAMES_CACHE_MAX = 256
 
+# Flat MCP schemas for the local tools ``tools/list`` advertises, keyed and
+# weakref-guarded like ``_granted_tool_names_cache``. Caching avoids rebuilding a
+# ToolManager (and its synchronous filesystem probes) on every discovery call.
+_mcp_local_tool_schemas_cache: dict[
+    tuple[int, str | None], tuple[weakref.ref[AgentSpec], list[_JsonObject]]
+] = {}
+
 
 def _effective_harness_name(agent_spec: AgentSpec, effective_harness: str | None) -> str | None:
     """Return the canonical harness a session actually runs.
@@ -1063,7 +1070,17 @@ def build_mcp_local_tool_schemas(
     former run on the client and the latter route to the external MCP manager,
     so neither is dispatchable as a bare local tool through this endpoint.
     """
+    from omnigent.spec.types import AgentSpec as _AgentSpec
+
+    if not isinstance(agent_spec, _AgentSpec):
+        # Partial stand-ins (legacy or test resolver objects) cannot build a
+        # ToolManager; match the dispatch gate and advertise no local surface.
+        return []
     harness = _effective_harness_name(agent_spec, effective_harness)
+    cache_key = (id(agent_spec), harness)
+    cached = _mcp_local_tool_schemas_cache.get(cache_key)
+    if cached is not None and cached[0]() is agent_spec:
+        return cached[1]
     granted = _granted_tool_names(agent_spec, harness)
     client_names = client_runtime_tool_names(agent_spec)
     manager = ToolManager(agent_spec, os_env_schema_only=True)
@@ -1095,7 +1112,11 @@ def build_mcp_local_tool_schemas(
             "description": description if isinstance(description, str) else "",
             "parameters": parameters or {"type": "object", "properties": {}},
         }
-    return list(schemas.values())
+    result = list(schemas.values())
+    if len(_mcp_local_tool_schemas_cache) >= _GRANTED_TOOL_NAMES_CACHE_MAX:
+        _mcp_local_tool_schemas_cache.clear()
+    _mcp_local_tool_schemas_cache[cache_key] = (weakref.ref(agent_spec), result)
+    return result
 
 
 async def _execute_local_python_tool(

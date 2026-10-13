@@ -343,9 +343,8 @@ def register_mcp_routes(
                         spec_workdir = _resolved_workdir_for_spec(resolved_entry, runner_workspace)
                         spec = _unwrap_resolved_spec(resolved_entry)
                     except (OmnigentError, httpx.HTTPError, RuntimeError):
-                        # A transient resolution failure here now fails closed
-                        # below; log it so that is distinguishable from a session
-                        # that genuinely has no spec.
+                        # Resolution failure falls through to the fail-closed branch
+                        # below; log so it's distinguishable from a spec-less session.
                         _logger.warning(
                             "MCP tools/call spec resolution failed for session %r; failing closed",
                             session_id,
