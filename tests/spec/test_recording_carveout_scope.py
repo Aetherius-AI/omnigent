@@ -58,13 +58,22 @@ def test_caption_rules_require_visible_assertions_not_attribute_reads() -> None:
     lanes = _normalized(_DEV / "recording-lanes.md")
     instructions = " ".join(load(_REPRO_AGENT, expand_env=False).instructions.split())
 
-    assert "`expect(locator).to_be_visible()`" in lanes
-    assert "open in the recorded viewport" in lanes
+    assert (
+        "A visible-state assertion is `expect(locator).to_be_visible()` on the element "
+        "the caption describes" in lanes
+    )
+    assert "scrolling that element into the recorded viewport" in lanes
+    assert "text matching alone is not a substitute" in lanes
+    assert "or `to_have_text(...)`" not in lanes
     assert '`get_attribute("aria-label")`' in lanes
     assert "never-opened elements, so they are not screen evidence" in lanes
     assert "Quote only text the clip renders" in lanes
+    assert "a native `title` tooltip has no locator" in lanes
     assert "say so in the caption" in lanes
 
+    assert "`to_be_visible()` on the element the caption describes" in instructions
+    assert "text matching alone passes on hidden content" in instructions
+    assert "`to_be_visible()` / `to_have_text()`" not in instructions
     assert '`get_attribute("aria-label")`' in instructions
     assert "they are not screen evidence" in instructions
     assert "say so in the caption and claim only what visibility assertions established" in (
