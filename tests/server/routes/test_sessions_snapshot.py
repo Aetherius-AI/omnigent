@@ -883,6 +883,8 @@ async def _snapshot_after_runner_exit(
         monkeypatch.setitem(session_live_state._last_liveness_stamp, "runner_ran", 1)
     else:
         monkeypatch.delitem(session_live_state._last_liveness_stamp, "runner_ran", raising=False)
+    if connection_source == "persisted":
+        conv.runner_connected_id = "runner_ran"
     reports = RunnerExitReports()
     reports.record(
         "runner_ran",
@@ -899,7 +901,7 @@ async def _snapshot_after_runner_exit(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("connection_source", ["replica", "host"])
+@pytest.mark.parametrize("connection_source", ["replica", "host", "persisted"])
 async def test_session_snapshot_idle_session_of_connected_runner_ignores_exit_report(
     monkeypatch: pytest.MonkeyPatch,
     connection_source: str,
@@ -920,7 +922,7 @@ async def test_session_snapshot_idle_session_of_connected_runner_ignores_exit_re
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("live_status", ["running", "waiting", "failed"])
-@pytest.mark.parametrize("connection_source", ["replica", "host"])
+@pytest.mark.parametrize("connection_source", ["replica", "host", "persisted"])
 async def test_session_snapshot_exit_report_still_fails_non_idle_session_of_connected_runner(
     monkeypatch: pytest.MonkeyPatch, live_status: str, connection_source: str
 ) -> None:

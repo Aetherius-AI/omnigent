@@ -1484,6 +1484,10 @@ class ConversationStore(ABC):
         derive ``runner_online`` from freshness. One bulk ``UPDATE``;
         must NOT bump ``updated_at`` (it drives sidebar ordering).
 
+        Remember which binding connected; clearing the live stamp retains
+        that evidence, and a different runner binding cannot reuse it.
+        An id longer than the column bound is not remembered.
+
         :param runner_ids: Runner ids with a live tunnel,
             e.g. ``["runner_token_abc123"]``. Empty is a no-op.
         :param now: Epoch seconds to stamp.

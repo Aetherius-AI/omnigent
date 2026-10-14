@@ -272,10 +272,16 @@ class Conversation:
     live_status: str | None = None
     pending_elicitation_count: int | None = None
     runner_last_seen: int | None = None
+    runner_connected_id: str | None = None
     project_id: str | None = None
     # Transient: populated only by list_conversations on a content search;
     # never read from or written to the DB.
     search_snippet: str | None = None
+
+    @property
+    def runner_has_connected(self) -> bool:
+        """A heartbeat was persisted for the current binding, even if now offline."""
+        return self.runner_id is not None and self.runner_connected_id == self.runner_id
 
 
 # ── Conversation item data types ───────────────────────

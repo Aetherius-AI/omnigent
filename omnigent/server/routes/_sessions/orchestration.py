@@ -12641,6 +12641,7 @@ async def _get_session_snapshot(
         runner_ran = (
             runner_exit_reports.was_connected(conv.runner_id)
             or session_live_state.last_liveness_stamp(conv.runner_id) is not None
+            or conv.runner_has_connected
         )
         # A cause recorded by a previous runner attempt is stale once a new
         # runner is bound; surface that runner's exit instead of hiding it.
