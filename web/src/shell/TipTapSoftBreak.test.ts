@@ -191,6 +191,23 @@ describe("SoftBreak serialisation", () => {
     );
   });
 
+  it("collapses soft breaks left adjacent by edits into one newline", () => {
+    editor = makeEditor("alpha\nbeta\ngamma");
+    const [first, second] = softBreakPositions(editor.state.doc);
+    editor.commands.deleteRange({ from: first + 1, to: second });
+    expect(softBreakPositions(editor.state.doc)).toHaveLength(2);
+    expect(editor.getMarkdown().trim()).toBe("alpha\ngamma");
+  });
+
+  it("drops the marks of a soft break whose marked neighbours were deleted", () => {
+    editor = makeEditor("x **a\nb** y");
+    const [sb] = softBreakPositions(editor.state.doc);
+    // Delete "b" (after the break) and then "a" (before it).
+    editor.commands.deleteRange({ from: sb + 1, to: sb + 2 });
+    editor.commands.deleteRange({ from: sb - 1, to: sb });
+    expect(editor.getMarkdown().trim()).toBe("x \n y");
+  });
+
   it("joins the two source lines when the user deletes a soft break", () => {
     editor = makeEditor(WRAPPED);
     const [firstBreak] = softBreakPositions(editor.state.doc);

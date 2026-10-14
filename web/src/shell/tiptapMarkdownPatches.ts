@@ -60,6 +60,9 @@ function joinSoftBreaks(node: JSONContent): JSONContent {
   let afterBreak = false;
   for (const child of node.content) {
     const isBreak = child.type === SOFT_BREAK_NODE;
+    // Consecutive soft breaks (a wrapped line emptied by edits) would serialise
+    // as a blank line and split the paragraph on reload; keep one newline.
+    if (isBreak && afterBreak) continue;
     const next = isBreak ? textNode("\n", child.marks) : joinSoftBreaks(child);
     const prev = content[content.length - 1];
     if (
@@ -70,7 +73,9 @@ function joinSoftBreaks(node: JSONContent): JSONContent {
     ) {
       content[content.length - 1] = { ...prev, text: (prev.text ?? "") + (next.text ?? "") };
     } else {
-      content.push(next);
+      // Marks on a newline that found no same-marked neighbour carry no meaning
+      // and would serialise as `**\n**`.
+      content.push(isBreak ? textNode("\n", undefined) : next);
     }
     afterBreak = isBreak;
   }
@@ -181,7 +186,7 @@ function splitSoftBreaks(node: JSONContent, verbatim: ReadonlySet<string>): JSON
   return { ...node, content };
 }
 
-/** The private surface of MarkdownManager the parser patch reads. */
+/** The private surface of MarkdownManager the soft-break patches read. */
 interface ParserInternals {
   /** Every extension registered with this manager (the editor's stack). */
   extensions: { name: string }[];

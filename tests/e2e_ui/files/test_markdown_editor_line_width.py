@@ -191,4 +191,5 @@ def test_edit_mode_reflows_hard_wrapped_paragraph_to_viewer_width(
         page.get_by_role("button", name=re.compile("Add comment", re.IGNORECASE))
     ).to_be_visible()
     page.keyboard.press("ControlOrMeta+c")
+    page.wait_for_function("() => window.__copiedText !== null")
     assert page.evaluate("window.__copiedText") == f"{last_word}\n{first_word}"
