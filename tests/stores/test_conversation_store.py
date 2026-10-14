@@ -7,7 +7,7 @@ import json
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -7077,56 +7077,6 @@ def test_list_conversations_archived_only_returns_only_archived(
     assert active.id not in ids
 
 
-def test_runner_connection_history_tracks_the_binding(
-    conversation_store: SqlAlchemyConversationStore,
-) -> None:
-    conv = conversation_store.create_conversation(runner_id="runner-old")
-    conversation_store.touch_runner_liveness(["runner-old"], now=1)
-    conversation_store.clear_runner_liveness("runner-old")
-    offline = conversation_store.get_conversation(conv.id)
-    assert offline is not None
-    assert offline.runner_last_seen is None
-    assert offline.runner_has_connected
-    assert offline.updated_at == conv.updated_at
-
-    conversation_store.clear_runner_id(conv.id)
-    assert conversation_store.set_runner_id(conv.id, "runner-new")
-    conversation_store.touch_runner_liveness(["runner-old"], now=2)
-    rebound = conversation_store.get_conversation(conv.id)
-    assert rebound is not None
-    assert not rebound.runner_has_connected
-    assert rebound.runner_connected_id == "runner-old"
-
-    conversation_store.touch_runner_liveness(["runner-new"], now=3)
-    connected = conversation_store.get_conversation(conv.id)
-    assert connected is not None and connected.runner_has_connected
-    assert connected.runner_connected_id == "runner-new"
-    assert connected.runner_last_seen == 3
-
-    conversation_store.replace_runner_id(conv.id, "runner-replacement")
-    conversation_store.touch_runner_liveness(["runner-new"], now=4)
-    replaced = conversation_store.get_conversation(conv.id)
-    assert replaced is not None
-    assert not replaced.runner_has_connected
-    assert replaced.runner_connected_id == "runner-new"
-    assert replaced.runner_last_seen == 3
-
-
-def test_runner_connection_history_skips_oversized_runner_ids(
-    conversation_store: SqlAlchemyConversationStore,
-) -> None:
-    if conversation_store._engine.dialect.name != "sqlite":
-        pytest.skip("only SQLite stores a runner_id longer than its declared bound")
-    oversized = "runner_" + "x" * RUNNER_ID_MAX_LENGTH
-    conv = conversation_store.create_conversation(runner_id=oversized)
-    conversation_store.touch_runner_liveness([oversized], now=1)
-    refreshed = conversation_store.get_conversation(conv.id)
-    assert refreshed is not None
-    assert refreshed.runner_last_seen == 1
-    assert refreshed.runner_connected_id is None
-    assert not refreshed.runner_has_connected
-
-
 def test_live_state_columns_round_trip_without_bumping_updated_at(
     conversation_store: SqlAlchemyConversationStore,
 ) -> None:
@@ -8322,3 +8272,75 @@ def test_get_conversation_keeps_distinct_query_names(
         "omnigent.conversation_store.select_conversation_metadata_by_id",
         "omnigent.conversation_store.select_conversation_labels",
     ], names
+
+
+@pytest.mark.parametrize(
+    "initial_runner_id", ["runner-old", "🙂" * RUNNER_ID_MAX_LENGTH], ids=["ascii", "unicode64"]
+)
+def test_runner_connection_history_tracks_the_binding(
+    conversation_store: SqlAlchemyConversationStore,
+    initial_runner_id: str,
+) -> None:
+    conv = conversation_store.create_conversation(runner_id=initial_runner_id)
+    conversation_store.touch_runner_liveness([initial_runner_id], now=1)
+    conversation_store.clear_runner_liveness(initial_runner_id)
+    offline = conversation_store.get_conversation(conv.id)
+    assert offline is not None
+    assert offline.runner_last_seen is None
+    assert offline.runner_has_connected
+    assert offline.updated_at == conv.updated_at
+
+    conversation_store.clear_runner_id(conv.id)
+    assert conversation_store.set_runner_id(conv.id, "runner-new")
+    conversation_store.touch_runner_liveness([initial_runner_id], now=2)
+    rebound = conversation_store.get_conversation(conv.id)
+    assert rebound is not None
+    assert not rebound.runner_has_connected
+    assert rebound.runner_connected_id == initial_runner_id
+
+    conversation_store.touch_runner_liveness(["runner-new"], now=3)
+    connected = conversation_store.get_conversation(conv.id)
+    assert connected is not None and connected.runner_has_connected
+    assert connected.runner_connected_id == "runner-new"
+    assert connected.runner_last_seen == 3
+
+    conversation_store.replace_runner_id(conv.id, "runner-replacement")
+    conversation_store.touch_runner_liveness(["runner-new"], now=4)
+    replaced = conversation_store.get_conversation(conv.id)
+    assert replaced is not None
+    assert not replaced.runner_has_connected
+    assert replaced.runner_connected_id == "runner-new"
+    assert replaced.runner_last_seen == 3
+
+
+@pytest.mark.parametrize(
+    "legacy_id",
+    [
+        "x" * (RUNNER_ID_MAX_LENGTH + 1),
+        "🙂" * (RUNNER_ID_MAX_LENGTH + 1),
+        "ok\x00" + "x" * 16_384,
+        "ok\x00" + "x" * 80,
+        b"\x00" + b"x" * 16_384,
+        b"short",
+    ],
+    ids=["ascii65", "unicode65", "nul-large", "nul-hidden", "blob-large", "blob-short"],
+)
+def test_runner_connection_history_skips_invalid_legacy_ids(
+    conversation_store: SqlAlchemyConversationStore,
+    legacy_id: str | bytes,
+) -> None:
+    if conversation_store._engine.dialect.name != "sqlite":
+        pytest.skip("only SQLite stores legacy IDs outside VARCHAR constraints")
+    conv = conversation_store.create_conversation(runner_id=cast(str, legacy_id))
+    valid_id = "🙂" * RUNNER_ID_MAX_LENGTH
+    valid = conversation_store.create_conversation(runner_id=valid_id)
+    conversation_store.touch_runner_liveness([cast(str, legacy_id), valid_id], now=1)
+    refreshed = conversation_store.get_conversation(conv.id)
+    assert refreshed is not None
+    assert refreshed.runner_last_seen == 1
+    assert refreshed.runner_connected_id is None
+    assert not refreshed.runner_has_connected
+    valid_refreshed = conversation_store.get_conversation(valid.id)
+    assert valid_refreshed is not None
+    assert valid_refreshed.runner_last_seen == 1
+    assert valid_refreshed.runner_connected_id == valid_id

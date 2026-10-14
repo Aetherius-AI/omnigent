@@ -36,7 +36,7 @@ from omnigent.util.uuid import uuid_to_bytes as uuid_to_bytes
 
 # The schema created by these model definitions; later migrations can precede
 # their application mappings during a staged deployment.
-MODEL_SCHEMA_REVISION = "mm1a2b3c4d5e"
+MODEL_SCHEMA_REVISION = "mn1a2b3c4d5e"
 
 # 32-byte sha256 digest column. LargeBinary → BYTEA (Postgres) / BLOB (SQLite),
 # but MySQL cannot index a BLOB without a key-prefix length, so use fixed-length
@@ -642,6 +642,7 @@ class SqlSessionPermission(OmnigentBase):
 
 # Max length shared by ``runner_id`` and ``runner_connected_id``.
 RUNNER_ID_MAX_LENGTH = 64
+RUNNER_ID_MAX_UTF8_BYTES = 4 * RUNNER_ID_MAX_LENGTH
 
 
 class SqlConversationMetadata(OmnigentBase):
@@ -708,6 +709,14 @@ class SqlConversationMetadata(OmnigentBase):
             "host_id IS NULL OR workspace IS NOT NULL",
             name="ck_conversation_metadata_workspace_required_for_host",
         ),
+        CheckConstraint(
+            "runner_connected_id IS NULL OR (typeof(runner_connected_id) = 'text' "
+            "AND instr(runner_connected_id, char(0)) = 0 "
+            f"AND length(runner_connected_id) <= {RUNNER_ID_MAX_LENGTH} "
+            "AND length(CAST(runner_connected_id AS BLOB)) "
+            f"<= {RUNNER_ID_MAX_UTF8_BYTES})",
+            name="ck_conversation_metadata_runner_connected_id_bound",
+        ).ddl_if(dialect="sqlite"),
         # Supports list_conversations_by_runner_id and get_runner_ids.
         Index("ix_conversation_metadata_runner_id", "workspace_id", "runner_id", "id"),
         # "list sessions in project X" + per-project counts (GROUP BY project_id).

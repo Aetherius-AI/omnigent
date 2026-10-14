@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from pathlib import Path
 
@@ -32,10 +33,11 @@ async def test_idle_runner_exit_keeps_connection_history_after_restart(
     model = "runner-history-mock"
     answer = "IDLE_HISTORY_COMPLETE"
     configure_mock_llm(isolated_mock_llm_server_url, [{"text": answer}], key=model)
+    runtime = {"OMNIGENT_HARNESS_TMP_PARENT": os.environ.get("OMNIGENT_HARNESS_TMP_PARENT")}
     with server_runner(
-        tmp_path / "stack", server_env={"OMNIGENT_PROCESS_LOG_FILE": str(runtime_log)}
+        tmp_path / "stack", server_env={**runtime, "OMNIGENT_PROCESS_LOG_FILE": str(runtime_log)}
     ) as stack:
-        stack.start_runner()
+        stack.start_runner(env=runtime)
         store = SqlAlchemyConversationStore(stack.database_uri)
         try:
             with httpx.Client(base_url=stack.base_url, trust_env=False) as client:

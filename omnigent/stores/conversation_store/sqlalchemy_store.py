@@ -13,8 +13,10 @@ from sqlalchemy import (
     ColumnElement,
     LargeBinary,
     Select,
+    String,
     and_,
     asc,
+    bindparam,
     delete,
     desc,
     func,
@@ -37,6 +39,7 @@ from omnigent.db.converters import sql_agent_to_entity
 from omnigent.db.db_models import (
     LABEL_VALUE_MAX_LEN,
     RUNNER_ID_MAX_LENGTH,
+    RUNNER_ID_MAX_UTF8_BYTES,
     SqlAgent,
     SqlComment,
     SqlConversation,
@@ -3742,20 +3745,39 @@ class SqlAlchemyConversationStore(ConversationStore):
             return
         from sqlalchemy import case, update
 
+        runner_id = SqlConversationMetadata.runner_id
+        marker_is_valid: ColumnElement[bool] = func.length(runner_id) <= RUNNER_ID_MAX_LENGTH
+        byte_length = func.octet_length(runner_id)
+        if self._engine.dialect.name == "sqlite":
+            byte_length = func.length(runner_id.cast(LargeBinary))
+            marker_is_valid = and_(
+                marker_is_valid,
+                func.typeof(runner_id) == "text",
+                func.instr(runner_id, func.char(0)) == 0,
+            )
+        marker_is_valid = and_(marker_is_valid, byte_length <= RUNNER_ID_MAX_UTF8_BYTES)
+
         def write(session: Session) -> None:
             session.execute(
                 update(SqlConversationMetadata)
                 .where(
                     SqlConversationMetadata.workspace_id == current_workspace_id(),
-                    SqlConversationMetadata.runner_id.in_(runner_ids),
+                    SqlConversationMetadata.runner_id.in_(
+                        # A legacy binary ID must not change the entire batch's bind type.
+                        bindparam(
+                            "runner_ids",
+                            runner_ids,
+                            expanding=True,
+                            type_=String(RUNNER_ID_MAX_LENGTH),
+                        )
+                    ),
                 )
                 .values(
                     runner_last_seen=now,
-                    # SQLite does not enforce String(n): leave the marker unset for
-                    # an oversized legacy id rather than store an unbounded value.
+                    # Invalid legacy IDs must not abort the other heartbeat updates.
                     runner_connected_id=case(
                         (
-                            func.length(SqlConversationMetadata.runner_id) <= RUNNER_ID_MAX_LENGTH,
+                            marker_is_valid,
                             SqlConversationMetadata.runner_id,
                         ),
                         else_=None,
