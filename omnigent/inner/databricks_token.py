@@ -11,9 +11,10 @@ never got a Gateway bearer. The databricks-sdk's ``Config.authenticate()`` does
 the client-credentials exchange (and env / file OIDC and a static PAT), so this
 mints through the SDK rather than reimplementing any OAuth.
 
-The caller already tried CLI authentication. This fallback excludes the SDK's
-CLI provider, which can otherwise force another rotation of the shared OAuth
-refresh token. SDK-native credentials, including M2M, remain available.
+The generated helper runs ``databricks auth token`` before this fallback, so the
+SDK's own ``databricks-cli`` strategy is excluded here: repeating that request (a
+forced refresh on newer SDKs) rotates the shared OAuth grant again. Every other
+SDK credential source, including M2M, stays available.
 
 Identity is **fail-closed and profile-pinned**. The SDK resolves config in the
 order kwargs > environment > profile-section, so ``Config(profile=P)`` alone does
@@ -86,8 +87,7 @@ def _sdk_bearer(profile: str | None, host: str | None) -> tuple[str, str] | None
     class SdkFallbackCredentials(DefaultCredentials, CredentialsStrategy):
         def __init__(self) -> None:
             super().__init__()
-            # The caller already tried the CLI; its SDK strategy can force
-            # another rotation of the same shared OAuth refresh token.
+            # The helper already ran the CLI; see the module docstring.
             self._auth_providers = [
                 provider
                 for provider in self._auth_providers
