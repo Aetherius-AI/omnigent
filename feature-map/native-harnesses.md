@@ -263,6 +263,16 @@ Cross-harness journeys:
   one approval must send just one Enter; the next identical request stays
   unanswered. The fixture uses the current built SPA and logs the server's
   import path. Without the older checkout, this mixed-version case is skipped.
+  After building the current SPA, reproduce with the pre-retry server `511135bc4`:
+
+  ```sh
+  git worktree add --detach ../omnigent-kiro-legacy-511135bc4 511135bc4
+  OMNIGENT_E2E_KIRO_LEGACY_SERVER_CHECKOUT="$(cd ../omnigent-kiro-legacy-511135bc4 && pwd)" \
+    uv run --no-sync pytest \
+    tests/e2e_ui/messages/test_kiro_permission_retry.py::test_kiro_legacy_server_does_not_repeat_enter \
+    --headed --ui-skip-build
+  ```
+
   Child-session routing uses the shared approval card; server ownership and
   receipt races, abandoned-hook cleanup, and legacy verdict replay are covered by
   `tests/server/integration/test_kiro_permission_delivery.py`.
