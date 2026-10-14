@@ -21,6 +21,7 @@ import { Table, TableCell, TableHeader, TableRow } from "@tiptap/extension-table
 import { createWorkspaceImageExtension, ImageAwareLink } from "./TipTapWorkspaceImage";
 import { GitHubAlertBlockquote } from "./TipTapGitHubAlert";
 import { HtmlPassthrough } from "./TipTapHtmlPassthrough";
+import { SoftLineBreak } from "./TipTapSoftLineBreak";
 import { installMarkdownSerializerPatch } from "./tiptapMarkdownPatches";
 
 vi.mock("@/hooks/useFileContent", async (importOriginal) => {
@@ -49,6 +50,7 @@ function makeEditor(markdown: string): Editor {
       ImageAwareLink.configure({ openOnClick: false, autolink: false }),
       GitHubAlertBlockquote,
       HtmlPassthrough,
+      SoftLineBreak,
       Markdown,
       createWorkspaceImageExtension("conv_test1", "README.md"),
     ],

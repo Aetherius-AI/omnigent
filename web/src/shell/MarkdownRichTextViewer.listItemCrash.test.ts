@@ -31,6 +31,7 @@ import { Markdown } from "@tiptap/markdown";
 import { createWorkspaceImageExtension, ImageAwareLink } from "./TipTapWorkspaceImage";
 import { GitHubAlertBlockquote } from "./TipTapGitHubAlert";
 import { HtmlPassthrough } from "./TipTapHtmlPassthrough";
+import { SoftLineBreak } from "./TipTapSoftLineBreak";
 
 // The fix under test — must match MarkdownRichTextViewer's SafeListItem.
 const SafeListItem = ListItem.extend({ content: "block+" });
@@ -71,6 +72,7 @@ function makeEditor(markdown: string): Editor {
       ImageAwareLink.configure({ openOnClick: false, autolink: false }),
       GitHubAlertBlockquote,
       HtmlPassthrough,
+      SoftLineBreak,
       Markdown,
       createWorkspaceImageExtension("conv_test", "README.md"),
     ],

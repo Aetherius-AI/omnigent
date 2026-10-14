@@ -14,6 +14,10 @@
 //   - `>` when it starts a line (would become a blockquote)
 // Everything else round-trips verbatim.
 //
+// The same override writes a soft line break (a space carrying the
+// SoftLineBreak mark, see TipTapSoftLineBreak.ts) back as the newline it was
+// parsed from, so a save keeps the file's wrapping.
+//
 // The method (and the `codeTypes` registry it reads) are `private` in the
 // upstream .d.ts, hence the casts. The patch is pinned by the round-trip
 // tests in TipTapHtmlPassthrough.test.ts — if a @tiptap/markdown upgrade
@@ -23,6 +27,7 @@ import { MarkdownManager } from "@tiptap/markdown";
 import type { JSONContent } from "@tiptap/core";
 
 import { toBlockContent } from "./TipTapGitHubAlert";
+import { isSoftLineBreakText } from "./TipTapSoftLineBreak";
 
 /** Ampersands that would parse as an entity reference on the way back in. */
 const ENTITY_AMP = /&(?=[a-zA-Z][a-zA-Z0-9]{1,31};|#\d{1,7};|#[xX][0-9a-fA-F]{1,6};)/g;
@@ -54,6 +59,7 @@ export function installMarkdownSerializerPatch(): void {
     node: JSONContent,
     parentNode: JSONContent | undefined,
   ): string {
+    if (isSoftLineBreakText(node)) return "\n";
     // Same code-context check as upstream: literal characters are preserved
     // inside code marks / code blocks.
     const insideCode =

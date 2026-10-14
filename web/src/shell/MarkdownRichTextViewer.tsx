@@ -50,6 +50,7 @@ import { CodeBlockWithLanguage } from "./TipTapCodeBlockExtension";
 import { isUserEditUpdate } from "./codeBlockLanguageEdit";
 import { GitHubAlertBlockquote } from "./TipTapGitHubAlert";
 import { HtmlPassthrough } from "./TipTapHtmlPassthrough";
+import { SoftLineBreak } from "./TipTapSoftLineBreak";
 import {
   installMarkdownParserPatch,
   installMarkdownSerializerPatch,
@@ -370,6 +371,7 @@ function MarkdownRichTextViewerInner({
       ImageAwareLink.configure({ openOnClick: false, autolink: false }),
       GitHubAlertBlockquote,
       HtmlPassthrough,
+      SoftLineBreak,
       Markdown,
       createWorkspaceImageExtension(conversationId, path),
       createCommentDecorationExtension(commentStateRef),

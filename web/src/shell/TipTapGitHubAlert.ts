@@ -15,6 +15,8 @@
 import { Blockquote } from "@tiptap/extension-blockquote";
 import type { JSONContent } from "@tiptap/core";
 
+import { isSoftLineBreakText } from "./TipTapSoftLineBreak";
+
 /** GitHub alert types, lowercase as stored in the `alertType` attr. */
 const ALERT_TYPES = ["note", "tip", "important", "warning", "caution"] as const;
 type AlertType = (typeof ALERT_TYPES)[number];
@@ -28,8 +30,9 @@ const ALERT_LABELS: Record<AlertType, string> = {
   caution: "Caution",
 };
 
-/** Matches a marker at the start of the quote's first paragraph text,
- *  e.g. "[!NOTE]\nrest of the paragraph…" or a bare "[!NOTE]". */
+/** Matches a marker that is the whole first text node of the quote's first
+ *  paragraph ("[!NOTE]", with the line break parsed separately) or that opens
+ *  it on its own line ("[!NOTE]\nrest of the paragraph…"). */
 const ALERT_MARKER = /^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\](\n|$)/;
 
 /** Result of stripping an alert marker from parsed blockquote children. */
@@ -116,22 +119,19 @@ export function extractAlert(children: JSONContent[]): ExtractedAlert {
   const stripped = firstText.text.slice(match[0].length);
   // `first.content!` below is safe: firstText (first.content[0]) was just
   // verified to be a text node, so first is a paragraph with content.
-  if (stripped === "" && first.content!.length === 1) {
+  let siblings = first.content!.slice(1);
+  // The line break after the marker belongs to the marker line, not the body.
+  if (stripped === "" && isSoftLineBreakText(siblings[0])) siblings = siblings.slice(1);
+  // Empty text nodes are invalid in ProseMirror — omit when the marker was
+  // the entire text node.
+  const body = [...(stripped !== "" ? [{ ...firstText, text: stripped }] : []), ...siblings];
+  if (body.length === 0) {
     // Marker-only paragraph: drop it (keep one empty paragraph if it was
     // the only child — blockquote content requires at least one block).
     const rest = children.slice(1);
     return { alertType, children: rest.length > 0 ? rest : [{ type: "paragraph" }] };
   }
-  const restoredFirst: JSONContent = {
-    ...first,
-    content: [
-      // Empty text nodes are invalid in ProseMirror — omit when the marker
-      // was the entire text node (e.g. "[!NOTE]\n" followed by marked text).
-      ...(stripped !== "" ? [{ ...firstText, text: stripped }] : []),
-      ...first.content!.slice(1),
-    ],
-  };
-  return { alertType, children: [restoredFirst, ...children.slice(1)] };
+  return { alertType, children: [{ ...first, content: body }, ...children.slice(1)] };
 }
 
 /**

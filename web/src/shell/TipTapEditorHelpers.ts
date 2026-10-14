@@ -11,11 +11,18 @@
 //      window hint so duplicate text resolves to the right occurrence.
 //   3. Map between text-content offset and PM position via binary search on
 //      doc.textBetween(0, mid, "\n").length — O(log n · n) for typical docs.
+//   4. Match with newlines folded to spaces: the editor shows a soft line
+//      break in the raw file as a space (one character either way), and
+//      anchors saved before that change still carry the newline.
 
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import type { Comment } from "@/hooks/useComments";
 
 const SEP = "\n";
+
+function foldNewlines(text: string): string {
+  return text.replace(/\n/g, " ");
+}
 
 /**
  * Returns the occurrence of `needle` whose start is closest to `hint`.
@@ -90,7 +97,7 @@ export function findPmRangeForComment(
   const hint =
     rawContent.length > 0 ? Math.round((start_index * textContent.length) / rawContent.length) : 0;
 
-  const textFrom = nearestOccurrence(textContent, anchor_content, hint);
+  const textFrom = nearestOccurrence(foldNewlines(textContent), foldNewlines(anchor_content), hint);
   if (textFrom === -1) return null;
 
   const from = textOffsetToPmPos(doc, textFrom);
@@ -129,10 +136,10 @@ export function computeSelectionData(
   const hint =
     textContent.length > 0 ? Math.round((textFrom * rawContent.length) / textContent.length) : 0;
 
-  const idx = nearestOccurrence(rawContent, anchor_content, hint);
+  const idx = nearestOccurrence(foldNewlines(rawContent), foldNewlines(anchor_content), hint);
 
   // Fall back to proportional indices when the anchor text isn't found
-  // verbatim (multi-line, table, code block selections).
+  // verbatim (multi-block, table, code block selections).
   if (idx === -1) {
     return {
       start_index: hint,

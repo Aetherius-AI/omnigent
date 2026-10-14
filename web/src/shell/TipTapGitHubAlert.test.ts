@@ -7,7 +7,9 @@
  *   - plain blockquotes are untouched in both directions
  *
  * Editor tests use a real TipTap Editor (real schema, real @tiptap/markdown
- * parsing) so regressions in parse/serialise behaviour fail the test.
+ * parsing) so regressions in parse/serialise behaviour fail the test. The
+ * viewer's serialiser patch is installed because it writes the soft line
+ * breaks inside a quote back as newlines.
  */
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -15,6 +17,10 @@ import { Editor } from "@tiptap/core";
 import { Markdown } from "@tiptap/markdown";
 import { StarterKit } from "@tiptap/starter-kit";
 import { extractAlert, GitHubAlertBlockquote, toBlockContent } from "./TipTapGitHubAlert";
+import { SoftLineBreak } from "./TipTapSoftLineBreak";
+import { installMarkdownSerializerPatch } from "./tiptapMarkdownPatches";
+
+installMarkdownSerializerPatch();
 
 let editor: Editor | null = null;
 afterEach(() => {
@@ -31,6 +37,7 @@ function makeEditor(markdown: string): Editor {
       // disabled so GitHubAlertBlockquote owns the markdown token.
       StarterKit.configure({ blockquote: false }),
       GitHubAlertBlockquote,
+      SoftLineBreak,
       Markdown,
     ],
     content: markdown,
@@ -49,6 +56,23 @@ describe("extractAlert", () => {
     ]);
     expect(alertType).toBe("note");
     expect(children[0].content![0].text).toBe("body text");
+  });
+
+  it("drops the soft line break that follows a marker", () => {
+    const { alertType, children } = extractAlert([
+      {
+        type: "paragraph",
+        content: [
+          { type: "text", text: "[!TIP]" },
+          { type: "text", text: " ", marks: [{ type: "softLineBreak" }] },
+          { type: "text", text: "body text" },
+        ],
+      },
+    ]);
+    expect(alertType).toBe("tip");
+    expect(children).toEqual([
+      { type: "paragraph", content: [{ type: "text", text: "body text" }] },
+    ]);
   });
 
   it("drops a marker-only paragraph but keeps the rest", () => {

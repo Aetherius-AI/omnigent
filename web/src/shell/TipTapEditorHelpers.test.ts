@@ -132,6 +132,19 @@ describe("findPmRangeForComment", () => {
     const result = findPmRangeForComment(doc, makeComment("Hello", 10), rawContent);
     expect(result).toEqual({ from: 6, to: 11 });
   });
+
+  it("re-locates an anchor saved across a source line break the editor now shows as a space", () => {
+    // The anchor was stored while soft line breaks reached the editor text as
+    // "\n"; the editor now renders that break as a space of the same length.
+    const rawContent = "The rollout plan covers the previous\nrelease. Each cluster";
+    const doc = makeDoc("The rollout plan covers the previous release. Each cluster");
+    const result = findPmRangeForComment(
+      doc,
+      makeComment("previous\nrelease. Each", 28),
+      rawContent,
+    );
+    expect(result).toEqual({ from: 28, to: 50 });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -157,6 +170,18 @@ describe("computeSelectionData", () => {
     const doc = makeDoc(text);
     const result = computeSelectionData(7, 12, doc, text);
     expect(result).toEqual({ start_index: 7, end_index: 12, anchor_content: "world" });
+  });
+
+  it("returns exact raw indices for a selection spanning a soft line break", () => {
+    // The raw file wraps the paragraph; the editor shows the break as a space.
+    const rawContent = "wrapped prose keeps\nflowing in the editor";
+    const doc = makeDoc("wrapped prose keeps flowing in the editor");
+    const result = computeSelectionData(8, 27, doc, rawContent);
+    expect(result).toEqual({
+      start_index: 8,
+      end_index: 27,
+      anchor_content: "prose keeps flowing",
+    });
   });
 
   it("uses anchor_content as-is (no trimming)", () => {

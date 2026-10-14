@@ -36,6 +36,7 @@ import { Markdown } from "@tiptap/markdown";
 import { createWorkspaceImageExtension, ImageAwareLink } from "./TipTapWorkspaceImage";
 import { GitHubAlertBlockquote } from "./TipTapGitHubAlert";
 import { HtmlPassthrough } from "./TipTapHtmlPassthrough";
+import { SoftLineBreak } from "./TipTapSoftLineBreak";
 import { installMarkdownParserPatch } from "./tiptapMarkdownPatches";
 
 // The fix under test — installed at module load, as MarkdownRichTextViewer does.
@@ -80,6 +81,7 @@ function makeEditor(markdown: string): Editor {
       ImageAwareLink.configure({ openOnClick: false, autolink: false }),
       GitHubAlertBlockquote,
       HtmlPassthrough,
+      SoftLineBreak,
       Markdown,
       createWorkspaceImageExtension("conv_test", "README.md"),
     ],
