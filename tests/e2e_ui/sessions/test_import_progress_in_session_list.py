@@ -1,8 +1,4 @@
-"""E2E: the session list shows an in-progress state while sessions are being imported.
-
-Real path: a spawned host daemon with seeded Claude Code transcripts, the real
-Settings › Import UI, and the real sidebar after going Back mid-import.
-"""
+"""E2E: the session list shows an in-progress state while a real host daemon imports sessions."""
 
 from __future__ import annotations
 
@@ -101,10 +97,7 @@ def test_session_list_shows_import_in_progress(
     live_server: str,
     import_host: _ImportHost,
 ) -> None:
-    """Going Back to the session list mid-import shows that sessions are being imported.
-
-    Guards against the list giving no sign an import is running while rows just appear.
-    """
+    """Going Back to the session list mid-import shows that sessions are being imported."""
     page: Page = request.getfixturevalue("page")
     page.goto(f"{live_server}/")
     page.get_by_test_id("settings-button").click()
