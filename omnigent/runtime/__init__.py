@@ -401,7 +401,8 @@ def set_remote_routing_available(available: bool) -> None:
 
     :param available: What the server reported.
     """
-    _globals._caps.remote_routing_available = available
+    # Caps are built lazily, so this may be the process's first caps access.
+    get_caps().remote_routing_available = available
 
 
 def set_harness_process_manager(manager: HarnessProcessManager | None) -> None:
