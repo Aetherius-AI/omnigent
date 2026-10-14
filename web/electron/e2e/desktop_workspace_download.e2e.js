@@ -145,7 +145,7 @@ function tunnelRequestSummary(ingress, hostId) {
   };
 }
 
-/** Whether the UI reports a failed download: the row icon's tooltip or the viewer's toast. */
+/** Whether the viewer's "Download failed" toast is showing (the row icon only has a hover tooltip). */
 async function failureTextVisible(window) {
   const text = window.getByText("Download failed");
   return (await text.count()) > 0 && (await text.first().isVisible());
@@ -211,8 +211,9 @@ describe(
       // Close everything even when one step throws, so no process or tmp dir leaks.
       const results = await Promise.allSettled([ingress?.close(), host?.close(), server?.close()]);
       if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
-      const failed = results.find((r) => r.status === "rejected");
-      if (failed) throw failed.reason;
+      const failures = results.filter((r) => r.status === "rejected").map((r) => r.reason);
+      if (failures.length === 1) throw failures[0];
+      if (failures.length > 1) throw new AggregateError(failures, "teardown steps failed");
     });
 
     it("downloading through the ingress carries the slice key and saves the complete file", async () => {
@@ -229,7 +230,6 @@ describe(
       });
       const observed = {
         listing: null,
-        rowIcon: {},
         viewerMenu: {},
         downloads: [],
         downloadRequests: [],
@@ -253,7 +253,6 @@ describe(
         await rail.getByRole("button", { name: `Download ${FILE_NAME}` }).click();
         mark("rowIconClicked");
         await waitForDownloadDone(electronApp, 1);
-        observed.rowIcon = { failureTextVisible: await failureTextVisible(window) };
         mark("rowIconObserved");
         await window.screenshot({ path: path.join(recordDir, "after-row-icon-click.png") });
         await pace(2000);
@@ -319,11 +318,6 @@ describe(
         `expected one download per action: ${JSON.stringify(observed.downloads)}`,
       );
       for (const download of observed.downloads) assertSavedFile(download);
-      assert.equal(
-        observed.rowIcon.failureTextVisible,
-        false,
-        "the row icon reported Download failed",
-      );
       assert.equal(
         observed.viewerMenu.failureTextVisible,
         false,

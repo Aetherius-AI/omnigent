@@ -299,7 +299,7 @@ describe("downloadWorkspaceFile", () => {
       const key = new Headers(init.headers).get("X-Databricks-Omnigent-Slice-Key");
       return key === "host_desktop"
         ? blobResponse(file)
-        : { ok: false, status: 400, statusText: "Wrong replica" };
+        : { ok: false, status: 500, statusText: "Wrong replica" };
     });
     const clicked = captureDownloadClicks();
     const createObjectURL = vi.fn(() => "blob:desktop");

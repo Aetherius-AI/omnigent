@@ -34,17 +34,25 @@ async function fetchJson(url, init) {
   return { status: res.status, body };
 }
 
-/** Isolated process env for a host: no inherited runner/host identity. */
+/** Isolated process env for a host: no inherited identity, proxies or provider auth. */
 function hostEnv(home, extra) {
-  const base = Object.fromEntries(
-    Object.entries(process.env).filter(
-      ([key]) => !key.startsWith("OMNIGENT") && key !== "RUNNER_SERVER_URL",
-    ),
+  // Mirrors tests/_helpers/live_server.py: drop ambient Omnigent/runner identity, proxy
+  // settings and provider/auth secrets, keep loopback direct, then apply explicit inputs.
+  const inherited = Object.entries(process.env).filter(
+    ([key]) =>
+      !key.startsWith("OMNIGENT") &&
+      !key.startsWith("DATABRICKS_") &&
+      !key.endsWith("_SECRET") &&
+      !/^(https?_proxy|all_proxy|no_proxy|RUNNER_SERVER_URL|ANTHROPIC_API_KEY|OPENAI_API_KEY|OPENAI_BASE_URL|CODEX_API_KEY)$/i.test(
+        key,
+      ),
   );
   return {
-    ...base,
+    ...Object.fromEntries(inherited),
     HOME: home,
     PYTHONPATH: REPO_ROOT,
+    NO_PROXY: "127.0.0.1,localhost",
+    no_proxy: "127.0.0.1,localhost",
     OMNIGENT_DATA_DIR: path.join(home, ".omnigent"),
     OMNIGENT_CONFIG_HOME: path.join(home, ".omnigent"),
     OMNIGENT_AUTH_PROVIDER: "header",
