@@ -5022,9 +5022,9 @@ def test_inject_user_message_keeps_enter_when_no_config_dir_is_advertised(
             id="later-block-wins",
         ),
         pytest.param(
-            _claude_keybindings({"enter": "chat:newline"}),
+            "{not json",
             None,
-            id="nothing-submits",
+            id="malformed-logs-a-warning",
         ),
         pytest.param(
             _claude_keybindings({"Return": None, "Control+Enter": "chat:submit"}),
@@ -5035,11 +5035,6 @@ def test_inject_user_message_keeps_enter_when_no_config_dir_is_advertised(
             _claude_keybindings({"enter": "chat:newline", "ctrl+x s": "chat:submit"}),
             "\x1b[120;5u\x1b[115u",
             id="chord",
-        ),
-        pytest.param(
-            _claude_keybindings({"enter": "chat:newline", "up": "chat:submit"}),
-            None,
-            id="key-csi-u-cannot-carry",
         ),
     ],
 )
@@ -5053,6 +5048,32 @@ def test_rebound_submit_sequence_reads_the_chat_keybindings(
         (tmp_path / "keybindings.json").write_text(keybindings)
 
     assert claude_native_bridge._rebound_submit_sequence(tmp_path) == expected
+
+
+@pytest.mark.parametrize(
+    ("chat_bindings", "named"),
+    [
+        ({"enter": "chat:newline", "up": "chat:submit"}, "up"),
+        ({"enter": "chat:newline"}, "nothing"),
+    ],
+    ids=["key-csi-u-cannot-carry", "nothing-submits"],
+)
+def test_rebound_submit_sequence_rejects_undriveable_keybindings(
+    tmp_path: Path, chat_bindings: dict[str, str | None], named: str
+) -> None:
+    """
+    Enter rebound with no typeable ``chat:submit`` key fails loud before any keystroke.
+
+    Enter would only add newlines, so pressing it could only end in the generic
+    verify timeout; the error names the keys instead.
+
+    :param chat_bindings: The ``Chat`` bindings written to the file.
+    :param named: The key list the error names.
+    """
+    (tmp_path / "keybindings.json").write_text(_claude_keybindings(chat_bindings))
+
+    with pytest.raises(claude_native_bridge.ClaudeSubmitKeyUnsupported, match=named):
+        claude_native_bridge._rebound_submit_sequence(tmp_path)
 
 
 def test_write_tmux_target_advertises_the_claude_config_dir(tmp_path: Path) -> None:

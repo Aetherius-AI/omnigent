@@ -638,6 +638,10 @@ def _check_injection_cancelled() -> None:
         raise ClaudeInjectionCancelled("Claude Code message delivery was cancelled")
 
 
+class ClaudeSubmitKeyUnsupported(ClaudeMessageNotAccepted):
+    """``keybindings.json`` moves ``chat:submit`` off Enter onto keys the bridge cannot type."""
+
+
 class TmuxSessionNotAdvertised(RuntimeError):
     """The bridge's tmux target was not advertised before the deadline."""
 
@@ -4352,30 +4356,39 @@ def _rebound_submit_sequence(config_dir: Path | None) -> str | None:
         which is not Claude's.
     :returns: The submit key as CSI-u, e.g. ``"\\x1b[13;2u"`` for
         ``shift+enter``, or ``None`` when Enter still submits.
+    :raises ClaudeSubmitKeyUnsupported: If Enter no longer submits and
+        ``chat:submit`` is bound only to keys CSI-u cannot carry, e.g. ``up``.
     """
     if config_dir is None:
         return None
+    path = config_dir / _CLAUDE_KEYBINDINGS_FILE
     chat: dict[str, Any] = {}
     try:
-        config = json.loads((config_dir / _CLAUDE_KEYBINDINGS_FILE).read_text(encoding="utf-8"))
+        config = json.loads(path.read_text(encoding="utf-8"))
         for block in config["bindings"]:
             if block.get("context") == "Chat":
                 chat.update(block["bindings"])
-    except (OSError, ValueError, LookupError, TypeError, AttributeError):
-        # Claude falls back to its defaults for a missing or malformed file.
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, LookupError, TypeError, AttributeError) as exc:
+        # Claude falls back to its defaults for a malformed file; leave a trace.
+        _logger.warning("claude-native: ignoring unreadable %s, pressing Enter: %s", path, exc)
         return None
     bindings = {" ".join(key.lower().split()): action for key, action in chat.items()}
     if bindings.get("enter", bindings.get("return", "chat:submit")) == "chat:submit":
         return None
-    for keys, action in bindings.items():
-        sequence = _keys_csi_u(keys) if action == "chat:submit" else None
+    submit_keys = [keys for keys, action in bindings.items() if action == "chat:submit"]
+    for keys in submit_keys:
+        sequence = _keys_csi_u(keys)
         if sequence is not None:
             return sequence
-    _logger.warning(
-        "claude-native: keybindings.json moves chat:submit off Enter but binds it to no "
-        "key this bridge can type; pressing Enter"
+    # Enter would only add newlines, so failing now beats the generic verify timeout.
+    raise ClaudeSubmitKeyUnsupported(
+        "Claude Code's keybindings.json moves chat:submit off Enter but binds it to "
+        f"{', '.join(submit_keys) or 'nothing'}, which Omnigent cannot type into the "
+        "terminal. Bind chat:submit to Enter or a Ctrl/Alt/Shift chord. The message was "
+        "not delivered."
     )
-    return None
 
 
 def _press_submit(socket_path: str, tmux_target: str, sequence: str | None) -> None:

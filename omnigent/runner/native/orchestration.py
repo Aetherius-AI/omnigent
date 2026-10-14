@@ -183,23 +183,41 @@ def _publish_tmux_target_for_bridge(
         return
     # Imported here to avoid pulling Claude-native specifics into the
     # generic runner module's import-time graph.
-    from omnigent.harnesses.claude_native.bridge import (
-        bridge_dir_for_bridge_id,
-        claude_config_dir,
-        write_tmux_target,
-    )
+    from omnigent.harnesses.claude_native.bridge import bridge_dir_for_bridge_id, write_tmux_target
 
     write_tmux_target(
         bridge_dir_for_bridge_id(bridge_id),
         socket_path=instance.socket_path,
         tmux_target=instance.tmux_target,
-        # Injection honors the keybindings of the config dir this pane's Claude
-        # process reads — its launch env and cwd, ``env`` wrapper included, as
-        # trust seeding resolves them.
-        config_dir=claude_config_dir(
-            cwd=_claude_instance_launch_cwd(instance),
-            env=_claude_terminal_launch_env(instance),
-        ),
+        config_dir=_claude_instance_config_dir(instance),
+    )
+
+
+def _claude_instance_config_dir(instance: TerminalInstance) -> Path | None:
+    """
+    Return the Claude config dir a launched pane's process reads, if it is known.
+
+    Injection honors the keybindings there, so this follows the launch env and
+    cwd the way trust seeding does, ``env`` wrapper included. An ``env`` wrapper
+    whose form is not modeled could point Claude at another directory, so it
+    yields ``None`` and injection keeps the Enter submit.
+
+    :param instance: The launched Claude terminal instance.
+    :returns: The config directory, or ``None`` when it cannot be resolved.
+    """
+    from omnigent.harnesses.claude_native.bridge import claude_config_dir
+
+    command = instance.command or ""
+    if (
+        Path(command).name == "env"
+        and env_wrapper_environment(
+            command, list(instance.args), _claude_terminal_pre_wrapper_env(instance)
+        )
+        is None
+    ):
+        return None
+    return claude_config_dir(
+        cwd=_claude_instance_launch_cwd(instance), env=_claude_terminal_launch_env(instance)
     )
 
 

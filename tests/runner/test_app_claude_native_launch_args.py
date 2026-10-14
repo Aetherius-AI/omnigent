@@ -905,14 +905,16 @@ def test_claude_trust_seeding_never_expands_runner_auth_secrets(
         (["CLAUDE_CONFIG_DIR=wrapped/claude", "claude"], "/work/wrapped/claude"),
         # ``env -C`` moves Claude's cwd, so a relative dir resolves from there.
         (["-C", "sub", "CLAUDE_CONFIG_DIR=wrapped/claude", "claude"], "/work/sub/wrapped/claude"),
+        # An unmodeled wrapper form could select any directory: advertise none.
+        (["-v", "CLAUDE_CONFIG_DIR=wrapped/claude", "claude"], None),
     ],
-    ids=["wrapper-env", "wrapper-chdir"],
+    ids=["wrapper-env", "wrapper-chdir", "wrapper-unmodeled"],
 )
 def test_publish_tmux_target_advertises_the_config_dir_the_pane_reads(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     args: list[str],
-    expected_config_dir: str,
+    expected_config_dir: str | None,
 ) -> None:
     """
     ``tmux.json`` names the config dir of this pane's Claude, env wrapper included.
@@ -921,7 +923,8 @@ def test_publish_tmux_target_advertises_the_config_dir_the_pane_reads(
     in the directory the wrapper selects is honored rather than the runner's own.
 
     :param args: The ``env`` wrapper's arguments.
-    :param expected_config_dir: The directory Claude reads its config from.
+    :param expected_config_dir: The directory Claude reads its config from, or
+        ``None`` when the launch must not advertise one.
     """
     from omnigent.harnesses.claude_native import bridge as claude_native_bridge
     from omnigent.runner.native import orchestration
@@ -948,7 +951,7 @@ def test_publish_tmux_target_advertises_the_config_dir_the_pane_reads(
     bridge_dir = claude_native_bridge.bridge_dir_for_bridge_id("bridge_abc123")
     payload = json.loads((bridge_dir / "tmux.json").read_text(encoding="utf-8"))
     assert payload["tmux_target"] == instance.tmux_target
-    assert payload["claude_config_dir"] == expected_config_dir
+    assert payload.get("claude_config_dir") == expected_config_dir
 
 
 def test_claude_terminal_launch_cwd_uses_terminal_os_env_resolution(tmp_path: Path) -> None:

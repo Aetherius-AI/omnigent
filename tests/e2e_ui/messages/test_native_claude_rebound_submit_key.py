@@ -112,6 +112,7 @@ def rebound_claude_session(
     runner_id = str(_server_state["runner_id"])
     root = _scratch_root(tmp_path)
     session_id: str | None = None
+    yielded = False
     # One cleanup path for setup failures and teardown alike, so a respawned
     # runner or the scratch root never outlives a journey that failed to start.
     try:
@@ -145,6 +146,7 @@ def rebound_claude_session(
             )
             session_id = str(created["session_id"])
             bind_session_runner(httpx.patch, live_server, session_id, runner_id, timeout=10.0)
+            yielded = True
             yield ReboundClaudeSession(live_server, session_id, claude_config_dir)
     finally:
         if session_id is not None:
@@ -159,8 +161,9 @@ def rebound_claude_session(
             except subprocess.TimeoutExpired:
                 respawned.kill()
                 respawned.wait(timeout=5)
-        # Keep Claude Code's config and debug log for a failed journey.
-        if root != tmp_path and request.session.testsfailed == failed_before:
+        # Keep Claude Code's config and debug log for a journey that failed or
+        # never started (a setup failure is not counted in testsfailed yet).
+        if root != tmp_path and yielded and request.session.testsfailed == failed_before:
             shutil.rmtree(root, ignore_errors=True)
 
 
@@ -206,7 +209,7 @@ async def _read_terminal_screen(ws_url: str) -> str:
                 break
             try:
                 frame = await asyncio.wait_for(ws.recv(), timeout=remaining)
-            except (TimeoutError, asyncio.TimeoutError):
+            except TimeoutError:
                 break
             if isinstance(frame, bytes):
                 stream.feed(frame)
@@ -215,14 +218,14 @@ async def _read_terminal_screen(ws_url: str) -> str:
 
 def _terminal_screen(base_url: str, session_id: str) -> str:
     """Return the live TUI screen via the product's read-only terminal attach."""
-    terminal_id = _terminal_resource_id(base_url, session_id)
-    if terminal_id is None:
-        return ""
-    ws_url = (
-        base_url.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
-        + f"/v1/sessions/{session_id}/resources/terminals/{terminal_id}/attach?read_only=true"
-    )
     try:
+        terminal_id = _terminal_resource_id(base_url, session_id)
+        if terminal_id is None:
+            return ""
+        ws_url = (
+            base_url.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
+            + f"/v1/sessions/{session_id}/resources/terminals/{terminal_id}/attach?read_only=true"
+        )
         # The sync Playwright test may already run inside an event loop.
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             return pool.submit(asyncio.run, _read_terminal_screen(ws_url)).result(
