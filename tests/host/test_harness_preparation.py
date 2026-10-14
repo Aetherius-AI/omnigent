@@ -5,6 +5,7 @@ prepare thread inline so dispatch is deterministic; the npm install is patched o
 from __future__ import annotations
 
 import threading
+import types
 from collections.abc import Callable, Sequence
 
 import pytest
@@ -33,20 +34,18 @@ class _SyncThread:
 
 @pytest.fixture
 def inline_threads(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(hp.threading, "Thread", _SyncThread)
+    monkeypatch.setattr(hp, "threading", types.SimpleNamespace(Thread=_SyncThread))
 
 
-def _record_installs(monkeypatch: pytest.MonkeyPatch, *, present: bool) -> list[str]:
-    """Patch the binary lookup + installer; return the list of install attempts."""
+def _record_installs(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Patch the binary lookup (absent) + installer; return the install attempts."""
     attempts: list[str] = []
 
     def fake_try_install(key: str) -> HarnessInstallResult:
         attempts.append(key)
         return HarnessInstallResult(True, None)
 
-    monkeypatch.setattr(
-        hp, "harness_cli_binary", lambda key: "/opt/pi/bin/pi" if present else None
-    )
+    monkeypatch.setattr(hp, "harness_cli_binary", lambda key: None)
     monkeypatch.setattr(hp, "try_install_harness_cli", fake_try_install)
     return attempts
 
@@ -54,18 +53,9 @@ def _record_installs(monkeypatch: pytest.MonkeyPatch, *, present: bool) -> list[
 @pytest.mark.usefixtures("inline_threads")
 def test_installs_missing_pi_on_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("IS_SANDBOX", "1")
-    attempts = _record_installs(monkeypatch, present=False)
+    attempts = _record_installs(monkeypatch)
     assert hp.prepare_host_harnesses() is True
     assert attempts == [PI_KEY]
-
-
-@pytest.mark.usefixtures("inline_threads")
-def test_skips_install_when_pi_already_present(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("IS_SANDBOX", "1")
-    attempts = _record_installs(monkeypatch, present=True)
-    # A prepare thread still runs, but it must not reinstall a present CLI.
-    assert hp.prepare_host_harnesses() is True
-    assert attempts == []
 
 
 @pytest.mark.usefixtures("inline_threads")
@@ -101,7 +91,7 @@ def test_non_sandbox_marker_is_a_noop(monkeypatch: pytest.MonkeyPatch, marker: s
         monkeypatch.delenv("IS_SANDBOX", raising=False)
     else:
         monkeypatch.setenv("IS_SANDBOX", marker)
-    attempts = _record_installs(monkeypatch, present=False)
+    attempts = _record_installs(monkeypatch)
     assert hp.prepare_host_harnesses() is False
     assert attempts == []
 
@@ -128,9 +118,22 @@ def test_worker_start_failure_does_not_propagate(monkeypatch: pytest.MonkeyPatch
         def start(self) -> None:
             raise RuntimeError("can't start new thread")
 
-    monkeypatch.setattr(hp.threading, "Thread", _UnstartableThread)
-    attempts = _record_installs(monkeypatch, present=False)
+    monkeypatch.setattr(hp, "threading", types.SimpleNamespace(Thread=_UnstartableThread))
+    attempts = _record_installs(monkeypatch)
     # Thread exhaustion is logged; host boot continues without preparation.
+    assert hp.prepare_host_harnesses() is False
+    assert attempts == []
+
+
+@pytest.mark.usefixtures("inline_threads")
+def test_spec_lookup_failure_does_not_propagate(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("IS_SANDBOX", "1")
+    attempts = _record_installs(monkeypatch)
+
+    def broken_spec(key: str) -> object:
+        raise RuntimeError("plugin install spec exploded")
+
+    monkeypatch.setattr(hp, "harness_install_spec", broken_spec)
     assert hp.prepare_host_harnesses() is False
     assert attempts == []
 

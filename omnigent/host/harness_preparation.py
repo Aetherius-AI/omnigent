@@ -51,7 +51,11 @@ def prepare_host_harnesses() -> bool:
         return False
     started = False
     for key in _MANAGED_HARNESS_KEYS:
-        if harness_install_spec(key) is None:
+        try:
+            if harness_install_spec(key) is None:
+                continue
+        except Exception:  # a broken plugin spec must not abort host boot
+            _logger.exception("Harness preparation: spec lookup for %r failed", key)
             continue
         worker = threading.Thread(
             target=_install_missing_harness,

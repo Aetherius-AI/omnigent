@@ -1680,7 +1680,6 @@ def test_concurrent_installs_of_one_package_are_serialized(
     the same package at once. The caller that waited skips a now-compatible
     install but still upgrades a binary whose version is too low."""
     import threading
-    import time
 
     monkeypatch.setenv("PATH", str(tmp_path))
     monkeypatch.setattr(hi.shutil, "which", lambda name: f"/usr/local/bin/{name}")
@@ -1688,23 +1687,40 @@ def test_concurrent_installs_of_one_package_are_serialized(
     binary.write_text("")
     monkeypatch.setattr(hi, "resolve_cli_binary", lambda _name: str(binary))
     monkeypatch.setattr(hi, "_harness_cli_version_satisfies", lambda *_a, **_k: compatible)
+    package_lock = threading.Lock()
+    other_caller_waiting = threading.Event()
+
+    class _ObservedLock:
+        """The real per-package lock, signalling once a caller blocks on it."""
+
+        def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+            if blocking:
+                other_caller_waiting.set()
+            return package_lock.acquire(blocking, timeout)
+
+        def release(self) -> None:
+            package_lock.release()
+
+    monkeypatch.setattr(hi, "_install_lock", lambda _spec: _ObservedLock())
     active = 0
     peak = 0
     runs = 0
     guard = threading.Lock()
 
-    def _slow_run(cmd, **_kwargs):
+    def _run_until_the_other_caller_waits(cmd, **_kwargs):
         nonlocal active, peak, runs
         with guard:
             active += 1
             runs += 1
             peak = max(peak, active)
-        time.sleep(0.5)
+        # Hold the installer until the other caller is blocked on the lock, so the
+        # overlap is guaranteed rather than timing-dependent.
+        assert other_caller_waiting.wait(timeout=10)
         with guard:
             active -= 1
         return subprocess.CompletedProcess(cmd, 0)
 
-    monkeypatch.setattr(hi.subprocess, "run", _slow_run)
+    monkeypatch.setattr(hi.subprocess, "run", _run_until_the_other_caller_waits)
     results: list[hi.HarnessInstallResult] = []
     threads = [
         threading.Thread(target=lambda: results.append(hi.try_install_harness_cli(hi.PI_KEY)))

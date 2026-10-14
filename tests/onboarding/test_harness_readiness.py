@@ -421,6 +421,28 @@ def test_pi_managed_connect_broker_yields_to_global_api_key(
     assert configured_harness_map()["pi-native"] == "needs-auth"
 
 
+def test_pi_managed_connect_check_failure_logs_only_the_exception_class(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failing lookup is logged without its message: a ``.databrickscfg`` parse
+    error can quote the offending line, including a malformed credential."""
+    import logging
+
+    from omnigent.host import databricks_credential as dc
+
+    _all_clis_installed(monkeypatch)
+    monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(tmp_path / ".databrickscfg"))
+
+    def broken_lookup() -> str | None:
+        raise ValueError("Source contains parsing errors: token = sk-SYNTHETIC-SECRET")
+
+    monkeypatch.setattr(dc, "managed_connect_workspace_host", broken_lookup)
+    with caplog.at_level(logging.DEBUG, logger="omnigent.onboarding.harness_readiness"):
+        assert configured_harness_map()["pi-native"] == "needs-auth"
+    assert "SYNTHETIC-SECRET" not in caplog.text
+    assert "managed-connect check failed (ValueError)" in caplog.text
+
+
 def test_family_provider_configured_excludes_subscription(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

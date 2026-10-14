@@ -561,8 +561,8 @@ def _managed_connect_pi_provider_configured() -> bool:
         if api_key_auth_precludes_broker(None):
             return False
         return managed_connect_workspace_host() is not None
-    except Exception:
-        _logger.debug("readiness: managed-connect check failed", exc_info=True)
+    except Exception as exc:  # the message can quote .databrickscfg lines
+        _logger.debug("readiness: managed-connect check failed (%s)", type(exc).__name__)
         return False
 
 
