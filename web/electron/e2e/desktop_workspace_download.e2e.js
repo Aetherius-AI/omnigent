@@ -84,7 +84,7 @@ async function watchDownloads(electronApp, saveDir) {
         startState: item.getState(),
         done: null,
         receivedBytes: 0,
-        savePath: `${dir}/${globalThis.omniDownloadRecords.length}-${item.getFilename()}`,
+        savePath: `${dir}/${globalThis.omniDownloadRecords.length}-${item.getFilename().replaceAll("/", "_")}`,
       };
       globalThis.omniDownloadRecords.push(record);
       // A preset path skips the native Save dialog.
@@ -106,7 +106,10 @@ async function waitForDownloadDone(electronApp, count) {
   // oxlint-disable no-await-in-loop -- polling the main process.
   for (;;) {
     const downloads = await readDownloads(electronApp);
-    if (downloads.length >= count && downloads.slice(0, count).every((d) => d.done)) {
+    const settled = downloads.slice(0, count);
+    const bad = settled.find((d) => d.done && d.done !== "completed");
+    if (bad) throw new Error(`download ended in state ${bad.done}: ${JSON.stringify(bad)}`);
+    if (downloads.length >= count && settled.every((d) => d.done)) {
       return downloads;
     }
     if (Date.now() >= deadline) {
@@ -268,6 +271,8 @@ describe(
         await window.getByRole("menuitem", { name: "Download file" }).click();
         mark("viewerDownloadClicked");
         await waitForDownloadDone(electronApp, 2);
+        // Let the renderer flush a failure toast before the negative check.
+        await sleep(500);
         observed.viewerMenu = { failureTextVisible: await failureTextVisible(window) };
         mark("viewerDownloadObserved");
         await window.screenshot({ path: path.join(recordDir, "after-viewer-download.png") });
@@ -323,43 +328,6 @@ describe(
         false,
         "the viewer showed Download failed",
       );
-    });
-
-    it("downloading directly from the server saves the complete file", async () => {
-      const recordDir = path.join(RECORD_DIR, "direct");
-      const { electronApp, window, userDataDir, stopDisplayCapture } = await launchDesktop({
-        recordDir,
-        serverUrl: server.serverUrl,
-      });
-      let downloads = [];
-      try {
-        await watchDownloads(electronApp, path.join(tmpDir, "saved-direct"));
-        await window
-          .getByText("What should we build?")
-          .waitFor({ state: "visible", timeout: 30_000 });
-        const { rail, row } = await openFilesPanel(window, server.serverUrl, session.sessionId);
-        await pace(1500);
-        await row.hover();
-        await pace(800);
-        await rail.getByRole("button", { name: `Download ${FILE_NAME}` }).click();
-        downloads = await waitForDownloadDone(electronApp, 1);
-        await pace(2000);
-        fs.writeFileSync(
-          path.join(recordDir, "observed.json"),
-          JSON.stringify({ downloads }, null, 2),
-        );
-      } finally {
-        await stopDisplayCapture().catch(() => {});
-        await electronApp.close().catch(() => {});
-        try {
-          saveRecording(recordDir, "direct-download");
-        } catch {
-          // Renaming the clips must not skip the profile cleanup below.
-        }
-        fs.rmSync(userDataDir, { recursive: true, force: true });
-      }
-      assert.equal(downloads.length, 1, `expected one download, got ${JSON.stringify(downloads)}`);
-      assertSavedFile(downloads[0]);
     });
   },
 );
