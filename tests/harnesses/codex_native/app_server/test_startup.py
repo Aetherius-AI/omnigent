@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import Mock
 
+import psutil
 import pytest
 
 from omnigent.errors import ErrorCode, OmnigentError
@@ -218,11 +219,11 @@ async def test_start_failure_snapshots_owned_process_before_cleanup(
 async def test_start_failure_diagnostics_cannot_mask_error_or_cleanup(
     startup_failure_server: tuple[CodexNativeAppServer, Path],
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
     failure_stage: str,
 ) -> None:
     """Diagnostic collection and logging failures preserve the original startup error."""
     from omnigent.harnesses.codex_native import app_server as module
-    from omnigent.harnesses.codex_native import diagnostics
 
     server, _source = startup_failure_server
     failure = RuntimeError("original startup error")
@@ -236,20 +237,34 @@ async def test_start_failure_diagnostics_cannot_mask_error_or_cleanup(
 
     def fail(*_args: object, **_kwargs: object) -> None:
         diagnostic_calls.append(None)
-        raise ValueError("diagnostic failure")
+        raise ValueError("private diagnostic failure detail")
 
     monkeypatch.setattr(CodexNativeAppServer, "_wait_until_ready", ready)
     if failure_stage == "collector":
-        monkeypatch.setattr(diagnostics, "collect_codex_startup_diagnostics", fail)
+        monkeypatch.setattr(module, "collect_codex_startup_diagnostics", fail)
     else:
         monkeypatch.setattr(module._logger, "warning", fail)
-    with pytest.raises(RuntimeError) as raised:
+    with caplog.at_level(logging.WARNING), pytest.raises(RuntimeError) as raised:
         await server.start()
 
     assert raised.value is failure
     assert len(diagnostic_calls) == 1
     assert server.proc is None and server.stderr_task is None
     assert processes[0].returncode is not None
+    records = [
+        record
+        for record in caplog.records
+        if getattr(record, "event_name", None) == "codex_app_server_start_failed"
+    ]
+    if failure_stage == "collector":
+        [record] = records
+        assert record.attributes["exception_type"] == "RuntimeError"
+        assert record.attributes["diagnostics_error_type"] == "ValueError"
+        assert "app_server_pid" not in record.attributes
+        serialized = json.dumps({"message": record.getMessage(), "attributes": record.attributes})
+        assert "private diagnostic failure detail" not in serialized
+    else:
+        assert records == []
 
 
 async def test_wait_until_ready_closes_failed_client_before_reconnect(
@@ -587,3 +602,58 @@ async def test_start_reports_a_removed_workspace_before_any_setup(
     assert failure.value.code == ErrorCode.WORKSPACE_MISSING
     assert server.proc is None
     assert not codex_home.exists()
+
+
+# Reports a version like the real CLI, records its app-server PID, then never
+# opens the --listen socket.
+_NEVER_READY_CODEX = """#!/bin/sh
+case "$1" in
+  --version) echo "codex-cli 0.158.0" ;;
+  app-server) echo $$ > "$(dirname "$0")/app-server.pid"; exec sleep 600 ;;
+esac
+"""
+
+
+async def test_readiness_failure_records_app_server_state_before_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A child that never becomes ready is reaped, but its state is logged first."""
+    from omnigent.harnesses.codex_native import app_server as codex_native_app_server
+
+    source_home = tmp_path / "source-codex-home"
+    source_home.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(source_home))
+    codex = tmp_path / "codex"
+    codex.write_text(_NEVER_READY_CODEX)
+    codex.chmod(0o755)
+    monkeypatch.setattr(codex_native_app_server, "_APP_SERVER_READY_TIMEOUT_SECONDS", 1.0)
+    server = _test_app_server(tmp_path, tmp_path / "codex-home", tmp_path / "bridge", workspace)
+    server.codex_path = str(codex)
+
+    with (
+        caplog.at_level(logging.INFO),
+        pytest.raises(
+            RuntimeError, match=r"^Timed out after 1s waiting for the Codex app-server at "
+        ),
+    ):
+        await server.start()
+
+    child_pid = int((tmp_path / "app-server.pid").read_text())
+    assert not psutil.pid_exists(child_pid), "readiness failure left the app-server running"
+    assert server.proc is None
+    assert server.stderr_task is None
+    snapshots = [
+        record.attributes
+        for record in caplog.records
+        if isinstance(getattr(record, "attributes", None), dict)
+        and "app_server_pid" in record.attributes
+    ]
+    assert snapshots, "readiness failure logged no app-server state before cleanup"
+    [snapshot] = snapshots
+    assert snapshot["app_server_pid"] == child_pid
+    assert snapshot["app_server_state"] == "running"
+    assert snapshot["stderr_reader_state"] == "running"
+    assert snapshot["codex_version"] == "0.158.0"
+    assert "--listen" not in repr(snapshot)
