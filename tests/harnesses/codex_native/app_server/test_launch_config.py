@@ -390,26 +390,60 @@ def test_codex_login_launch_pins_a_gateway_spelled_pick_in_codex_spelling(
 
 
 @pytest.mark.parametrize(
-    "extra_overrides",
+    ("extra_overrides", "shared_config", "expected_pin"),
     [
-        pytest.param(['model_provider="Databricks"'], id="cli-config-provider"),
-        pytest.param(None, id="config-default-provider"),
-        pytest.param(["model_provider=openai"], id="undecodable-provider-override"),
+        # No override and no custom default: codex's built-in openai provider.
+        pytest.param(None, "", "gpt-6.1-sol", id="no-override-builtin-default"),
+        # The shared config.toml selects a gateway, top-level or via its profile.
+        pytest.param(
+            None,
+            'model_provider = "Databricks"\n',
+            "system.ai.gpt-6-1-sol",
+            id="no-override-config-default-gateway",
+        ),
+        pytest.param(
+            None,
+            'profile = "db"\n[profiles.db]\nmodel_provider = "Databricks"\n',
+            "system.ai.gpt-6-1-sol",
+            id="no-override-profile-gateway",
+        ),
+        # An explicit override outranks the config default, and the last one wins.
+        pytest.param(
+            ['model_provider="openai"'],
+            'model_provider = "Databricks"\n',
+            "gpt-6.1-sol",
+            id="openai-override-outranks-config-default",
+        ),
+        pytest.param(
+            ['model_provider="Databricks"'], "", "system.ai.gpt-6-1-sol", id="cli-config-provider"
+        ),
+        pytest.param(
+            ['model_provider="openai"', 'model_provider="Databricks"'],
+            "",
+            "system.ai.gpt-6-1-sol",
+            id="last-override-wins",
+        ),
     ],
 )
-def test_gateway_launch_keeps_the_catalog_spelled_pick(
+def test_pick_translates_only_when_codex_login_serves_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     extra_overrides: list[str] | None,
+    shared_config: str,
+    expected_pin: str,
 ) -> None:
     """
-    Only an explicit codex login translates; a gateway gets the id it serves.
+    The pick is translated exactly when codex's own backend will receive it.
 
-    A cli-config provider, or the shared config.toml's default provider when
-    no override pins one, may be a Databricks gateway that knows the model by
-    its catalog id, so the pick reaches codex exactly as given. An override
-    that does not decode pins nothing recognisable and is left alone too.
+    Codex resolves its provider from the ``-c`` overrides (last one wins), then
+    the shared config.toml (active profile before top-level), then its built-in
+    ``openai`` provider. A gateway reached on any of those paths knows the model
+    by its catalog id, so the pick reaches codex as given.
     """
+    source_home = tmp_path / "source"
+    source_home.mkdir()
+    (source_home / "config.toml").write_text(shared_config, encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(source_home))
     monkeypatch.setattr(
         "omnigent.harnesses.codex_native.app_server._find_codex_cli",
         lambda: sys.executable,
@@ -427,8 +461,31 @@ def test_gateway_launch_keeps_the_catalog_spelled_pick(
         extra_config_overrides=extra_overrides,
     )
 
-    assert app_server.pinned_model == "system.ai.gpt-6-1-sol"
-    assert 'model="system.ai.gpt-6-1-sol"' in app_server.config_overrides
+    assert app_server.pinned_model == expected_pin
+    assert f"model={json.dumps(expected_pin)}" in app_server.config_overrides
+
+
+def test_undecodable_model_provider_override_fails_the_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An override that is not a TOML basic string fails at build, not at first resume."""
+    monkeypatch.setattr(
+        "omnigent.harnesses.codex_native.app_server._find_codex_cli",
+        lambda: sys.executable,
+    )
+
+    with pytest.raises(ValueError):
+        build_codex_native_server(
+            socket_path=tmp_path / "codex.sock",
+            codex_home=tmp_path / "codex-home",
+            cwd=tmp_path,
+            model="system.ai.gpt-6-1-sol",
+            profile=None,
+            bridge_dir=tmp_path / "bridge",
+            ap_server_url=None,
+            ap_auth_headers={},
+            extra_config_overrides=["model_provider=openai"],
+        )
 
 
 async def test_start_writes_codex_slug_for_a_gateway_spelled_pick_on_codex_login(
