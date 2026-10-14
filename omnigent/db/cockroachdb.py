@@ -289,7 +289,10 @@ def _initialize_or_verify_crdb_schema(engine: Engine, db_uri: str) -> None:
     expected = set(OmnigentBase.metadata.tables) | set(ConversationBase.metadata.tables)
 
     if current is None:
-        _start_or_resume_crdb_bootstrap(engine, version, tables, expected, head)
+        # Models can advance while the already-deployed migration head stays the same.
+        _start_or_resume_crdb_bootstrap(
+            engine, version, tables, expected, f"{MODEL_SCHEMA_REVISION}:{head}"
+        )
         with query_name_scope("omnigent.database.bootstrap_cockroachdb"):
             with engine.connect() as connection:
                 _prepare_crdb_schema_transaction(connection, version)

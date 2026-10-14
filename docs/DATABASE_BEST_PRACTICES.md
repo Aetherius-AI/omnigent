@@ -369,6 +369,9 @@ PR has landed. Managed distributions that extend the models or patch their local
 migration chain must keep the marker on that chain and align it with the schema
 their model metadata creates. Do not stamp an older model's schema at a newer
 migration head.
+Interrupted bootstrap resumes only when both the model revision and migration
+head match its recorded target. Older marker formats require explicit recovery
+or a fresh empty database; do not infer their model revision from the head.
 
 ## Stored procedures
 
