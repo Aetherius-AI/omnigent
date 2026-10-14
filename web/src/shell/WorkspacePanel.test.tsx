@@ -65,6 +65,12 @@ vi.mock("@/components/chat/SideChatPane", () => ({
     <div data-testid="side-chat-pane-stub">{childId}</div>
   ),
 }));
+// Side-chat entry points consult the session's fork restriction; default to an
+// unrestricted session so the generic cases below keep side chat available.
+const restrictionsMock = vi.hoisted(() => vi.fn(() => ({}) as Record<string, string | undefined>));
+vi.mock("@/hooks/useSessionActionRestrictions", () => ({
+  useSessionActionRestrictions: () => restrictionsMock(),
+}));
 const isMobileMock = vi.hoisted(() => vi.fn(() => false));
 vi.mock("@/hooks/useIsMobileViewport", () => ({ useIsMobileViewport: () => isMobileMock() }));
 
@@ -77,6 +83,7 @@ afterEach(() => {
   localStorage.clear();
   vi.clearAllMocks();
   isMobileMock.mockReturnValue(false);
+  restrictionsMock.mockReturnValue({});
   Reflect.deleteProperty(window, "omnigentDesktop");
   useTerminalsMock.mockReturnValue({ terminals: [], isLoading: false, error: null });
   useCreateTerminalMock.mockReturnValue({

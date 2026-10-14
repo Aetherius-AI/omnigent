@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   SANDBOX_FORK_UNSUPPORTED,
+  SANDBOX_SIDE_CHAT_UNSUPPORTED,
   SANDBOX_SWITCH_HOST_UNSUPPORTED,
   sessionActionRestrictions,
 } from "./sessionCapabilities";
@@ -9,6 +10,7 @@ describe("session action restrictions", () => {
   it("recognizes the managed snapshot without access to its host record", () => {
     expect(sessionActionRestrictions({ labels: { "omnigent.host_type": "managed" } })).toEqual({
       forkDisabledReason: SANDBOX_FORK_UNSUPPORTED,
+      sideChatDisabledReason: SANDBOX_SIDE_CHAT_UNSUPPORTED,
       switchHostDisabledReason: SANDBOX_SWITCH_HOST_UNSUPPORTED,
     });
   });
@@ -18,6 +20,7 @@ describe("session action restrictions", () => {
     (provider) => {
       expect(sessionActionRestrictions({ labels: {} }, { sandbox_provider: provider })).toEqual({
         forkDisabledReason: SANDBOX_FORK_UNSUPPORTED,
+        sideChatDisabledReason: SANDBOX_SIDE_CHAT_UNSUPPORTED,
         switchHostDisabledReason: SANDBOX_SWITCH_HOST_UNSUPPORTED,
       });
     },
@@ -29,6 +32,7 @@ describe("session action restrictions", () => {
       { sandbox_provider: "modal" },
     );
     expect(result.forkDisabledReason).toBeUndefined();
+    expect(result.sideChatDisabledReason).toBeUndefined();
     expect(result.switchHostDisabledReason).toBe(SANDBOX_SWITCH_HOST_UNSUPPORTED);
   });
 
@@ -40,6 +44,7 @@ describe("session action restrictions", () => {
       ),
     ).toEqual({
       forkDisabledReason: SANDBOX_FORK_UNSUPPORTED,
+      sideChatDisabledReason: SANDBOX_SIDE_CHAT_UNSUPPORTED,
       switchHostDisabledReason: SANDBOX_SWITCH_HOST_UNSUPPORTED,
     });
   });
@@ -47,6 +52,7 @@ describe("session action restrictions", () => {
   it("keeps both actions available for ordinary hosts", () => {
     expect(sessionActionRestrictions({ labels: {} }, { sandbox_provider: null })).toEqual({
       forkDisabledReason: undefined,
+      sideChatDisabledReason: undefined,
       switchHostDisabledReason: undefined,
     });
   });
