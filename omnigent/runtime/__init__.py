@@ -392,13 +392,12 @@ def get_runner_id() -> str | None:
 
 
 def set_remote_routing_available(available: bool) -> None:
-    """Record remote routing availability on the lazily built caps.
+    """Record the attached server's routing availability, creating caps lazily.
 
     Runners never call :func:`init`, which would replace the caps object.
 
     :param available: The server's answer from the session-init envelope.
     """
-    # Caps are built lazily, so this may be the process's first caps access.
     get_caps().remote_routing_available = available
 
 
