@@ -64,6 +64,12 @@ to make it pass; the *code* must change to satisfy it.
 
 ### 2B.4 — Select permanent regression coverage
 
+Read `tests/README.md` and `tests/_helpers/README.md` in the product checkout
+before writing setup (or nearby fixtures when that repository has no catalog).
+Follow its API examples and the selection policy below. In `test_audit`, name
+the nearest test/helper considered, explain any new setup, and report permanent
+test/support additions and deletions including helper changes.
+
 Choose which tests belong in the final PR. Search existing tests by behavior
 and fixture, and read the nearest scenarios. If one already drives the relevant
 setup and state transition, fold the missing assertions into it; parameterize
@@ -187,6 +193,10 @@ how the surface was filmed, run that driver and setup first; it is the proven
 route to the state you need to show.
 See [`dev/recording-lanes.md`](../../../recording-lanes.md) for setup and recording
 steps, including `OMNIGENT_E2E_RECORD_DIR` (`--video on` does not work here).
+Burn step-by-step timed captions into each new after-clip with
+`dev/caption_recording.py`, then inspect the rendered actions and final outcome
+before adding it to the handoff or PR Demo. Follow the shared guide's captioning
+fallback if rendering is blocked; keep any usable footage.
 
 - Record the user action and the corrected product behavior. Tests may drive
   and verify the interaction, but the clip must show the product, not pytest,
@@ -195,8 +205,10 @@ steps, including `OMNIGENT_E2E_RECORD_DIR` (`--video on` does not work here).
   only an error message changes. For example, run `omnigent host` with an
   expired login and capture the corrected error message.
 - Record your fix on the author path, or the reviewed PR head on the review
-  path. Save the clip as `recordings/<slug>/after-<facet>.<ext>` with
-  `kind: "after"`, and include it in the PR Demo section and handoff.
+  path. Save the raw capture as `recordings/<slug>/raw/after-<facet>.<ext>`.
+  Render to `recordings/<slug>/after-<facet>.mp4`, inspect it, then declare
+  that final path with `kind: "after"` in the PR Demo and handoff. If captioning
+  fails, use the shared guide's explicit fallback path instead.
 - Keep any recovered before-clip unchanged. A missing before-clip is not a
   reason to skip the after-clip; note the missing before-clip in your evidence.
   A skipped after-clip is not a reason to drop the before-clip either:
