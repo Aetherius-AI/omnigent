@@ -1,0 +1,11 @@
+# Server config template for the Railway deployment. Dockerfile.prebuilt
+# fills __OMNIGENT_SERVER_URL__ from the OMNIGENT_SERVER_URL build arg (a
+# Railway service variable) and installs the result at /etc/omnigent/config.yaml,
+# which the service selects with OMNIGENT_CONFIG. Secrets never live here:
+# Modal credentials come from Railway variables, LLM / git credentials from
+# the Modal secrets listed below.
+sandbox:
+  provider: modal
+  server_url: __OMNIGENT_SERVER_URL__
+  modal:
+    secrets: [omnigent-llm]
