@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from omnigent.spec.types import AgentSpec
 
 from omnigent.cli_invocation import cli_invocation
+from omnigent.debug_logging import debug_event
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.harnesses.codex_egress import CertificateFailure, detect_certificate_failure
 from omnigent.harnesses.codex_native.bridge import (
@@ -133,6 +134,13 @@ _CONNECT_TIMEOUT_SECONDS = 10.0
 # 10 s to start codex. Match the 60 s native-terminal readiness budget; a child
 # that exits early still fails at once.
 _APP_SERVER_READY_TIMEOUT_SECONDS = 60.0
+_APP_SERVER_BIND_ATTEMPTS = 3
+
+
+class _CodexListenAddressInUse(RuntimeError):
+    """The owned app-server exited because another process claimed its listener."""
+
+
 # Initialization and model/list can stall after the listener becomes ready.
 _MODEL_CATALOG_PROBE_TIMEOUT_SECONDS = 30.0
 _MODEL_DISCOVERY_CACHE_SECONDS = 300.0
@@ -2004,6 +2012,7 @@ class CodexNativeAppServer:
     reconcile_process_registry: bool = True
     config_profile: str | None = None
     session_id: str | None = None
+    retry_bind_collision: bool = False
     stderr_capture_error_type: str | None = field(default=None, init=False)
     # First TLS certificate failure the launcher printed; mirrored into the
     # bridge so the forwarder can fail a stuck turn with the cause.
@@ -2011,6 +2020,30 @@ class CodexNativeAppServer:
     _stderr_diagnostics: CodexStderrDiagnostics | None = field(default=None, init=False)
 
     async def start(self) -> None:
+        """Start the app-server, retrying collisions only on an allocated loopback port."""
+        for attempt in range(_APP_SERVER_BIND_ATTEMPTS):
+            try:
+                await self._start_once()
+                return
+            except _CodexListenAddressInUse:
+                if (
+                    not self.retry_bind_collision
+                    or not (self.listen_url or "").startswith("ws://127.0.0.1:")
+                    or attempt + 1 == _APP_SERVER_BIND_ATTEMPTS
+                ):
+                    raise
+                self.listen_url = f"ws://127.0.0.1:{_allocate_loopback_port()}"
+                _logger.warning(
+                    "Codex app-server listen address was taken; retrying startup",
+                    extra=debug_event(
+                        "codex_app_server_bind_retry",
+                        session_id=self.session_id,
+                        attempt=attempt + 2,
+                        max_attempts=_APP_SERVER_BIND_ATTEMPTS,
+                    ),
+                )
+
+    async def _start_once(self) -> None:
         """
         Start the Codex app-server and wait for the socket.
 
@@ -2494,7 +2527,13 @@ class CodexNativeAppServer:
         last_error: Exception | None = None
         while asyncio.get_running_loop().time() < deadline:
             if self.proc is not None and self.proc.returncode is not None:
+                if self.stderr_task is not None:
+                    await asyncio.wait({self.stderr_task}, timeout=1.0)
                 detail = " | ".join((self.recent_stderr or [])[-5:])
+                if re.search(
+                    r"Error: Address (?:already )?in use \(os error (?:48|98|10048)\)", detail
+                ):
+                    raise _CodexListenAddressInUse(f"Codex app-server exited early: {detail}")
                 raise RuntimeError(f"Codex app-server exited early: {detail}")
             client: CodexAppServerClient | None = None
             try:

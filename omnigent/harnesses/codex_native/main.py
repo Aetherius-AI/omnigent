@@ -1279,11 +1279,14 @@ async def _prepare_codex_terminal(
             terminal_launch_args=codex_args,
         )
         app_server.listen_url = codex_ws_url
+        app_server.retry_bind_collision = True
         event_client: CodexAppServerClient | None = None
         terminal_id: str | None = None
         launched_terminal: LaunchedCodexTerminal | None = None
         try:
             await app_server.start()
+            codex_ws_url = app_server.listen_url
+            assert codex_ws_url is not None
             if thread_id is None:
                 event_client = client_for_transport(
                     codex_ws_url,

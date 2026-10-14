@@ -5368,7 +5368,10 @@ async def _auto_create_codex_terminal(
         turn_routing=launch_config.turn_routing,
     )
     app_server.listen_url = codex_ws_url
+    app_server.retry_bind_collision = True
     await app_server.start()
+    codex_ws_url = app_server.listen_url
+    assert codex_ws_url is not None
     _AUTO_CODEX_APP_SERVERS[session_id] = app_server
 
     event_client = CodexAppServerClient(
