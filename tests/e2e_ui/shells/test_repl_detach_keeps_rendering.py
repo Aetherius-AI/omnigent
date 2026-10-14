@@ -187,6 +187,20 @@ def _wait_until(predicate: Callable[[], bool], *, timeout_s: float, what: str) -
     raise TimeoutError(f"timed out waiting for {what}")
 
 
+def _wait_until_settled(pane: ReplPane, *, interval_s: float, timeout_s: float, what: str) -> str:
+    """Return the pane contents once two captures *interval_s* apart match."""
+    deadline = time.monotonic() + timeout_s
+    previous = pane.capture()
+    while True:
+        time.sleep(interval_s)
+        current = pane.capture()
+        if current == previous:
+            return current
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"timed out waiting for {what}")
+        previous = current
+
+
 def _accept_first_run_theme_picker(pane: ReplPane) -> bool:
     """Accept the first-run theme picker a fresh (theme-less) e2e home shows."""
     if "Choose your theme" not in pane.capture():
@@ -288,10 +302,13 @@ def test_detached_repl_stops_rendering_after_last_client_leaves(
         key=nonce,
         match=nonce,
     )
-    # A settled snapshot of the paused pane taken right before the turn: a
-    # correctly paused REPL repaints nothing for the turn, so this stays
-    # byte-identical even where the toolbar's context-usage ring would redraw.
-    pane_detached = pane.capture()
+    # The REPL pauses asynchronously after tmux reports the detach, so wait for
+    # the pane to stop changing before snapshotting it. A correctly paused REPL
+    # repaints nothing for the turn, so the snapshot stays byte-identical even
+    # where the toolbar's context-usage ring would redraw.
+    pane_detached = _wait_until_settled(
+        pane, interval_s=1.0, timeout_s=15.0, what="the detached pane to settle"
+    )
     # The prompt names only the nonce, never the reply token, so the token can
     # reach the transcript or the pane only as the assistant's painted response
     # -- not by echoing the user's own text.

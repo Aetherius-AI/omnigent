@@ -3013,14 +3013,18 @@ class TerminalHost:
         kept for callers that need to clear without an immediate
         replacement (e.g. cancel paths).
 
-        While rendering is paused the pre-pause lines stay on the unviewed
-        screen and their counts are preserved; the erase is deferred and runs
-        at the start of :meth:`resume_rendering`, against the live terminal and
-        before any queued output, so it survives an empty or non-stream replay.
-        The held-back buffer is dropped either way, matching the raw-tail
-        guarantee above.
+        While rendering is paused the clear first drops the streaming queued
+        since the pause, which is what it cancels. If nothing else is queued,
+        the pre-pause lines stay on the unviewed screen with their counts and
+        the erase is deferred to the start of :meth:`resume_rendering`, before
+        any queued output, so it survives an empty or non-stream replay. If a
+        committed item is queued, its replay replaces or finishes those lines
+        exactly as it would have unpaused, so nothing further is deferred.
         """
         if self._render_paused:
+            self._drop_queued_streaming()
+            if self._paused_output:
+                return
             self._pending_streamed_clear = True
         else:
             self._erase_streamed_region()
@@ -3186,9 +3190,10 @@ class TerminalHost:
         survive an empty or non-stream replay. A mid-replay write failure (a
         pane that vanished) re-pauses the host and keeps the items it never
         reached, so the next resume on reattach finishes them rather than
-        painting ahead of a stranded backlog. The failing item is dropped
-        because it may have been written in part; a failed skipped-output notice
-        keeps its count so a later resume re-emits it.
+        painting ahead of a stranded backlog. The failing item is dropped, with
+        any text it left unflushed, because it may have been written in part; a
+        failed skipped-output notice keeps its count so a later resume re-emits
+        it.
         """
         if not self._render_paused:
             return
@@ -3232,6 +3237,8 @@ class TerminalHost:
                 self.output(item)
             except Exception:
                 self._render_paused = True
+                self._text_buffer = ""
+                self._last_was_streaming = False
                 if dropped and index == 0:
                     # The skipped-output notice never printed; keep its count so
                     # a later resume re-emits it with the whole retained backlog.
@@ -3251,10 +3258,7 @@ class TerminalHost:
         latest. This bounds the replay to committed content.
         """
         if isinstance(item, StreamReplace):
-            while self._paused_output and isinstance(
-                self._paused_output[-1], StreamingText | StreamLive
-            ):
-                self._paused_output.pop()
+            self._drop_queued_streaming()
         elif (
             isinstance(item, StreamLive)
             and self._paused_output
@@ -3265,6 +3269,13 @@ class TerminalHost:
         if len(self._paused_output) == self._paused_output.maxlen:
             self._paused_output_dropped += 1
         self._paused_output.append(item)
+
+    def _drop_queued_streaming(self) -> None:
+        """Drop the ``StreamingText``/``StreamLive`` items queued since the last commit."""
+        while self._paused_output and isinstance(
+            self._paused_output[-1], StreamingText | StreamLive
+        ):
+            self._paused_output.pop()
 
     def start_timer(self) -> None:
         """Start the elapsed timer shown in the toolbar.

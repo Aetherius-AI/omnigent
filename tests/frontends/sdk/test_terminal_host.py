@@ -2076,6 +2076,90 @@ def test_deferred_clear_re_pauses_when_the_erase_write_fails(
     assert list(host._paused_output) == []
 
 
+def test_paused_clear_drops_the_streaming_queued_since_the_pause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A clear while paused also cancels the draft queued since the pause."""
+    host = TerminalHost(model_name="test")
+    writes = _capture_stdout(monkeypatch)
+    host._streamed_line_count = 2
+
+    host.pause_rendering()
+    host.output(StreamingText(text="stale delta\n"))
+    host.output(StreamLive(Text("stale draft")))
+    host.clear_streamed_text()
+    assert list(host._paused_output) == []
+    assert host._pending_streamed_clear
+
+    host.resume_rendering()
+    painted = "".join(writes)
+    assert painted == "\033[A\033[2K" * 2
+    assert host._streamed_line_count == 0
+
+
+def test_paused_clear_after_a_queued_commit_only_drops_the_newer_draft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A queued panel commits the pre-pause lines; a later clear only drops the newer draft.
+
+    Unpaused, the panel would have flushed the partial tail and committed the
+    streamed lines before the clear ran, so the clear must neither erase them
+    nor drop the tail the panel still has to flush.
+    """
+    host = TerminalHost(model_name="test")
+    writes = _capture_stdout(monkeypatch)
+    host._streamed_line_count = 2
+    host._text_buffer = "partial tail"
+
+    host.pause_rendering()
+    host.output(Text("panel"))
+    host.output(StreamingText(text="stale delta\n"))
+    host.clear_streamed_text()
+    assert [type(item) for item in host._paused_output] == [Text]
+    assert not host._pending_streamed_clear
+    assert host._text_buffer == "partial tail"
+
+    host.resume_rendering()
+    painted = "".join(writes)
+    assert "\033[2K" not in painted
+    assert painted.index("partial tail") < painted.index("panel")
+    assert "stale" not in painted
+    assert host._streamed_line_count == 0
+
+
+def test_failed_streaming_replay_drops_its_unflushed_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``StreamingText`` item that fails mid-replay leaves nothing behind to flush later."""
+    host = TerminalHost(model_name="test")
+    host.pause_rendering()
+    host.output(StreamingText(text="alpha line\nbeta tail"))
+    host.output(Text("charlie"))
+
+    fail = {"active": True}
+
+    def _write(data: str) -> int:
+        if fail["active"] and "alpha" in data:
+            raise BrokenPipeError("pane gone mid-replay")
+        return len(data)
+
+    monkeypatch.setattr(sys.stdout, "write", _write)
+    monkeypatch.setattr(sys.stdout, "flush", lambda: None)
+
+    with pytest.raises(BrokenPipeError):
+        host.resume_rendering()
+    assert host.rendering_paused
+    assert host._text_buffer == ""
+    assert [item.plain for item in host._paused_output] == ["charlie"]
+
+    fail["active"] = False
+    writes = _capture_stdout(monkeypatch)
+    host.resume_rendering()
+    painted = "".join(writes)
+    assert "beta tail" not in painted
+    assert "charlie" in painted
+
+
 def test_dropped_notice_replaces_the_pre_pause_live_region(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
