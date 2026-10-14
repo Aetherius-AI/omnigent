@@ -400,15 +400,14 @@ _OVERLAY_SURFACE = "an overlay"
 # lacks it is not such a surface — e.g. a launch wrapper's output before
 # Claude Code has drawn its input box — and an Escape cannot clear it.
 _ESCAPE_DISMISS_HINT = re.compile(r"\bEsc to \w", re.IGNORECASE)
-# An option row offering to quit, as on the workspace trust dialog. Cancelling
-# such a startup prompt exits Claude Code, so its Escape ends the session. Read
-# per row from the dialog's own option list (:func:`_exit_option_in_dialog`),
-# never from the whole capture: the same text echoed into the transcript above
-# a dismissible overlay must not stop that overlay's Escape.
+# An option row offering to quit, as on the workspace trust dialog, whose Escape
+# exits Claude Code. Matched per dialog option row (:func:`_exit_option_in_dialog`),
+# never against the whole capture, so a transcript echo cannot block an overlay's Escape.
 _EXIT_OPTION_ROW = re.compile(r"\s*(?:❯\s*)?(?:\d+\.\s*)?No, exit\s*")
-# How many rows above a dialog's footer its option list can span: the trust and
-# bypass-permissions prompts list two options, the MCP approval three.
-_DIALOG_OPTION_ROWS = 4
+# Rows above a dialog's footer that may hold its option list: the trust and
+# bypass-permissions prompts list two options, the MCP approval three, with slack
+# for a hint row between the options and the footer.
+_DIALOG_OPTION_ROWS = 6
 # Titles of the confirmation dialog Claude Code pops when a switch invalidates
 # the prompt cache — one component, titled for what is being switched. It only
 # appears on a session with history, and it took ~1.9s to render on a warm

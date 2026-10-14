@@ -11211,7 +11211,7 @@ def test_delivery_never_escapes_the_workspace_trust_dialog(
         else:
             claude_native_bridge.inject_slash_command(bridge_dir, command="/compact")
 
-    assert "Escape" not in [args[-1] for args in sends]
+    assert sends == [], f"Nothing may be typed into the trust dialog; got {sends}."
     assert str(excinfo.value).startswith(
         "Claude Code is waiting for an answer in its terminal (Accessing workspace:)"
     )
@@ -11221,6 +11221,12 @@ def test_delivery_never_escapes_the_workspace_trust_dialog(
     ("pane", "offers_exit"),
     [
         (_TRUST_DIALOG_PANE, True),
+        (
+            _TRUST_DIALOG_PANE.replace(
+                " Enter to confirm", " Use arrow keys to choose\n Enter to confirm"
+            ),
+            True,
+        ),
         ("❯ No, exit\n" + _MODEL_PICKER_PANE, False),
         ("  1. No, exit\n" + _REWIND_PANE, False),
         (_MCP_APPROVAL_DIALOG_PANE, False),
@@ -11230,6 +11236,7 @@ def test_delivery_never_escapes_the_workspace_trust_dialog(
     ],
     ids=[
         "folder-trust",
+        "folder-trust-with-hint-row",
         "exit-echo-above-picker",
         "exit-echo-above-rewind",
         "mcp-single",
@@ -11244,7 +11251,9 @@ def test_exit_option_is_read_from_the_dialog_option_rows(pane: str, offers_exit:
 
     A transcript line with the same text above a picker or rewind dialog sits
     outside the option rows under the footer, so those overlays stay
-    dismissible; dialogs without a quit option are not mistaken for one.
+    dismissible; a hint row between the options and the footer still leaves
+    the quit option inside the window; dialogs without a quit option are not
+    mistaken for one.
     """
     assert claude_native_bridge._exit_option_in_dialog(pane) is offers_exit
 
