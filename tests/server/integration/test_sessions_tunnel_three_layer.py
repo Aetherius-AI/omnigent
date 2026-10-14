@@ -926,9 +926,9 @@ async def test_on_runner_connect_restarts_relay_via_router(
         async def post(self, *args: Any, **kwargs: Any) -> _StubResponse:
             return _StubResponse()
 
-    def _spy_resolver(conv_id: str):  # type: ignore[no-untyped-def]
+    def _spy_resolver(conv_id: str, **kwargs: Any):  # type: ignore[no-untyped-def]
         routed_calls.append(conv_id)
-        real_routed = real_resolver(conv_id)
+        real_routed = real_resolver(conv_id, **kwargs)
         fake = RoutedRunner(runner_id=real_routed.runner_id, client=_StubClient())  # type: ignore[arg-type]
         routed_clients[conv_id] = fake.client
         return fake
@@ -1059,6 +1059,7 @@ async def _reconnect_fires_connect_hook(
     *,
     wait_for_recover: str,
     runner_client: httpx.AsyncClient | None = None,
+    expect_recovered: bool = True,
 ) -> AsyncIterator[list[str]]:
     """Drive a real tunnel disconnect/reconnect so ``_on_runner_connect`` fires.
 
@@ -1069,7 +1070,7 @@ async def _reconnect_fires_connect_hook(
     ``_publish_runner_recovered_status`` with a spy that records
     completion (the closure re-imports it from the module on each call,
     so the patch is picked up). Waits until the recovery helper has run
-    to completion for ``wait_for_recover`` before yielding, so callers
+    to completion for the whole connection before yielding, so callers
     can assert on the post-recovery state.
 
     With ``runner_client``, keep the real relay and replace only its transport.
@@ -1095,8 +1096,8 @@ async def _reconnect_fires_connect_hook(
         async def post(self, *args: Any, **kwargs: Any) -> _StubResponse:
             return _StubResponse()
 
-    def _spy_resolver(conv_id: str):  # type: ignore[no-untyped-def]
-        real_routed = real_resolver(conv_id)
+    def _spy_resolver(conv_id: str, **kwargs: Any):  # type: ignore[no-untyped-def]
+        real_routed = real_resolver(conv_id, **kwargs)
         return RoutedRunner(
             runner_id=real_routed.runner_id,
             client=runner_client if runner_client is not None else _StubClient(),  # type: ignore[arg-type]
@@ -1129,6 +1130,17 @@ async def _reconnect_fires_connect_hook(
 
     sessions_routes._publish_runner_recovered_status = _spy_recover  # type: ignore[assignment]
 
+    from omnigent.server.routes import runner_tunnel
+
+    recovery_finished = asyncio.Event()
+    real_hook = runner_tunnel._run_connect_hook
+
+    async def _spy_hook(hook: Any, connection: Any) -> None:
+        await real_hook(hook, connection)
+        if ap_app.state.tunnel_registry.get(_RUNNER_ID) is connection:
+            recovery_finished.set()
+
+    runner_tunnel._run_connect_hook = _spy_hook
     communicator: ApplicationCommunicator | None = None
     forwarder_task: asyncio.Task[None] | None = None
     try:
@@ -1155,21 +1167,19 @@ async def _reconnect_fires_connect_hook(
             name="tunnel-recover-reconnect-forwarder",
         )
 
-        async def _recovered() -> None:
-            while wait_for_recover not in recovered_calls:
-                await asyncio.sleep(0.02)
-
         try:
-            await asyncio.wait_for(_recovered(), timeout=budget(5.0))
+            await asyncio.wait_for(recovery_finished.wait(), timeout=budget(5.0))
         except asyncio.TimeoutError:
             raise AssertionError(
-                "Reconnect did not drive _on_runner_connect to call "
-                f"_publish_runner_recovered_status for {wait_for_recover!r} "
+                "Reconnect did not finish recovery of the connection containing "
+                f"{wait_for_recover!r} "
                 f"within 5s. recovered_calls={recovered_calls}"
             ) from None
 
+        assert (wait_for_recover in recovered_calls) is expect_recovered, recovered_calls
         yield recovered_calls
     finally:
+        runner_tunnel._run_connect_hook = real_hook
         router.client_for_session_resources = real_resolver  # type: ignore[method-assign]
         sessions_routes._ensure_runner_relay = real_ensure  # type: ignore[assignment]
         sessions_routes._ensure_runner_relay_ready = real_ensure_ready  # type: ignore[assignment]
@@ -1560,8 +1570,8 @@ def _stub_connect_hook_for_pumpless_ws(ap_app: FastAPI, monkeypatch: pytest.Monk
     router = ap_app.state.runner_router
     real_resolver = router.client_for_session_resources
 
-    def _stub_resolver(conv_id: str):  # type: ignore[no-untyped-def]
-        real_routed = real_resolver(conv_id)
+    def _stub_resolver(conv_id: str, **kwargs: Any):  # type: ignore[no-untyped-def]
+        real_routed = real_resolver(conv_id, **kwargs)
         return RoutedRunner(runner_id=real_routed.runner_id, client=_StubClient())  # type: ignore[arg-type]
 
     monkeypatch.setattr(router, "client_for_session_resources", _stub_resolver)
@@ -1666,6 +1676,84 @@ async def test_runner_disconnect_grace_defers_failed_marking(
                 )
             with contextlib.suppress(asyncio.TimeoutError, Exception):
                 await reconnect_communicator.wait(timeout=budget(2.0))
+        sessions_module._session_status_cache.pop(session_id, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_isolated_session_status_cache")
+@pytest.mark.parametrize("reconnect_during_lookup", [True, False])
+async def test_runner_disconnect_rechecks_tunnel_after_session_lookup(
+    tunnel_three_layer_stack: _TunnelStack,
+    monkeypatch: pytest.MonkeyPatch,
+    reconnect_during_lookup: bool,
+) -> None:
+    """A slow offline lookup must not fail a runner that reconnected meanwhile."""
+    from omnigent.runtime import get_conversation_store
+    from omnigent.server.routes import sessions as sessions_module
+
+    ap_app = tunnel_three_layer_stack.ap_app
+    monkeypatch.setattr(sessions_module, "RUNNER_DISCONNECT_GRACE_S", 0.01)
+    _stub_connect_hook_for_pumpless_ws(ap_app, monkeypatch)
+    response = await tunnel_three_layer_stack.ap_client.post(
+        "/v1/sessions",
+        data={"metadata": json.dumps({})},
+        files={"bundle": ("agent.tar.gz", _build_harness_agent_bundle(), "application/gzip")},
+    )
+    assert response.status_code == 201, response.text
+    session_id = response.json()["session_id"]
+    runner_id = "runner-reconnect-during-offline-lookup"
+    store = get_conversation_store()
+    store.replace_runner_id(session_id, runner_id)
+    communicator = await _connect_runner_tunnel(ap_app, runner_id)
+    await _send_hello_and_wait(communicator, ap_app, runner_id, harnesses=[_TEST_HARNESS_NAME])
+    sessions_module._session_status_cache[session_id] = "running"
+
+    lookup_started = threading.Event()
+    release_lookup = threading.Event()
+    real_lookup = store.list_conversations_by_runner_id
+
+    def delayed_lookup(lookup_runner_id: str):  # type: ignore[no-untyped-def]
+        rows = real_lookup(lookup_runner_id)
+        # Hold only the disconnect read; the real reconnect hook may read too.
+        if lookup_runner_id == runner_id and not lookup_started.is_set():
+            lookup_started.set()
+            if not release_lookup.wait(timeout=budget(10.0)):
+                raise TimeoutError("offline lookup was never released")
+        return rows
+
+    monkeypatch.setattr(store, "list_conversations_by_runner_id", delayed_lookup)
+    reconnect: ApplicationCommunicator | None = None
+    try:
+        await communicator.send_input({"type": "websocket.disconnect", "code": 1006})
+        await communicator.wait(timeout=budget(2.0))
+        assert await asyncio.to_thread(lookup_started.wait, budget(5.0))
+        grace_task = next(
+            task
+            for task in asyncio.all_tasks()
+            if task.get_name() == f"runner-disconnect-grace-{runner_id}"
+        )
+        if reconnect_during_lookup:
+            reconnect = await _connect_runner_tunnel(ap_app, runner_id)
+            await _send_hello_and_wait(
+                reconnect, ap_app, runner_id, harnesses=[_TEST_HARNESS_NAME]
+            )
+            assert ap_app.state.tunnel_registry.get(runner_id) is not None
+        release_lookup.set()
+        await asyncio.wait_for(asyncio.shield(grace_task), timeout=budget(5.0))
+        expected = "running" if reconnect_during_lookup else "failed"
+        assert sessions_module._session_status_cache[session_id] == expected
+        conv = store.get_conversation(session_id)
+        assert conv is not None
+        error = sessions_module._last_task_error_from_labels(conv.labels)
+        if reconnect_during_lookup:
+            assert error is None
+        else:
+            assert error is not None and error["code"] == "runner_disconnected"
+    finally:
+        release_lookup.set()
+        if reconnect is not None:
+            await reconnect.send_input({"type": "websocket.disconnect", "code": 1000})
+            await reconnect.wait(timeout=budget(2.0))
         sessions_module._session_status_cache.pop(session_id, None)
 
 
@@ -2117,7 +2205,10 @@ async def test_parent_reconnect_restores_interrupted_child_on_old_runner(
 
     monkeypatch.setattr(initializer, "initialize", record_init)
     async with _reconnect_fires_connect_hook(
-        ap_app, fake_pm, wait_for_recover=parent_id
+        ap_app,
+        fake_pm,
+        wait_for_recover=parent_id,
+        expect_recovered=fail_first != "parent",
     ) as recovered:
         if fail_first:
             assert failed_once
