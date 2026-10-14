@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 import * as sessionsApi from "@/lib/sessionsApi";
 import { useChatStore } from "@/store/chatStore";
+import { SANDBOX_SIDE_CHAT_UNSUPPORTED } from "@/lib/sessionCapabilities";
 import { ALT_KEY, MOD_KEY } from "@/components/KeyboardShortcut";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useSessionAgent } from "@/hooks/useAgents";
@@ -84,6 +85,7 @@ afterEach(() => {
   vi.clearAllMocks();
   isMobileMock.mockReturnValue(false);
   restrictionsMock.mockReturnValue({});
+  useChatStore.setState({ sessionHarness: null });
   Reflect.deleteProperty(window, "omnigentDesktop");
   useTerminalsMock.mockReturnValue({ terminals: [], isLoading: false, error: null });
   useCreateTerminalMock.mockReturnValue({
@@ -1129,6 +1131,19 @@ describe("WorkspacePanel mobile side chats", () => {
 
     expect(screen.queryByTestId("side-chats-panel-drawer")).toBeNull();
     expect(screen.getByTestId("side-chat-pane-stub")).toHaveTextContent("conv_side_b");
+  });
+
+  it("disables the drawer's New side chat and explains the fork restriction", () => {
+    isMobileMock.mockReturnValue(true);
+    useChatStore.setState({ sessionHarness: "claude-sdk" });
+    restrictionsMock.mockReturnValue({ sideChatDisabledReason: SANDBOX_SIDE_CHAT_UNSUPPORTED });
+    renderWorkspace({ rightRailTab: "sidechat", mobileSideChatsOpen: true });
+
+    const drawer = screen.getByTestId("side-chats-panel-drawer");
+    expect(within(drawer).getByRole("button", { name: "New side chat" })).toBeDisabled();
+    // The empty state swaps its "Tap +" hint for the server's refusal reason.
+    expect(within(drawer).getByText(SANDBOX_SIDE_CHAT_UNSUPPORTED)).toBeVisible();
+    expect(within(drawer).queryByText(/Tap \+ to ask a question/)).toBeNull();
   });
 });
 

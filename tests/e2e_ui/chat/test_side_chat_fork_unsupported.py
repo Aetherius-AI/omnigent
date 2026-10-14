@@ -68,13 +68,15 @@ def expect_fork_action_unsupported(page: Page) -> None:
 
 
 def _expect_withheld(item: Locator, what: str) -> None:
+    # The item is either removed (a quick count-0 probe) or kept but disabled; the
+    # disabled assertion gets the default timeout so a slow CI render can't flake it.
     try:
         expect(item).to_have_count(0, timeout=1_500)
         return
     except AssertionError:
         pass
     try:
-        expect(item).to_be_disabled(timeout=1_500)
+        expect(item).to_be_disabled()
     except AssertionError:
         pytest.fail(f"{what} is offered on a session whose forks are unsupported")
 
@@ -110,6 +112,10 @@ def test_side_chat_entry_points_follow_fork_restriction(
     composer.fill("/")
     expect(page.locator('[data-testid^="slash-menu-item-"]').first).to_be_visible()
     composer.fill("/side")
+    # Wait for the menu to re-filter to the "/side" query before asserting the side
+    # command is absent: /help cannot match "side", so its disappearance proves the
+    # filtered state settled and the count-0 check can't pass on a stale menu.
+    expect(page.get_by_test_id("slash-menu-item-help")).to_have_count(0)
     _expect_withheld(page.get_by_test_id("slash-menu-item-side"), "The /side slash command")
 
 
