@@ -5912,12 +5912,13 @@ export function NewChatLandingScreen() {
   ];
   const cloudHosts = listedHosts.filter(isCloudHostEntry);
   const localHosts = listedHosts.filter((host) => !isCloudHostEntry(host));
-  const myMachinesEmptyText =
-    allHosts.length === 0
-      ? "No hosts connected yet."
-      : onlineHosts.length === 0
-        ? "No hosts online."
-        : null;
+  const myMachines = allHosts.filter((host) => !isCloudHostEntry(host));
+  let myMachinesEmptyText: string | null = null;
+  if (allHosts.length === 0) {
+    myMachinesEmptyText = "No hosts connected yet.";
+  } else if (myMachines.length > 0 && !myMachines.some((host) => host.status === "online")) {
+    myMachinesEmptyText = "No hosts online.";
+  }
   const hasCloudOptions =
     managedSandboxesEnabled ||
     showDisabledSandboxWithDocs ||

@@ -3273,7 +3273,7 @@ describe("NewChatLandingScreen", () => {
         RECENT_KEY,
         JSON.stringify({ host_1: ["/Users/corey/repo"], host_2: ["/work/repo"] }),
       );
-      mockHosts([host("online", 1), host("offline", 2)]);
+      mockHosts([host("online", 1), host("offline", 2), host("offline", 3)]);
       renderLanding({ managed_sandboxes_enabled: managedSandboxesEnabled });
 
       const chip = screen.getByTestId("new-chat-landing-host-chip");
@@ -3294,40 +3294,51 @@ describe("NewChatLandingScreen", () => {
         "data-active",
         "true",
       );
+      // Only the remembered offline host keeps a row; other stopped hosts are hidden.
+      expect(screen.queryByTestId("new-chat-landing-host-host_3")).toBeNull();
+      expect(screen.getByTestId("new-chat-landing-host-host_1")).not.toHaveAttribute(
+        "aria-disabled",
+      );
       fireEvent.click(screen.getByTestId("new-chat-landing-host-host_1"));
       await waitFor(() => expect(screen.getByTestId("new-chat-landing-submit")).toBeEnabled());
       expect(localStorage.getItem("omnigent:last-host-choice")).toBe("host_1");
     },
   );
 
-  it("lists online hosts and the selected offline host but hides other stopped hosts", async () => {
-    localStorage.setItem("omnigent:last-host-choice", "host_2");
-    mockHosts([host("online", 1), host("offline", 2), host("offline", 3)]);
-    renderLanding();
+  it.each([
+    { hosts: [] as Host[], text: "No hosts connected yet." },
+    { hosts: [host("offline", 1), host("offline", 2)], text: "No hosts online." },
+  ])(
+    "explains an empty My machines list ($text) instead of listing dead rows",
+    async ({ hosts, text }) => {
+      mockHosts(hosts);
+      renderLanding();
 
-    const chip = screen.getByTestId("new-chat-landing-host-chip");
-    await waitFor(() => expect(chip).toHaveAccessibleName("Host: machine-2, Offline"));
-    fireEvent.pointerDown(chip, { button: 0 });
-    expect(screen.getByTestId("new-chat-landing-host-host_1")).not.toHaveAttribute("aria-disabled");
-    expect(screen.getByTestId("new-chat-landing-host-host_2")).toHaveAttribute(
-      "data-active",
-      "true",
-    );
-    expect(screen.queryByTestId("new-chat-landing-host-host_3")).toBeNull();
-    expect(screen.getByTestId("new-chat-landing-host-menu")).not.toHaveTextContent("machine-3");
-  });
+      const chip = screen.getByTestId("new-chat-landing-host-chip");
+      await waitFor(() =>
+        expect(chip).toHaveAccessibleName(expect.stringContaining("No host selected")),
+      );
+      fireEvent.pointerDown(chip, { button: 0 });
+      const menu = screen.getByTestId("new-chat-landing-host-menu");
+      expect(menu.querySelectorAll('[data-testid^="new-chat-landing-host-host_"]')).toHaveLength(0);
+      expect(menu).toHaveTextContent(text);
+    },
+  );
 
-  it("says no hosts are online instead of listing dead rows when every host is offline", async () => {
-    mockHosts([host("offline", 1), host("offline", 2)]);
+  it("keeps the My machines notice when only a cloud host is online", async () => {
+    mockHosts([
+      { host_id: "cloud-1", name: "team-cloud-box", owner: "me", status: "online" },
+      host("offline", 2),
+    ]);
     renderLanding();
 
     const chip = screen.getByTestId("new-chat-landing-host-chip");
     await waitFor(() =>
-      expect(chip).toHaveAccessibleName(expect.stringContaining("No host selected")),
+      expect(chip).toHaveAccessibleName(/^Host: (This machine|team-cloud-box), Online$/),
     );
     fireEvent.pointerDown(chip, { button: 0 });
     const menu = screen.getByTestId("new-chat-landing-host-menu");
-    expect(screen.queryByTestId("new-chat-landing-host-host_1")).toBeNull();
+    expect(screen.getByTestId("new-chat-landing-host-cloud-1")).toBeVisible();
     expect(screen.queryByTestId("new-chat-landing-host-host_2")).toBeNull();
     expect(menu).toHaveTextContent("No hosts online.");
   });
