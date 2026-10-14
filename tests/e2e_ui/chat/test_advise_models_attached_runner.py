@@ -19,6 +19,7 @@ import httpx
 import pytest
 import yaml
 from playwright.sync_api import Browser, Page, expect
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from tests._helpers.host import isolated_host
 from tests._helpers.server_runner import server_runner
@@ -160,7 +161,7 @@ def _settle_turn(page: Page) -> str | None:
             content = pill.get_by_test_id("error-message-content")
             expect(content).to_be_visible()
             return f"{headline} | {content.inner_text()}"
-        except Exception as pill_error:
+        except (AssertionError, PlaywrightTimeoutError) as pill_error:
             raise AssertionError(
                 f"no recommendation, and the error pill could not be read: {pill_error}"
             ) from no_reply
@@ -168,6 +169,7 @@ def _settle_turn(page: Page) -> str | None:
 
 
 @pytest.mark.timeout(240)
+@pytest.mark.min_server_version("0.19.0")
 def test_host_launched_runner_offers_advise_models_when_server_routes(
     browser: Browser, routing_stack: RoutingStack
 ) -> None:

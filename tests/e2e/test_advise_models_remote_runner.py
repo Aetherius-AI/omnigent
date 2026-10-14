@@ -33,6 +33,13 @@ from tests.e2e.conftest import (
 )
 from tests.e2e.helpers import POLL_INTERVAL_S
 
+# Both sides must carry the capability: an older server omits the field and an
+# older runner cannot consume it.
+pytestmark = [
+    pytest.mark.min_server_version("0.19.0"),
+    pytest.mark.min_runner_version("0.19.0"),
+]
+
 _HOST_ONLINE_TIMEOUT_S = 60.0
 _TURN_TIMEOUT_S = 180.0
 _ADVISOR_ARGUMENTS = {
