@@ -4328,8 +4328,8 @@ def _keys_csi_u(keys: str) -> str | None:
     Encode a Claude Code keystroke or chord as CSI-u sequences.
 
     :param keys: A ``keybindings.json`` key, e.g. ``"ctrl+s"`` or ``"ctrl+x s"``.
-    :returns: The sequences, e.g. ``"\\x1b[115;5u"``, or ``None`` when a
-        keystroke is one CSI-u does not carry, e.g. ``"up"``.
+    :returns: The sequences, e.g. ``"\\x1b[115;5u"`` or ``"\\x1b[120;5us"``, or
+        ``None`` when a keystroke is one CSI-u does not carry, e.g. ``"up"``.
     """
     sequences = ""
     for keystroke in keys.split():
@@ -4338,7 +4338,8 @@ def _keys_csi_u(keys: str) -> str | None:
         if code is None or any(modifier not in _CSI_U_MODIFIER_BITS for modifier in modifiers):
             return None
         bits = sum({_CSI_U_MODIFIER_BITS[modifier] for modifier in modifiers})
-        sequences += f"\x1b[{code};{bits + 1}u" if bits else f"\x1b[{code}u"
+        # An unmodified key goes as the character a terminal emits for it.
+        sequences += f"\x1b[{code};{bits + 1}u" if bits else chr(code)
     return sequences or None
 
 

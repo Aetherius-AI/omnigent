@@ -7,6 +7,7 @@ import base64
 import io
 import itertools
 import json
+import logging
 import os
 import queue
 import select
@@ -5022,19 +5023,19 @@ def test_inject_user_message_keeps_enter_when_no_config_dir_is_advertised(
             id="later-block-wins",
         ),
         pytest.param(
-            "{not json",
-            None,
-            id="malformed-logs-a-warning",
-        ),
-        pytest.param(
             _claude_keybindings({"Return": None, "Control+Enter": "chat:submit"}),
             "\x1b[13;5u",
             id="aliases",
         ),
         pytest.param(
             _claude_keybindings({"enter": "chat:newline", "ctrl+x s": "chat:submit"}),
-            "\x1b[120;5u\x1b[115u",
+            "\x1b[120;5us",
             id="chord",
+        ),
+        pytest.param(
+            _claude_keybindings({"enter": "chat:newline", "ctrl+x enter": "chat:submit"}),
+            "\x1b[120;5u\r",
+            id="chord-ending-in-enter",
         ),
     ],
 )
@@ -5048,6 +5049,19 @@ def test_rebound_submit_sequence_reads_the_chat_keybindings(
         (tmp_path / "keybindings.json").write_text(keybindings)
 
     assert claude_native_bridge._rebound_submit_sequence(tmp_path) == expected
+
+
+def test_rebound_submit_sequence_logs_an_unreadable_keybindings_file(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A malformed file is logged before Enter is kept; a missing one stays quiet."""
+    with caplog.at_level(logging.WARNING, logger="omnigent.harnesses.claude_native.bridge"):
+        assert claude_native_bridge._rebound_submit_sequence(tmp_path) is None
+        assert not caplog.records
+        (tmp_path / "keybindings.json").write_text("{not json")
+        assert claude_native_bridge._rebound_submit_sequence(tmp_path) is None
+    assert [record.levelno for record in caplog.records] == [logging.WARNING]
+    assert "keybindings.json" in caplog.records[0].getMessage()
 
 
 @pytest.mark.parametrize(
