@@ -26,6 +26,7 @@ from omnigent.db.cockroachdb import (
     _initialize_or_verify_crdb_schema,
     _prepare_crdb_schema_transaction,
 )
+from omnigent.db.db_models import MODEL_SCHEMA_REVISION
 from omnigent.db.utils import (
     _build_alembic_config,
     _create_engine,
@@ -203,7 +204,7 @@ def test_cockroachdb_bootstrap_resumes_after_interrupted_migration(
     try:
         with pytest.raises(RuntimeError, match="injected migration interruption"):
             _initialize_or_verify_crdb_schema(engine, fresh_uri)
-        assert _get_current_db_revision(engine) == model_head
+        assert _get_current_db_revision(engine) == MODEL_SCHEMA_REVISION
         assert _CRDB_BOOTSTRAP_MARKER_TABLE in inspect(engine).get_table_names()
         assert _SCHEMA_ONLY_COLUMN not in agents_columns()
 
@@ -265,8 +266,6 @@ def test_cockroachdb_upgrades_from_supported_baseline(db_uri: str) -> None:
 
 
 def test_cockroachdb_resumes_empty_revision_and_repairs_indexes(db_uri: str) -> None:
-    from omnigent.db.db_models import MODEL_SCHEMA_REVISION
-
     engine = _crdb_engine(db_uri)
     version = _crdb_server_version(engine)
     head = _get_head_db_revision(db_uri)
