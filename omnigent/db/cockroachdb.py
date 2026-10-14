@@ -188,7 +188,10 @@ def _start_or_resume_crdb_bootstrap(
         return
     raise RuntimeError(
         "CockroachDB has an invalid Omnigent bootstrap marker or unexpected tables. "
-        "Use a new empty database rather than stamping an unknown partial schema."
+        "Its target may be legacy or differ from this application's model revision "
+        "and migration head. Existing data was left unchanged. Back up and inspect "
+        "this database and its bootstrap marker before manual recovery, or initialize "
+        "a separate empty database. Do not guess or manually stamp a revision."
     )
 
 
