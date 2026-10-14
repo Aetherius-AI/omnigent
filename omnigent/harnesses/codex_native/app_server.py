@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from omnigent.spec.types import AgentSpec
 
 from omnigent.cli_invocation import cli_invocation
+from omnigent.debug_logging import debug_event
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.harnesses.codex_egress import CertificateFailure, detect_certificate_failure
 from omnigent.harnesses.codex_native.bridge import (
@@ -2293,7 +2294,26 @@ class CodexNativeAppServer:
                     await startup_client.close()
                 except Exception:  # noqa: BLE001 - a dead control socket cannot undo trust
                     _logger.warning("Could not close Codex startup client", exc_info=True)
-        except BaseException:
+        except BaseException as exc:
+            if isinstance(exc, Exception):
+                with contextlib.suppress(Exception):
+                    from omnigent.harnesses.codex_native.diagnostics import (
+                        collect_codex_startup_diagnostics,
+                    )
+
+                    failure_event = debug_event(
+                        "codex_app_server_start_failed", session_id=self.session_id
+                    )
+                    failure_event["attributes"] = {
+                        "harness": "codex-native",
+                        "phase": "app_server_startup",
+                        "exception_type": type(exc).__name__,
+                        **collect_codex_startup_diagnostics(self),
+                    }
+                    _logger.warning(
+                        "Codex app-server startup failed before cleanup",
+                        extra=failure_event,
+                    )
             await self.close()
             raise
 
