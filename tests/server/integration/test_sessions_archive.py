@@ -297,7 +297,7 @@ async def test_archive_tears_down_host_spawned_runner(
         )
     finally:
         _sessions_common._session_status_cache.pop(session_id, None)
-        _sessions_common._intentional_stop_sessions.discard(session_id)
+        _sessions_common._intentional_stop_sessions.pop(session_id, None)
 
 
 async def test_failed_archive_leaves_session_running(
@@ -415,6 +415,8 @@ async def test_unarchive_skips_stop(
     session_id = session["id"]
 
     await client.patch(f"/v1/sessions/{session_id}", json={"archived": True})
+    # Finish setup's detached stop before observing the unarchive operation.
+    await _drain_detached_stops()
 
     mock_stop = AsyncMock()
     _sessions_common._session_status_cache[session_id] = "running"
