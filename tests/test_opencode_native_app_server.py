@@ -146,6 +146,53 @@ def test_filtered_server_env_drops_global_opencode_config(
     assert env["XDG_CONFIG_HOME"] == str(tmp_path / "xdg-config")
 
 
+def _gh_config_dir(env: dict[str, str]) -> Path:
+    # gh resolves its config dir as GH_CONFIG_DIR, else $XDG_CONFIG_HOME/gh,
+    # else $HOME/.config/gh (see `gh help environment`).
+    if env.get("GH_CONFIG_DIR"):
+        return Path(env["GH_CONFIG_DIR"])
+    if env.get("XDG_CONFIG_HOME"):
+        return Path(env["XDG_CONFIG_HOME"]) / "gh"
+    return Path(env["HOME"]) / ".config" / "gh"
+
+
+@pytest.mark.parametrize("host_layout", ["home_config", "xdg_config_home", "gh_config_dir"])
+def test_filtered_server_env_keeps_host_gh_login_visible(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, host_layout: str
+) -> None:
+    """The agent shell must still see the host's `gh` CLI login.
+
+    The user logs in with `gh auth login`, which writes the host config under
+    `$HOME/.config/gh` (or the host's own `XDG_CONFIG_HOME` / `GH_CONFIG_DIR`).
+    The per-session XDG isolation must not hide it, or `gh` in the agent shell
+    reports "not logged into any GitHub hosts".
+    """
+    host_home = tmp_path / "host-home"
+    monkeypatch.setenv("HOME", str(host_home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("GH_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("OMNIGENT_RUNNER_ENV_PASSTHROUGH", raising=False)
+    if host_layout == "home_config":
+        gh_config = host_home / ".config" / "gh"
+    elif host_layout == "xdg_config_home":
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "host-xdg"))
+        gh_config = tmp_path / "host-xdg" / "gh"
+    else:
+        gh_config = tmp_path / "host-gh"
+        monkeypatch.setenv("GH_CONFIG_DIR", str(gh_config))
+    gh_config.mkdir(parents=True)
+    (gh_config / "hosts.yml").write_text("github.com:\n    user: octocat\n")
+
+    env = filtered_server_env(bridge_dir=tmp_path / "bridge", auth_secret="pw")
+
+    resolved = _gh_config_dir(env)
+    assert (resolved / "hosts.yml").is_file(), (
+        f"gh resolves config to {resolved}, which hides the host login at {gh_config}"
+    )
+    # OpenCode's own config stays isolated in the per-session dir.
+    assert env["XDG_CONFIG_HOME"] == str(tmp_path / "bridge" / "xdg-config")
+
+
 def _server(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> OpenCodeNativeServer:
     monkeypatch.setattr(appsrv.shutil, "which", lambda name: f"/usr/bin/{name}")
     return OpenCodeNativeServer(
