@@ -134,6 +134,7 @@ _CONNECT_TIMEOUT_SECONDS = 10.0
 # that exits early still fails at once.
 _APP_SERVER_READY_TIMEOUT_SECONDS = 60.0
 _APP_SERVER_BIND_ATTEMPTS = 2
+_APP_SERVER_EXIT_STDERR_TIMEOUT_SECONDS = 1.0
 # Initialization and model/list can stall after the listener becomes ready.
 _MODEL_CATALOG_PROBE_TIMEOUT_SECONDS = 30.0
 _MODEL_DISCOVERY_CACHE_SECONDS = 300.0
@@ -2506,16 +2507,9 @@ class CodexNativeAppServer:
                     with contextlib.suppress(Exception):
                         await asyncio.to_thread(diagnostics.close)
 
-    async def _startup_exit_error(self, deadline: float) -> RuntimeError:
-        """Classify the owned child's exit after bounded stderr draining."""
-        if self.stderr_task is not None:
-            await asyncio.wait(
-                {self.stderr_task},
-                timeout=max(0.0, min(0.1, deadline - asyncio.get_running_loop().time())),
-            )
-        detail = " | ".join((self.recent_stderr or [])[-5:])
-        message = f"Codex app-server exited early: {detail}"
-        if (
+    def _has_loopback_bind_collision(self) -> bool:
+        """Require the owned loopback listener's exact bind-error diagnostic."""
+        return (
             self.listen_url is not None
             and self.listen_url.startswith("ws://127.0.0.1:")
             and any(
@@ -2525,7 +2519,30 @@ class CodexNativeAppServer:
                 )
                 for line in self.recent_stderr or []
             )
-        ):
+        )
+
+    async def _startup_exit_error(self, deadline: float) -> RuntimeError:
+        """Classify the owned child's exit after bounded stderr draining."""
+        if self.stderr_task is not None:
+            loop = asyncio.get_running_loop()
+            drain_deadline = min(deadline, loop.time() + _APP_SERVER_EXIT_STDERR_TIMEOUT_SECONDS)
+            while True:
+                remaining = max(0.0, drain_deadline - loop.time())
+                timeout = (
+                    0.0
+                    if self._has_loopback_bind_collision()
+                    else min(_CONNECT_RETRY_DELAY_SECONDS, remaining)
+                )
+                await asyncio.wait({self.stderr_task}, timeout=timeout)
+                if (
+                    self.stderr_task.done()
+                    or self._has_loopback_bind_collision()
+                    or loop.time() >= drain_deadline
+                ):
+                    break
+        detail = " | ".join((self.recent_stderr or [])[-5:])
+        message = f"Codex app-server exited early: {detail}"
+        if self._has_loopback_bind_collision():
             return _CodexAppServerBindCollision(message)
         return RuntimeError(message)
 

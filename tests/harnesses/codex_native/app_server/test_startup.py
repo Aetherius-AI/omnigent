@@ -238,6 +238,39 @@ async def test_start_rechecks_owned_child_after_readiness_connect(
     assert clients[0].close_calls == 1
 
 
+@pytest.mark.parametrize("budget,collision_expected", [(5.0, True), (0.05, False)])
+async def test_startup_exit_detects_delayed_collision_without_stderr_eof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, budget: float, collision_expected: bool
+) -> None:
+    """A delayed collision line is sufficient even when a descendant holds the pipe."""
+    from omnigent.harnesses.codex_native import app_server as module
+
+    monkeypatch.setattr(module, "harness_stderr_capture_enabled", lambda: False)
+    server = _test_app_server(tmp_path, tmp_path / "home", tmp_path / "bridge", tmp_path)
+    server.listen_url = "ws://127.0.0.1:45001"
+    reader = asyncio.StreamReader()
+    server.proc = Mock(returncode=1, stderr=reader)
+    server.recent_stderr = []
+    server.stderr_task = asyncio.create_task(server._stderr_loop())
+    loop = asyncio.get_running_loop()
+    timer = loop.call_later(0.15, reader.feed_data, b"Error: Address in use (os error 98)\n")
+    try:
+        async with asyncio.timeout(2.0):
+            error = await server._startup_exit_error(loop.time() + budget)
+        if collision_expected:
+            assert isinstance(error, module._CodexAppServerBindCollision)
+            assert (
+                str(error) == "Codex app-server exited early: Error: Address in use (os error 98)"
+            )
+        else:
+            assert type(error) is RuntimeError
+            assert str(error) == "Codex app-server exited early: "
+        assert not server.stderr_task.done()
+    finally:
+        timer.cancel()
+        await server.close()
+
+
 async def test_wait_until_ready_cancellation_closes_connecting_client(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
