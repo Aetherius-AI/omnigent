@@ -401,8 +401,14 @@ _OVERLAY_SURFACE = "an overlay"
 # Claude Code has drawn its input box — and an Escape cannot clear it.
 _ESCAPE_DISMISS_HINT = re.compile(r"\bEsc to \w", re.IGNORECASE)
 # An option row offering to quit, as on the workspace trust dialog. Cancelling
-# such a startup prompt exits Claude Code, so its Escape ends the session.
-_EXIT_OPTION_ROW = re.compile(r"^\s*(?:❯\s*)?(?:\d+\.\s*)?No, exit\s*$", re.MULTILINE)
+# such a startup prompt exits Claude Code, so its Escape ends the session. Read
+# per row from the dialog's own option list (:func:`_exit_option_in_dialog`),
+# never from the whole capture: the same text echoed into the transcript above
+# a dismissible overlay must not stop that overlay's Escape.
+_EXIT_OPTION_ROW = re.compile(r"\s*(?:❯\s*)?(?:\d+\.\s*)?No, exit\s*")
+# How many rows above a dialog's footer its option list can span: the trust and
+# bypass-permissions prompts list two options, the MCP approval three.
+_DIALOG_OPTION_ROWS = 4
 # Titles of the confirmation dialog Claude Code pops when a switch invalidates
 # the prompt cache — one component, titled for what is being switched. It only
 # appears on a session with history, and it took ~1.9s to render on a warm
@@ -4698,7 +4704,7 @@ def inject_slash_command(
         # No readiness gate follows; a blind Enter would answer the dialog.
         pane = _capture_pane(socket_path, tmux_target)
         headline = _terminal_dialog_headline(pane)
-        if headline is not None and _EXIT_OPTION_ROW.search(pane) is not None:
+        if headline is not None and _exit_option_in_dialog(pane):
             # Dismissing this dialog quits Claude Code, so name it instead.
             raise ClaudeTerminalDialog(
                 f"Claude Code is waiting for an answer in its terminal ({headline}), so the "
@@ -5806,7 +5812,7 @@ def _restore_occupied_input(
         # mounts, a dialog that offers no dismissal, or a startup prompt whose
         # cancel quits Claude Code.
         unclearable = surface == _OVERLAY_SURFACE and (
-            not _ESCAPE_DISMISS_HINT.search(pane) or _EXIT_OPTION_ROW.search(pane) is not None
+            not _ESCAPE_DISMISS_HINT.search(pane) or _exit_option_in_dialog(pane)
         )
         if not confirmed:
             # One sighting is not enough to spend an Escape on: on a bare
@@ -6117,9 +6123,7 @@ def _terminal_dialog_headline(pane: str) -> str | None:
     """
     if not pane.strip() or _composer_row(pane) is not None:
         return None
-    lines = [line for line in pane.splitlines() if line.strip()]
-    last_rule = max((i for i, line in enumerate(lines) if _is_box_rule(line)), default=None)
-    region = lines[last_rule + 1 :] if last_rule is not None else lines[-_DIALOG_SCAN_TAIL_LINES:]
+    region = _dialog_region(pane)
     footer = next((line for line in reversed(region) if _DIALOG_FOOTER_RE.search(line)), None)
     if footer is None:
         return None
@@ -6129,6 +6133,37 @@ def _terminal_dialog_headline(pane: str) -> str | None:
     if not has_selector and "press enter" not in footer.lower():
         return None
     return " ".join(region[0].strip().strip("│").split())[:120]
+
+
+def _dialog_region(pane: str) -> list[str]:
+    """Non-empty rows below the last box rule, or the pane tail when none is drawn."""
+    lines = [line for line in pane.splitlines() if line.strip()]
+    last_rule = max((i for i, line in enumerate(lines) if _is_box_rule(line)), default=None)
+    return lines[last_rule + 1 :] if last_rule is not None else lines[-_DIALOG_SCAN_TAIL_LINES:]
+
+
+def _exit_option_in_dialog(pane: str) -> bool:
+    """
+    Whether the dialog holding the pane offers to quit Claude Code.
+
+    Its option list sits directly above the "Enter to … · Esc to …" footer, so
+    only the :data:`_DIALOG_OPTION_ROWS` rows before that footer are read. A
+    transcript row that merely says "No, exit" higher up — above a ``/model``
+    picker or the rewind dialog, say — is outside that window, so those
+    overlays keep their Escape.
+
+    :param pane: Captured pane text from :func:`_capture_pane`.
+    :returns: ``True`` when one of the dialog's option rows reads "No, exit".
+    """
+    region = _dialog_region(pane)
+    footer = next(
+        (i for i in range(len(region) - 1, -1, -1) if _DIALOG_FOOTER_RE.search(region[i])),
+        None,
+    )
+    if footer is None:
+        return False
+    options = region[max(0, footer - _DIALOG_OPTION_ROWS) : footer]
+    return any(_EXIT_OPTION_ROW.fullmatch(line) for line in options)
 
 
 def _wait_for_claude_prompt_ready(

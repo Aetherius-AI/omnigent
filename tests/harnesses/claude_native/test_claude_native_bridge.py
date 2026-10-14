@@ -10959,6 +10959,8 @@ def test_an_effort_injection_with_no_dialog_completes_without_hanging(
         _SHELL_MODE_PANE,
         _REWIND_PANE,
         _SETTINGS_PANEL_PANE,
+        "❯ No, exit\n" + _MODEL_PICKER_PANE,
+        "  1. No, exit\n" + _REWIND_PANE,
     ],
     ids=[
         "reverse-search",
@@ -10967,6 +10969,8 @@ def test_an_effort_injection_with_no_dialog_completes_without_hanging(
         "shell-mode",
         "rewind",
         "settings-panel",
+        "exit-echo-above-picker",
+        "exit-echo-above-rewind",
     ],
 )
 def test_inject_user_message_restores_an_occupied_input_box_first(
@@ -10983,7 +10987,9 @@ def test_inject_user_message_restores_an_occupied_input_box_first(
     checkpoint restore, a settings panel changes a setting, and shell mode
     hands the message to bash. The injection must Escape the surface first
     (its own documented dismissal), restoring the empty input box, then
-    deliver the message normally.
+    deliver the message normally. A transcript row that merely reads
+    "No, exit" above the surface is not the trust dialog's option and must
+    not keep the surface from being dismissed.
     """
     monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._TRUSTED_PARENT", tmp_path)
     monkeypatch.setattr(
@@ -11209,6 +11215,60 @@ def test_delivery_never_escapes_the_workspace_trust_dialog(
     assert str(excinfo.value).startswith(
         "Claude Code is waiting for an answer in its terminal (Accessing workspace:)"
     )
+
+
+@pytest.mark.parametrize(
+    ("pane", "offers_exit"),
+    [
+        (_TRUST_DIALOG_PANE, True),
+        ("❯ No, exit\n" + _MODEL_PICKER_PANE, False),
+        ("  1. No, exit\n" + _REWIND_PANE, False),
+        (_MCP_APPROVAL_DIALOG_PANE, False),
+        (_API_KEY_DIALOG_PANE, False),
+        (_PERMISSION_PROMPT_PANE, False),
+        (_SETTINGS_PANEL_PANE, False),
+    ],
+    ids=[
+        "folder-trust",
+        "exit-echo-above-picker",
+        "exit-echo-above-rewind",
+        "mcp-single",
+        "api-key",
+        "permission-prompt",
+        "settings-panel",
+    ],
+)
+def test_exit_option_is_read_from_the_dialog_option_rows(pane: str, offers_exit: bool) -> None:
+    """
+    Only an option row of the dialog itself counts as "No, exit".
+
+    A transcript line with the same text above a picker or rewind dialog sits
+    outside the option rows under the footer, so those overlays stay
+    dismissible; dialogs without a quit option are not mistaken for one.
+    """
+    assert claude_native_bridge._exit_option_in_dialog(pane) is offers_exit
+
+
+def test_inject_slash_command_dismisses_an_overlay_below_an_exit_echo(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A "No, exit" transcript echo above a picker does not block a slash command.
+
+    The picker is still Escaped and the command typed; the refusal that names
+    a quitting dialog is reserved for the dialog's own option rows.
+    """
+    bridge_dir = _picker_bridge_dir(tmp_path)
+    occupied = "❯ No, exit\n" + _MODEL_PICKER_PANE
+    sends = _fake_tmux(
+        monkeypatch,
+        [occupied, occupied, _IDLE_PANE, _composer_pane("/effort high"), _IDLE_PANE],
+    )
+
+    claude_native_bridge.inject_slash_command(bridge_dir, command="/effort high")
+
+    assert [args[-1] for args in sends] == ["Escape", "C-u", "/effort high", "Enter"]
 
 
 def test_wait_for_claude_prompt_ready_fails_fast_on_a_terminal_dialog(
