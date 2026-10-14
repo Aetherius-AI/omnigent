@@ -119,6 +119,24 @@ def _pause_next_extraction(
     return extraction_started, release_extraction
 
 
+def _submit_load(
+    pool: concurrent.futures.ThreadPoolExecutor,
+    cache: AgentCache,
+    agent_id: str,
+    bundle_location: str,
+) -> concurrent.futures.Future[LoadedAgent]:
+    """Submit a load and return once its worker thread is about to call load()."""
+    entered = threading.Event()
+
+    def run() -> LoadedAgent:
+        entered.set()
+        return cache.load(agent_id, bundle_location)
+
+    future = pool.submit(run)
+    assert entered.wait(timeout=5)
+    return future
+
+
 def test_load_cache_miss_downloads_and_extracts(
     agent_cache: AgentCache,
     artifact_store: LocalArtifactStore,
@@ -744,7 +762,7 @@ def test_concurrent_cold_loads_never_read_an_unpublished_directory(
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(first_cache.load, "agent-shared", bundle_location)
         assert extraction_started.wait(timeout=5)
-        second = pool.submit(second_cache.load, "agent-shared", winner_location)
+        second = _submit_load(pool, second_cache, "agent-shared", winner_location)
         try:
             if separate_instances:
                 # Another instance shares no lock, so it publishes during the pause.
@@ -818,7 +836,7 @@ def test_load_during_replace_waits_for_complete_workdir(
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
         replacing = pool.submit(agent_cache.replace, "agent-swap", "agent-swap/v2", new_bundle)
         assert swap_started.wait(timeout=10)
-        reading = pool.submit(agent_cache.load, "agent-swap", location)
+        reading = _submit_load(pool, agent_cache, "agent-swap", location)
         other = pool.submit(agent_cache.load, "agent-other", "agent-other/v1")
         try:
             assert (other.result(timeout=5).workdir / "config.yaml").is_file()
@@ -871,7 +889,7 @@ def test_load_during_evict_never_caches_a_removed_workdir(
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
         evicting = pool.submit(agent_cache.evict, "agent-gone")
         assert removal_started.wait(timeout=10)
-        reading = pool.submit(agent_cache.load, "agent-gone", location)
+        reading = _submit_load(pool, agent_cache, "agent-gone", location)
         try:
             early = _early_result(reading, timeout=1)
         finally:
@@ -911,7 +929,7 @@ def test_concurrent_cold_misses_extract_once(
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(agent_cache.load, "agent-cold", location)
         assert extraction_started.wait(timeout=5)
-        second = pool.submit(agent_cache.load, "agent-cold", location)
+        second = _submit_load(pool, agent_cache, "agent-cold", location)
         try:
             early = _early_result(second, timeout=1)
         finally:
