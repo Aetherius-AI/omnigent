@@ -151,6 +151,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   // writeCodeFontSizePx (live-apply test) persists to localStorage; clear it so
   // other suites start from the code-font default.
   localStorage.clear();
@@ -162,12 +163,16 @@ describe("MonacoDiffViewer", () => {
     const { rerender } = renderDiff(props);
     await waitFor(() => expect(h.onMount).not.toBeNull());
     const modified = makeFindableModified(makeFindController());
+    let updated = () => {};
     const editor = {
       getModifiedEditor: () => modified,
       getOriginalEditor: () => ({ getModel: () => null }),
       getModel: () => null,
       getDiffComputationResult: () => ({ quitEarly: true }),
-      onDidUpdateDiff: () => ({ dispose: vi.fn() }),
+      onDidUpdateDiff: (listener: () => void) => {
+        updated = listener;
+        return { dispose: vi.fn() };
+      },
       updateOptions: vi.fn(),
     };
     act(() =>
@@ -183,6 +188,15 @@ describe("MonacoDiffViewer", () => {
     rerender(diffTree({ ...props, hideWhitespace: true }));
     expect(h.budgets.length).toBeGreaterThan(0);
     expect(h.budgets.every((budget) => budget === 1000)).toBe(true);
+    vi.useFakeTimers();
+    editor.updateOptions.mockClear();
+    act(() => updated());
+    act(() => vi.advanceTimersByTime(150));
+    expect(h.diffProps?.options?.maxComputationTime).toBe(10000);
+    expect(editor.updateOptions).toHaveBeenCalledExactlyOnceWith({ maxComputationTime: 10000 });
+    act(() => updated());
+    act(() => vi.advanceTimersByTime(10000));
+    expect(editor.updateOptions).toHaveBeenCalledTimes(1);
   });
 
   it("feeds before→original and after→modified into the diff editor", async () => {
