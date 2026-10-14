@@ -108,7 +108,6 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
-  vi.useRealTimers();
   setSessionHost("sess_desktop", null);
   // restore (not just reset) so any `vi.spyOn` a test installs is removed even
   // if that test threw before its own cleanup — otherwise a leaked
@@ -182,14 +181,13 @@ describe("fileContentToBlob", () => {
 
 describe("triggerBrowserDownload", () => {
   it("creates and clicks a synthetic link then removes it", () => {
-    vi.useFakeTimers();
     const blob = new Blob(["data"], { type: "text/plain" });
     const createdLinks: HTMLAnchorElement[] = [];
     const origCreateElement = document.createElement.bind(document);
     vi.spyOn(document, "createElement").mockImplementation((tag: string) => {
       const el = origCreateElement(tag);
       if (tag === "a") {
-        vi.spyOn(el as HTMLAnchorElement, "click").mockImplementation(() => {});
+        vi.spyOn(el as HTMLAnchorElement, "click");
         createdLinks.push(el as HTMLAnchorElement);
       }
       return el;
@@ -208,8 +206,6 @@ describe("triggerBrowserDownload", () => {
     expect(link.click).toHaveBeenCalledOnce();
     // Element must have been removed from the DOM.
     expect(document.body.contains(link)).toBe(false);
-    expect(URL.revokeObjectURL).not.toHaveBeenCalled();
-    vi.advanceTimersByTime(60_000);
     expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:fake");
 
     vi.restoreAllMocks();

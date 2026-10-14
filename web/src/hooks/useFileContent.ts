@@ -94,8 +94,8 @@ export function fileContentToBlob(data: FileContentResponse): Blob {
  * Programmatically trigger a browser file download for the given ``Blob``.
  *
  * Creates a temporary object URL, clicks a synthetic ``<a>`` element to
- * initiate the download, then removes the element. URL cleanup is delayed
- * so the browser can consume the blob after the click returns.
+ * initiate the download, then immediately cleans up both the element and
+ * the URL.
  *
  * :param blob: The file data to download.
  * :param filename: The suggested filename presented to the browser's save dialog.
@@ -103,7 +103,7 @@ export function fileContentToBlob(data: FileContentResponse): Blob {
 export function triggerBrowserDownload(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
   clickDownloadLink(url, filename);
-  window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  URL.revokeObjectURL(url);
 }
 
 function clickDownloadLink(href: string, filename: string): void {
@@ -128,8 +128,9 @@ function clickDownloadLink(href: string, filename: string): void {
  * managed embed owns the transport (auth headers, replica routing) and the
  * mobile shells save http(s) downloads outside the WebView's session, so those
  * fetch the bytes through `authenticatedFetch` and hand them over as a Blob,
- * which only surfaces once the whole file has arrived. Electron also uses
- * this transport to preserve identity and host-routing headers.
+ * which only surfaces once the whole file has arrived. The desktop shell loads
+ * the standalone SPA, so its anchors would also lack the identity and
+ * host-routing headers the SPA stamps; it takes the fetch path as well.
  *
  * :param conversationId: The session/conversation ID, e.g. ``"sess_abc123"``.
  * :param path: Workspace-relative file path, e.g. ``"src/main.py"``.
