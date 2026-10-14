@@ -42,7 +42,7 @@ from typing import Any
 
 import pytest
 
-from omnigent.inner.datamodel import CredentialProxySpec, OSEnvSandboxSpec
+from omnigent.inner.datamodel import CredentialProxySpec, GitSshBinding, OSEnvSandboxSpec
 
 _BWRAP_AVAILABLE = shutil.which("bwrap") is not None
 _SANDBOX_EXEC_AVAILABLE = shutil.which("sandbox-exec") is not None
@@ -153,6 +153,7 @@ def active_sandbox_spec_factory(
         extra_read_paths: list[str] | None = None,
         egress_allow_private_destinations: bool = False,
         credential_proxy: CredentialProxySpec | None = None,
+        git_ssh: list[GitSshBinding] | None = None,
     ) -> OSEnvSandboxSpec:
         read_paths = [repo_root]
         if extra_read_paths:
@@ -167,6 +168,7 @@ def active_sandbox_spec_factory(
             egress_rules=egress_rules,
             egress_allow_private_destinations=egress_allow_private_destinations,
             credential_proxy=credential_proxy,
+            git_ssh=git_ssh,
         )
 
     return _make
