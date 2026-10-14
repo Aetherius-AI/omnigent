@@ -110,9 +110,9 @@ def test_native_cli_turn_status_reaches_the_debug_sink_with_its_session(
                     for row in capture.rows()
                     if row.get("event_name") == "codex_turn_status"
                     and row.get("session_id") == session
-                        and row.get("attributes", {}).get("protocol_source") == "turn/completed"
+                    and row.get("attributes", {}).get("protocol_source") == "turn/completed"
                 ]
-                    if any(row["attributes"]["status"] == "idle" for row in rows):
+                if any(row["attributes"]["status"] == "idle" for row in rows):
                     break
                 assert time.monotonic() < deadline, stack.log_tail()
                 time.sleep(0.05)
