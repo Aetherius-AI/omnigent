@@ -20,6 +20,7 @@ from omnigent.inner.databricks_executor import databricks_bearer_token_command
 
 @pytest.mark.posix_only
 @pytest.mark.skipif(shutil.which("openssl") is None, reason="requires a local HTTPS certificate")
+@pytest.mark.skipif(shutil.which("jq") is None, reason="the generated auth command requires jq")
 @pytest.mark.parametrize("profile", ["cli", "service"])
 def test_generated_command_uses_the_sdk_without_repeating_cli_auth(
     tmp_path: Path,

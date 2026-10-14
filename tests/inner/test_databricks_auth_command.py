@@ -729,15 +729,15 @@ def test_the_sdk_fallback_skips_the_cli_for_a_cli_profile_and_a_host_lookup(
 ) -> None:
     """``auth_type = databricks-cli`` names only the strategy the fallback excludes,
     and the unprofiled ``--host`` lookup installs the same filtered chain. Neither
-    may spawn ``databricks auth token`` again; both resolve to no bearer."""
+    may spawn ``databricks auth token`` again; the SDK reports that no strategy
+    applied (a crash inside the strategy would raise something else)."""
     from omnigent.inner import databricks_token
 
     log = _controlled_databricks_cli(tmp_path)
     with _workspace_without_metadata() as host:
         _pin_sdk_resolution(monkeypatch, tmp_path, config.format(host=host), log.parent / "bin")
-        argv = ["--host", host] + (["--profile", profile] if profile else [])
-        rc = databricks_token.main(argv)
-    assert rc == 0
+        with pytest.raises(ValueError):
+            databricks_token._sdk_bearer(profile, host)
     assert _cli_auth_token_calls(log) == []
 
 
@@ -770,6 +770,27 @@ def _restore_ambient_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     ``os.environ``; register the ones present so monkeypatch puts them back."""
     from omnigent.inner import databricks_token
 
-    for name in databricks_token._ambient_credential_env_vars():
+    try:
+        names = databricks_token._ambient_credential_env_vars()
+    except ImportError:  # no databricks-sdk: the entrypoint scrubs nothing
+        return
+    for name in names:
         if name in os.environ:
             monkeypatch.setenv(name, os.environ[name])
+
+
+@pytest.mark.posix_only
+def test_the_controlled_cli_is_what_the_sdk_default_chain_would_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Canary for the quiet-log assertions above: the SDK's unfiltered default
+    chain does discover the controlled CLI on ``PATH`` and runs ``auth token``
+    through it, so an empty log means the fallback excluded that strategy."""
+    from databricks.sdk.config import Config
+
+    log = _controlled_databricks_cli(tmp_path)
+    with _workspace_without_metadata() as host:
+        _pin_sdk_resolution(monkeypatch, tmp_path, "", log.parent / "bin")
+        with pytest.raises(ValueError):
+            Config(host=host)
+    assert len(_cli_auth_token_calls(log)) == 1
