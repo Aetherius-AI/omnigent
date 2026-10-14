@@ -457,24 +457,23 @@ def test_large_diff_has_bounded_computation(
         editor = viewer.locator(".monaco-diff-editor")
         editor.evaluate("e => e.dataset.refinementIdentity = 'same-editor'")
         page.wait_for_function("!!window.releaseRefinement", timeout=20_000)
-        editor.hover()
+        visible_text = """els => els.filter(e => {
+            const r=e.getBoundingClientRect(); return r.top > 200 && r.top < 700;
+        }).map(e => [e.textContent,e.getBoundingClientRect().top])"""
+        initial_scroll = editor.locator(".modified .view-line").evaluate_all(visible_text)
+        pane = editor.locator(".modified").bounding_box()
+        assert pane is not None
+        page.mouse.move(pane["x"] + pane["width"] / 2, pane["y"] + pane["height"] / 2)
         page.mouse.wheel(0, 1400)
         page.wait_for_timeout(250)
-        before_scroll = editor.locator(".modified .view-line").evaluate_all(
-            """els => els.filter(e => {
-                const r=e.getBoundingClientRect(); return r.top > 200 && r.top < 700;
-            }).map(e => [e.textContent,e.getBoundingClientRect().top])"""
-        )
+        before_scroll = editor.locator(".modified .view-line").evaluate_all(visible_text)
         assert before_scroll
+        assert before_scroll != initial_scroll
         page.evaluate("window.releaseRefinement()")
         expect(viewer.get_by_role("status")).to_have_count(0, timeout=5000)
         expect(editor).to_have_attribute("data-refinement-identity", "same-editor")
         page.wait_for_timeout(250)
-        after_scroll = editor.locator(".modified .view-line").evaluate_all(
-            """els => els.filter(e => {
-                const r=e.getBoundingClientRect(); return r.top > 200 && r.top < 700;
-            }).map(e => [e.textContent,e.getBoundingClientRect().top])"""
-        )
+        after_scroll = editor.locator(".modified .view-line").evaluate_all(visible_text)
         assert before_scroll == after_scroll
         computations = page.evaluate("window.diffComputations")
         assert len(computations) == 2
