@@ -4111,7 +4111,7 @@ def write_tmux_target(
     socket_path: Path,
     tmux_target: str,
     pid: int | None = None,
-    claude_config_dir: Path | None = None,
+    config_dir: Path | None = None,
 ) -> None:
     """
     Advertise the tmux socket + target for the Claude terminal.
@@ -4126,9 +4126,9 @@ def write_tmux_target(
         socket, e.g. ``Path("/tmp/.../tmux.sock")``.
     :param tmux_target: tmux pane target string, e.g. ``"claude:0.0"``.
     :param pid: Optional Claude process pid, recorded for diagnostics.
-    :param claude_config_dir: The config directory this pane's Claude
-        process reads (see :func:`claude_config_dir`), so injection can
-        honor its ``keybindings.json``. ``None`` keeps the Enter submit.
+    :param config_dir: The Claude config directory this pane's process reads
+        (see :func:`claude_config_dir`), so injection can honor its
+        ``keybindings.json``. ``None`` keeps the Enter submit.
     :returns: None.
     """
     _ensure_secure_dir(bridge_dir)
@@ -4139,8 +4139,8 @@ def write_tmux_target(
     }
     if pid is not None:
         payload["pid"] = pid
-    if claude_config_dir is not None:
-        payload["claude_config_dir"] = str(claude_config_dir)
+    if config_dir is not None:
+        payload["claude_config_dir"] = str(config_dir)
     _write_json_file(bridge_dir / _TMUX_FILE, payload)
 
 
@@ -4371,6 +4371,10 @@ def _rebound_submit_sequence(config_dir: Path | None) -> str | None:
         sequence = _keys_csi_u(keys) if action == "chat:submit" else None
         if sequence is not None:
             return sequence
+    _logger.warning(
+        "claude-native: keybindings.json moves chat:submit off Enter but binds it to no "
+        "key this bridge can type; pressing Enter"
+    )
     return None
 
 

@@ -4858,7 +4858,7 @@ def _rebound_bridge_dir(tmp_path: Path, chat_bindings: dict[str, str | None]) ->
         bridge_dir,
         socket_path=Path("/tmp/example/tmux.sock"),
         tmux_target="claude:0.0",
-        claude_config_dir=config_dir,
+        config_dir=config_dir,
     )
     return bridge_dir
 
@@ -5070,7 +5070,7 @@ def test_write_tmux_target_advertises_the_claude_config_dir(tmp_path: Path) -> N
         bridge_dir,
         socket_path=socket_path,
         tmux_target="claude:0.0",
-        claude_config_dir=Path("/srv/claude"),
+        config_dir=Path("/srv/claude"),
     )
     payload = json.loads((bridge_dir / "tmux.json").read_text(encoding="utf-8"))
     assert payload["claude_config_dir"] == "/srv/claude"

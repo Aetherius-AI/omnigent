@@ -194,10 +194,10 @@ def _publish_tmux_target_for_bridge(
         socket_path=instance.socket_path,
         tmux_target=instance.tmux_target,
         # Injection honors the keybindings of the config dir this pane's Claude
-        # process reads — its launch env, ``env`` wrapper included, as trust
-        # seeding resolves it.
-        claude_config_dir=claude_config_dir(
-            cwd=Path(instance.launch_cwd) if instance.launch_cwd else None,
+        # process reads — its launch env and cwd, ``env`` wrapper included, as
+        # trust seeding resolves them.
+        config_dir=claude_config_dir(
+            cwd=_claude_instance_launch_cwd(instance),
             env=_claude_terminal_launch_env(instance),
         ),
     )
@@ -7571,6 +7571,27 @@ def _claude_terminal_launch_cwd(spec: TerminalEnvSpec, parent_os_env: OSEnvSpec 
     return target
 
 
+def _claude_instance_launch_cwd(instance: TerminalInstance) -> Path | None:
+    """
+    Return the directory a launched Claude pane's process runs in.
+
+    The pane's cwd with an ``env -C``/``--chdir`` wrapper directory applied the
+    way ``chdir(2)`` does, mirroring :func:`_claude_terminal_launch_cwd` for a
+    pane that already launched; ``None`` when the pane recorded no cwd and the
+    wrapper changes none.
+
+    :param instance: The launched Claude terminal instance.
+    :returns: The resolved cwd, e.g. ``Path("/home/user/repo/sub")``, or ``None``.
+    """
+    cwd = Path(instance.launch_cwd) if instance.launch_cwd else None
+    chdir = env_wrapper_chdir(
+        instance.command or "", list(instance.args), _claude_terminal_pre_wrapper_env(instance)
+    )
+    if chdir is None:
+        return cwd
+    return (cwd or Path(os.getcwd())) / chdir
+
+
 def _claude_terminal_pre_wrapper_env(spec: _ClaudeLaunchSource) -> dict[str, str]:
     """
     Return the environment a Claude launch command starts with.
@@ -7608,8 +7629,7 @@ def _claude_terminal_launch_env(spec: _ClaudeLaunchSource) -> dict[str, str]:
     wrapper = env_wrapper_environment(spec.command or "", list(spec.args), env)
     if wrapper is None and Path(spec.command or "").name == "env":
         _logger.info(
-            "Claude terminal env wrapper form is not modeled; trust seeding uses the "
-            "pre-wrapper environment"
+            "Claude terminal env wrapper form is not modeled; using the pre-wrapper environment"
         )
     if wrapper is not None:
         if not wrapper.inherit:

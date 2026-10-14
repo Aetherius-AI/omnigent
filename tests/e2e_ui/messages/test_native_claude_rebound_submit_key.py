@@ -111,46 +111,57 @@ def rebound_claude_session(
     respawned = _ensure_runner_online(live_server, tmp_path_factory)
     runner_id = str(_server_state["runner_id"])
     root = _scratch_root(tmp_path)
-    workspace = root / "workspace"
-    claude_config_dir = root / "claude-config"
-    (workspace / ".omnigent").mkdir(parents=True)
-    claude_config_dir.mkdir()
-    (claude_config_dir / "keybindings.json").write_text(json.dumps(_REBOUND_KEYBINDINGS) + "\n")
-    claude = shutil.which("claude") or "claude"
-    (workspace / ".omnigent" / "config.yaml").write_text(
-        yaml.safe_dump(
-            {
-                "harness": {
-                    "claude-native": {
-                        "command": "env",
-                        "args": [f"CLAUDE_CONFIG_DIR={claude_config_dir}", claude],
+    session_id: str | None = None
+    # One cleanup path for setup failures and teardown alike, so a respawned
+    # runner or the scratch root never outlives a journey that failed to start.
+    try:
+        workspace = root / "workspace"
+        claude_config_dir = root / "claude-config"
+        (workspace / ".omnigent").mkdir(parents=True)
+        claude_config_dir.mkdir()
+        (claude_config_dir / "keybindings.json").write_text(
+            json.dumps(_REBOUND_KEYBINDINGS) + "\n"
+        )
+        claude = shutil.which("claude") or "claude"
+        (workspace / ".omnigent" / "config.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "harness": {
+                        "claude-native": {
+                            "command": "env",
+                            "args": [f"CLAUDE_CONFIG_DIR={claude_config_dir}", claude],
+                        }
                     }
                 }
-            }
+            )
         )
-    )
-    with temp_omnigent_mock_config(
-        mock_llm_server_url, "claude", workflow_owned=bool(_server_state.get("workflow_owned"))
-    ):
-        created = create_native_session(
-            httpx, live_server, harness="claude", metadata={"workspace": str(workspace)}
-        )
-        session_id = str(created["session_id"])
-        bind_session_runner(httpx.patch, live_server, session_id, runner_id, timeout=10.0)
-        try:
+        with temp_omnigent_mock_config(
+            mock_llm_server_url,
+            "claude",
+            workflow_owned=bool(_server_state.get("workflow_owned")),
+        ):
+            created = create_native_session(
+                httpx, live_server, harness="claude", metadata={"workspace": str(workspace)}
+            )
+            session_id = str(created["session_id"])
+            bind_session_runner(httpx.patch, live_server, session_id, runner_id, timeout=10.0)
             yield ReboundClaudeSession(live_server, session_id, claude_config_dir)
-        finally:
-            httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
-            if respawned is not None:
-                respawned.terminate()
-                try:
-                    respawned.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    respawned.kill()
-                    respawned.wait(timeout=5)
-            # Keep Claude Code's config and debug log for a failed journey.
-            if root != tmp_path and request.session.testsfailed == failed_before:
-                shutil.rmtree(root, ignore_errors=True)
+    finally:
+        if session_id is not None:
+            try:
+                httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
+            except httpx.HTTPError as exc:
+                _log.warning("session delete failed during teardown: %s", exc)
+        if respawned is not None:
+            respawned.terminate()
+            try:
+                respawned.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                respawned.kill()
+                respawned.wait(timeout=5)
+        # Keep Claude Code's config and debug log for a failed journey.
+        if root != tmp_path and request.session.testsfailed == failed_before:
+            shutil.rmtree(root, ignore_errors=True)
 
 
 def _wait_for_claude_startup_write(config_dir: Path) -> None:
@@ -162,7 +173,10 @@ def _wait_for_claude_startup_write(config_dir: Path) -> None:
         global_config = config_dir / ".claude.json"
         touched = False
         if global_config.exists():
-            data = json.loads(global_config.read_text(encoding="utf-8"))
+            try:
+                data = json.loads(global_config.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                data = {}  # Claude Code mid-write; the next poll reads it whole.
             touched = any(key in data for key in ("numStartups", "firstStartTime", "userID"))
         if touched or entries - seeded:
             return
@@ -184,8 +198,8 @@ def _terminal_resource_id(base_url: str, session_id: str) -> str | None:
 async def _read_terminal_screen(ws_url: str) -> str:
     screen = pyte.Screen(220, 60)
     stream = pyte.ByteStream(screen)
-    deadline = asyncio.get_running_loop().time() + _SCREEN_READ_S
     async with websockets.connect(ws_url, max_size=None) as ws:
+        deadline = asyncio.get_running_loop().time() + _SCREEN_READ_S
         while True:
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:

@@ -899,14 +899,29 @@ def test_claude_trust_seeding_never_expands_runner_auth_secrets(
     assert not any(token in str(path) for path in tmp_path.rglob("*"))
 
 
+@pytest.mark.parametrize(
+    ("args", "expected_config_dir"),
+    [
+        (["CLAUDE_CONFIG_DIR=wrapped/claude", "claude"], "/work/wrapped/claude"),
+        # ``env -C`` moves Claude's cwd, so a relative dir resolves from there.
+        (["-C", "sub", "CLAUDE_CONFIG_DIR=wrapped/claude", "claude"], "/work/sub/wrapped/claude"),
+    ],
+    ids=["wrapper-env", "wrapper-chdir"],
+)
 def test_publish_tmux_target_advertises_the_config_dir_the_pane_reads(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    args: list[str],
+    expected_config_dir: str,
 ) -> None:
     """
     ``tmux.json`` names the config dir of this pane's Claude, env wrapper included.
 
     Injection reads ``keybindings.json`` from it, so a submit key moved off Enter
     in the directory the wrapper selects is honored rather than the runner's own.
+
+    :param args: The ``env`` wrapper's arguments.
+    :param expected_config_dir: The directory Claude reads its config from.
     """
     from omnigent.harnesses.claude_native import bridge as claude_native_bridge
     from omnigent.runner.native import orchestration
@@ -918,7 +933,7 @@ def test_publish_tmux_target_advertises_the_config_dir_the_pane_reads(
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/runner/claude")
     instance = make_test_terminal_instance("claude", "main", tmp_path)
     instance.command = "env"
-    instance.args = ["CLAUDE_CONFIG_DIR=wrapped/claude", "claude"]
+    instance.args = args
     instance.launch_cwd = "/work"
     registry = SimpleNamespace(terminal_registry=SimpleNamespace(get=lambda *_args: instance))
 
@@ -933,7 +948,7 @@ def test_publish_tmux_target_advertises_the_config_dir_the_pane_reads(
     bridge_dir = claude_native_bridge.bridge_dir_for_bridge_id("bridge_abc123")
     payload = json.loads((bridge_dir / "tmux.json").read_text(encoding="utf-8"))
     assert payload["tmux_target"] == instance.tmux_target
-    assert payload["claude_config_dir"] == "/work/wrapped/claude"
+    assert payload["claude_config_dir"] == expected_config_dir
 
 
 def test_claude_terminal_launch_cwd_uses_terminal_os_env_resolution(tmp_path: Path) -> None:
