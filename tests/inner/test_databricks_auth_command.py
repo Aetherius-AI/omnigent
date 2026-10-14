@@ -788,9 +788,14 @@ def test_the_controlled_cli_is_what_the_sdk_default_chain_would_run(
     through it, so an empty log means the fallback excluded that strategy."""
     from databricks.sdk.config import Config
 
+    from omnigent.inner import databricks_token
+
     log = _controlled_databricks_cli(tmp_path)
     with _workspace_without_metadata() as host:
         _pin_sdk_resolution(monkeypatch, tmp_path, "", log.parent / "bin")
+        # Ambient cloud credentials would satisfy an earlier strategy in the chain.
+        for name in databricks_token._ambient_credential_env_vars():
+            monkeypatch.delenv(name, raising=False)
         with pytest.raises(ValueError):
             Config(host=host)
     assert len(_cli_auth_token_calls(log)) == 1
