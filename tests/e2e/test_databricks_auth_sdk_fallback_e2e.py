@@ -123,6 +123,8 @@ def test_generated_command_uses_the_sdk_without_repeating_cli_auth(
             "PATH": os.pathsep.join(
                 (str(tmp_path), str(Path(sys.executable).parent), env.get("PATH", ""))
             ),
+            # The helper's python3 must import this worktree, not an installed copy.
+            "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
             "DATABRICKS_CONFIG_FILE": str(config),
             "REQUESTS_CA_BUNDLE": str(certificate),
         }
