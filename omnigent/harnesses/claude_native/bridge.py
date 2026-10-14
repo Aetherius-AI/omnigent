@@ -1864,10 +1864,31 @@ def claude_config_dir(cwd: Path | None = None, env: Mapping[str, str] | None = N
     """
     env = os.environ if env is None else env
     base = cwd if cwd is not None else Path.cwd()
-    configured = env.get("CLAUDE_CONFIG_DIR")
-    directory = configured or os.path.join(env.get("HOME") or str(_account_home_dir()), ".claude")
-    joined = os.path.normpath(directory)
+    joined = os.path.normpath(_claude_config_directory(env))
     return Path(joined) if os.path.isabs(joined) else base / joined
+
+
+def claude_config_dir_is_relative(env: Mapping[str, str] | None = None) -> bool:
+    """
+    Return whether Claude's config directory depends on its working directory.
+
+    :param env: Claude's launch environment, e.g. ``{"CLAUDE_CONFIG_DIR": "cfg"}``.
+        ``None`` uses this process's environment.
+    :returns: ``True`` for a relative ``CLAUDE_CONFIG_DIR`` or home, e.g. ``"cfg"``.
+    """
+    env = os.environ if env is None else env
+    return not os.path.isabs(os.path.normpath(_claude_config_directory(env)))
+
+
+def _claude_config_directory(env: Mapping[str, str]) -> str:
+    """
+    Return the directory value Claude resolves its config dir from.
+
+    :param env: Claude's launch environment.
+    :returns: ``$CLAUDE_CONFIG_DIR`` when non-empty, else ``<home>/.claude``.
+    """
+    configured = env.get("CLAUDE_CONFIG_DIR")
+    return configured or os.path.join(env.get("HOME") or str(_account_home_dir()), ".claude")
 
 
 def _account_home_dir() -> Path:
@@ -4221,6 +4242,8 @@ def inject_user_message(
     """
     delivery_diagnostics.set_stage("waiting_for_tmux")
     info = _wait_for_tmux_info(bridge_dir, timeout_s=timeout_s)
+    # An unsupported submit binding fails here, before any keystroke reaches the pane.
+    submit_sequence = _rebound_submit_sequence(_advertised_claude_config_dir(info))
     delivery_diagnostics.set_stage("restoring_input")
     # A surface left occupying the composer swallows everything typed
     # below — and hides the input box, wedging the readiness gate — so
@@ -4253,7 +4276,6 @@ def inject_user_message(
     needle = _submit_needle(content)
     socket_path = info["socket_path"]
     tmux_target = info["tmux_target"]
-    submit_sequence = _rebound_submit_sequence(_advertised_claude_config_dir(info))
     # A leading ``/name`` that is neither allowed nor known-dropped passes
     # through on the assumption it is a skill. Claude Code is the only
     # authority on that guess: when it does NOT recognize the name it

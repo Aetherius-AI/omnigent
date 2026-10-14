@@ -206,16 +206,17 @@ def _claude_instance_config_dir(instance: TerminalInstance) -> Path | None:
     :param instance: The launched Claude terminal instance.
     :returns: The config directory, or ``None`` when it cannot be resolved.
     """
-    from omnigent.harnesses.claude_native.bridge import claude_config_dir
+    from omnigent.harnesses.claude_native.bridge import (
+        claude_config_dir,
+        claude_config_dir_is_relative,
+    )
 
     env, modeled = _claude_terminal_launch_env_modeled(instance)
     if not modeled:
         return None
     cwd = _claude_instance_launch_cwd(instance)
-    if cwd is None:
-        chosen = env.get("CLAUDE_CONFIG_DIR") or os.path.join(env.get("HOME") or "", ".claude")
-        if not os.path.isabs(chosen):
-            return None
+    if cwd is None and claude_config_dir_is_relative(env):
+        return None
     return claude_config_dir(cwd=cwd, env=env)
 
 

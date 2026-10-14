@@ -45,6 +45,7 @@ from omnigent.harnesses.claude_native.bridge import (
     _occupying_surface,
     augment_claude_args,
     claude_config_dir,
+    claude_config_dir_is_relative,
     claude_global_config_path,
     count_hook_events,
     display_cost_approval_popup,
@@ -4886,7 +4887,7 @@ class _RebindableTui:
             return SimpleNamespace(returncode=0, stdout=_composer_pane(self.draft), stderr="")
         if "paste-buffer" in cmd:
             self.draft = "fix the flaky test"
-        elif cmd[-1] in ("Enter", _SHIFT_ENTER):
+        elif cmd[-1] in ("Enter", _SHIFT_ENTER, self.submit_key):
             self.submits.append(cmd[-1])
             if cmd[-1] != self.submit_key:
                 self.draft += "\n"
@@ -4941,6 +4942,45 @@ def test_submit_retry_resends_the_rebound_submit_key(
     inject_user_message(bridge_dir, content="fix the flaky test")
 
     assert tui.submits == [_SHIFT_ENTER, _SHIFT_ENTER]
+
+
+def test_inject_user_message_rereads_the_keybindings_on_every_injection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Claude Code hot-reloads keybindings.json, so each injection reads the file afresh."""
+    bridge_dir = _rebound_bridge_dir(
+        tmp_path, {"enter": "chat:newline", "shift+enter": "chat:submit"}
+    )
+    ctrl_s = "\x1b[115;5u"
+    tui = _RebindableTui(_SHIFT_ENTER)
+    monkeypatch.setattr("subprocess.run", tui.run)
+    inject_user_message(bridge_dir, content="fix the flaky test")
+    assert tui.submits == [_SHIFT_ENTER]
+
+    (tmp_path / "claude-config" / "keybindings.json").write_text(
+        _claude_keybindings({"enter": "chat:newline", "ctrl+s": "chat:submit"})
+    )
+    tui.submit_key = ctrl_s
+    inject_user_message(bridge_dir, content="fix the flaky test")
+
+    assert tui.submits == [_SHIFT_ENTER, ctrl_s]
+
+
+def test_inject_user_message_rejects_undriveable_keybindings_before_typing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unsupported chat:submit binding fails the injection before any keystroke."""
+    bridge_dir = _rebound_bridge_dir(tmp_path, {"enter": "chat:newline", "up": "chat:submit"})
+
+    def _no_tmux(cmd: list[str], **kwargs: object) -> SimpleNamespace:
+        del kwargs
+        raise AssertionError(f"tmux must not be invoked: {cmd}")
+
+    monkeypatch.setattr("subprocess.run", _no_tmux)
+    with pytest.raises(claude_native_bridge.ClaudeSubmitKeyUnsupported, match="up"):
+        inject_user_message(bridge_dir, content="fix the flaky test")
 
 
 def test_inject_user_message_keeps_enter_when_no_config_dir_is_advertised(
@@ -5117,25 +5157,30 @@ def test_write_tmux_target_advertises_the_claude_config_dir(tmp_path: Path) -> N
 
 
 @pytest.mark.parametrize(
-    ("env", "expected"),
+    ("env", "expected", "relative"),
     [
-        ({"HOME": "/home/user"}, Path("/home/user/.claude")),
+        ({"HOME": "/home/user"}, Path("/home/user/.claude"), False),
         # An empty CLAUDE_CONFIG_DIR means unset to Claude.
-        ({"HOME": "/home/user", "CLAUDE_CONFIG_DIR": ""}, Path("/home/user/.claude")),
-        ({"HOME": "/home/user", "CLAUDE_CONFIG_DIR": "/srv/claude/"}, Path("/srv/claude")),
+        ({"HOME": "/home/user", "CLAUDE_CONFIG_DIR": ""}, Path("/home/user/.claude"), False),
+        ({"HOME": "/home/user", "CLAUDE_CONFIG_DIR": "/srv/claude/"}, Path("/srv/claude"), False),
         # A relative dir is Claude's cwd-relative path, ``..`` removed lexically.
-        ({"HOME": "/home/user", "CLAUDE_CONFIG_DIR": "cfg/../claude"}, Path("/work/claude")),
+        ({"HOME": "/home/user", "CLAUDE_CONFIG_DIR": "cfg/../claude"}, Path("/work/claude"), True),
+        ({"HOME": "home", "CLAUDE_CONFIG_DIR": ""}, Path("/work/home/.claude"), True),
     ],
-    ids=["home", "empty-override", "absolute", "relative"],
+    ids=["home", "empty-override", "absolute", "relative", "relative-home"],
 )
-def test_claude_config_dir_resolves_like_claude(env: dict[str, str], expected: Path) -> None:
+def test_claude_config_dir_resolves_like_claude(
+    env: dict[str, str], expected: Path, relative: bool
+) -> None:
     """
     ``keybindings.json`` is read from the directory Claude itself resolves.
 
     :param env: Claude's launch environment.
-    :param expected: The config directory Claude reads.
+    :param expected: The config directory Claude reads from ``/work``.
+    :param relative: Whether that directory depends on Claude's cwd.
     """
     assert claude_config_dir(Path("/work"), env) == expected
+    assert claude_config_dir_is_relative(env) is relative
 
 
 def test_inject_user_message_raises_when_draft_never_submits(

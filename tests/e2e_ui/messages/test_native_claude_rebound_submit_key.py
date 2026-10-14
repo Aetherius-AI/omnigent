@@ -171,6 +171,7 @@ def _wait_for_claude_startup_write(config_dir: Path) -> None:
     """Block until Claude Code has written into *config_dir*, proving it loaded that directory."""
     deadline = time.monotonic() + _CLAUDE_STARTUP_WRITE_TIMEOUT_S
     seeded = {".claude.json", "keybindings.json"}
+    entries: set[str] = set()
     while time.monotonic() < deadline:
         entries = {entry.name for entry in config_dir.iterdir()}
         global_config = config_dir / ".claude.json"
@@ -186,7 +187,7 @@ def _wait_for_claude_startup_write(config_dir: Path) -> None:
         time.sleep(0.5)
     raise AssertionError(
         f"Claude Code never wrote into {config_dir}; the rebinding was not loaded from it. "
-        f"Entries: {sorted(entry.name for entry in config_dir.iterdir())}"
+        f"Entries: {sorted(entries)}"
     )
 
 
