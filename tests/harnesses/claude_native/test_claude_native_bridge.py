@@ -11305,6 +11305,29 @@ def test_inject_slash_command_dismisses_an_overlay_below_an_exit_echo(
     assert [args[-1] for args in sends] == ["Escape", "C-u", "/effort high", "Enter"]
 
 
+def test_inject_slash_command_names_the_quitting_dialog_from_the_frame_it_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The refusal describes the frame the reclaim classified, not a later capture.
+
+    A torn (empty) capture right after the reclaim must not downgrade the trust
+    dialog's refusal to the generic "dismiss it" wording, whose advice would
+    quit Claude Code.
+    """
+    bridge_dir = _picker_bridge_dir(tmp_path)
+    sends = _fake_tmux(monkeypatch, [_TRUST_DIALOG_PANE, _TRUST_DIALOG_PANE, ""])
+
+    with pytest.raises(claude_native_bridge.ClaudeTerminalDialog) as excinfo:
+        claude_native_bridge.inject_slash_command(bridge_dir, command="/compact")
+
+    assert sends == []
+    assert str(excinfo.value).startswith(
+        "Claude Code is waiting for an answer in its terminal (Accessing workspace:)"
+    )
+
+
 def test_wait_for_claude_prompt_ready_fails_fast_on_a_terminal_dialog(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

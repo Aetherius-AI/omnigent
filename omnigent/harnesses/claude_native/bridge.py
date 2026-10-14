@@ -4201,7 +4201,7 @@ def inject_user_message(
     # reclaim the input box before waiting on it.
     surface = _restore_occupied_input(
         info["socket_path"], info["tmux_target"], bridge_dir=bridge_dir
-    )
+    ).surface
     if surface is not None and surface != _OVERLAY_SURFACE:
         # An overlay may be launcher output the readiness gate waits through; a
         # box held in another mode never frees itself, and timing out reaps the pane.
@@ -4699,19 +4699,19 @@ def inject_slash_command(
     tmux_target = info["tmux_target"]
     # Same reclaim as inject_user_message: a surface left occupying the
     # composer would swallow the C-u and the typed command.
-    surface = _restore_occupied_input(socket_path, tmux_target, bridge_dir=bridge_dir)
-    if surface is not None:
-        # No readiness gate follows; a blind Enter would answer the dialog.
-        pane = _capture_pane(socket_path, tmux_target)
-        headline = _terminal_dialog_headline(pane)
-        if headline is not None and _exit_option_in_dialog(pane):
+    reclaim = _restore_occupied_input(socket_path, tmux_target, bridge_dir=bridge_dir)
+    if reclaim.surface is not None:
+        # No readiness gate follows; a blind Enter would answer the dialog. Read
+        # the frame the reclaim classified, not a fresh one that may have torn.
+        headline = _terminal_dialog_headline(reclaim.pane)
+        if headline is not None and _exit_option_in_dialog(reclaim.pane):
             # Dismissing this dialog quits Claude Code, so name it instead.
             raise ClaudeTerminalDialog(
                 f"Claude Code is waiting for an answer in its terminal ({headline}), so the "
                 "command was not sent. Open the terminal, answer the prompt, then retry."
             )
         raise ClaudeTerminalDialog(
-            f"Claude Code's input box is occupied by {surface}, so the command was "
+            f"Claude Code's input box is occupied by {reclaim.surface}, so the command was "
             "not sent. Open the terminal, dismiss it, then retry."
         )
     if has_pending_user_prompt(bridge_dir):
@@ -5732,9 +5732,16 @@ def acknowledge_auto_mode_billing_notice(
         lock.release()
 
 
+class _InputBoxReclaim(NamedTuple):
+    """What :func:`_restore_occupied_input` left on screen, and the frame it read."""
+
+    surface: str | None
+    pane: str
+
+
 def _restore_occupied_input(
     socket_path: str, tmux_target: str, *, bridge_dir: Path | None = None
-) -> str | None:
+) -> _InputBoxReclaim:
     """
     Dismiss a terminal-opened surface occupying Claude's input box.
 
@@ -5777,9 +5784,11 @@ def _restore_occupied_input(
     :param socket_path: Absolute path to the tmux socket.
     :param tmux_target: tmux pane target string, e.g. ``"main"``.
     :param bridge_dir: Bridge whose live permission hooks protect the native prompt.
-    :returns: ``None`` once the input box is free (or the capture is torn);
-        otherwise the :func:`_occupying_surface` description of what is
-        still on screen, for the caller to refuse to type into.
+    :returns: ``surface`` is ``None`` once the input box is free (or the
+        capture is torn); otherwise the :func:`_occupying_surface` description
+        of what is still on screen, for the caller to refuse to type into.
+        ``pane`` is the capture that verdict was read from, so a refusal can
+        describe the same frame instead of a fresh, possibly torn, one.
     """
     deadline = time.monotonic() + _OCCUPIED_INPUT_DISMISS_TIMEOUT_S
     last_escape: float | None = None
@@ -5796,10 +5805,10 @@ def _restore_occupied_input(
             )
         if auto_mode_billing_notice_visible(pane):
             _acknowledge_auto_mode_billing_notice(socket_path, tmux_target)
-            return None
+            return _InputBoxReclaim(None, pane)
         surface = _occupying_surface(pane)
         if surface is None:
-            return None
+            return _InputBoxReclaim(None, pane)
         now = time.monotonic()
         if now >= deadline:
             _logger.warning(
@@ -5807,7 +5816,7 @@ def _restore_occupied_input(
                 surface,
                 _OCCUPIED_INPUT_DISMISS_TIMEOUT_S,
             )
-            return surface
+            return _InputBoxReclaim(surface, pane)
         # Nothing an Escape can clear: launcher output before the input box
         # mounts, a dialog that offers no dismissal, or a startup prompt whose
         # cancel quits Claude Code.
@@ -5825,7 +5834,7 @@ def _restore_occupied_input(
             # torn frame mid-redraw of a dismissible surface does not hand a
             # transient back to a caller that will refuse to type into it.
             if unclearable_seen:
-                return surface
+                return _InputBoxReclaim(surface, pane)
         elif last_escape is None or now - last_escape >= _OCCUPIED_INPUT_DISMISS_RETRY_INTERVAL_S:
             _logger.info("claude-native: dismissing %s covering the input box", surface)
             _run_tmux(socket_path, "send-keys", "-t", tmux_target, "Escape")
@@ -6169,7 +6178,9 @@ def _exit_option_in_dialog(pane: str) -> bool:
     return any(
         _EXIT_OPTION_ROW.fullmatch(row)
         and any(
-            _AFFIRMATIVE_OPTION_ROW.fullmatch(rows[j]) for j in (i - 1, i + 1) if 0 <= j < len(rows)
+            _AFFIRMATIVE_OPTION_ROW.fullmatch(rows[j])
+            for j in (i - 1, i + 1)
+            if 0 <= j < len(rows)
         )
         for i, row in enumerate(rows)
     )
