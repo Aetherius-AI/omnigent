@@ -195,6 +195,8 @@ async def test_start_failure_snapshots_owned_process_before_cleanup(
     record = records[0]
     attributes = record.attributes
     assert record.session_id == server.session_id
+    assert attributes["harness"] == "codex-native"
+    assert attributes["phase"] == "app_server_startup"
     assert attributes["app_server_state"] == "running"
     assert attributes["app_server_pid"] == processes[0].pid
     assert attributes["stderr_reader_state"] == "running"
