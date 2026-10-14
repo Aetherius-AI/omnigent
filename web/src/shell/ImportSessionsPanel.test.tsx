@@ -6,7 +6,8 @@ import { MemoryRouter } from "react-router-dom";
 
 import { ImportSessionsPanel } from "./ImportSessionsPanel";
 import { useHosts } from "@/hooks/useHosts";
-import { importLocalSessions } from "@/lib/sessionsApi";
+import { importLocalSessions, type LocalImportResult } from "@/lib/sessionsApi";
+import { useSessionImportStore } from "@/store/sessionImport";
 
 vi.mock("@/hooks/useHosts", () => ({ useHosts: vi.fn() }));
 vi.mock("@/lib/sessionsApi", () => ({ importLocalSessions: vi.fn() }));
@@ -54,6 +55,7 @@ function renderPanel() {
 beforeEach(() => {
   useHostsMock.mockReset();
   importLocalSessionsMock.mockReset();
+  useSessionImportStore.setState({ importing: false, streamed: [], result: null, error: null });
 });
 
 afterEach(() => cleanup());
@@ -135,6 +137,46 @@ describe("ImportSessionsPanel", () => {
     importLocalSessionsMock.mockClear();
     fireEvent.click(screen.getByTestId("import-retry"));
     await waitFor(() => expect(importLocalSessionsMock).toHaveBeenCalledTimes(1));
+  });
+
+  it("keeps an in-flight import running and shows its progress after a remount", async () => {
+    useHostsMock.mockReturnValue({
+      data: [{ host_id: "host_1", name: "mac-laptop", owner: "alice", status: "online" }],
+    } as unknown as ReturnType<typeof useHosts>);
+    let finish!: (result: LocalImportResult) => void;
+    importLocalSessionsMock.mockImplementation((_host, _source, _limit, onSession) => {
+      onSession?.({ id: "c1", title: "First session" });
+      return new Promise<LocalImportResult>((resolve) => {
+        finish = resolve;
+      });
+    });
+
+    const first = renderPanel();
+    fireEvent.click(screen.getByTestId("import-submit"));
+    await waitFor(() =>
+      expect(screen.getByTestId("import-progress")).toHaveTextContent("Importing 1 so far…"),
+    );
+
+    // Leaving Settings unmounts the panel; the host keeps streaming, and
+    // coming back shows the same run rather than a blank form.
+    first.unmount();
+    renderPanel();
+    expect(screen.getByTestId("import-progress")).toHaveTextContent("Importing 1 so far…");
+    expect(screen.getByTestId("import-result-link-c1")).toBeInTheDocument();
+    // A second Import while one is running does not start another stream.
+    fireEvent.click(screen.getByTestId("import-submit"));
+    expect(importLocalSessionsMock).toHaveBeenCalledTimes(1);
+
+    finish({
+      imported: 1,
+      alreadyImported: 0,
+      failed: 0,
+      sessions: [{ id: "c1", title: "First session" }],
+      failures: [],
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("import-result")).toHaveTextContent("Imported 1."),
+    );
   });
 
   it("imports one session by harness and ID without listing sessions", async () => {

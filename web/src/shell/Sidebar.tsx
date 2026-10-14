@@ -236,6 +236,7 @@ import { useViewerId } from "@/hooks/useViewerId";
 import { useExtensions } from "@/extensions/ExtensionProvider";
 import { extensionPathParts, resolveExtensionPageFromPath } from "@/extensions/catalog";
 import { NewProjectButton } from "./NewProjectButton";
+import { SessionImportStatus } from "./SessionImportStatus";
 import { SettingsSidebarBody, useSettingsRoute, useTrackSettingsReturn } from "./settingsNav";
 import {
   type ActiveChatOverride,
@@ -2650,6 +2651,7 @@ function ConversationList({
               onMouseEnter={() => setPointerInside(true)}
               onMouseLeave={() => setPointerInside(false)}
             >
+              <SessionImportStatus onNavigate={onRowClick} />
               {/* Removing a filed session from its project means dropping it back
             onto the flat "Chats" list — so the Chats section itself is the
             ungroup target (wrapped below). This top strip is only a FALLBACK

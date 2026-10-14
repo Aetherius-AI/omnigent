@@ -13,12 +13,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import {
-  importLocalSessions,
-  type ImportedSessionRef,
-  type ImportSourceSelector,
-  type LocalImportResult,
-} from "@/lib/sessionsApi";
+import type { ImportSourceSelector } from "@/lib/sessionsApi";
+import { useSessionImportStore } from "@/store/sessionImport";
 
 // Harnesses the import endpoint accepts, with human labels for the picker.
 // "all" reads every supported harness on the host in one batch.
@@ -51,12 +47,9 @@ export function ImportSessionsPanel() {
   const [limit, setLimit] = useState(25);
   const [mode, setMode] = useState<ImportMode>("recent");
   const [sessionId, setSessionId] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  // Sessions appended as their frames stream in, so the list fills live rather
-  // than appearing all at once when the import finishes.
-  const [streamed, setStreamed] = useState<ImportedSessionRef[]>([]);
-  const [result, setResult] = useState<LocalImportResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // The import run lives in a store so it survives leaving Settings; the
+  // sidebar shows the same in-flight state.
+  const { importing, streamed, result, error, start } = useSessionImportStore();
 
   // Default to the caller's current online machine — the transcripts are read
   // on the host, so there's nothing to import without one.
@@ -66,39 +59,16 @@ export function ImportSessionsPanel() {
     }
   }, [hostId, onlineHosts]);
 
-  // The server persists each session as its frame arrives, so refresh the
-  // sidebar list every 5s while the import is in flight — sessions show up as
-  // they land instead of all at once when the request finally returns.
-  useEffect(() => {
-    if (!submitting) return;
-    const id = setInterval(() => {
-      void queryClient.invalidateQueries({ queryKey: ["conversations"] });
-    }, 5000);
-    return () => clearInterval(id);
-  }, [submitting, queryClient]);
-
   async function handleImport(): Promise<void> {
     if (hostId === null) return;
     const exactSessionId = sessionId.trim();
     if (mode === "session" && exactSessionId.length === 0) return;
-    setSubmitting(true);
-    setError(null);
-    setResult(null);
-    setStreamed([]);
-    try {
-      const onSession = (s: ImportedSessionRef) => setStreamed((prev) => [...prev, s]);
-      const res =
-        mode === "session"
-          ? await importLocalSessions(hostId, source, limit, onSession, exactSessionId)
-          : await importLocalSessions(hostId, source, limit, onSession);
-      setResult(res);
-      // Newly imported sessions land in the sidebar list.
-      await queryClient.invalidateQueries({ queryKey: ["conversations"] });
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Import failed. Try again.");
-    } finally {
-      setSubmitting(false);
-    }
+    await start(
+      mode === "session"
+        ? { hostId, source, limit, sessionId: exactSessionId }
+        : { hostId, source, limit },
+      queryClient,
+    );
   }
 
   if (onlineHosts.length === 0) {
@@ -214,7 +184,7 @@ export function ImportSessionsPanel() {
       <div className="flex justify-end pt-4">
         <Button
           data-testid="import-submit"
-          loading={submitting}
+          loading={importing}
           disabled={hostId === null || (mode === "session" && sessionId.trim().length === 0)}
           onClick={() => void handleImport()}
         >
@@ -222,7 +192,7 @@ export function ImportSessionsPanel() {
         </Button>
       </div>
 
-      {(result !== null || streamed.length > 0 || submitting) && (
+      {(result !== null || streamed.length > 0 || importing) && (
         <div className="mt-4 flex flex-col gap-2 border-t border-border pt-4">
           {result !== null ? (
             <p className="text-sm text-muted-foreground" data-testid="import-result">
@@ -230,7 +200,7 @@ export function ImportSessionsPanel() {
               {result.alreadyImported > 0 && `, ${result.alreadyImported} already imported`}
               {result.failed > 0 && `, ${result.failed} failed`}.
             </p>
-          ) : submitting ? (
+          ) : importing ? (
             <p className="text-sm text-muted-foreground" data-testid="import-progress">
               Importing{streamed.length > 0 ? ` ${streamed.length} so far` : ""}…
             </p>
@@ -277,7 +247,7 @@ export function ImportSessionsPanel() {
                   variant="outline"
                   size="sm"
                   data-testid="import-retry"
-                  loading={submitting}
+                  loading={importing}
                   onClick={() => void handleImport()}
                 >
                   Retry failed
