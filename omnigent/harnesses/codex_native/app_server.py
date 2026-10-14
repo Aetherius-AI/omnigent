@@ -3369,6 +3369,7 @@ def build_codex_native_server(
     env = _clean_codex_env()
     config_overrides: list[str] = []
     config_profile = codex_config_profile(terminal_launch_args)
+    provider_override = _model_provider_override(extra_config_overrides or ())
     pinned_model = model
     if profile is not None:
         databricks = _databricks_launch_materialization(
@@ -3383,7 +3384,7 @@ def build_codex_native_server(
         # forwarder mirror and cost gate report the model this session runs
         # instead of whatever the shared file was last left on.
         pinned_model = codex_spawn_model(databricks.model) or databricks.model
-    elif model and _routes_through_codex_login(extra_config_overrides or (), config_profile):
+    elif model and _routes_through_codex_login(provider_override, config_profile):
         # Codex's own backend knows a model only by codex's slug; the catalog
         # spelling (``system.ai.gpt-6-1-sol``) is rejected with a 400.
         pinned_model = codex_spawn_model(model) or model
@@ -3534,25 +3535,22 @@ def _model_provider_override(config_overrides: Iterable[str]) -> str | None:
     return pinned
 
 
-def _routes_through_codex_login(
-    config_overrides: Iterable[str], config_profile: str | None
-) -> bool:
+def _routes_through_codex_login(provider_override: str | None, config_profile: str | None) -> bool:
     """Whether a profile-free launch runs on codex's built-in ``openai`` provider.
 
-    Mirrors codex's own precedence: a ``model_provider`` ``-c`` override, else
+    Mirrors codex's own precedence: the ``model_provider`` ``-c`` override, else
     the shared config.toml's effective provider (active profile before
     top-level), else the built-in ``openai`` provider. A config or profile
     codex itself cannot read is left alone.
 
-    :param config_overrides: Codex ``-c`` overrides, e.g.
-        ``['model_provider="openai"']``.
+    :param provider_override: The launch's ``model_provider`` override (see
+        :func:`_model_provider_override`), or ``None``.
     :param config_profile: Config-file profile the launch selects, or ``None``.
     :returns: ``True`` when the launch's model reaches codex's own backend.
-    :raises ValueError: When a ``model_provider`` override is not a TOML basic string.
     """
     from omnigent.onboarding.codex_auth_readiness import effective_codex_model_provider
 
-    pinned = _model_provider_override(config_overrides)
+    pinned = provider_override
     if pinned is None:
         config = _shared_codex_config(config_profile)
         if config is None:

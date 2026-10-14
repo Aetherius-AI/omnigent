@@ -274,8 +274,6 @@ def test_build_codex_native_server_pins_profile_resolved_model(
         # Subscription: an explicit pick and a catalog-resolved Default.
         ("gpt-5.5", None, ['model_provider="openai"']),
         ("gpt-5.6-terra", None, ['model_provider="openai"']),
-        # Subscription: a catalog-spelled pick lands in codex's spelling on both.
-        ("system.ai.gpt-6-1-sol", None, ['model_provider="openai"']),
         # cli-config: the user's own provider table rides the config copy.
         ("gpt-5.5", None, ['model_provider="Databricks"']),
         # Databricks profile: Default and an explicit pick.
@@ -403,9 +401,9 @@ def test_codex_login_launch_pins_a_gateway_spelled_pick_in_codex_spelling(
         ),
         pytest.param(
             None,
-            'profile = "db"\n[profiles.db]\nmodel_provider = "Databricks"\n',
+            'model_provider = "openai"\nprofile = "db"\n[profiles.db]\nmodel_provider = "Databricks"\n',
             "system.ai.gpt-6-1-sol",
-            id="no-override-profile-gateway",
+            id="no-override-profile-gateway-outranks-top-level",
         ),
         # An explicit override outranks the config default, and the last one wins.
         pytest.param(
@@ -465,6 +463,7 @@ def test_pick_translates_only_when_codex_login_serves_it(
     assert f"model={json.dumps(expected_pin)}" in app_server.config_overrides
 
 
+@pytest.mark.parametrize("model", [None, "system.ai.gpt-6-1-sol"], ids=["default-model", "pick"])
 @pytest.mark.parametrize(
     ("override", "match"),
     [
@@ -473,7 +472,11 @@ def test_pick_translates_only_when_codex_login_serves_it(
     ],
 )
 def test_malformed_model_provider_override_fails_the_build(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, override: str, match: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    override: str,
+    match: str,
+    model: str | None,
 ) -> None:
     """An override that is not a TOML basic string fails at build, not at first resume."""
     monkeypatch.setattr(
@@ -486,7 +489,7 @@ def test_malformed_model_provider_override_fails_the_build(
             socket_path=tmp_path / "codex.sock",
             codex_home=tmp_path / "codex-home",
             cwd=tmp_path,
-            model="system.ai.gpt-6-1-sol",
+            model=model,
             profile=None,
             bridge_dir=tmp_path / "bridge",
             ap_server_url=None,
