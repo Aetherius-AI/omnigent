@@ -21,7 +21,7 @@ import sys
 import time
 import urllib.parse
 import uuid
-from collections.abc import Awaitable, Callable, Coroutine, Mapping, MutableMapping
+from collections.abc import Awaitable, Callable, Coroutine, Mapping, MutableMapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 
@@ -127,6 +127,25 @@ class _EnsureCommentRelay(Protocol):
         pass
 
 
+class _ClaudeLaunchSource(Protocol):
+    """What a Claude pane's environment is derived from: its spec or the live instance."""
+
+    @property
+    def command(self) -> str | None: ...
+
+    @property
+    def args(self) -> Sequence[str]: ...
+
+    @property
+    def env(self) -> Mapping[str, str]: ...
+
+    @property
+    def env_unset(self) -> Sequence[str]: ...
+
+    @property
+    def inherit_env(self) -> bool: ...
+
+
 def _publish_tmux_target_for_bridge(
     *,
     resource_registry: SessionResourceRegistry,
@@ -164,12 +183,23 @@ def _publish_tmux_target_for_bridge(
         return
     # Imported here to avoid pulling Claude-native specifics into the
     # generic runner module's import-time graph.
-    from omnigent.harnesses.claude_native.bridge import bridge_dir_for_bridge_id, write_tmux_target
+    from omnigent.harnesses.claude_native.bridge import (
+        bridge_dir_for_bridge_id,
+        claude_config_dir,
+        write_tmux_target,
+    )
 
     write_tmux_target(
         bridge_dir_for_bridge_id(bridge_id),
         socket_path=instance.socket_path,
         tmux_target=instance.tmux_target,
+        # Injection honors the keybindings of the config dir this pane's Claude
+        # process reads — its launch env, ``env`` wrapper included, as trust
+        # seeding resolves it.
+        claude_config_dir=claude_config_dir(
+            cwd=Path(instance.launch_cwd) if instance.launch_cwd else None,
+            env=_claude_terminal_launch_env(instance),
+        ),
     )
 
 
@@ -7541,7 +7571,7 @@ def _claude_terminal_launch_cwd(spec: TerminalEnvSpec, parent_os_env: OSEnvSpec 
     return target
 
 
-def _claude_terminal_pre_wrapper_env(spec: TerminalEnvSpec) -> dict[str, str]:
+def _claude_terminal_pre_wrapper_env(spec: _ClaudeLaunchSource) -> dict[str, str]:
     """
     Return the environment a Claude launch command starts with.
 
@@ -7550,7 +7580,7 @@ def _claude_terminal_pre_wrapper_env(spec: TerminalEnvSpec) -> dict[str, str]:
     and a UTF-8 locale default) before an ``env`` wrapper applies its own
     changes; ``env -S`` expands ``${NAME}`` from it.
 
-    :param spec: The Claude terminal launch spec.
+    :param spec: The Claude terminal launch spec, or its live instance.
     :returns: The pre-wrapper environment, e.g. ``{"HOME": "/home/user"}``.
     """
     return terminal_pane_environment(
@@ -7558,17 +7588,19 @@ def _claude_terminal_pre_wrapper_env(spec: TerminalEnvSpec) -> dict[str, str]:
     )
 
 
-def _claude_terminal_launch_env(spec: TerminalEnvSpec) -> dict[str, str]:
+def _claude_terminal_launch_env(spec: _ClaudeLaunchSource) -> dict[str, str]:
     """
     Return the environment the native Claude terminal process starts with.
 
     Mirrors the pane launch: the runner environment (when inherited), the
     spec's overrides and removals, then the options and assignments of an
     ``env`` wrapper command. Trust seeding uses it so the runner writes the
-    global config file this Claude process will read.
+    global config file this Claude process will read, and the tmux target
+    advertisement so injection reads the keybindings that process loads.
 
-    :param spec: The Claude terminal launch spec, e.g. one with
-        ``command="env"`` and ``args=["CLAUDE_CONFIG_DIR=/srv/claude", "claude"]``.
+    :param spec: The Claude terminal launch spec, or its live instance, e.g.
+        one with ``command="env"`` and
+        ``args=["CLAUDE_CONFIG_DIR=/srv/claude", "claude"]``.
     :returns: The effective environment, e.g.
         ``{"HOME": "/home/user", "CLAUDE_CONFIG_DIR": "/srv/claude"}``.
     """

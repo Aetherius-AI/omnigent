@@ -43,6 +43,7 @@ from omnigent.harnesses.claude_native.bridge import (
     _JsonlRecord,
     _occupying_surface,
     augment_claude_args,
+    claude_config_dir,
     claude_global_config_path,
     count_hook_events,
     display_cost_approval_popup,
@@ -4838,6 +4839,63 @@ def _claude_keybindings(chat_bindings: dict[str, str | None]) -> str:
     return json.dumps({"bindings": [{"context": "Chat", "bindings": chat_bindings}]})
 
 
+_SHIFT_ENTER = "\x1b[13;2u"
+
+
+def _rebound_bridge_dir(tmp_path: Path, chat_bindings: dict[str, str | None]) -> Path:
+    """
+    Advertise a pane whose Claude Code loaded *chat_bindings* from its config dir.
+
+    :param tmp_path: Per-test temp directory.
+    :param chat_bindings: The ``Chat`` bindings written to ``keybindings.json``.
+    :returns: The bridge directory.
+    """
+    config_dir = tmp_path / "claude-config"
+    config_dir.mkdir()
+    (config_dir / "keybindings.json").write_text(_claude_keybindings(chat_bindings))
+    bridge_dir = tmp_path / "bridge"
+    write_tmux_target(
+        bridge_dir,
+        socket_path=Path("/tmp/example/tmux.sock"),
+        tmux_target="claude:0.0",
+        claude_config_dir=config_dir,
+    )
+    return bridge_dir
+
+
+class _RebindableTui:
+    """
+    Fake Claude input box that submits only on *submit_key*.
+
+    The paste lands as a draft; ``Enter`` with a rebound submit key only adds a
+    newline, as Claude Code does with Enter bound to ``chat:newline``; the
+    submit key clears the box once ``swallow`` dropped submits have passed.
+    """
+
+    def __init__(self, submit_key: str, *, swallow: int = 0) -> None:
+        self.submit_key = submit_key
+        self.swallow = swallow
+        self.draft = ""
+        self.submits: list[str] = []
+
+    def run(self, cmd: list[str], **kwargs: object) -> SimpleNamespace:
+        """Stand in for ``subprocess.run`` on the bridge's tmux calls."""
+        del kwargs
+        if "capture-pane" in cmd:
+            return SimpleNamespace(returncode=0, stdout=_composer_pane(self.draft), stderr="")
+        if "paste-buffer" in cmd:
+            self.draft = "fix the flaky test"
+        elif cmd[-1] in ("Enter", _SHIFT_ENTER):
+            self.submits.append(cmd[-1])
+            if cmd[-1] != self.submit_key:
+                self.draft += "\n"
+            elif self.swallow:
+                self.swallow -= 1
+            else:
+                self.draft = ""
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+
 def test_inject_user_message_submits_with_a_rebound_submit_key(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4856,45 +4914,64 @@ def test_inject_user_message_submits_with_a_rebound_submit_key(
     monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._SUBMIT_RETRY_INTERVAL_S", 0.02)
     monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._SUBMIT_VERIFY_TIMEOUT_S", 0.5)
     monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._PASTE_SETTLE_S", 0.0)
-    config_dir = tmp_path / "claude-config"
-    config_dir.mkdir()
-    (config_dir / "keybindings.json").write_text(
-        _claude_keybindings({"enter": "chat:newline", "shift+enter": "chat:submit"})
+    bridge_dir = _rebound_bridge_dir(
+        tmp_path, {"enter": "chat:newline", "shift+enter": "chat:submit"}
     )
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
-    bridge_dir = tmp_path / "bridge"
-    write_tmux_target(
-        bridge_dir,
-        socket_path=Path("/tmp/example/tmux.sock"),
-        tmux_target="claude:0.0",
-    )
-    shift_enter = "\x1b[13;2u"
-    submits: list[str] = []
-    tui = {"pane": _composer_pane()}
+    tui = _RebindableTui(_SHIFT_ENTER)
 
-    def _fake_run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
-        """
-        Simulate a TUI whose Enter adds a newline and Shift+Enter submits.
-
-        :param cmd: Argv list passed to subprocess.run.
-        :param kwargs: Subprocess kwargs (ignored).
-        :returns: Fake CompletedProcess.
-        """
-        del kwargs
-        if "capture-pane" in cmd:
-            return SimpleNamespace(returncode=0, stdout=tui["pane"], stderr="")
-        if "paste-buffer" in cmd:
-            tui["pane"] = _composer_pane("fix the flaky test")
-        elif cmd[-1] in ("Enter", shift_enter):
-            submits.append(cmd[-1])
-            if cmd[-1] == shift_enter:
-                tui["pane"] = _composer_pane()
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr("subprocess.run", _fake_run)
+    monkeypatch.setattr("subprocess.run", tui.run)
     inject_user_message(bridge_dir, content="fix the flaky test")
 
-    assert submits == [shift_enter]
+    assert tui.submits == [_SHIFT_ENTER]
+
+
+def test_submit_retry_resends_the_rebound_submit_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Shift+Enter the TUI swallowed is retried as Shift+Enter, never as Enter."""
+    bridge_dir = _rebound_bridge_dir(
+        tmp_path, {"enter": "chat:newline", "shift+enter": "chat:submit"}
+    )
+    tui = _RebindableTui(_SHIFT_ENTER, swallow=1)
+
+    monkeypatch.setattr("subprocess.run", tui.run)
+    monkeypatch.setattr(claude_native_bridge, "time", _VirtualClock())
+    inject_user_message(bridge_dir, content="fix the flaky test")
+
+    assert tui.submits == [_SHIFT_ENTER, _SHIFT_ENTER]
+
+
+def test_inject_user_message_keeps_enter_when_no_config_dir_is_advertised(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Without an advertised config dir the bridge presses Enter, whatever its own env says.
+
+    The runner's ``CLAUDE_CONFIG_DIR`` and home are not Claude's when the pane
+    was launched through an ``env`` wrapper, so a rebinding found there must not
+    be applied; the launch advertises the directory the pane actually reads.
+    """
+    for name in ("runner-config", "runner-home/.claude"):
+        rebound = tmp_path / name
+        rebound.mkdir(parents=True)
+        (rebound / "keybindings.json").write_text(
+            _claude_keybindings({"enter": "chat:newline", "shift+enter": "chat:submit"})
+        )
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "runner-config"))
+    monkeypatch.setenv("HOME", str(tmp_path / "runner-home"))
+    bridge_dir = tmp_path / "bridge"
+    write_tmux_target(
+        bridge_dir, socket_path=Path("/tmp/example/tmux.sock"), tmux_target="claude:0.0"
+    )
+    tui = _RebindableTui("Enter")
+
+    monkeypatch.setattr("subprocess.run", tui.run)
+    inject_user_message(bridge_dir, content="fix the flaky test")
+
+    assert tui.submits == ["Enter"]
+    assert claude_native_bridge._rebound_submit_sequence(None) is None
 
 
 @pytest.mark.parametrize(
@@ -4915,9 +4992,39 @@ def test_inject_user_message_submits_with_a_rebound_submit_key(
             id="enter-still-submits",
         ),
         pytest.param(
+            _claude_keybindings({"enter": "chat:newline", "shift+enter": "chat:submit"}),
+            "\x1b[13;2u",
+            id="shift-enter",
+        ),
+        pytest.param(
+            _claude_keybindings({"enter": "chat:newline", "meta+enter": "chat:submit"}),
+            "\x1b[13;3u",
+            id="meta-enter",
+        ),
+        pytest.param(
             _claude_keybindings({"enter": "chat:newline", "ctrl+s": "chat:submit"}),
             "\x1b[115;5u",
             id="ctrl-s",
+        ),
+        pytest.param(
+            json.dumps(
+                {
+                    "bindings": [
+                        {
+                            "context": "Chat",
+                            "bindings": {"enter": "chat:newline", "ctrl+s": "chat:submit"},
+                        },
+                        {"context": "Chat", "bindings": {"enter": "chat:submit"}},
+                    ]
+                }
+            ),
+            None,
+            id="later-block-wins",
+        ),
+        pytest.param(
+            _claude_keybindings({"enter": "chat:newline"}),
+            None,
+            id="nothing-submits",
         ),
         pytest.param(
             _claude_keybindings({"Return": None, "Control+Enter": "chat:submit"}),
@@ -4938,16 +5045,62 @@ def test_inject_user_message_submits_with_a_rebound_submit_key(
 )
 def test_rebound_submit_sequence_reads_the_chat_keybindings(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     keybindings: str | None,
     expected: str | None,
 ) -> None:
     """The submit key follows the user's ``Chat`` bindings and falls back to Enter."""
     if keybindings is not None:
         (tmp_path / "keybindings.json").write_text(keybindings)
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
 
-    assert claude_native_bridge._rebound_submit_sequence() == expected
+    assert claude_native_bridge._rebound_submit_sequence(tmp_path) == expected
+
+
+def test_write_tmux_target_advertises_the_claude_config_dir(tmp_path: Path) -> None:
+    """The pane's Claude config dir rides along with the socket and target, when known."""
+    bridge_dir = tmp_path / "bridge"
+    socket_path = Path("/tmp/example/tmux.sock")
+
+    write_tmux_target(bridge_dir, socket_path=socket_path, tmux_target="claude:0.0")
+    assert claude_native_bridge._wait_for_tmux_info(bridge_dir, timeout_s=1.0) == {
+        "socket_path": "/tmp/example/tmux.sock",
+        "tmux_target": "claude:0.0",
+    }
+
+    write_tmux_target(
+        bridge_dir,
+        socket_path=socket_path,
+        tmux_target="claude:0.0",
+        claude_config_dir=Path("/srv/claude"),
+    )
+    payload = json.loads((bridge_dir / "tmux.json").read_text(encoding="utf-8"))
+    assert payload["claude_config_dir"] == "/srv/claude"
+    assert claude_native_bridge._wait_for_tmux_info(bridge_dir, timeout_s=1.0) == {
+        "socket_path": "/tmp/example/tmux.sock",
+        "tmux_target": "claude:0.0",
+        "claude_config_dir": "/srv/claude",
+    }
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({"HOME": "/home/user"}, Path("/home/user/.claude")),
+        # An empty CLAUDE_CONFIG_DIR means unset to Claude.
+        ({"HOME": "/home/user", "CLAUDE_CONFIG_DIR": ""}, Path("/home/user/.claude")),
+        ({"HOME": "/home/user", "CLAUDE_CONFIG_DIR": "/srv/claude/"}, Path("/srv/claude")),
+        # A relative dir is Claude's cwd-relative path, ``..`` removed lexically.
+        ({"HOME": "/home/user", "CLAUDE_CONFIG_DIR": "cfg/../claude"}, Path("/work/claude")),
+    ],
+    ids=["home", "empty-override", "absolute", "relative"],
+)
+def test_claude_config_dir_resolves_like_claude(env: dict[str, str], expected: Path) -> None:
+    """
+    ``keybindings.json`` is read from the directory Claude itself resolves.
+
+    :param env: Claude's launch environment.
+    :param expected: The config directory Claude reads.
+    """
+    assert claude_config_dir(Path("/work"), env) == expected
 
 
 def test_inject_user_message_raises_when_draft_never_submits(
@@ -10972,11 +11125,7 @@ def test_a_slash_command_submits_with_a_rebound_submit_key(
     Claude's command menu, open while a bare ``/compact`` sits in the box, only
     answers Enter, so the bridge types a trailing space that closes it first.
     """
-    bridge_dir = _picker_bridge_dir(tmp_path)
-    (tmp_path / "keybindings.json").write_text(
-        _claude_keybindings({"enter": "chat:newline", "ctrl+s": "chat:submit"})
-    )
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    bridge_dir = _rebound_bridge_dir(tmp_path, {"enter": "chat:newline", "ctrl+s": "chat:submit"})
     ctrl_s = "\x1b[115;5u"
     tails: list[str] = []
 
