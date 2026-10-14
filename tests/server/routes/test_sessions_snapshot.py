@@ -15,6 +15,7 @@ import pytest
 from sqlalchemy.exc import StatementError
 
 from omnigent.entities import Conversation, ConversationItem, MessageData, PagedList
+from omnigent.runner.routing import RoutedRunner
 from omnigent.server.routes import sessions as _sessions_mod
 from omnigent.server.routes.sessions import (
     _LABEL_VALUE_MAX_LEN,
@@ -136,6 +137,11 @@ class _ConversationStore:
             root_conversation_id=conversation_id,
             agent_id="087b7cb7ac30abf4debfaa578d052ec6",
         )
+
+    def replace_conversation(self, conversation: Conversation) -> None:
+        """Serve a rewritten row from now on, e.g. after the session rebinds to another runner."""
+        assert self._conversations is not None
+        self._conversations[conversation.id] = conversation
 
     def list_conversations(
         self,
@@ -1051,6 +1057,38 @@ def _use_runner_client(monkeypatch: pytest.MonkeyPatch, runner_client: object) -
     monkeypatch.setattr("omnigent.runtime.get_runner_router", lambda: None)
 
 
+class _BindingRouter:
+    """Fake runner router that routes each conversation row to the runner it names."""
+
+    def __init__(self, clients: dict[str, object]) -> None:
+        self.clients = clients
+
+    def client_for_session_resources(
+        self, conversation_id: str, *, conversation: Conversation | None = None
+    ) -> RoutedRunner:
+        del conversation_id
+        assert conversation is not None and conversation.runner_id is not None
+        client = self.clients[conversation.runner_id]
+        return RoutedRunner(runner_id=conversation.runner_id, client=client)  # type: ignore[arg-type]
+
+
+def _use_binding_router(monkeypatch: pytest.MonkeyPatch, clients: dict[str, object]) -> None:
+    monkeypatch.setattr("omnigent.runtime.get_runner_client", lambda: None)
+    monkeypatch.setattr("omnigent.runtime.get_runner_router", lambda: _BindingRouter(clients))
+
+
+def _bound_conversation(session_id: str, runner_id: str) -> Conversation:
+    """The conversation row the store serves while *session_id* is bound to *runner_id*."""
+    return Conversation(
+        id=session_id,
+        created_at=1,
+        updated_at=1,
+        root_conversation_id=session_id,
+        agent_id="087b7cb7ac30abf4debfaa578d052ec6",
+        runner_id=runner_id,
+    )
+
+
 @pytest.mark.asyncio
 async def test_session_snapshot_transport_failure_is_shared_and_backed_off(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
@@ -1061,23 +1099,26 @@ async def test_session_snapshot_transport_failure_is_shared_and_backed_off(
     session_id = "probe_transport_failure"
     _sessions_mod._session_status_cache.pop(session_id, None)
     _sessions_mod._runner_status_probe_backoff.pop(session_id, None)
+    conv_store = _ConversationStore([])
     runner_client = _GatedRunnerClient(error=httpx.ConnectError("runner disconnected"))
     _use_runner_client(monkeypatch, runner_client)
-    first = asyncio.create_task(orchestration._probe_runner_live_status(runner_client, session_id))  # type: ignore[arg-type]
+    first = asyncio.create_task(
+        orchestration._probe_runner_live_status(conv_store, runner_client, session_id)  # type: ignore[arg-type]
+    )
     await asyncio.wait_for(runner_client.arrived.wait(), timeout=1.0)
     second = asyncio.create_task(
-        orchestration._probe_runner_live_status(runner_client, session_id)
-    )  # type: ignore[arg-type]
+        orchestration._probe_runner_live_status(conv_store, runner_client, session_id)  # type: ignore[arg-type]
+    )
     await asyncio.sleep(0)
     started = time.monotonic()
     with caplog.at_level(logging.WARNING, logger="omnigent.server.routes.sessions"):
         runner_client.release.set()
         assert await asyncio.gather(first, second) == [None, None]
-        snapshot = await _get_session_snapshot(_ConversationStore([]), session_id)  # type: ignore[arg-type]
+        snapshot = await _get_session_snapshot(conv_store, session_id)  # type: ignore[arg-type]
 
     assert snapshot.status == "idle"
     assert runner_client.get_calls == [f"/v1/sessions/{session_id}"]
-    assert _sessions_mod._runner_status_probe_inflight.get(session_id) is None
+    assert _sessions_mod._runner_status_probe_inflight.get((session_id, None)) is None
     assert _sessions_mod._session_status_cache.get(session_id) is None
     backoff = _sessions_mod._runner_status_probe_backoff.get(session_id)
     assert backoff.failures == 1
@@ -1138,53 +1179,54 @@ async def test_session_snapshot_rebind_discards_inflight_old_runner(
     old_outcome: str,
     new_fails: bool,
 ) -> None:
-    """A retired probe cannot publish status, alter backoff, or clear its replacement."""
+    """A retired runner's probe cannot publish status, alter backoff, or clear its replacement."""
     from omnigent.server.routes._sessions import orchestration
 
     session_id = "probe_rebind"
     _sessions_mod._session_status_cache.pop(session_id, None)
     _sessions_mod._runner_status_probe_backoff.pop(session_id, None)
+    inflight = _sessions_mod._runner_status_probe_inflight
     persist = Mock()
     monkeypatch.setattr(orchestration.session_live_state, "persist_live_status", persist)
+    conv_store = _ConversationStore(
+        [], conversations={session_id: _bound_conversation(session_id, "runner_old")}
+    )
     old = _GatedRunnerClient(
         error=httpx.ConnectError("old runner") if old_outcome == "transport_error" else None,
         status_code=404 if old_outcome == "not_found" else 200,
     )
-    # Only a 200 reaches the retired probe's caller; a transport error or a prompt
-    # 404 yields None either way.
-    old_result = "running" if old_outcome == "running" else None
     new = _GatedRunnerClient(
         status="idle", error=httpx.ConnectError("new runner") if new_fails else None
     )
     first = asyncio.create_task(
-        orchestration._probe_runner_live_status(old, session_id, "runner_old")  # type: ignore[arg-type]
+        orchestration._probe_runner_live_status(conv_store, old, session_id, "runner_old")  # type: ignore[arg-type]
     )
     await asyncio.wait_for(old.arrived.wait(), timeout=1.0)
+    conv_store.replace_conversation(_bound_conversation(session_id, "runner_new"))
     replacement = asyncio.create_task(
-        orchestration._probe_runner_live_status(new, session_id, "runner_new")  # type: ignore[arg-type]
+        orchestration._probe_runner_live_status(conv_store, new, session_id, "runner_new")  # type: ignore[arg-type]
     )
     try:
         await asyncio.wait_for(new.arrived.wait(), timeout=1.0)
         if old_finishes_first:
             old.release.set()
-            # The retired probe still returns the status it observed, but must
-            # not publish it into the shared caches owned by its replacement.
-            assert await first == old_result
-            assert _sessions_mod._runner_status_probe_inflight.get(session_id) is not None
+            assert await first is None
+            assert inflight.get((session_id, "runner_new")) is not None
             assert _sessions_mod._session_status_cache.get(session_id) is None
             assert _sessions_mod._runner_status_probe_backoff.get(session_id) is None
             persist.assert_not_called()
         new.release.set()
         assert await replacement == (None if new_fails else "idle")
         old.release.set()
-        assert await first == old_result
+        assert await first is None
     finally:
         old.release.set()
         new.release.set()
         await asyncio.gather(first, replacement, return_exceptions=True)
 
     assert old.get_calls == new.get_calls == [f"/v1/sessions/{session_id}"]
-    assert _sessions_mod._runner_status_probe_inflight.get(session_id) is None
+    assert inflight.get((session_id, "runner_old")) is None
+    assert inflight.get((session_id, "runner_new")) is None
     assert _sessions_mod._session_status_cache.get(session_id) == (None if new_fails else "idle")
     backoff = _sessions_mod._runner_status_probe_backoff.get(session_id)
     if new_fails:
@@ -1194,6 +1236,104 @@ async def test_session_snapshot_rebind_discards_inflight_old_runner(
     else:
         assert backoff is None
         persist.assert_called_once_with(session_id, "idle")
+
+
+@pytest.mark.asyncio
+async def test_session_snapshot_after_rebind_queries_the_new_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A snapshot taken after a rebind probes the new runner and never waits on the old one."""
+    from omnigent.server.routes._sessions import orchestration
+
+    session_id = "probe_rebind_snapshot"
+    _sessions_mod._session_status_cache.pop(session_id, None)
+    _sessions_mod._runner_status_probe_backoff.pop(session_id, None)
+    persist = Mock()
+    monkeypatch.setattr(orchestration.session_live_state, "persist_live_status", persist)
+    old = _GatedRunnerClient(status="failed")
+    new = _GatedRunnerClient(status="running")
+    _use_binding_router(monkeypatch, {"runner_old": old, "runner_new": new})
+    conv_store = _ConversationStore(
+        [], conversations={session_id: _bound_conversation(session_id, "runner_old")}
+    )
+
+    before = asyncio.create_task(_get_session_snapshot(conv_store, session_id))  # type: ignore[arg-type]
+    await asyncio.wait_for(old.arrived.wait(), timeout=1.0)
+    conv_store.replace_conversation(_bound_conversation(session_id, "runner_new"))
+    after = asyncio.create_task(_get_session_snapshot(conv_store, session_id))  # type: ignore[arg-type]
+    new.release.set()
+    try:
+        done, _ = await asyncio.wait({after}, timeout=1.0)
+        assert after in done, "the post-rebind snapshot is waiting on the previous runner's probe"
+        assert (await after).status == "running"
+        assert new.get_calls == [f"/v1/sessions/{session_id}"]
+    finally:
+        old.release.set()
+        await asyncio.gather(before, after, return_exceptions=True)
+
+    # The pre-rebind snapshot falls back rather than reporting a runner the session has left.
+    assert (await before).status == "idle"
+    assert old.get_calls == [f"/v1/sessions/{session_id}"]
+    assert _sessions_mod._session_status_cache.get(session_id) == "running"
+    persist.assert_called_once_with(session_id, "running")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("new_fails", [True, False])
+async def test_session_snapshot_with_a_stale_row_cannot_displace_the_new_runners_probe(
+    monkeypatch: pytest.MonkeyPatch, new_fails: bool
+) -> None:
+    """A snapshot holding a pre-rebind row leaves the new runner's probe and backoff alone."""
+    from omnigent.server.routes._sessions import orchestration
+
+    session_id = "probe_stale_row"
+    _sessions_mod._session_status_cache.pop(session_id, None)
+    _sessions_mod._runner_status_probe_backoff.pop(session_id, None)
+    inflight = _sessions_mod._runner_status_probe_inflight
+    persist = Mock()
+    monkeypatch.setattr(orchestration.session_live_state, "persist_live_status", persist)
+    old = _GatedRunnerClient(status="failed")
+    new = _GatedRunnerClient(
+        status="running", error=httpx.ConnectError("new runner") if new_fails else None
+    )
+    _use_binding_router(monkeypatch, {"runner_old": old, "runner_new": new})
+    stale_row = _bound_conversation(session_id, "runner_old")
+    conv_store = _ConversationStore(
+        [], conversations={session_id: _bound_conversation(session_id, "runner_new")}
+    )
+
+    current = asyncio.create_task(_get_session_snapshot(conv_store, session_id))  # type: ignore[arg-type]
+    await asyncio.wait_for(new.arrived.wait(), timeout=1.0)
+    # A request that authorized the session before the rebind still carries the old row.
+    stale = asyncio.create_task(
+        _get_session_snapshot(conv_store, session_id, conversation=stale_row)  # type: ignore[arg-type]
+    )
+    try:
+        await asyncio.wait_for(old.arrived.wait(), timeout=1.0)
+        old.release.set()
+        assert (await stale).status == "idle"
+        assert _sessions_mod._session_status_cache.get(session_id) is None
+        persist.assert_not_called()
+        assert inflight.get((session_id, "runner_new")) is not None
+    finally:
+        old.release.set()
+        new.release.set()
+        await asyncio.gather(current, stale, return_exceptions=True)
+
+    current_snapshot = await current
+    backoff = _sessions_mod._runner_status_probe_backoff.get(session_id)
+    if new_fails:
+        assert current_snapshot.status == "idle"
+        assert _sessions_mod._session_status_cache.get(session_id) is None
+        assert backoff.runner_id == "runner_new"
+        assert backoff.failures == 1
+        persist.assert_not_called()
+    else:
+        assert current_snapshot.status == "running"
+        assert _sessions_mod._session_status_cache.get(session_id) == "running"
+        assert backoff is None
+        persist.assert_called_once_with(session_id, "running")
+    assert old.get_calls == new.get_calls == [f"/v1/sessions/{session_id}"]
 
 
 @pytest.mark.asyncio
@@ -1247,14 +1387,15 @@ async def test_session_snapshot_concurrent_cache_misses_share_one_status_probe()
     session_id = "4e8b6d3a0f5c4c2d9a7e9b6f5c3d4e1a"
     _mod._session_status_cache.pop(session_id, None)
     _mod._runner_status_probe_backoff.pop(session_id, None)
+    conv_store = _ConversationStore([])
     runner_client = _GatedRunnerClient()
 
     first = asyncio.create_task(
-        orchestration._probe_runner_live_status(runner_client, session_id)  # type: ignore[arg-type]
+        orchestration._probe_runner_live_status(conv_store, runner_client, session_id)  # type: ignore[arg-type]
     )
     await asyncio.wait_for(runner_client.arrived.wait(), timeout=1.0)
     second = asyncio.create_task(
-        orchestration._probe_runner_live_status(runner_client, session_id)  # type: ignore[arg-type]
+        orchestration._probe_runner_live_status(conv_store, runner_client, session_id)  # type: ignore[arg-type]
     )
     # One yield schedules `second` onto the shared probe; only then may it finish.
     await asyncio.sleep(0)
@@ -1263,7 +1404,7 @@ async def test_session_snapshot_concurrent_cache_misses_share_one_status_probe()
     assert await asyncio.gather(first, second) == ["running", "running"]
     assert runner_client.get_calls == [f"/v1/sessions/{session_id}"]
     assert _mod._session_status_cache.get(session_id) == "running"
-    assert _mod._runner_status_probe_inflight.get(session_id) is None
+    assert _mod._runner_status_probe_inflight.get((session_id, None)) is None
 
 
 @pytest.mark.asyncio
@@ -1275,14 +1416,15 @@ async def test_session_snapshot_cancelled_caller_does_not_abort_shared_status_pr
     session_id = "5f9c7e4b1a2d4d3e8b0f1c9d6e5a7b2c"
     _mod._session_status_cache.pop(session_id, None)
     _mod._runner_status_probe_backoff.pop(session_id, None)
+    conv_store = _ConversationStore([])
     runner_client = _GatedRunnerClient()
 
     first = asyncio.create_task(
-        orchestration._probe_runner_live_status(runner_client, session_id)  # type: ignore[arg-type]
+        orchestration._probe_runner_live_status(conv_store, runner_client, session_id)  # type: ignore[arg-type]
     )
     await asyncio.wait_for(runner_client.arrived.wait(), timeout=1.0)
     second = asyncio.create_task(
-        orchestration._probe_runner_live_status(runner_client, session_id)  # type: ignore[arg-type]
+        orchestration._probe_runner_live_status(conv_store, runner_client, session_id)  # type: ignore[arg-type]
     )
     await asyncio.sleep(0)
     first.cancel()
@@ -1493,10 +1635,14 @@ async def test_session_snapshot_probe_backoff_is_discarded_when_the_runner_chang
     session_id = "9d3a1c8f6b5e4e7d0f2a4b6c8e1d3f5a"
     _mod._session_status_cache.pop(session_id, None)
     _mod._runner_status_probe_backoff.pop(session_id, None)
+    probe = orchestration._probe_runner_live_status
+    conv_store = _ConversationStore(
+        [], conversations={session_id: _bound_conversation(session_id, "runner_old")}
+    )
     stalled = _HangingRunnerClient()
 
     monkeypatch.setattr(orchestration, "_RUNNER_STATUS_PROBE_TIMEOUT_S", 0.05)
-    assert await orchestration._probe_runner_live_status(stalled, session_id, "runner_old") is None  # type: ignore[arg-type]
+    assert await probe(conv_store, stalled, session_id, "runner_old") is None  # type: ignore[arg-type]
     assert _mod._runner_status_probe_backoff.get(session_id).runner_id == "runner_old"
 
     class _HealthyRunnerClient:
@@ -1507,8 +1653,9 @@ async def test_session_snapshot_probe_backoff_is_discarded_when_the_runner_chang
             self.get_calls.append(url)
             return SimpleNamespace(status_code=200, json=lambda: {"status": "running"})
 
+    conv_store.replace_conversation(_bound_conversation(session_id, "runner_new"))
     replacement = _HealthyRunnerClient()
-    status = await orchestration._probe_runner_live_status(replacement, session_id, "runner_new")  # type: ignore[arg-type]
+    status = await probe(conv_store, replacement, session_id, "runner_new")  # type: ignore[arg-type]
 
     assert status == "running"
     assert replacement.get_calls == [f"/v1/sessions/{session_id}"]

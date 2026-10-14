@@ -620,9 +620,10 @@ _runner_status_probe_backoff: WorkspaceScopedCache[str, _RunnerStatusProbeBackof
     WorkspaceScopedCache()
 )
 
-# The current runner id and shared status probe for each session.
+# The status probe in flight for each (session, bound runner) pair; concurrent
+# snapshots of that pair await it.
 _runner_status_probe_inflight: WorkspaceScopedCache[
-    str, tuple[str | None, asyncio.Task[str | None]]
+    tuple[str, str | None], asyncio.Task[str | None]
 ] = WorkspaceScopedCache()
 
 
