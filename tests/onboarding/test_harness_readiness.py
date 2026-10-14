@@ -377,8 +377,12 @@ def _managed_connect_host(
 ) -> None:
     """Model a managed-connect sandbox: host-only ``[omnigent]`` profile, plus the
     broker sidecar ``configure_host_databricks`` writes beside it when *sidecar*."""
+    import omnigent.harnesses.codex_native.main as codex_main
     from omnigent.host import databricks_credential as dc
 
+    # Codex readiness probes the [omnigent] profile live (model discovery), which
+    # can block for minutes without a reachable workspace; these tests are about Pi.
+    monkeypatch.setattr(codex_main, "_codex_auth_unavailable_reason", lambda: None)
     cfg = tmp_path / ".databrickscfg"
     monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(cfg))
     assert dc._write_profile(cfg, "https://ws.example")
