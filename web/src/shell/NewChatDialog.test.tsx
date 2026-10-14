@@ -2890,6 +2890,7 @@ describe("Run on this machine (desktop host enrollment)", () => {
   it("shows Use this machine on a known local host after it disconnects", async () => {
     mockHosts([
       { host_id: "this-machine", name: "jackson-laptop", owner: "me", status: "offline" },
+      host("offline", 2),
     ]);
     renderLanding();
     await act(async () => {});
@@ -2901,6 +2902,8 @@ describe("Run on this machine (desktop host enrollment)", () => {
     expect(screen.getByTestId("new-chat-landing-use-this-machine")).toHaveTextContent(
       "Use this machine",
     );
+    // Only this machine's offline row doubles as an action; other stopped hosts stay hidden.
+    expect(screen.queryByTestId("new-chat-landing-host-host_2")).toBeNull();
   });
 
   it("hides Use this machine while the local host is connected", async () => {
@@ -3089,6 +3092,8 @@ describe("Run on Arca (Databricks-internal, MDM-gated)", () => {
       expect(await screen.findByTestId("new-chat-landing-run-on-arca")).toHaveTextContent(
         /^Run on Arca$/,
       );
+      // A stopped instance is reached through Run on Arca, not a dead Cloud row.
+      expect(screen.queryByTestId("new-chat-landing-host-arca-1")).toBeNull();
     },
   );
 
@@ -3294,6 +3299,38 @@ describe("NewChatLandingScreen", () => {
       expect(localStorage.getItem("omnigent:last-host-choice")).toBe("host_1");
     },
   );
+
+  it("lists online hosts and the selected offline host but hides other stopped hosts", async () => {
+    localStorage.setItem("omnigent:last-host-choice", "host_2");
+    mockHosts([host("online", 1), host("offline", 2), host("offline", 3)]);
+    renderLanding();
+
+    const chip = screen.getByTestId("new-chat-landing-host-chip");
+    await waitFor(() => expect(chip).toHaveAccessibleName("Host: machine-2, Offline"));
+    fireEvent.pointerDown(chip, { button: 0 });
+    expect(screen.getByTestId("new-chat-landing-host-host_1")).not.toHaveAttribute("aria-disabled");
+    expect(screen.getByTestId("new-chat-landing-host-host_2")).toHaveAttribute(
+      "data-active",
+      "true",
+    );
+    expect(screen.queryByTestId("new-chat-landing-host-host_3")).toBeNull();
+    expect(screen.getByTestId("new-chat-landing-host-menu")).not.toHaveTextContent("machine-3");
+  });
+
+  it("says no hosts are online instead of listing dead rows when every host is offline", async () => {
+    mockHosts([host("offline", 1), host("offline", 2)]);
+    renderLanding();
+
+    const chip = screen.getByTestId("new-chat-landing-host-chip");
+    await waitFor(() =>
+      expect(chip).toHaveAccessibleName(expect.stringContaining("No host selected")),
+    );
+    fireEvent.pointerDown(chip, { button: 0 });
+    const menu = screen.getByTestId("new-chat-landing-host-menu");
+    expect(screen.queryByTestId("new-chat-landing-host-host_1")).toBeNull();
+    expect(screen.queryByTestId("new-chat-landing-host-host_2")).toBeNull();
+    expect(menu).toHaveTextContent("No hosts online.");
+  });
 
   it.each(["offline", "missing"])(
     "blocks creation when the selected host becomes %s and recovers when it returns",
