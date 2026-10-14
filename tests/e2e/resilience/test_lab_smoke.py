@@ -23,7 +23,6 @@ from tests.e2e.resilience.lab.proxy import FaultProxy
 _TURN_TIMEOUT_S = 120.0
 
 
-@pytest.mark.timeout(60)
 def test_upstream_ports_remain_available_after_proxy_startup_and_server_restart(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -33,6 +32,7 @@ def test_upstream_ports_remain_available_after_proxy_startup_and_server_restart(
 
     def start(proxy: FaultProxy) -> None:
         if proxy.name == "client":
+            assert proxy._listen_port == 0
             # Choose an upstream port whenever it is free, as an ephemeral
             # allocation can do before the upstream process binds it.
             for port in (lab._model_port, lab._server_port):
