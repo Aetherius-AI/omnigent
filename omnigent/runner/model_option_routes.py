@@ -331,12 +331,9 @@ def register_model_option_routes(
             time.monotonic() + _CLAUDE_MODEL_OPTIONS_CACHE_TTL_S,
             rows,
         )
-        # Executor parity: a cold launch may have recorded no picker
-        # vocabulary (the store had no catalog yet), while routing decisions
-        # accept picks against THIS listing. Refresh the bridge snapshot so
-        # a routed turn's executor translates exactly the vocabulary served
-        # here — including an authoritative empty catalog, which clears
-        # stale launch values. Best-effort: the terminal may not exist yet.
+        # Refresh cold launch snapshots to the listing routing uses, including
+        # optional capabilities and an authoritative empty catalog. The terminal
+        # may not exist yet, so this refresh remains best-effort.
         try:
             from omnigent.harnesses.claude_native.bridge import (
                 bridge_dir_for_bridge_id,
@@ -354,6 +351,7 @@ def register_model_option_routes(
                 launch_env=None,
                 launch_model=None,
                 picker_values=picker_command_values(rows),
+                model_options=rows,
             )
         except Exception:  # noqa: BLE001 — vocabulary refresh is advisory
             _logger.debug(

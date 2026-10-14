@@ -1918,7 +1918,7 @@ async def test_claude_native_model_options_refresh_the_bridge_vocabulary(
         )
 
     monkeypatch.setattr("omnigent.harnesses.claude_native.main.probe_claude_model_options", _probe)
-    recorded: list[tuple[Any, Any, Any, list[str]]] = []
+    recorded: list[tuple[Any, Any, Any, list[str], Any]] = []
 
     def _record(
         bridge_dir: Any,
@@ -1926,8 +1926,11 @@ async def test_claude_native_model_options_refresh_the_bridge_vocabulary(
         launch_env: Any,
         launch_model: Any,
         picker_values: Any = None,
+        model_options: Any = None,
     ) -> None:
-        recorded.append((bridge_dir, launch_env, launch_model, list(picker_values or [])))
+        recorded.append(
+            (bridge_dir, launch_env, launch_model, list(picker_values or []), model_options)
+        )
 
     monkeypatch.setattr(claude_bridge, "record_model_vocabulary", _record)
 
@@ -1961,11 +1964,12 @@ async def test_claude_native_model_options_refresh_the_bridge_vocabulary(
 
     assert listing.status_code == 200, listing.text
     assert recorded, "the listing must refresh the bridge vocabulary"
-    bridge_dir, launch_env, launch_model, picker_values = recorded[-1]
+    bridge_dir, launch_env, launch_model, picker_values, model_options = recorded[-1]
     assert bridge_dir == claude_bridge.bridge_dir_for_bridge_id(conv_id)
     assert launch_env is None
     assert launch_model is None
     assert picker_values == ([] if empty else ["opus", "system.ai.glm-5-3"])
+    assert model_options == listing.json()["models"]
 
 
 @pytest.mark.asyncio
