@@ -5,3 +5,7 @@
 
 ARG OMNIGENT_IMAGE=ghcr.io/omnigent-ai/omnigent-server:latest
 FROM ${OMNIGENT_IMAGE}
+
+# Bake the Railway server config in so managed sandboxes are configured from
+# source control; the service selects it with OMNIGENT_CONFIG.
+COPY deploy/railway/config.yaml /etc/omnigent/config.yaml

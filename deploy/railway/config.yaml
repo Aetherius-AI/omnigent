@@ -1,0 +1,11 @@
+# Server config for the Aetherius-AI collab deployment on Railway.
+# Baked into the image by deploy/docker/Dockerfile.prebuilt and selected
+# with OMNIGENT_CONFIG=/etc/omnigent/config.yaml on the Railway service.
+# Secrets never live here: Modal credentials and DATABASE_URL come from
+# the Railway service variables; LLM / git credentials come from the
+# Modal secrets listed below.
+sandbox:
+  provider: modal
+  server_url: https://omnigent-production-50e4.up.railway.app
+  modal:
+    secrets: [omnigent-llm]
