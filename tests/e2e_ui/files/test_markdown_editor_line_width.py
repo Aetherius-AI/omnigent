@@ -17,6 +17,7 @@ from collections.abc import Iterator
 import httpx
 import pytest
 from playwright.sync_api import Locator, Page, expect
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from tests.e2e_ui.conftest import open_right_rail, switch_markdown_view_mode
 
@@ -96,7 +97,7 @@ def seeded_wrapped_markdown_session(
         # Deleting the session keeps its workspace files, so remove the seed here.
         # A cleanup failure must not mask the test's own result.
         with contextlib.suppress(httpx.HTTPError):
-            httpx.delete(file_url, timeout=10.0)
+            httpx.delete(file_url, timeout=10.0).raise_for_status()
 
 
 # Select from the last word before the first soft break to the first word after it
@@ -191,5 +192,10 @@ def test_edit_mode_reflows_hard_wrapped_paragraph_to_viewer_width(
         page.get_by_role("button", name=re.compile("Add comment", re.IGNORECASE))
     ).to_be_visible()
     page.keyboard.press("ControlOrMeta+c")
-    page.wait_for_function("() => window.__copiedText !== null")
+    try:
+        page.wait_for_function("() => window.__copiedText !== null", timeout=5_000)
+    except PlaywrightTimeoutError as err:
+        raise AssertionError(
+            "the copy shortcut did not dispatch a copy event in the editor"
+        ) from err
     assert page.evaluate("window.__copiedText") == f"{last_word}\n{first_word}"

@@ -200,12 +200,20 @@ describe("SoftBreak serialisation", () => {
   });
 
   it("drops the marks of a soft break whose marked neighbours were deleted", () => {
-    editor = makeEditor("x **a\nb** y");
+    editor = makeEditor("x**a\nb**y");
     const [sb] = softBreakPositions(editor.state.doc);
     // Delete "b" (after the break) and then "a" (before it).
     editor.commands.deleteRange({ from: sb + 1, to: sb + 2 });
     editor.commands.deleteRange({ from: sb - 1, to: sb });
-    expect(editor.getMarkdown().trim()).toBe("x \n y");
+    expect(editor.getMarkdown().trim()).toBe("x\ny");
+  });
+
+  it("drops soft breaks left at the start or end of a paragraph by edits", () => {
+    editor = makeEditor("alpha\nbeta\ngamma");
+    const [first, second] = softBreakPositions(editor.state.doc);
+    editor.commands.deleteRange({ from: second + 1, to: second + 6 }); // "gamma"
+    editor.commands.deleteRange({ from: 1, to: first }); // "alpha"
+    expect(editor.getMarkdown().trim()).toBe("beta");
   });
 
   it("joins the two source lines when the user deletes a soft break", () => {
@@ -228,8 +236,8 @@ describe("SoftBreak code-block conversion", () => {
     expect(block.type.name).toBe("codeBlock");
     expect(block.textContent).toBe("alpha\nbeta");
     expect(editor.getMarkdown().trim()).toBe("```\nalpha\nbeta\n```");
-    // Toggling back keeps both lines; ProseMirror turns the code block's
-    // newlines into hard breaks (its linebreakReplacement), as before this change.
+    // Toggling back keeps both lines: ProseMirror turns the code block's
+    // newlines into hard breaks (its linebreakReplacement).
     expect(editor.commands.toggleCodeBlock()).toBe(true);
     const paragraph = editor.state.doc.child(0);
     expect(paragraph.type.name).toBe("paragraph");

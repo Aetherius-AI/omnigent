@@ -56,13 +56,20 @@ function textNode(text: string, marks: JSONContent["marks"]): JSONContent {
  */
 function joinSoftBreaks(node: JSONContent): JSONContent {
   if (node.content == null) return node;
-  const content: JSONContent[] = [];
-  let afterBreak = false;
+  // Leading, trailing or repeated soft breaks (a wrapped line emptied by edits)
+  // would serialise as blank lines that split the block on reload; keep only
+  // single breaks between content.
+  const children: JSONContent[] = [];
   for (const child of node.content) {
     const isBreak = child.type === SOFT_BREAK_NODE;
-    // Consecutive soft breaks (a wrapped line emptied by edits) would serialise
-    // as a blank line and split the paragraph on reload; keep one newline.
-    if (isBreak && afterBreak) continue;
+    if (isBreak && (children.length === 0 || children.at(-1)?.type === SOFT_BREAK_NODE)) continue;
+    children.push(child);
+  }
+  while (children.at(-1)?.type === SOFT_BREAK_NODE) children.pop();
+  const content: JSONContent[] = [];
+  let afterBreak = false;
+  for (const child of children) {
+    const isBreak = child.type === SOFT_BREAK_NODE;
     const next = isBreak ? textNode("\n", child.marks) : joinSoftBreaks(child);
     const prev = content[content.length - 1];
     if (
@@ -229,7 +236,9 @@ export function installMarkdownParserPatch(): void {
   proto.parse = function (this: MarkdownManager, markdown: string): JSONContent {
     const doc = wrapLooseInlineRuns(originalParse.call(this, markdown));
     if (!hasSoftBreakNode(this)) return doc;
-    const { codeTypes } = this as unknown as SerializerInternals;
-    return splitSoftBreaks(doc, codeTypes ?? new Set(["codeBlock"]));
+    // Without the manager's code-type registry no node can be proven verbatim,
+    // so leave the newlines as text rather than risk splitting code content.
+    const { codeTypes } = this as unknown as Partial<SerializerInternals>;
+    return codeTypes ? splitSoftBreaks(doc, codeTypes) : doc;
   };
 }
