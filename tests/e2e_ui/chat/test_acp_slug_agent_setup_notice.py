@@ -1,17 +1,8 @@
 """E2E: a configured, launchable ``acp:<slug>`` agent must not be flagged "needs setup".
 
-Journey from the bug report: a user adds a generic-ACP agent (``acp:`` block,
-``name: TraeX``) to the host's ``~/.omnigent/config.yaml``, starts the server with
-that config so the picker seeds a TraeX row, connects the host, selects the host
-and TraeX in New Chat, and sends a message. The agent launches and replies, yet
-New Chat warned beforehand that TraeX "isn't configured on <host>".
-
-The server, a REAL ``omnigent host`` daemon (isolated HOME carrying the ``acp:``
-block) and a hermetic stdio ACP agent standing in for the ``traex`` binary are
-all started here, so the daemon's actual readiness map — not a hand-written wire
-body — is what the picker renders. The test fails while the under-composer
-readiness notice appears for the launchable agent and passes once the picker's
-readiness for ``acp:<slug>`` agrees with the launch.
+A real server seeded from an ``acp:`` block, a real ``omnigent host`` daemon
+carrying the same block, and a stdio ACP agent standing in for the ``traex``
+binary, so New Chat renders the daemon's actual readiness map.
 """
 
 from __future__ import annotations
@@ -63,11 +54,7 @@ def acp_host_stack(
     built_spa: None,
     tmp_path_factory: pytest.TempPathFactory,
 ) -> Iterator[dict[str, Any]]:
-    """Server seeded from an ``acp:`` block plus a real host daemon carrying the same block.
-
-    Yields the server URL, the seeded TraeX agent row, the online host's
-    ``/v1/hosts`` row and a workspace directory on the host.
-    """
+    """Yield the server URL, the seeded TraeX row, the online host row and a workspace."""
     root = tmp_path_factory.mktemp("acp_slug_stack")
     agent_script = root / "fake_acp_agent.py"
     agent_script.write_text(_FAKE_ACP_AGENT)
@@ -127,13 +114,10 @@ def test_configured_acp_slug_agent_shows_no_setup_notice(
     acp_host_stack: dict[str, Any],
     output_path: str,
 ) -> None:
-    """The configured TraeX agent on its host must not warn under the composer.
+    """A returning user with TraeX selected sees no readiness notice, and TraeX replies.
 
-    Drives New Chat as a returning user who last picked TraeX (seeded via
-    ``omnigent:last-agent-id``, the same path the picker persists): pick the
-    host, confirm TraeX is the selected agent, read the under-composer readiness
-    notice, then send a message and wait for the ACP agent's reply. The reply
-    proves the agent is launchable; the test fails if a notice was shown for it.
+    ``omnigent:last-agent-id`` is the key the picker persists, so seeding it
+    selects TraeX the way a real return visit would.
     """
     base_url = acp_host_stack["base_url"]
     host = acp_host_stack["host"]
