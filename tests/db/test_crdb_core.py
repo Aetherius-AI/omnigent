@@ -16,8 +16,8 @@ from sqlalchemy.exc import NoSuchModuleError
 from omnigent.db import cockroachdb, utils
 
 
-def test_model_schema_revision_matches_model_tables_and_columns(tmp_path: Path) -> None:
-    """Model columns must be represented at the revision stamped by bootstrap."""
+def test_model_schema_revision_matches_model_metadata(tmp_path: Path) -> None:
+    """Model tables, columns, and indexes must exist at the revision stamped by bootstrap."""
     from omnigent.db.db_models import MODEL_SCHEMA_REVISION, ConversationBase, OmnigentBase
 
     uri = f"sqlite:///{tmp_path / 'model_revision.db'}"
@@ -41,6 +41,28 @@ def test_model_schema_revision_matches_model_tables_and_columns(tmp_path: Path) 
         assert migrated == models, (
             "Advance MODEL_SCHEMA_REVISION with model table/column changes; "
             "CockroachDB bootstrap stamps this revision before later migrations."
+        )
+        migrated_indexes = {
+            table: {
+                str(index["name"])
+                for index in inspector.get_indexes(table)
+                if index.get("name") and not str(index["name"]).startswith("sqlite_autoindex")
+            }
+            for table in migrated
+        }
+        model_indexes = {
+            table.name: {
+                index.name
+                for index in table.indexes
+                # Dialect-gated indexes (the CockroachDB trigram index) never exist on SQLite.
+                if index.name and index._ddl_if is None
+            }
+            for metadata in (OmnigentBase.metadata, ConversationBase.metadata)
+            for table in metadata.tables.values()
+        }
+        assert migrated_indexes == model_indexes, (
+            "Advance MODEL_SCHEMA_REVISION with model index changes; "
+            "CockroachDB bootstrap creates model indexes before later migrations."
         )
     finally:
         engine.dispose()

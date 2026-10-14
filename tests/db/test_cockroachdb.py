@@ -118,8 +118,12 @@ def _fresh_database(db_uri: str, tmp_path: Path) -> tuple[str, Callable[[], None
         run(f'DROP DATABASE IF EXISTS "{name}" CASCADE')
         root.dispose()
 
-    run(f'DROP DATABASE IF EXISTS "{name}" CASCADE')
-    run(f'CREATE DATABASE "{name}"')
+    try:
+        run(f'DROP DATABASE IF EXISTS "{name}" CASCADE')
+        run(f'CREATE DATABASE "{name}"')
+    except Exception:
+        root.dispose()
+        raise
     return url.set(database=name).render_as_string(hide_password=False), drop
 
 

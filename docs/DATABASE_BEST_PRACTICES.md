@@ -372,7 +372,8 @@ migration head.
 An interrupted bootstrap records `MODEL_SCHEMA_REVISION:head` in its marker.
 Until the model revision is stamped, startup resumes only when both revisions
 match; after the stamp, the next start continues through normal Alembic
-upgrades. A legacy or mismatched marker leaves the database untouched.
+upgrades. Before a revision is stamped, a legacy or mismatched marker leaves
+the database untouched.
 Back up the original database and inspect its columns, indexes, migration chain,
 and bootstrap marker before a reviewed manual recovery (see
 [CockroachDB](COCKROACHDB.md)). For a new installation,

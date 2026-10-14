@@ -321,8 +321,9 @@ def _initialize_or_verify_crdb_schema(engine: Engine, db_uri: str) -> None:
                 _run_migrations(engine, db_uri)
             if _get_current_db_revision(engine) != head:
                 raise RuntimeError(
-                    "CockroachDB schema bootstrap did not stamp the expected Alembic head "
-                    f"{head!r}. The bootstrap marker was retained for a safe retry."
+                    "CockroachDB schema bootstrap did not reach the expected Alembic head "
+                    f"{head!r} after stamping {MODEL_SCHEMA_REVISION!r} and running "
+                    "migrations. The bootstrap marker was retained for a safe retry."
                 )
             _finish_crdb_bootstrap(engine, version)
         return
