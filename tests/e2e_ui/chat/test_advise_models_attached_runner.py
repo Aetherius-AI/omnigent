@@ -115,7 +115,9 @@ def _create_session(stack: RoutingStack, *, on_host: bool) -> str:
 
 
 def _script_advisor_call(mock_url: str, nonce: str) -> None:
-    arguments = {"tasks": [{"title": "auth-refactor", "agents": [{"agent": "worker", "models": None}]}]}
+    arguments = {
+        "tasks": [{"title": "auth-refactor", "agents": [{"agent": "worker", "models": None}]}]
+    }
     configure_mock_llm(
         mock_url,
         [
@@ -144,7 +146,9 @@ def _offered_tools(mock_url: str, nonce: str) -> set[str]:
                 str(tool.get("name") or tool.get("function", {}).get("name"))
                 for tool in request["tools"]
             }
-    raise AssertionError(f"no model request with tools carried {nonce!r}: {len(requests)} captured")
+    raise AssertionError(
+        f"no model request with tools carried {nonce!r}: {len(requests)} captured"
+    )
 
 
 def _send_prompt(page: Page, base_url: str, session_id: str, prompt: str) -> None:
