@@ -188,7 +188,11 @@ def test_bootstrap_rejects_invalid_marker() -> None:
 
 @pytest.mark.parametrize(
     ("previous_target", "current_target"),
-    [("older-head", "current-head"), ("old-model:head", "new-model:head")],
+    [
+        ("older-head", "current-head"),
+        ("old-model:head", "new-model:head"),
+        ("head", "model:head"),
+    ],
 )
 def test_bootstrap_rejects_marker_from_different_schema_target(
     previous_target: str, current_target: str
@@ -202,7 +206,7 @@ def test_bootstrap_rejects_marker_from_different_schema_target(
     engine = MagicMock()
     engine.connect.return_value = nullcontext(connection)
 
-    with pytest.raises(RuntimeError, match="invalid Omnigent bootstrap marker"):
+    with pytest.raises(RuntimeError, match="invalid Omnigent bootstrap marker") as error:
         cockroachdb._start_or_resume_crdb_bootstrap(
             engine,
             Version("25.2.10"),
@@ -210,6 +214,11 @@ def test_bootstrap_rejects_marker_from_different_schema_target(
             {"agents", "conversations"},
             current_target,
         )
+    assert "Existing data was left unchanged" in str(error.value)
+    assert "Back up and inspect" in str(error.value)
+    assert all(
+        str(call.args[0]).startswith("SELECT") for call in connection.execute.call_args_list
+    )
 
 
 def test_bootstrap_rejects_empty_alembic_table_without_marker() -> None:

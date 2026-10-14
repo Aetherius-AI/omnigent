@@ -369,9 +369,16 @@ PR has landed. Managed distributions that extend the models or patch their local
 migration chain must keep the marker on that chain and align it with the schema
 their model metadata creates. Do not stamp an older model's schema at a newer
 migration head.
-Interrupted bootstrap resumes only when both the model revision and migration
-head match its recorded target. Older marker formats require explicit recovery
-or a fresh empty database; do not infer their model revision from the head.
+Interrupted bootstrap records `MODEL_SCHEMA_REVISION:head` and resumes only when
+both revisions match. A legacy or mismatched marker leaves the database untouched.
+Back up the original database and inspect its columns, indexes, migration chain,
+and bootstrap marker before a reviewed manual recovery. For a new installation,
+use a separate empty database while retaining the original for inspection. Do not
+drop existing data or stamp a guessed revision to bypass the check; the migration
+head alone does not establish which model metadata created a partial schema.
+This does not retroactively repair a database already falsely stamped at head
+by older bootstrap code. Back up and reconcile its actual schema with its recorded
+revision before rolling out an application that needs the missing additions.
 
 ## Stored procedures
 
