@@ -549,9 +549,20 @@ def _spawn_spec() -> AgentSpec:
     return AgentSpec(spec_version=1, spawn=True)
 
 
-def test_advise_models_hidden_when_routing_disabled() -> None:
+@pytest.mark.parametrize(
+    "caps",
+    [
+        pytest.param(_FakeRoutingCaps(routing_client=None), id="no-router"),
+        pytest.param(
+            SimpleNamespace(
+                routing_client=None, routing_backends=None, remote_routing_available=False
+            ),
+            id="remote-server-does-not-route",
+        ),
+    ],
+)
+def test_advise_models_hidden_when_routing_disabled(caps: Any) -> None:
     """sys_advise_models must not appear when no router is configured."""
-    caps = _FakeRoutingCaps(routing_client=None)
     with patch("omnigent.runtime._globals._caps", new=caps):
         names = {s["function"]["name"] for s in ToolManager(_spawn_spec()).get_tool_schemas()}
     assert "sys_list_models" in names
@@ -600,19 +611,6 @@ def test_advise_models_exposed_when_only_the_remote_server_routes() -> None:
     with patch("omnigent.runtime._globals._caps", new=caps):
         names = {s["function"]["name"] for s in ToolManager(_spawn_spec()).get_tool_schemas()}
     assert "sys_advise_models" in names
-
-
-def test_advise_models_hidden_when_the_remote_server_does_not_route() -> None:
-    """A server that reports no router keeps the tool hidden on the runner."""
-    caps = SimpleNamespace(
-        routing_client=None,
-        routing_backends=None,
-        remote_routing_available=False,
-    )
-    with patch("omnigent.runtime._globals._caps", new=caps):
-        names = {s["function"]["name"] for s in ToolManager(_spawn_spec()).get_tool_schemas()}
-    assert "sys_list_models" in names
-    assert "sys_advise_models" not in names
 
 
 def test_share_non_public_registers_share_tool_without_public() -> None:

@@ -1,30 +1,12 @@
-"""E2E: ``sys_advise_models`` must be offered on a runner attached to a routing server.
+"""``sys_advise_models`` is offered on runners attached to a routing-enabled server.
 
-Journey: run an omnigent server with
-smart routing configured (the ``live_server`` fixture's server-level ``llm:``
-block gives it the built-in OSS judge, so ``GET /v1/info`` reports
-``smart_routing_enabled: true``) -> attach a runner process that does not share
-the server's process (an ``omnigent host`` daemon, and the tunneled sibling
-runner every local deployment spawns) -> start a session on that runner and run
-one turn -> inspect the tool surface offered to the model.
-
-Expected: ``sys_advise_models`` is advertised alongside ``sys_list_models``,
-because the attached server can answer the call. The guarded regression: the
-runner-process gate evaluates ``routing_available(get_caps())`` against its own
-empty caps (the routing backends live only in the server process), so the
-advisor is hidden from every session on such a runner unless the server's
-session-init envelope carries its routing answer.
-
-Usage::
-
-    pytest tests/e2e/test_advise_models_remote_runner.py -v
+The ``live_server`` fixture's server-level ``llm:`` block builds the OSS judge.
+A runner outside that server process (an ``omnigent host`` daemon's runner, or
+the tunneled sibling runner) must still advertise the advisor the server answers.
 """
 
 from __future__ import annotations
 
-import os
-import signal
-import subprocess
 import time
 import uuid
 from collections.abc import Iterator
@@ -35,7 +17,7 @@ import httpx
 import pytest
 
 from omnigent.runner.identity import OMNIGENT_INTERNAL_WS_ORIGIN
-from tests._helpers.compat import apply_runner_env, compat_runner_cwd, runner_executable
+from tests._helpers.host import isolated_host
 from tests.e2e.conftest import (
     configure_mock_llm,
     create_runner_bound_session,
@@ -47,8 +29,6 @@ from tests.e2e.conftest import (
     send_user_message_to_session,
 )
 from tests.e2e.helpers import POLL_INTERVAL_S
-
-_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 _HOST_ONLINE_TIMEOUT_S = 60.0
 _TURN_TIMEOUT_S = 180.0
@@ -145,62 +125,9 @@ def _assert_advisor_offered(tool_names: set[str], *, topology: str) -> None:
 @pytest.fixture
 def attached_host(live_server: str, http_client: httpx.Client, tmp_path: Path) -> Iterator[str]:
     """Attach a real ``omnigent host`` daemon to the live server; yield its host id."""
-    home_dir = tmp_path / "host-home"
-    home_dir.mkdir()
-    log_path = tmp_path / "host-daemon.log"
-    env = os.environ.copy()
-    env["HOME"] = str(home_dir)
-    env["OMNIGENT_CONFIG_HOME"] = str(home_dir / "config")
-    env["OMNIGENT_DATA_DIR"] = str(home_dir / "data")
-    # Absolute paths only: the host-spawned runner's cwd is the session
-    # workspace, where relative PYTHONPATH entries stop resolving.
-    env["PYTHONPATH"] = os.pathsep.join(
-        [
-            str(_REPO_ROOT),
-            str(_REPO_ROOT / "sdks" / "python-client"),
-            str(_REPO_ROOT / "sdks" / "ui"),
-        ]
-        + [e for e in env.get("PYTHONPATH", "").split(os.pathsep) if os.path.isabs(e)]
-    )
-    env.pop("CLAUDECODE", None)
-    with open(log_path, "w") as log_fh:
-        proc = subprocess.Popen(
-            [runner_executable(), "-m", "omnigent.host._daemon_entry", "--server", live_server],
-            env=apply_runner_env(env),
-            cwd=compat_runner_cwd(),
-            stdout=log_fh,
-            stderr=subprocess.STDOUT,
-        )
-    try:
-        deadline = time.monotonic() + _HOST_ONLINE_TIMEOUT_S
-        host_id: str | None = None
-        while time.monotonic() < deadline:
-            if proc.poll() is not None:
-                raise AssertionError(
-                    f"host daemon exited with {proc.returncode}:\n"
-                    f"{log_path.read_text(errors='replace')[-3000:]}"
-                )
-            resp = http_client.get("/v1/hosts")
-            if resp.status_code == 200:
-                online = [h for h in resp.json().get("hosts", []) if h["status"] == "online"]
-                if online:
-                    host_id = str(online[0]["host_id"])
-                    break
-            time.sleep(POLL_INTERVAL_S)
-        if host_id is None:
-            raise AssertionError(
-                f"no host came online within {_HOST_ONLINE_TIMEOUT_S}s:\n"
-                f"{log_path.read_text(errors='replace')[-3000:]}"
-            )
-        yield host_id
-    finally:
-        if proc.poll() is None:
-            proc.send_signal(signal.SIGTERM)
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=5)
+    with isolated_host(tmp_path / "host", live_server) as host:
+        host.wait_online(http_client, timeout=_HOST_ONLINE_TIMEOUT_S)
+        yield host.host_id
 
 
 def test_advise_models_offered_on_host_attached_runner(

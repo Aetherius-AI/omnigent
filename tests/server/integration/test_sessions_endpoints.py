@@ -5359,71 +5359,53 @@ async def test_create_and_bind_notifies_carry_the_servers_routing_answer(
 ) -> None:
     """Both runner notifies must stamp the server's routing answer.
 
-    The routing backends live in the server process, so the runner learns
-    whether ``sys_advise_models`` is answerable only from
-    ``smart_routing_available`` on the session-init envelope. A notify that
-    omits the stamp (or sends the legacy id-only body, which takes the
-    runner's envelope-less init path) leaves the runner reading routing as
-    off and hiding the advisor from every session bound through it.
+    The runner learns whether ``sys_advise_models`` is answerable only from
+    ``smart_routing_available`` on the session-init envelope; an id-only body
+    takes its envelope-less init path and leaves routing read as off.
     """
     from omnigent.server.routes import sessions as sessions_module
     from omnigent.server.routes.sessions import routes_core as routes_core_module
 
-    class _RecordingRunnerClient:
-        def __init__(self) -> None:
-            self.posts: list[dict[str, Any]] = []
+    inits: list[dict[str, Any]] = []
 
-        async def post(
-            self,
-            url: str,
-            *,
-            json: dict[str, Any],
-            timeout: float,
-        ) -> httpx.Response:
-            self.posts.append({"url": url, "json": json})
-            return httpx.Response(200, request=httpx.Request("POST", url))
-
-    runner_client = _RecordingRunnerClient()
-
-    async def _get_runner_client(
-        _session_id: str, _runner_router: Any, **_kwargs: Any
-    ) -> _RecordingRunnerClient:
-        return runner_client
+    def record_init(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/sessions":
+            inits.append(json.loads(request.content))
+        return httpx.Response(200, json={})
 
     async def _ensure_runner_relay_ready(*_args: Any, **_kwargs: Any) -> None:
         return None
 
-    monkeypatch.setattr(sessions_module, "_get_runner_client", _get_runner_client)
     monkeypatch.setattr(sessions_module, "_ensure_runner_relay_ready", _ensure_runner_relay_ready)
     monkeypatch.setattr(
         sessions_module, "_registered_runner_id", lambda _router, raw, *, user_id=None: raw
     )
     monkeypatch.setattr(routes_core_module, "routing_available", lambda _caps: server_routes)
 
-    def _init_envelopes() -> list[Any]:
-        return [
-            parse_runner_session_init_envelope(post["json"])
-            for post in runner_client.posts
-            if post["url"] == "/v1/sessions"
-        ]
+    def _routing_answers() -> list[bool | None]:
+        envelopes = [parse_runner_session_init_envelope(body) for body in inits]
+        return [env.smart_routing_available if env is not None else None for env in envelopes]
 
-    agent = await create_test_agent(client)
-    session = await _create_session(client, agent["id"])
-    sid = session["id"]
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(record_init), base_url="http://runner"
+    ) as runner:
+        _route_to_runner(monkeypatch, runner)
+        agent = await create_test_agent(client)
+        session = await _create_session(client, agent["id"])
 
-    create_envelopes = _init_envelopes()
-    assert create_envelopes, "session create never notified the runner"
-    assert all(env is not None for env in create_envelopes)
-    assert all(env.smart_routing_available is server_routes for env in create_envelopes)
+        create_answers = _routing_answers()
+        assert create_answers, "session create never notified the runner"
+        assert all(answer is server_routes for answer in create_answers), create_answers
 
-    runner_client.posts.clear()
-    resp = await client.patch(f"/v1/sessions/{sid}", json={"runner_id": "runner_bound"})
-    assert resp.status_code == 200, resp.text
+        inits.clear()
+        resp = await client.patch(
+            f"/v1/sessions/{session['id']}", json={"runner_id": "runner_bound"}
+        )
+        assert resp.status_code == 200, resp.text
 
-    bind_envelopes = _init_envelopes()
-    assert bind_envelopes, "runner bind never notified the runner"
-    assert all(env is not None for env in bind_envelopes)
-    assert all(env.smart_routing_available is server_routes for env in bind_envelopes)
+        bind_answers = _routing_answers()
+        assert bind_answers, "runner bind never notified the runner"
+        assert all(answer is server_routes for answer in bind_answers), bind_answers
 
 
 async def test_post_external_session_status_idle_forwards_persisted_assistant_output(

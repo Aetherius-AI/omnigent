@@ -76,8 +76,9 @@ def routing_stack(
     with server_runner(
         root / "stack", server_env=provider_env, server_args=["--config", str(config)]
     ) as stack:
-        info = httpx.get(f"{stack.base_url}/v1/info", timeout=10).json()
-        assert info["smart_routing_enabled"] is True, info
+        info = httpx.get(f"{stack.base_url}/v1/info", timeout=10)
+        info.raise_for_status()
+        assert info.json()["smart_routing_enabled"] is True, info.text
         stack.start_runner(env=provider_env)
         with (
             isolated_host(root / "host", stack.base_url, env=provider_env) as host,
@@ -101,7 +102,10 @@ def _create_session(stack: RoutingStack, *, on_host: bool) -> str:
         created.raise_for_status()
         session_id = str(created.json()["session_id"])
         if on_host:
-            runner_id = client.get(f"/v1/sessions/{session_id}").json()["runner_id"]
+            session = client.get(f"/v1/sessions/{session_id}")
+            session.raise_for_status()
+            runner_id = session.json()["runner_id"]
+            assert runner_id, f"host launch did not bind a runner for session {session_id}"
         else:
             runner_id = stack.sibling_runner_id
             bind_session_runner(client.patch, stack.base_url, session_id, runner_id)
@@ -139,12 +143,15 @@ def _script_advisor_call(mock_url: str, nonce: str) -> None:
 
 def _offered_tools(mock_url: str, nonce: str) -> set[str]:
     """Tool names the runner advertised on the model request carrying ``nonce``."""
-    requests = httpx.get(f"{mock_url}/mock/requests", timeout=10).json()["requests"]
+    captured = httpx.get(f"{mock_url}/mock/requests", timeout=10)
+    captured.raise_for_status()
+    requests = captured.json()["requests"]
     for request in requests:
         if nonce in json.dumps(request) and request.get("tools"):
             return {
-                str(tool.get("name") or tool.get("function", {}).get("name"))
+                str(name).split("__")[-1]
                 for tool in request["tools"]
+                if (name := tool.get("name") or tool.get("function", {}).get("name"))
             }
     raise AssertionError(
         f"no model request with tools carried {nonce!r}: {len(requests)} captured"
@@ -172,7 +179,6 @@ def _settle_turn(page: Page) -> str | None:
     pill.get_by_role("button").first.click()
     content = pill.get_by_test_id("error-message-content")
     expect(content).to_be_visible()
-    page.wait_for_timeout(2_000)
     return f"{headline} | {content.inner_text()}"
 
 
@@ -190,7 +196,9 @@ def test_attached_runner_offers_advise_models_when_server_routes(
         page = context.new_page()
         _send_prompt(page, routing_stack.base_url, session_id, f"{_PROMPT} ({nonce})")
         error_text = _settle_turn(page)
-        routing = httpx.get(f"{routing_stack.base_url}/v1/info", timeout=10).json()
+        info = httpx.get(f"{routing_stack.base_url}/v1/info", timeout=10)
+        info.raise_for_status()
+        routing = info.json()
         tools = _offered_tools(routing_stack.mock_url, nonce)
         assert "sys_list_models" in tools, sorted(tools)
         assert "sys_advise_models" in tools, (
