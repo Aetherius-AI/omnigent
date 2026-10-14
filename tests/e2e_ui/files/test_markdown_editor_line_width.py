@@ -186,5 +186,9 @@ def test_edit_mode_reflows_hard_wrapped_paragraph_to_viewer_width(
     first_word = _INTRO_LINES[1].split(" ", 1)[0]
     editor.locator("h1").click()
     assert editor.evaluate(_SELECT_ACROSS_SOFT_BREAK_JS, [last_word, first_word]) == "ok"
+    # The floating comment button appears once ProseMirror has taken the selection.
+    expect(
+        page.get_by_role("button", name=re.compile("Add comment", re.IGNORECASE))
+    ).to_be_visible()
     page.keyboard.press("ControlOrMeta+c")
     assert page.evaluate("window.__copiedText") == f"{last_word}\n{first_word}"

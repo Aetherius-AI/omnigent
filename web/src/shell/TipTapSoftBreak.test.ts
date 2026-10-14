@@ -211,6 +211,13 @@ describe("SoftBreak code-block conversion", () => {
     expect(block.type.name).toBe("codeBlock");
     expect(block.textContent).toBe("alpha\nbeta");
     expect(editor.getMarkdown().trim()).toBe("```\nalpha\nbeta\n```");
+    // Toggling back keeps both lines; ProseMirror turns the code block's
+    // newlines into hard breaks (its linebreakReplacement), as before this change.
+    expect(editor.commands.toggleCodeBlock()).toBe(true);
+    const paragraph = editor.state.doc.child(0);
+    expect(paragraph.type.name).toBe("paragraph");
+    expect(paragraph.textContent).toBe("alpha\nbeta");
+    expect(editor.getMarkdown().trim()).toBe("alpha  \nbeta");
   });
 
   it("the ``` input rule keeps the source newlines", () => {
