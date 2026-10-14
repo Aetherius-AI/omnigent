@@ -38,10 +38,11 @@ _PI_PACKAGE = "@earendil-works/pi-coding-agent"
 
 
 def path_without_pi(root: Path) -> str:
-    """Keep the other harness CLIs reachable while ``pi`` resolves nowhere."""
+    """Keep ``node`` and the other harness CLIs reachable while ``pi`` resolves nowhere;
+    the linked ``pi`` still needs ``node`` even when both share an install directory."""
     keep = root / "bin"
     keep.mkdir()
-    for name in ("claude", "codex"):
+    for name in ("claude", "codex", "node"):
         found = shutil.which(name)
         if found:
             (keep / name).symlink_to(found)
@@ -154,8 +155,13 @@ def wait_runner_online(client: httpx.Client, session_id: str, *, timeout: float)
         if snapshot.get("runner_online") is True:
             return
         time.sleep(1.0)
-    items = client.get(f"/v1/sessions/{session_id}/items", timeout=10.0).json()
-    errors = [item.get("message") for item in items.get("data", []) if item.get("type") == "error"]
+    try:
+        items = client.get(f"/v1/sessions/{session_id}/items", timeout=10.0).json()
+        errors = [
+            item.get("message") for item in items.get("data", []) if item.get("type") == "error"
+        ]
+    except Exception as exc:  # diagnostics only; keep the primary assertion
+        errors = [f"<failed to fetch items: {exc}>"]
     raise AssertionError(
         f"runner for session {session_id} never came online; runner_online="
         f"{snapshot.get('runner_online')!r} host_online={snapshot.get('host_online')!r} "
@@ -236,7 +242,10 @@ def _setup_still_required(
                 client.delete(f"/v1/sessions/{response.json()['id']}", timeout=10.0)
             verdict = f"{response.status_code} (session created)"
         else:
-            error = response.json().get("error") or {}
+            try:
+                error = response.json().get("error") or {}
+            except ValueError:
+                error = {"code": "non-JSON body", "message": response.text[:200]}
             verdict = f"{response.status_code} {error.get('code')}: {error.get('message')}"
     return (
         f"Pi is not usable on fresh host {host['name']!r} without manual setup: the picker "
@@ -307,9 +316,10 @@ async def _drive(base_url: str, hosts: list[dict[str, Any]], agent_id: str) -> N
                         )
                     _assert_pi_installed_by_host(base_url, host)
     finally:
-        for session_id in created:
-            with contextlib.suppress(Exception):
-                httpx.delete(f"{base_url}/v1/sessions/{session_id}", timeout=10.0)
+        with httpx.Client(base_url=base_url, trust_env=False) as client:
+            for session_id in created:
+                with contextlib.suppress(Exception):
+                    client.delete(f"/v1/sessions/{session_id}", timeout=10.0)
 
 
 def test_fresh_host_offers_pi_without_manual_setup(

@@ -194,9 +194,7 @@ def test_broker_token_command_none_for_a_different_workspace(
     assert dc.broker_token_command("https://other.example") is None
 
 
-def test_managed_connect_workspace_host_after_configure(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_managed_connect_workspace_host_after_configure(monkeypatch: pytest.MonkeyPatch) -> None:
     _connected(monkeypatch)
     assert dc.configure_host_databricks("https://omni.example/", "host-1") is True
     assert dc.managed_connect_workspace_host() == "https://ws.example"

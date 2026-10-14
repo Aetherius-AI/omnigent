@@ -80,13 +80,15 @@ def test_blank_is_sandbox_is_treated_as_laptop(monkeypatch: pytest.MonkeyPatch) 
     assert attempts == []
 
 
-def test_install_failure_does_not_propagate(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("failing", ["harness_cli_installed", "try_install_harness_cli"])
+def test_install_failure_does_not_propagate(monkeypatch: pytest.MonkeyPatch, failing: str) -> None:
     monkeypatch.setenv("IS_SANDBOX", "1")
 
-    def boom(key: str, *_a: object, **_k: object) -> bool:
-        raise RuntimeError("probe exploded")
+    def boom(key: str, *_a: object, **_k: object) -> object:
+        raise RuntimeError(f"{failing} exploded")
 
-    monkeypatch.setattr(hp, "harness_cli_installed", boom)
-    # Best-effort: a failing probe/install must leave the daemon starting
+    monkeypatch.setattr(hp, "harness_cli_installed", lambda key, *_a, **_k: False)
+    monkeypatch.setattr(hp, failing, boom)
+    # Best-effort: a failing probe or installer must leave the daemon starting
     # normally, not crash host boot.
     assert hp.prepare_host_harnesses() is True
