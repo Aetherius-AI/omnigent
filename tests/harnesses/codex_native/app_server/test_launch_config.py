@@ -26,6 +26,39 @@ from tests.harnesses.codex_native.app_server._support import (
 )
 
 
+@pytest.mark.parametrize("reused_home", [False, True], ids=["fresh", "resumed"])
+async def test_start_keeps_selected_source_provider_available_in_private_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reused_home: bool
+) -> None:
+    """A resumed private config can predate the host's selected provider."""
+    source = tmp_path / "source"
+    source.mkdir()
+    original = (
+        'model_provider = "gateway"\nmodel = "source-model"\n'
+        '[model_providers.gateway]\nname = "Gateway"\n'
+        'base_url = "https://source.example.test/v1"\nwire_api = "responses"\n'
+        'env_key = "SYNTHETIC_PROVIDER_KEY"\n'
+    )
+    (source / "config.toml").write_text(original)
+    monkeypatch.setenv("CODEX_HOME", str(source))
+    _disable_codex_startup_rpc(monkeypatch)
+    private = tmp_path / "private"
+    if reused_home:
+        private.mkdir()
+        (private / "config.toml").write_text('model = "private-model"\n')
+    server = _test_app_server(tmp_path, private, tmp_path / "bridge", tmp_path)
+    server.config_overrides = ['model_provider="gateway"']
+
+    await server.start()
+    try:
+        config = tomllib.loads((private / "config.toml").read_text())
+        assert config["model_providers"]["gateway"]["base_url"] == "https://source.example.test/v1"
+        assert config["model"] == ("private-model" if reused_home else "source-model")
+        assert (source / "config.toml").read_text() == original
+    finally:
+        await server.close()
+
+
 def test_build_codex_native_server_profile_error_names_profile(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -4442,6 +4442,94 @@ def test_materialize_codex_provider_config_applies_custom_retry_policy(tmp_path:
     assert provider["stream_idle_timeout_ms"] == 300_000
 
 
+@pytest.mark.parametrize(
+    "private_url,source_defined,selected",
+    [
+        (None, True, True),
+        ("https://private.example.test/v1", True, True),
+        (None, False, True),
+        (None, True, False),
+    ],
+    ids=[
+        "missing-private-provider",
+        "private-provider-wins",
+        "missing-source-provider",
+        "unselected",
+    ],
+)
+def test_materialize_codex_provider_config_backfills_only_missing_selected_provider(
+    tmp_path: Path, private_url: str | None, source_defined: bool, selected: bool
+) -> None:
+    """Host definitions can fill a missing selection without replacing private choices."""
+    import tomllib
+
+    from omnigent.inner.codex_executor import materialize_codex_provider_config
+
+    source = tmp_path / "source"
+    source.mkdir()
+    original = '[model_providers.unselected]\nname = "Unselected"\n'
+    if source_defined:
+        original += (
+            '[model_providers.gateway]\nname = "Gateway"\n'
+            'base_url = "https://source.example.test/v1"\nwire_api = "responses"\n'
+        )
+    (source / "config.toml").write_text(original)
+    private = tmp_path / "private"
+    private.mkdir()
+    config_path = private / "config.toml"
+    private_config = (
+        'model = "private-model"\ndeveloper_instructions = "Keep these instructions"\n'
+    )
+    if private_url is not None:
+        private_config += (
+            f'[model_providers.gateway]\nname = "Private"\nbase_url = "{private_url}"\n'
+        )
+    config_path.write_text(private_config)
+    overrides = ['model_provider="gateway"'] if selected else []
+
+    assert materialize_codex_provider_config(private, overrides, source_home=source) == overrides
+
+    config = tomllib.loads(config_path.read_text())
+    assert config["model"] == "private-model"
+    assert config["developer_instructions"] == "Keep these instructions"
+    providers = config.get("model_providers", {})
+    assert "unselected" not in providers
+    if private_url is not None:
+        assert providers["gateway"]["base_url"] == private_url
+        assert providers["gateway"]["name"] == "Private"
+    elif selected and source_defined:
+        assert providers["gateway"]["base_url"] == "https://source.example.test/v1"
+    else:
+        assert "gateway" not in providers
+    assert (source / "config.toml").read_text() == original
+    assert config_path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("private_config", ["model_providers = [", "model_providers = 42\n"])
+def test_materialize_codex_provider_config_preserves_invalid_private_config(
+    tmp_path: Path, private_config: str
+) -> None:
+    """A source definition cannot replace malformed private configuration."""
+    import tomlkit
+
+    from omnigent.inner.codex_executor import materialize_codex_provider_config
+
+    private = tmp_path / "private"
+    private.mkdir()
+    config_path = private / "config.toml"
+    config_path.write_text(private_config)
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.toml").write_text('[model_providers.gateway]\nname = "Gateway"\n')
+
+    with pytest.raises((ValueError, tomlkit.exceptions.TOMLKitError)):
+        materialize_codex_provider_config(
+            private, ['model_provider="gateway"'], source_home=source
+        )
+
+    assert config_path.read_text() == private_config
+
+
 def test_materialize_codex_provider_config_leaves_builtin_provider_tables_untouched(
     tmp_path: Path,
 ) -> None:

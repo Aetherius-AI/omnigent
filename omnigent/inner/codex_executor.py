@@ -1292,6 +1292,7 @@ def materialize_codex_provider_config(
     config_overrides: Iterable[str],
     *,
     retry_policy: RetryPolicy | None = None,
+    source_home: Path | None = None,
 ) -> list[str]:
     """Move generated provider definitions into a private Codex config.
 
@@ -1307,6 +1308,8 @@ def materialize_codex_provider_config(
     :param config_overrides: Pending Codex config override strings.
     :param retry_policy: Omnigent retry policy to apply through Codex's native
         provider settings. ``None`` uses :class:`RetryPolicy` defaults.
+    :param source_home: Optional host config source for a selected custom provider
+        missing from a reused private home. Existing private provider tables win.
     :returns: Overrides safe to retain in subprocess arguments.
     """
     codex_home.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -1320,7 +1323,7 @@ def materialize_codex_provider_config(
             provider_overrides.append(override)
         else:
             argv_overrides.append(override)
-    if not provider_overrides and not config_path.is_file():
+    if not provider_overrides and not config_path.is_file() and source_home is None:
         return argv_overrides
     if not provider_overrides and config_path.is_symlink():
         return argv_overrides
@@ -1330,17 +1333,14 @@ def materialize_codex_provider_config(
     existing = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
     document = tomlkit.parse(existing) if existing else tomlkit.document()
     providers = document.get("model_providers")
-    if providers is None and not provider_overrides:
-        if config_path.is_file() and not config_path.is_symlink():
-            os.chmod(config_path, 0o600)
-        return argv_overrides
-    if providers is None:
+    if providers is None and provider_overrides:
         document["model_providers"] = tomlkit.table()
         providers = document["model_providers"]
-    if not isinstance(providers, MutableMapping):
+    if providers is not None and not isinstance(providers, MutableMapping):
         raise ValueError("Codex model_providers config must be a TOML table")
 
     for override in provider_overrides:
+        assert isinstance(providers, MutableMapping)
         fragment = tomlkit.parse(override)
         generated = fragment.get("model_providers")
         if not isinstance(generated, MutableMapping) or not generated:
@@ -1349,6 +1349,39 @@ def materialize_codex_provider_config(
             providers[provider_name] = provider_config
 
     from omnigent.onboarding.codex_auth_readiness import CODEX_BUILTIN_PROVIDERS
+
+    if source_home is not None:
+        selected = document.get("model_provider")
+        for override in argv_overrides:
+            if override.partition("=")[0].strip() == "model_provider":
+                selected = tomlkit.parse(override).get("model_provider")
+        if (
+            isinstance(selected, str)
+            and selected not in CODEX_BUILTIN_PROVIDERS
+            and (providers is None or selected not in providers)
+        ):
+            source_path = source_home / "config.toml"
+            source = (
+                tomlkit.parse(source_path.read_text(encoding="utf-8"))
+                if source_path.is_file()
+                else {}
+            )
+            source_providers = source.get("model_providers")
+            source_provider = (
+                source_providers.get(selected)
+                if isinstance(source_providers, MutableMapping)
+                else None
+            )
+            if isinstance(source_provider, MutableMapping):
+                if providers is None:
+                    document["model_providers"] = tomlkit.table()
+                    providers = document["model_providers"]
+                providers[selected] = copy.deepcopy(source_provider)
+
+    if providers is None:
+        if config_path.is_file() and not config_path.is_symlink():
+            os.chmod(config_path, 0o600)
+        return argv_overrides
 
     policy = retry_policy if retry_policy is not None else RetryPolicy()
     for provider_name, provider_config in list(providers.items()):
