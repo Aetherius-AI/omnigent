@@ -1,4 +1,4 @@
-// Runtime patch for @tiptap/markdown's text escaping.
+// Runtime patches for @tiptap/markdown: text escaping, loose inline runs, soft breaks.
 //
 // ⚠️ This overrides a method on the exported MarkdownManager prototype.
 // Upstream's `encodeTextForMarkdown` HTML-entity-escapes every `&`, `<`, and
@@ -20,9 +20,10 @@
 // changes the serialiser so this no longer composes, those tests fail loudly.
 
 import { MarkdownManager } from "@tiptap/markdown";
-import type { JSONContent } from "@tiptap/core";
+import { marksEqual, type JSONContent } from "@tiptap/core";
 
 import { toBlockContent } from "./TipTapGitHubAlert";
+import { SOFT_BREAK_NODE } from "./TipTapSoftBreak";
 
 /** Ampersands that would parse as an entity reference on the way back in. */
 const ENTITY_AMP = /&(?=[a-zA-Z][a-zA-Z0-9]{1,31};|#\d{1,7};|#[xX][0-9a-fA-F]{1,6};)/g;
@@ -42,11 +43,51 @@ interface SerializerInternals {
   ) => string;
 }
 
+function textNode(text: string, marks: JSONContent["marks"]): JSONContent {
+  return marks ? { type: "text", text, marks } : { type: "text", text };
+}
+
+/**
+ * Inverse of `splitSoftBreaks`: turn every softBreak back into a "\n" text
+ * node with the same marks and re-merge adjacent same-mark text, so the
+ * serialiser sees exactly the document it would have seen without the split
+ * (a mark spanning a soft break stays one `**…**` run).
+ */
+function joinSoftBreaks(node: JSONContent): JSONContent {
+  if (node.content == null) return node;
+  const content: JSONContent[] = [];
+  for (const child of node.content) {
+    const next =
+      child.type === SOFT_BREAK_NODE ? textNode("\n", child.marks) : joinSoftBreaks(child);
+    const prev = content[content.length - 1];
+    if (
+      prev?.type === "text" &&
+      next.type === "text" &&
+      marksEqual(prev.marks ?? [], next.marks ?? [])
+    ) {
+      content[content.length - 1] = { ...prev, text: (prev.text ?? "") + (next.text ?? "") };
+    } else {
+      content.push(next);
+    }
+  }
+  return { ...node, content };
+}
+
+let serializeWrapped = false;
+
 /**
  * Install the minimal-escaping override. Idempotent — calling more than once
  * (e.g. from multiple editor modules) re-assigns the same implementation.
+ * Also rejoins soft breaks (see TipTapSoftBreak.ts) before serialising.
  */
 export function installMarkdownSerializerPatch(): void {
+  if (!serializeWrapped) {
+    serializeWrapped = true;
+    const originalSerialize = MarkdownManager.prototype.serialize;
+    MarkdownManager.prototype.serialize = function (this: MarkdownManager, content: JSONContent) {
+      return originalSerialize.call(this, joinSoftBreaks(content));
+    };
+  }
   const proto = MarkdownManager.prototype as unknown as SerializerInternals;
   proto.encodeTextForMarkdown = function (
     this: SerializerInternals,
@@ -102,6 +143,41 @@ function wrapLooseInlineRuns(node: JSONContent): JSONContent {
   };
 }
 
+/** Node types whose text keeps literal newlines; never split into soft breaks. */
+const VERBATIM_TEXT_TYPES = new Set(["codeBlock"]);
+
+/**
+ * Replace each "\n" inside prose text with a softBreak node carrying the same
+ * marks, so hard-wrapped source reflows to the editor width instead of
+ * rendering one visual line per source line (see TipTapSoftBreak.ts).
+ */
+function splitSoftBreaks(node: JSONContent): JSONContent {
+  if (node.content == null || (node.type != null && VERBATIM_TEXT_TYPES.has(node.type))) {
+    return node;
+  }
+  const content: JSONContent[] = [];
+  for (const child of node.content) {
+    if (child.type !== "text" || !child.text?.includes("\n")) {
+      content.push(splitSoftBreaks(child));
+      continue;
+    }
+    child.text.split("\n").forEach((part, i) => {
+      if (i > 0)
+        content.push(
+          child.marks ? { type: SOFT_BREAK_NODE, marks: child.marks } : { type: SOFT_BREAK_NODE },
+        );
+      if (part) content.push({ ...child, text: part });
+    });
+  }
+  return { ...node, content };
+}
+
+/** The private surface of MarkdownManager the parser patch reads. */
+interface ParserInternals {
+  /** Every extension registered with this manager (the editor's stack). */
+  extensions: { name: string }[];
+}
+
 let parserPatchInstalled = false;
 
 /**
@@ -120,6 +196,9 @@ let parserPatchInstalled = false;
  * generalising #2004's blockquote-only `toBlockContent` guard to every block
  * container. The wrap is round-trip-safe: the serialiser emits a paragraph
  * holding a lone image as `![x](y)`, byte-identical to the source.
+ *
+ * When the editor registers the SoftBreak node, prose newlines are then split
+ * into softBreak nodes; editors without it keep "\n" in their text.
  */
 export function installMarkdownParserPatch(): void {
   if (parserPatchInstalled) return;
@@ -127,6 +206,9 @@ export function installMarkdownParserPatch(): void {
   const proto = MarkdownManager.prototype;
   const originalParse = proto.parse;
   proto.parse = function (this: MarkdownManager, markdown: string): JSONContent {
-    return wrapLooseInlineRuns(originalParse.call(this, markdown));
+    const doc = wrapLooseInlineRuns(originalParse.call(this, markdown));
+    const { extensions } = this as unknown as ParserInternals;
+    const hasSoftBreak = extensions.some((ext) => ext.name === SOFT_BREAK_NODE);
+    return hasSoftBreak ? splitSoftBreaks(doc) : doc;
   };
 }
