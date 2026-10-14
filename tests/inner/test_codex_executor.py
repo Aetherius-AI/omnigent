@@ -4505,6 +4505,101 @@ def test_materialize_codex_provider_config_backfills_only_missing_selected_provi
     assert config_path.stat().st_mode & 0o777 == 0o600
 
 
+@pytest.mark.parametrize("private_style", ["inline", "standard"])
+def test_materialize_codex_provider_config_backfill_matches_private_table_style(
+    tmp_path: Path, private_style: str
+) -> None:
+    """A copied provider, nested tables included, serializes in the private file's table style."""
+    import tomllib
+
+    from omnigent.inner.codex_executor import materialize_codex_provider_config
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.toml").write_text(
+        '[model_providers.gateway]\nname = "Gateway"\n'
+        'base_url = "https://source.example.test/v1"\nwire_api = "responses"\n'
+        '[model_providers.gateway.auth]\ncommand = "sh"\nargs = ["-c", "printf token"]\n'
+        '[model_providers.gateway.http_headers]\nX-Trace = "yes"\n'
+    )
+    private = tmp_path / "private"
+    private.mkdir()
+    config_path = private / "config.toml"
+    if private_style == "inline":
+        config_path.write_text(
+            'model = "private-model"\n'
+            "model_providers = { other = "
+            '{ name = "Other", base_url = "https://other.example.test" } }\n'
+        )
+    else:
+        config_path.write_text(
+            'model = "private-model"\n'
+            '[model_providers.other]\nname = "Other"\nbase_url = "https://other.example.test"\n'
+        )
+    overrides = ['model_provider="gateway"']
+
+    assert materialize_codex_provider_config(private, overrides, source_home=source) == overrides
+
+    config = tomllib.loads(config_path.read_text())
+    assert config["model"] == "private-model"
+    providers = config["model_providers"]
+    assert providers["other"]["name"] == "Other"
+    assert providers["other"]["base_url"] == "https://other.example.test"
+    assert providers["gateway"]["base_url"] == "https://source.example.test/v1"
+    assert providers["gateway"]["auth"]["args"] == ["-c", "printf token"]
+    assert providers["gateway"]["http_headers"]["X-Trace"] == "yes"
+
+
+def test_materialize_codex_provider_config_generated_override_outranks_source_definition(
+    tmp_path: Path,
+) -> None:
+    """A generated table for the selected provider is kept over the host's definition."""
+    import tomllib
+
+    from omnigent.inner.codex_executor import materialize_codex_provider_config
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.toml").write_text(
+        '[model_providers.gateway]\nname = "Host"\nbase_url = "https://source.example.test/v1"\n'
+    )
+    private = tmp_path / "private"
+    private.mkdir()
+    (private / "config.toml").write_text('model = "private-model"\n')
+    generated = (
+        'model_providers.gateway={name="Generated",'
+        'base_url="https://generated.example.test/v1",wire_api="responses"}'
+    )
+
+    assert materialize_codex_provider_config(
+        private, [generated, 'model_provider="gateway"'], source_home=source
+    ) == ['model_provider="gateway"']
+
+    provider = tomllib.loads((private / "config.toml").read_text())["model_providers"]["gateway"]
+    assert provider["name"] == "Generated"
+    assert provider["base_url"] == "https://generated.example.test/v1"
+
+
+def test_materialize_codex_provider_config_passes_bare_selection_override_through(
+    tmp_path: Path,
+) -> None:
+    """A bare ``model_provider=name`` override is not TOML; it is kept as-is without a lookup."""
+    from omnigent.inner.codex_executor import materialize_codex_provider_config
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.toml").write_text('[model_providers.gateway]\nname = "Gateway"\n')
+    private = tmp_path / "private"
+    private.mkdir()
+    config_path = private / "config.toml"
+    config_path.write_text('model = "private-model"\n')
+    overrides = ["model_provider=gateway"]
+
+    assert materialize_codex_provider_config(private, overrides, source_home=source) == overrides
+
+    assert config_path.read_text() == 'model = "private-model"\n'
+
+
 @pytest.mark.parametrize("source_failure", ["toml", "utf8", "read", "stat"])
 def test_materialize_codex_provider_config_skips_unusable_optional_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_failure: str

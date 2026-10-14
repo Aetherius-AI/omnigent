@@ -1332,28 +1332,35 @@ def materialize_codex_provider_config(
 
     existing = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
     document = tomlkit.parse(existing) if existing else tomlkit.document()
-    providers = document.get("model_providers")
-    if providers is None and provider_overrides:
-        document["model_providers"] = tomlkit.table()
-        providers = document["model_providers"]
-    if providers is not None and not isinstance(providers, MutableMapping):
-        raise ValueError("Codex model_providers config must be a TOML table")
+    providers: MutableMapping[str, Any] | None = None
+    declared_providers = document.get("model_providers")
+    if declared_providers is not None:
+        if not isinstance(declared_providers, MutableMapping):
+            raise ValueError("Codex model_providers config must be a TOML table")
+        providers = declared_providers
 
-    for override in provider_overrides:
-        assert isinstance(providers, MutableMapping)
-        fragment = tomlkit.parse(override)
-        generated = fragment.get("model_providers")
-        if not isinstance(generated, MutableMapping) or not generated:
-            raise ValueError("Codex provider override must define model_providers")
-        for provider_name, provider_config in generated.items():
-            providers[provider_name] = provider_config
+    if provider_overrides:
+        if providers is None:
+            providers = tomlkit.table()
+            document["model_providers"] = providers
+        for override in provider_overrides:
+            fragment = tomlkit.parse(override)
+            generated = fragment.get("model_providers")
+            if not isinstance(generated, MutableMapping) or not generated:
+                raise ValueError("Codex provider override must define model_providers")
+            for provider_name, provider_config in generated.items():
+                providers[provider_name] = provider_config
 
     from omnigent.onboarding.codex_auth_readiness import CODEX_BUILTIN_PROVIDERS
 
     if source_home is not None:
         selected = document.get("model_provider")
         for override in argv_overrides:
-            if override.partition("=")[0].strip() == "model_provider":
+            if override.partition("=")[0].strip() != "model_provider":
+                continue
+            # Codex itself accepts a bare ``model_provider=name``; a value that is
+            # not TOML simply does not select a provider to backfill here.
+            with suppress(tomlkit.exceptions.TOMLKitError):
                 selected = tomlkit.parse(override).get("model_provider")
         if (
             isinstance(selected, str)
@@ -1363,7 +1370,7 @@ def materialize_codex_provider_config(
             source_path = source_home / "config.toml"
             try:
                 source = (
-                    tomlkit.parse(source_path.read_text(encoding="utf-8"))
+                    tomlkit.parse(source_path.read_text(encoding="utf-8")).unwrap()
                     if source_path.is_file()
                     else {}
                 )
@@ -1371,15 +1378,15 @@ def materialize_codex_provider_config(
                 source = {}
             source_providers = source.get("model_providers")
             source_provider = (
-                source_providers.get(selected)
-                if isinstance(source_providers, MutableMapping)
-                else None
+                source_providers.get(selected) if isinstance(source_providers, dict) else None
             )
-            if isinstance(source_provider, MutableMapping):
+            if isinstance(source_provider, dict):
                 if providers is None:
-                    document["model_providers"] = tomlkit.table()
-                    providers = document["model_providers"]
-                providers[selected] = copy.deepcopy(source_provider)
+                    providers = tomlkit.table()
+                    document["model_providers"] = providers
+                # A plain dict takes the parent's table style, so an inline
+                # ``model_providers`` parent still serializes as valid TOML.
+                providers[selected] = source_provider
 
     if providers is None:
         if config_path.is_file() and not config_path.is_symlink():
