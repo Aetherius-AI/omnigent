@@ -89,6 +89,7 @@ def test_generated_command_uses_the_sdk_without_repeating_cli_auth(
     )
     issuer = ThreadingHTTPServer(("127.0.0.1", 0), Issuer)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(certificate, key)
     issuer.socket = context.wrap_socket(issuer.socket, server_side=True)
     base = f"https://127.0.0.1:{issuer.server_port}"
