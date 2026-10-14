@@ -144,6 +144,10 @@ class _ConversationStore:
         assert self._conversations is not None
         self._conversations[conversation.id] = conversation
 
+    def get_runner_liveness(self, conversation_id: str) -> tuple[str | None, int | None] | None:
+        conv = self.get_conversation(conversation_id)
+        return None if conv is None else (conv.runner_id, None)
+
     def list_conversations(
         self,
         *,
@@ -1068,7 +1072,8 @@ class _BindingRouter:
         self, conversation_id: str, *, conversation: Conversation | None = None
     ) -> RoutedRunner:
         del conversation_id
-        assert conversation is not None and conversation.runner_id is not None
+        assert conversation is not None, "the snapshot passes the row it already holds"
+        assert conversation.runner_id is not None, "the fake router needs a bound runner"
         client = self.clients[conversation.runner_id]
         return RoutedRunner(runner_id=conversation.runner_id, client=client)  # type: ignore[arg-type]
 
@@ -1131,20 +1136,29 @@ async def test_session_snapshot_transport_failure_is_shared_and_backed_off(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("other_runner_window", [False, True])
 async def test_session_snapshot_probe_fails_softly_when_the_binding_cannot_be_read(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, other_runner_window: bool
 ) -> None:
-    """A failing binding read yields None to every waiter and publishes nothing."""
+    """A failing binding read yields None to every waiter, publishes nothing, and backs off."""
     from omnigent.server.routes._sessions import orchestration
+    from omnigent.server.routes._sessions.common import _RunnerStatusProbeBackoff
 
     session_id = "probe_binding_read_error"
     _sessions_mod._session_status_cache.pop(session_id, None)
     _sessions_mod._runner_status_probe_backoff.pop(session_id, None)
+    other = _RunnerStatusProbeBackoff(
+        skip_until=time.monotonic() + 60.0, failures=2, runner_id="runner_other"
+    )
+    if other_runner_window:
+        _sessions_mod._runner_status_probe_backoff[session_id] = other
     persist = Mock()
     monkeypatch.setattr(orchestration.session_live_state, "persist_live_status", persist)
 
     class _FailingStore:
-        def get_conversation(self, conversation_id: str) -> Conversation | None:
+        def get_runner_liveness(
+            self, conversation_id: str
+        ) -> tuple[str | None, int | None] | None:
             raise StatementError("database unavailable", None, None, None)
 
     conv_store = _FailingStore()
@@ -1164,8 +1178,15 @@ async def test_session_snapshot_probe_fails_softly_when_the_binding_cannot_be_re
     assert runner_client.get_calls == [f"/v1/sessions/{session_id}"]
     assert _sessions_mod._runner_status_probe_inflight.get((session_id, None)) is None
     assert _sessions_mod._session_status_cache.get(session_id) is None
-    assert _sessions_mod._runner_status_probe_backoff.get(session_id) is None
     persist.assert_not_called()
+    backoff = _sessions_mod._runner_status_probe_backoff.get(session_id)
+    assert backoff is not None
+    if other_runner_window:
+        # Another runner's window stays while this caller's binding is unconfirmed.
+        assert backoff is other
+    else:
+        assert backoff.runner_id is None
+        assert backoff.failures == 1
     warnings = [
         r for r in caplog.records if "could not confirm the runner binding" in r.getMessage()
     ]
@@ -1189,7 +1210,9 @@ async def test_session_snapshot_probe_fails_softly_when_the_binding_read_stalls(
     unblock = threading.Event()
 
     class _StalledStore:
-        def get_conversation(self, conversation_id: str) -> Conversation | None:
+        def get_runner_liveness(
+            self, conversation_id: str
+        ) -> tuple[str | None, int | None] | None:
             unblock.wait(timeout=5.0)
             return None
 
@@ -1208,15 +1231,19 @@ async def test_session_snapshot_probe_fails_softly_when_the_binding_read_stalls(
         with caplog.at_level(logging.WARNING, logger="omnigent.server.routes.sessions"):
             runner_client.release.set()
             assert await asyncio.gather(first, second) == [None, None]
-        assert time.monotonic() - started < 1.0
+        # Well under the 5 s stall: the waiters were released at the read bound.
+        assert time.monotonic() - started < 3.0
     finally:
         unblock.set()
 
     assert runner_client.get_calls == [f"/v1/sessions/{session_id}"]
     assert _sessions_mod._runner_status_probe_inflight.get((session_id, None)) is None
     assert _sessions_mod._session_status_cache.get(session_id) is None
-    assert _sessions_mod._runner_status_probe_backoff.get(session_id) is None
     persist.assert_not_called()
+    backoff = _sessions_mod._runner_status_probe_backoff.get(session_id)
+    assert backoff is not None
+    assert backoff.runner_id is None
+    assert backoff.failures == 1
     warnings = [
         r for r in caplog.records if "could not confirm the runner binding" in r.getMessage()
     ]

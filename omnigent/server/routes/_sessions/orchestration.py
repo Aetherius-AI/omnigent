@@ -12446,6 +12446,33 @@ async def _fetch_runner_status(
         return f"{type(exc).__name__}: {exc}"
 
 
+def _skip_runner_status_probe(session_id: str, runner_id: str | None, failure: str) -> None:
+    """
+    Record a skip window for a session's probe after it failed, and warn once.
+
+    :param session_id: Session/conversation identifier, e.g. ``"conv_abc123"``.
+    :param runner_id: The runner that was probed. A window left by another
+        runner does not lengthen this runner's streak.
+    :param failure: Why the probe failed, e.g. ``"no answer within 5s"``.
+    """
+    previous = _runner_status_probe_backoff.get(session_id)
+    if previous is not None and previous.runner_id == runner_id:
+        failures = previous.failures + 1
+    else:
+        failures = 1
+    window = _runner_status_probe_window_s(failures)
+    _runner_status_probe_backoff[session_id] = _RunnerStatusProbeBackoff(
+        skip_until=time.monotonic() + window, failures=failures, runner_id=runner_id
+    )
+    _logger.warning(
+        "Runner status probe for session=%s failed (%s); skipping it for %.0fs",
+        session_id,
+        failure,
+        window,
+        extra={"session_id": session_id},
+    )
+
+
 async def _run_runner_status_probe(
     conv_store: ConversationStore,
     runner_client: httpx.AsyncClient,
@@ -12468,20 +12495,28 @@ async def _run_runner_status_probe(
         # The row is the authority on the binding: the caller's row may predate a
         # rebind, and the session may have rebound while this request was pending.
         try:
-            conv = await asyncio.wait_for(
-                asyncio.to_thread(conv_store.get_conversation, session_id),
+            binding = await asyncio.wait_for(
+                asyncio.to_thread(conv_store.get_runner_liveness, session_id),
                 timeout=_RUNNER_STATUS_PROBE_BINDING_READ_S,
             )
         except Exception as exc:  # noqa: BLE001
-            _logger.warning(
-                "Runner status probe for session=%s could not confirm the runner binding "
-                "(%s); discarded",
-                session_id,
-                f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__,
-                extra={"session_id": session_id},
-            )
+            detail = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+            failure = f"could not confirm the runner binding, {detail}"
+            previous = _runner_status_probe_backoff.get(session_id)
+            # Unconfirmed binding: leave another runner's window alone. Otherwise
+            # back off, so a store outage does not cost a probe and a stranded
+            # reader thread per snapshot.
+            if previous is not None and previous.runner_id != runner_id:
+                _logger.warning(
+                    "Runner status probe for session=%s failed (%s); discarded",
+                    session_id,
+                    failure,
+                    extra={"session_id": session_id},
+                )
+                return None
+            _skip_runner_status_probe(session_id, runner_id, failure)
             return None
-        if (conv.runner_id if conv is not None else None) != runner_id:
+        if (binding[0] if binding is not None else None) != runner_id:
             _logger.debug(
                 "Runner status probe for session=%s finished after a rebind away from "
                 "runner=%s; discarded",
@@ -12516,23 +12551,7 @@ async def _run_runner_status_probe(
             return None
         else:
             failure = f"HTTP {answer.status_code} after {elapsed:.1f}s"
-        previous = _runner_status_probe_backoff.get(session_id)
-        # A window left by a previous runner does not lengthen this runner's streak.
-        if previous is not None and previous.runner_id == runner_id:
-            failures = previous.failures + 1
-        else:
-            failures = 1
-        window = _runner_status_probe_window_s(failures)
-        _runner_status_probe_backoff[session_id] = _RunnerStatusProbeBackoff(
-            skip_until=time.monotonic() + window, failures=failures, runner_id=runner_id
-        )
-        _logger.warning(
-            "Runner status probe for session=%s failed (%s); skipping it for %.0fs",
-            session_id,
-            failure,
-            window,
-            extra={"session_id": session_id},
-        )
+        _skip_runner_status_probe(session_id, runner_id, failure)
         return None
     finally:
         _runner_status_probe_inflight.pop((session_id, runner_id), None)
