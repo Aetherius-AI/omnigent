@@ -221,6 +221,7 @@ import {
   writeSessionFilter,
 } from "@/lib/sessionFilterPreferences";
 import {
+  SIDEBAR_GROUPINGS,
   SIDEBAR_SHOW_FIELDS,
   type SidebarGrouping,
   type SidebarOrdering,
@@ -3336,13 +3337,13 @@ function SessionFilterMenu({
               value={view.grouping}
               onValueChange={(next) => onViewChange({ grouping: next as SidebarGrouping })}
             >
-              {Object.entries(GROUPING_LABELS).map(([grouping, label]) => (
+              {SIDEBAR_GROUPINGS.map((grouping) => (
                 <DropdownMenuRadioItem
                   key={grouping}
                   value={grouping}
                   data-testid={`session-grouping-${grouping}`}
                 >
-                  {label}
+                  {GROUPING_LABELS[grouping]}
                 </DropdownMenuRadioItem>
               ))}
             </DropdownMenuRadioGroup>
