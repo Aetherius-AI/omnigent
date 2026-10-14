@@ -945,9 +945,8 @@ function WorkspacePanelImpl({
         useChatStore.getState().openSideChatWithDraft(childSessionId, text, conversationId);
       },
       (err) => {
-        // The rail path had no failure feedback (unlike the composer entry
-        // points); surface it with the server's reason. The pending tab + typed
-        // text stay for a retry.
+        // Toast the server's reason; rethrow so the pending tab + typed text
+        // stay for a retry.
         toastSideChatStartFailed(err);
         throw err;
       },

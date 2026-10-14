@@ -197,12 +197,13 @@ sidebar menus, and message actions. The composer's host menu shows a disabled
 existing host menu without switching controls. Hover or focus a disabled action
 to read why it is unsupported.
 A generic side chat forks the parent server-side, so it inherits the same ban:
-the composer withholds the `/side` slash suggestion, the **Workspace → + → Side
-chat** entry and the add tray's **Start a new side chat** are hidden, selecting
-assistant text no longer offers **Ask in side chat**, and the mobile drawer's
-**New side chat** button is disabled with its empty state showing the reason in
-place of the usual hint. Submitting a typed `/side` reports the reason inline and
-keeps the question for a retry. Codex native sessions fork in-process rather than
+the composer withholds the `/side` slash suggestion, while the **Workspace → + →
+Side chat** entry and the add tray's **Start a new side chat** stay listed but
+disabled, explaining the reason on hover. Selecting assistant text no longer
+offers **Ask in side chat**, and the mobile drawer's **New side chat** button is
+disabled with its empty state showing the reason in place of the usual hint.
+Submitting a typed `/side` reports the reason inline and keeps the question for a
+retry. Codex native sessions fork in-process rather than
 through the fork endpoint, so their side chat stays available on these hosts.
 The reconnect dialog also disables Clone and Switch host; directory selection
 cannot enable either action.

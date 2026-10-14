@@ -9,16 +9,19 @@ browser boundary because the core server forks every session.
 from __future__ import annotations
 
 import json
+import re
 
 import httpx
 import pytest
 from playwright.sync_api import Locator, Page, Route, expect
 
-from tests.e2e_ui.conftest import open_right_rail
+from tests.e2e_ui.conftest import configure_mock_llm, open_right_rail
 
 FORK_UNSUPPORTED = "Forking this sandbox session is not supported yet."
+SIDE_CHAT_UNSUPPORTED = "Side chat forks this sandbox session, which is not supported yet."
 FORK_REFUSED = "Session forks are disabled for managed sandbox sessions on this deployment."
 COMPOSER_PLACEHOLDER = "Send a message…"
+ASSISTANT_BUBBLE = '[data-testid="message-bubble"][data-role="assistant"]'
 
 
 @pytest.fixture
@@ -67,24 +70,18 @@ def expect_fork_action_unsupported(page: Page) -> None:
     close_menu(page)
 
 
-def _expect_withheld(item: Locator, what: str) -> None:
-    # The item is either removed (a quick count-0 probe) or kept but disabled; the
-    # disabled assertion gets the default timeout so a slow CI render can't flake it.
-    try:
-        expect(item).to_have_count(0, timeout=1_500)
-        return
-    except AssertionError:
-        pass
-    try:
-        expect(item).to_be_disabled()
-    except AssertionError:
-        pytest.fail(f"{what} is offered on a session whose forks are unsupported")
+def _expect_offer_disabled(page: Page, item: Locator) -> None:
+    """A listed side-chat entry stays in the menu but disabled, naming the reason on hover."""
+    expect(item).to_be_visible()
+    expect(item).to_be_disabled()
+    item.hover()
+    expect(page.get_by_role("tooltip").filter(has_text=SIDE_CHAT_UNSUPPORTED)).to_be_visible()
 
 
 def test_side_chat_entry_points_follow_fork_restriction(
     request: pytest.FixtureRequest, managed_session: tuple[str, str]
 ) -> None:
-    """Every side-chat entry point is withheld, or disabled, where Fork already is."""
+    """Listed side-chat entries stay disabled with a reason; the slash suggestion is dropped."""
     base_url, session_id = managed_session
     page: Page = request.getfixturevalue("page")
     page.goto(f"{base_url}/c/{session_id}")
@@ -96,27 +93,50 @@ def test_side_chat_entry_points_follow_fork_restriction(
     rail = page.get_by_role("complementary", name="Workspace")
     rail.get_by_role("button", name="Open new", exact=True).click()
     expect(page.get_by_role("menu")).to_be_visible()
-    _expect_withheld(
-        page.get_by_role("menuitem", name="Side chat", exact=True), "Workspace rail 'Side chat'"
-    )
+    _expect_offer_disabled(page, page.get_by_role("menuitem", name="Side chat", exact=True))
     close_menu(page)
 
     page.get_by_test_id("composer-attach").click()
     expect(page.get_by_role("menu")).to_be_visible()
-    _expect_withheld(
-        page.get_by_role("menuitem", name="Start a new side chat"),
-        "Composer tray 'Start a new side chat'",
-    )
+    _expect_offer_disabled(page, page.get_by_role("menuitem", name="Start a new side chat"))
     close_menu(page)
 
     composer.fill("/")
-    expect(page.locator('[data-testid^="slash-menu-item-"]').first).to_be_visible()
-    composer.fill("/side")
-    # Wait for the menu to re-filter to the "/side" query before asserting the side
-    # command is absent: /help cannot match "side", so its disappearance proves the
-    # filtered state settled and the count-0 check can't pass on a stale menu.
-    expect(page.get_by_test_id("slash-menu-item-help")).to_have_count(0)
-    _expect_withheld(page.get_by_test_id("slash-menu-item-side"), "The /side slash command")
+    # /help is an ungated built-in, so the open command menu always lists it; assert it
+    # first to prove the menu rendered. /side is dropped from the command map entirely
+    # when side chat is unavailable (not filtered by the query), so its absence from that
+    # same menu is a withheld suggestion rather than a slow render.
+    expect(page.get_by_test_id("slash-menu-item-help")).to_be_visible()
+    expect(page.get_by_test_id("slash-menu-item-side")).to_have_count(0)
+
+
+def test_restricted_session_withholds_ask_in_side_chat(
+    request: pytest.FixtureRequest,
+    managed_session: tuple[str, str],
+    mock_llm_server_url: str,
+) -> None:
+    """Selecting assistant text on a fork-restricted session omits Ask in side chat."""
+    base_url, session_id = managed_session
+    token = f"restricted-popup-{session_id}"
+    question = f"{token}: say something quotable."
+    reply = f"{token}: here is a quotable reply."
+    configure_mock_llm(mock_llm_server_url, [{"text": reply}], key=token, match=token)
+    page: Page = request.getfixturevalue("page")
+    page.goto(f"{base_url}/c/{session_id}")
+
+    composer = page.get_by_placeholder(COMPOSER_PLACEHOLDER)
+    expect(composer).to_be_visible()
+    composer.fill(question)
+    page.get_by_role("button", name="Send", exact=True).click()
+    assistant = page.locator(ASSISTANT_BUBBLE).filter(has_text=reply)
+    expect(assistant).to_be_visible(timeout=30_000)
+    expect(page.get_by_test_id("working-indicator")).to_have_count(0, timeout=30_000)
+
+    assistant.get_by_text(reply).select_text()
+    # Reply always survives, so its popup button proves the selection action bar rendered;
+    # Ask in side chat is withheld because this session's forks are unsupported.
+    expect(page.get_by_role("button", name=re.compile(r"^Reply"))).to_be_visible()
+    expect(page.get_by_role("button", name="Ask in side chat", exact=True)).to_have_count(0)
 
 
 def test_refused_side_chat_fork_explains_refusal(
