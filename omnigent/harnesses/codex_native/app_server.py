@@ -2506,6 +2506,29 @@ class CodexNativeAppServer:
                     with contextlib.suppress(Exception):
                         await asyncio.to_thread(diagnostics.close)
 
+    async def _startup_exit_error(self, deadline: float) -> RuntimeError:
+        """Classify the owned child's exit after bounded stderr draining."""
+        if self.stderr_task is not None:
+            await asyncio.wait(
+                {self.stderr_task},
+                timeout=max(0.0, min(0.1, deadline - asyncio.get_running_loop().time())),
+            )
+        detail = " | ".join((self.recent_stderr or [])[-5:])
+        message = f"Codex app-server exited early: {detail}"
+        if (
+            self.listen_url is not None
+            and self.listen_url.startswith("ws://127.0.0.1:")
+            and any(
+                re.fullmatch(
+                    r"Error: Address (?:already )?in use \(os error (?:48|98|10048)\)",
+                    line.strip(),
+                )
+                for line in self.recent_stderr or []
+            )
+        ):
+            return _CodexAppServerBindCollision(message)
+        return RuntimeError(message)
+
     async def _wait_until_ready(self) -> CodexAppServerClient:
         """
         Wait until the app-server socket accepts an initialized
@@ -2525,25 +2548,7 @@ class CodexNativeAppServer:
         last_error: Exception | None = None
         while loop.time() < deadline:
             if self.proc is not None and self.proc.returncode is not None:
-                if self.stderr_task is not None:
-                    await asyncio.wait(
-                        {self.stderr_task}, timeout=max(0.0, min(0.1, deadline - loop.time()))
-                    )
-                detail = " | ".join((self.recent_stderr or [])[-5:])
-                message = f"Codex app-server exited early: {detail}"
-                if (
-                    self.listen_url is not None
-                    and self.listen_url.startswith("ws://127.0.0.1:")
-                    and any(
-                        re.fullmatch(
-                            r"Error: Address (?:already )?in use \(os error (?:48|98|10048)\)",
-                            line.strip(),
-                        )
-                        for line in self.recent_stderr or []
-                    )
-                ):
-                    raise _CodexAppServerBindCollision(message)
-                raise RuntimeError(message)
+                raise await self._startup_exit_error(deadline)
             client: CodexAppServerClient | None = None
             try:
                 if self.listen_url and self.listen_url.startswith("ws://"):
@@ -2557,7 +2562,6 @@ class CodexNativeAppServer:
                         client_name="omnigent-probe",
                     )
                 await client.connect()
-                return client
             except asyncio.CancelledError:
                 if client is not None:
                     with contextlib.suppress(Exception):
@@ -2569,6 +2573,12 @@ class CodexNativeAppServer:
                     with contextlib.suppress(Exception):
                         await client.close()
                 await asyncio.sleep(_CONNECT_RETRY_DELAY_SECONDS)
+            else:
+                if self.proc is not None and self.proc.returncode is not None:
+                    with contextlib.suppress(Exception):
+                        await client.close()
+                    raise await self._startup_exit_error(deadline)
+                return client
         detail = " | ".join((self.recent_stderr or [])[-5:])
         target = self.listen_url or f"unix://{self.socket_path}"
         raise RuntimeError(

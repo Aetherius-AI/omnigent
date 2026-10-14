@@ -173,6 +173,71 @@ async def test_wait_until_ready_closes_failed_client_before_reconnect(
     assert second.close_calls == 0
 
 
+@pytest.mark.parametrize("connect_cost", [0.0, 65.0], ids=["within-budget", "past-deadline"])
+@pytest.mark.parametrize(
+    "stderr",
+    ["Error: Address in use (os error 98)", "Error: Invalid configuration"],
+    ids=["bind-collision", "other-exit"],
+)
+async def test_start_rechecks_owned_child_after_readiness_connect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stderr: str, connect_cost: float
+) -> None:
+    """A child exiting during initialize cannot publish a ready client."""
+    from omnigent.harnesses.codex_native import app_server as module
+
+    loop = asyncio.get_running_loop()
+    real_time = loop.time
+    offset = 0.0
+    monkeypatch.setattr(loop, "time", lambda: real_time() + offset)
+    server = _test_app_server(tmp_path, tmp_path / "home", tmp_path / "bridge", tmp_path)
+    server.listen_url = "ws://127.0.0.1:45001"
+    attempts = 0
+    processes: list[Mock] = []
+
+    @dataclass
+    class _ProbeClient:
+        close_calls: int = 0
+
+        async def connect(self) -> None:
+            nonlocal offset
+            if attempts == 1:
+                offset += connect_cost
+                processes[-1].returncode = 1
+
+        async def close(self) -> None:
+            self.close_calls += 1
+
+    clients: list[_ProbeClient] = []
+
+    def client(*_args: object, **_kwargs: object) -> _ProbeClient:
+        clients.append(_ProbeClient())
+        return clients[-1]
+
+    async def spawn(self: CodexNativeAppServer) -> None:
+        nonlocal attempts
+        if attempts:
+            assert clients[0].close_calls == 1
+        attempts += 1
+        processes.append(Mock(returncode=None))
+        self.proc = processes[-1]
+        self.recent_stderr = [stderr] if attempts == 1 else []
+
+    monkeypatch.setattr(CodexNativeAppServer, "_spawn_process", spawn)
+    monkeypatch.setattr(module, "CodexAppServerClient", client)
+    retry_expected = "Address in use" in stderr and connect_cost == 0.0
+    if retry_expected:
+        connected = await server._start_owned_listener()
+        assert connected is clients[1]
+        assert clients[1].close_calls == 0
+    else:
+        with pytest.raises(RuntimeError) as failure:
+            await server._start_owned_listener()
+        assert str(failure.value) == f"Codex app-server exited early: {stderr}"
+        assert type(failure.value) is RuntimeError
+    assert attempts == (2 if retry_expected else 1)
+    assert clients[0].close_calls == 1
+
+
 async def test_wait_until_ready_cancellation_closes_connecting_client(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
