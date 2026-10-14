@@ -1181,17 +1181,19 @@ async def test_session_snapshot_probe_fails_softly_when_the_binding_cannot_be_re
     persist.assert_not_called()
     backoff = _sessions_mod._runner_status_probe_backoff.get(session_id)
     assert backoff is not None
-    if other_runner_window:
-        # Another runner's window stays while this caller's binding is unconfirmed.
-        assert backoff is other
-    else:
-        assert backoff.runner_id is None
-        assert backoff.failures == 1
+    # Another runner's window is replaced, not extended: its streak is not ours.
+    assert backoff is not other
+    assert backoff.runner_id is None
+    assert backoff.failures == 1
     warnings = [
         r for r in caplog.records if "could not confirm the runner binding" in r.getMessage()
     ]
     assert len(warnings) == 1
     assert "StatementError" in warnings[0].getMessage()
+    # The recorded window throttles this runner's next request during the outage.
+    again = await orchestration._probe_runner_live_status(conv_store, runner_client, session_id)  # type: ignore[arg-type]
+    assert again is None
+    assert runner_client.get_calls == [f"/v1/sessions/{session_id}"]
 
 
 @pytest.mark.asyncio

@@ -12502,18 +12502,9 @@ async def _run_runner_status_probe(
         except Exception as exc:  # noqa: BLE001
             detail = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
             failure = f"could not confirm the runner binding, {detail}"
-            previous = _runner_status_probe_backoff.get(session_id)
-            # Unconfirmed binding: leave another runner's window alone. Otherwise
-            # back off, so a store outage does not cost a probe and a stranded
-            # reader thread per snapshot.
-            if previous is not None and previous.runner_id != runner_id:
-                _logger.warning(
-                    "Runner status probe for session=%s failed (%s); discarded",
-                    session_id,
-                    failure,
-                    extra={"session_id": session_id},
-                )
-                return None
+            # Back off even though the binding is unconfirmed: otherwise a store
+            # outage costs a probe and a stranded reader thread per snapshot. If
+            # this caller is stale, the bound runner is probed once more at most.
             _skip_runner_status_probe(session_id, runner_id, failure)
             return None
         if (binding[0] if binding is not None else None) != runner_id:
