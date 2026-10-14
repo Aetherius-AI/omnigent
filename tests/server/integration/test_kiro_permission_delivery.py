@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
@@ -11,6 +13,11 @@ import pytest
 from omnigent.runtime import pending_elicitations
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from tests.server.helpers import create_session_for_agent, create_test_agent
+from tests.test_kiro_native_permissions import (
+    _permission_msg,
+    _permission_result_msg,
+    _record_bytes,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -22,6 +29,91 @@ async def _wait_for_state(elicitation_id: str, state: str) -> None:
             if entry and entry[1]["params"]["native_delivery"]["state"] == state:
                 return
             await asyncio.sleep(0.01)
+
+
+async def test_kiro_mirror_recovers_unconfirmed_hook_without_advancing_queue(
+    client: httpx.AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omnigent import cli_auth
+    from omnigent.harnesses.kiro_native import permissions as knp
+
+    monkeypatch.setattr(knp, "_DELIVERY_CONFIRM_TIMEOUT_S", 0.02)
+    monkeypatch.setattr(knp, "_POLL_INTERVAL_S", 0.01)
+    agent = await create_test_agent(client, "kiro-transient-hook")
+    sid = await create_session_for_agent(client, agent["id"])
+    eid = knp.kiro_permission_elicitation_id(sid, "req-1")
+    next_eid = knp.kiro_permission_elicitation_id(sid, "req-2")
+    started = asyncio.Event()
+    unconfirmed: list[bytes] = []
+    sent: list[str] = []
+    record_file = knp.acp_record_path(tmp_path)
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        data = json.loads(request.content)
+        if data.get("native_delivery", {}).get("state") == "unconfirmed":
+            unconfirmed.append(request.content)
+            assert data["elicitation_id"] == eid
+            assert sent == ["accept"]
+            assert request.content == unconfirmed[0]
+            if len(unconfirmed) <= 2:
+                return httpx.Response(429 if len(unconfirmed) == 1 else 503)
+        return await client.post(request.url.path, json=data)
+
+    @asynccontextmanager
+    async def open_client(*args, **kwargs):
+        async with httpx.AsyncClient(
+            base_url="http://test", transport=httpx.MockTransport(handle)
+        ) as mirror_client:
+            started.set()
+            yield mirror_client
+
+    def send(*args, action: str, **kwargs) -> None:
+        sent.append(action)
+        if len(sent) == 2:
+            with record_file.open("ab") as stream:
+                stream.write(_record_bytes(_permission_result_msg("req-1")))
+
+    monkeypatch.setattr(cli_auth, "open_server_client", open_client)
+    monkeypatch.setattr(knp, "send_kiro_permission_verdict", send)
+    mirror = asyncio.create_task(
+        knp.supervise_kiro_permission_mirror(
+            base_url="http://test",
+            headers={},
+            session_id=sid,
+            bridge_dir=tmp_path,
+            poll_interval_s=0.005,
+        )
+    )
+    try:
+        async with asyncio.timeout(5):
+            await started.wait()
+        record_file.write_bytes(
+            _record_bytes(_permission_msg("req-1")) + _record_bytes(_permission_msg("req-2"))
+        )
+        await _wait_for_state(eid, "ready")
+        resolve_url = f"/v1/sessions/{sid}/elicitations/{eid}/resolve"
+        assert (await client.post(resolve_url, json={"action": "accept"})).status_code == 202
+        await _wait_for_state(eid, "unconfirmed")
+        assert len(unconfirmed) == 3
+        assert sent == ["accept"]
+        assert not mirror.done()
+        snapshot = (await client.get(f"/v1/sessions/{sid}")).json()
+        assert [entry["elicitation_id"] for entry in snapshot["pending_elicitations"]] == [eid]
+        delivery = snapshot["pending_elicitations"][0]["params"]["native_delivery"]
+        assert delivery == json.loads(unconfirmed[0])["native_delivery"]
+        response = await client.post(
+            resolve_url,
+            json={"action": "accept", "_meta": {"native_delivery_attempt": delivery["attempt"]}},
+        )
+        assert response.status_code == 202
+        await _wait_for_state(next_eid, "ready")
+        async with asyncio.timeout(5):
+            while pending_elicitations.lookup(eid, conversation_id=sid) is not None:
+                await asyncio.sleep(0.01)
+        assert sent == ["accept", "accept"]
+    finally:
+        mirror.cancel()
+        await asyncio.gather(mirror, return_exceptions=True)
 
 
 async def test_kiro_delivery_stays_pending_and_retries_only_the_current_attempt(

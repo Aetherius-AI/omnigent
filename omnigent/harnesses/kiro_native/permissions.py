@@ -337,6 +337,7 @@ async def _run_one_permission(
         "content_preview": permission.preview,
         "native_delivery": delivery,
     }
+    hook_backoff_s = _POLL_INTERVAL_S
     try:
         while not await asyncio.to_thread(probe.is_resolved):
             try:
@@ -346,7 +347,13 @@ async def _run_one_permission(
                 )
                 if response.status_code >= 400:
                     _logger.warning("kiro permission hook rejected: %s", response.status_code)
-                    return
+                    if response.status_code < 500 and response.status_code != 429:
+                        return
+                    # Repost the same attempt; HTTP retries must not send a key.
+                    await asyncio.sleep(random.uniform(hook_backoff_s / 2, hook_backoff_s))
+                    hook_backoff_s = min(hook_backoff_s * 2, _RECEIPT_RETRY_MAX_S)
+                    continue
+                hook_backoff_s = _POLL_INTERVAL_S
                 if not response.content:
                     # A hook wait can expire without a native response.
                     await asyncio.sleep(_POLL_INTERVAL_S)
@@ -359,7 +366,8 @@ async def _run_one_permission(
             except httpx.HTTPError:
                 _logger.exception("kiro permission hook failed; session=%s", session_id)
                 # Reconnect with the same attempt id; this does not send a key.
-                await asyncio.sleep(_POLL_INTERVAL_S)
+                await asyncio.sleep(random.uniform(hook_backoff_s / 2, hook_backoff_s))
+                hook_backoff_s = min(hook_backoff_s * 2, _RECEIPT_RETRY_MAX_S)
                 continue
             action = result.get("action") if isinstance(result, dict) else None
             if action not in ("accept", "decline", "cancel"):

@@ -657,26 +657,36 @@ async def test_supervise_mirror_reaps_finished_task_and_mirrors_next_request(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("outage", [None, 429, 503, "connection"])
 async def test_delivery_waits_for_explicit_retry_before_sending_again(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    outage: int | str | None,
 ) -> None:
-    monkeypatch.setattr(knp, "_DELIVERY_CONFIRM_TIMEOUT_S", 0.03)
-    monkeypatch.setattr(knp, "_POLL_INTERVAL_S", 0.01)
+    monkeypatch.setattr(knp, "_DELIVERY_CONFIRM_TIMEOUT_S", 0)
+    sleep = AsyncMock()
+    monkeypatch.setattr(knp, "asyncio", SimpleNamespace(**{**vars(asyncio), "sleep": sleep}))
     asked_to_retry = asyncio.Event()
     user_retries = asyncio.Event()
-    attempts: list[str] = []
+    requests: list[dict] = []
     sent: list[str] = []
+    failures = 10 if outage else 0
 
     async def handler(request: httpx.Request) -> httpx.Response:
         data = json.loads(request.content)
         if request.url.path.endswith("/events"):
             return httpx.Response(202)
         delivery = data["native_delivery"]
-        attempts.append(delivery["attempt"])
-        if len(attempts) == 2:
+        requests.append(data)
+        if len(requests) > 1:
             assert delivery["state"] == "unconfirmed"
             assert delivery["action"] == "accept"
+            assert sent == ["accept"]
+            assert data == requests[1]
+            if len(requests) <= failures + 1:
+                if outage == "connection":
+                    raise httpx.ConnectError("offline", request=request)
+                return httpx.Response(outage)
             asked_to_retry.set()
             await user_retries.wait()
         return httpx.Response(
@@ -710,11 +720,21 @@ async def test_delivery_waits_for_explicit_retry_before_sending_again(
                 await asked_to_retry.wait()
             assert sent == ["accept"]
             assert not task.done()
+            delays = [call.args[0] for call in sleep.await_args_list]
+            assert len(delays) == failures
+            for delay, ceiling in zip(
+                delays, [0.4, 0.8, 1.6, 3.2, 6.4, 12.8, 25.6, 30, 30, 30][:failures], strict=True
+            ):
+                assert ceiling / 2 <= delay <= ceiling
             user_retries.set()
             async with asyncio.timeout(5):
                 await task
             assert sent == ["accept", "accept"]
-            assert len(set(attempts)) == 2
+            assert len(requests) == failures + 2
+            assert (
+                requests[0]["native_delivery"]["attempt"]
+                != requests[1]["native_delivery"]["attempt"]
+            )
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
