@@ -51,7 +51,8 @@ _WRAP_FORCING_WIDTH = len(f"> [Attached: /attachments/{'0' * 32}/{_SCREENSHOT_NA
 
 def _pane_text(session: AntigravitySession) -> str:
     captured = session.tmux_command("capture-pane", "-p", "-t", session.pane()["tmux_target"])
-    return captured.stdout if captured.returncode == 0 else ""
+    assert captured.returncode == 0, f"tmux capture-pane failed: {captured.stderr.strip()}"
+    return captured.stdout
 
 
 def _pane_size(session: AntigravitySession) -> str:

@@ -1088,7 +1088,7 @@ def test_draft_in_input_region_detects_needle_split_across_a_wrap() -> None:
         "I am in YOU!  Omnigent!!!!"
     )
     needle = _mod._submit_needle(content)
-    assert needle == "[Attached: /data/.omnige"
+    assert content.splitlines()[0].startswith(needle)
     # agy wraps after "[Attached:", so no single rendered row contains the needle.
     pane = (
         f"{sep}\n"
@@ -1107,16 +1107,20 @@ def test_draft_in_input_region_wrap_fallback_does_not_match_unrelated_text() -> 
     baseline = _mod._agy_input_region(f"{sep}\n>\n{sep}")
     pane = f"{sep}\n> some completely unrelated leftover draft\n{sep}"
     assert not _mod._draft_in_input_region(pane, "[Attached: /data/.omnige", baseline)
-    # Collapsing whitespace must not shrink a needle into an incidental substring.
+    # Normalizing whitespace must not shrink a needle into an incidental substring
+    # or let concatenated words stand in for the needle's words.
     assert _mod._submit_needle("a  b") == "a  b"
     assert not _mod._draft_in_input_region(f"{sep}\n> tab\n{sep}", "a  b", baseline)
+    assert not _mod._draft_in_input_region(f"{sep}\n> notable\n{sep}", "not able", baseline)
+    # The same words split by a wrap at their space still match.
+    assert _mod._draft_in_input_region(f"{sep}\n> not\n  able\n{sep}", "not able", baseline)
 
 
-def test_draft_in_input_region_wrap_fallback_ignores_stale_same_root_attachment() -> None:
-    """A stale draft naming another attachment under the same root is caught by the baseline.
+def test_draft_in_input_region_rejects_stale_same_root_attachment_at_baseline() -> None:
+    """A stale draft naming another attachment under the same root is rejected by the baseline.
 
-    Every attachment under one root shares the 24-char needle, so the collision is
-    tolerable only because an unchanged composer never counts as the new draft.
+    Every attachment under one root shares the 24-char needle, which the per-row and
+    wrap checks would both accept; an unchanged composer never counts as the new draft.
     """
     sep = "─" * 80
     stale = (
