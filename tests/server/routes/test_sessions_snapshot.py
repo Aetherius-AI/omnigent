@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from types import SimpleNamespace
@@ -1121,11 +1122,106 @@ async def test_session_snapshot_transport_failure_is_shared_and_backed_off(
     assert _sessions_mod._runner_status_probe_inflight.get((session_id, None)) is None
     assert _sessions_mod._session_status_cache.get(session_id) is None
     backoff = _sessions_mod._runner_status_probe_backoff.get(session_id)
+    assert backoff is not None
     assert backoff.failures == 1
     assert backoff.skip_until >= started + orchestration._RUNNER_STATUS_PROBE_BACKOFF_S
     warnings = [r for r in caplog.records if "Runner status probe" in r.getMessage()]
     assert len(warnings) == 1
     assert "ConnectError: runner disconnected" in warnings[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_session_snapshot_probe_fails_softly_when_the_binding_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failing binding read yields None to every waiter and publishes nothing."""
+    from omnigent.server.routes._sessions import orchestration
+
+    session_id = "probe_binding_read_error"
+    _sessions_mod._session_status_cache.pop(session_id, None)
+    _sessions_mod._runner_status_probe_backoff.pop(session_id, None)
+    persist = Mock()
+    monkeypatch.setattr(orchestration.session_live_state, "persist_live_status", persist)
+
+    class _FailingStore:
+        def get_conversation(self, conversation_id: str) -> Conversation | None:
+            raise StatementError("database unavailable", None, None, None)
+
+    conv_store = _FailingStore()
+    runner_client = _GatedRunnerClient(status="running")
+    first = asyncio.create_task(
+        orchestration._probe_runner_live_status(conv_store, runner_client, session_id)  # type: ignore[arg-type]
+    )
+    await asyncio.wait_for(runner_client.arrived.wait(), timeout=1.0)
+    second = asyncio.create_task(
+        orchestration._probe_runner_live_status(conv_store, runner_client, session_id)  # type: ignore[arg-type]
+    )
+    await asyncio.sleep(0)
+    with caplog.at_level(logging.WARNING, logger="omnigent.server.routes.sessions"):
+        runner_client.release.set()
+        assert await asyncio.gather(first, second) == [None, None]
+
+    assert runner_client.get_calls == [f"/v1/sessions/{session_id}"]
+    assert _sessions_mod._runner_status_probe_inflight.get((session_id, None)) is None
+    assert _sessions_mod._session_status_cache.get(session_id) is None
+    assert _sessions_mod._runner_status_probe_backoff.get(session_id) is None
+    persist.assert_not_called()
+    warnings = [
+        r for r in caplog.records if "could not confirm the runner binding" in r.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert "StatementError" in warnings[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_session_snapshot_probe_fails_softly_when_the_binding_read_stalls(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A stalled binding read releases every waiter at its bound and publishes nothing."""
+    from omnigent.server.routes._sessions import orchestration
+
+    session_id = "probe_binding_read_stall"
+    _sessions_mod._session_status_cache.pop(session_id, None)
+    _sessions_mod._runner_status_probe_backoff.pop(session_id, None)
+    persist = Mock()
+    monkeypatch.setattr(orchestration.session_live_state, "persist_live_status", persist)
+    monkeypatch.setattr(orchestration, "_RUNNER_STATUS_PROBE_BINDING_READ_S", 0.05)
+    unblock = threading.Event()
+
+    class _StalledStore:
+        def get_conversation(self, conversation_id: str) -> Conversation | None:
+            unblock.wait(timeout=5.0)
+            return None
+
+    conv_store = _StalledStore()
+    runner_client = _GatedRunnerClient(status="running")
+    first = asyncio.create_task(
+        orchestration._probe_runner_live_status(conv_store, runner_client, session_id)  # type: ignore[arg-type]
+    )
+    await asyncio.wait_for(runner_client.arrived.wait(), timeout=1.0)
+    second = asyncio.create_task(
+        orchestration._probe_runner_live_status(conv_store, runner_client, session_id)  # type: ignore[arg-type]
+    )
+    await asyncio.sleep(0)
+    try:
+        started = time.monotonic()
+        with caplog.at_level(logging.WARNING, logger="omnigent.server.routes.sessions"):
+            runner_client.release.set()
+            assert await asyncio.gather(first, second) == [None, None]
+        assert time.monotonic() - started < 1.0
+    finally:
+        unblock.set()
+
+    assert runner_client.get_calls == [f"/v1/sessions/{session_id}"]
+    assert _sessions_mod._runner_status_probe_inflight.get((session_id, None)) is None
+    assert _sessions_mod._session_status_cache.get(session_id) is None
+    assert _sessions_mod._runner_status_probe_backoff.get(session_id) is None
+    persist.assert_not_called()
+    warnings = [
+        r for r in caplog.records if "could not confirm the runner binding" in r.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert "TimeoutError" in warnings[0].getMessage()
 
 
 @pytest.mark.asyncio
@@ -1230,6 +1326,7 @@ async def test_session_snapshot_rebind_discards_inflight_old_runner(
     assert _sessions_mod._session_status_cache.get(session_id) == (None if new_fails else "idle")
     backoff = _sessions_mod._runner_status_probe_backoff.get(session_id)
     if new_fails:
+        assert backoff is not None
         assert backoff.runner_id == "runner_new"
         assert backoff.failures == 1
         persist.assert_not_called()
@@ -1325,6 +1422,7 @@ async def test_session_snapshot_with_a_stale_row_cannot_displace_the_new_runners
     if new_fails:
         assert current_snapshot.status == "idle"
         assert _sessions_mod._session_status_cache.get(session_id) is None
+        assert backoff is not None
         assert backoff.runner_id == "runner_new"
         assert backoff.failures == 1
         persist.assert_not_called()

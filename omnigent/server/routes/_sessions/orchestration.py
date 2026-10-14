@@ -12350,6 +12350,9 @@ async def _load_acp_model_options(
 # production probes finish inside 5 s), and the runner's own launch-config
 # read of this snapshot has a 10 s budget the bound must leave room for.
 _RUNNER_STATUS_PROBE_TIMEOUT_S: float = 5.0
+# The binding re-read after the request has its own bound so a stalled store
+# cannot hold the probe's waiters; an unconfirmed binding discards the probe.
+_RUNNER_STATUS_PROBE_BINDING_READ_S: float = 1.0
 # A non-200 that arrives within this is a prompt answer from a responsive
 # runner (a freshly bound one answers 404 until session init lands) and is
 # asked again next snapshot; a slower one counts as a slow probe.
@@ -12464,7 +12467,20 @@ async def _run_runner_status_probe(
         elapsed = time.monotonic() - started
         # The row is the authority on the binding: the caller's row may predate a
         # rebind, and the session may have rebound while this request was pending.
-        conv = await asyncio.to_thread(conv_store.get_conversation, session_id)
+        try:
+            conv = await asyncio.wait_for(
+                asyncio.to_thread(conv_store.get_conversation, session_id),
+                timeout=_RUNNER_STATUS_PROBE_BINDING_READ_S,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning(
+                "Runner status probe for session=%s could not confirm the runner binding "
+                "(%s); discarded",
+                session_id,
+                f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__,
+                extra={"session_id": session_id},
+            )
+            return None
         if (conv.runner_id if conv is not None else None) != runner_id:
             _logger.debug(
                 "Runner status probe for session=%s finished after a rebind away from "
