@@ -238,6 +238,16 @@ describe("SoftBreak code-block conversion", () => {
     expect(editor.getMarkdown().trim()).toBe("alpha  \nbeta");
   });
 
+  it("setCodeBlock keeps the source newlines", () => {
+    editor = makeEditor("alpha\nbeta");
+    editor.commands.setTextSelection(2);
+    expect(editor.commands.setCodeBlock()).toBe(true);
+    const block = editor.state.doc.child(0);
+    expect(block.type.name).toBe("codeBlock");
+    expect(block.textContent).toBe("alpha\nbeta");
+    expect(editor.getMarkdown().trim()).toBe("```\nalpha\nbeta\n```");
+  });
+
   it("the ``` input rule keeps the source newlines", () => {
     const ed = makeEditor("alpha\nbeta");
     editor = ed;
