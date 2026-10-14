@@ -409,7 +409,7 @@ def test_pi_needs_auth_with_profile_but_no_broker_sidecar(
     assert configured_harness_map()["pi-native"] == "needs-auth"
 
 
-def test_pi_managed_connect_credit_yields_to_global_api_key(
+def test_pi_managed_connect_broker_yields_to_global_api_key(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """A global ``auth: api_key`` keeps launch off the broker, so readiness does too."""

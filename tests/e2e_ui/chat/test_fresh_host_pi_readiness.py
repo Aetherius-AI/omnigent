@@ -35,8 +35,8 @@ _HOST_ONLINE_TIMEOUT_S = 180.0
 _READINESS_PUBLISH_TIMEOUT_S = 150.0
 _PI_PREPARE_TIMEOUT_S = 90.0
 _RUNNER_ONLINE_TIMEOUT_S = 120.0
-# The report's acceptance requires the same flow on another fresh arclet with no
-# setup repeated, so a second independent host is driven, not just one.
+# Two independent fresh hosts verify that installation does not rely on another
+# host's state.
 _FRESH_HOST_COUNT = 2
 _PI_PACKAGE = "@earendil-works/pi-coding-agent"
 
@@ -283,6 +283,13 @@ def _assert_pi_installed_by_host(base_url: str, host: dict[str, Any]) -> None:
     )
 
 
+def _delete_sessions(base_url: str, session_ids: list[str]) -> None:
+    with httpx.Client(base_url=base_url, trust_env=False) as client:
+        for session_id in session_ids:
+            with contextlib.suppress(Exception):
+                client.delete(f"/v1/sessions/{session_id}", timeout=10.0)
+
+
 async def _drive(base_url: str, hosts: list[dict[str, Any]], agent_id: str) -> None:
     created: list[str] = []
     try:
@@ -337,12 +344,9 @@ async def _drive(base_url: str, hosts: list[dict[str, Any]], agent_id: str) -> N
                             match.group(1),
                             timeout=_RUNNER_ONLINE_TIMEOUT_S,
                         )
-                    _assert_pi_installed_by_host(base_url, host)
+                    await asyncio.to_thread(_assert_pi_installed_by_host, base_url, host)
     finally:
-        with httpx.Client(base_url=base_url, trust_env=False) as client:
-            for session_id in created:
-                with contextlib.suppress(Exception):
-                    client.delete(f"/v1/sessions/{session_id}", timeout=10.0)
+        await asyncio.to_thread(_delete_sessions, base_url, created)
 
 
 def test_fresh_host_offers_pi_without_manual_setup(

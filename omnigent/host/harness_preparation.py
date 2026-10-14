@@ -10,7 +10,7 @@ import threading
 
 from omnigent.onboarding.harness_install import (
     PI_KEY,
-    harness_cli_installed,
+    harness_cli_binary,
     harness_install_spec,
     try_install_harness_cli,
 )
@@ -27,9 +27,11 @@ def running_in_managed_sandbox() -> bool:
 
 
 def _install_missing_harness(key: str) -> None:
-    """Install one managed harness CLI when it is missing and installable."""
+    """Install one managed harness CLI when no binary is present and it is installable."""
     try:
-        if harness_cli_installed(key):
+        # Presence only: an existing (even outdated) CLI is never upgraded here;
+        # readiness reports its version separately.
+        if harness_cli_binary(key) is not None:
             return
         result = try_install_harness_cli(key)
     except Exception:

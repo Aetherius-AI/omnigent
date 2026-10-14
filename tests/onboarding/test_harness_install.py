@@ -1670,3 +1670,44 @@ def test_missing_harness_cli_flags_outdated_version(
     spec = hi.missing_harness_cli("opencode-native")
     assert spec is not None
     assert spec.binary == "opencode"
+
+
+def test_concurrent_installs_of_one_package_are_serialized(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Host boot preparation and a UI install request never run two installers of
+    the same package at once."""
+    import threading
+    import time
+
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setattr(hi.shutil, "which", lambda name: f"/usr/local/bin/{name}")
+    binary = tmp_path / "pi"
+    binary.write_text("")
+    monkeypatch.setattr(hi, "resolve_cli_binary", lambda _name: str(binary))
+    active = 0
+    peak = 0
+    guard = threading.Lock()
+
+    def _slow_run(cmd, **_kwargs):
+        nonlocal active, peak
+        with guard:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.05)
+        with guard:
+            active -= 1
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(hi.subprocess, "run", _slow_run)
+    results: list[hi.HarnessInstallResult] = []
+    threads = [
+        threading.Thread(target=lambda: results.append(hi.try_install_harness_cli(hi.PI_KEY)))
+        for _ in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+    assert [result.installed for result in results] == [True, True]
+    assert peak == 1
