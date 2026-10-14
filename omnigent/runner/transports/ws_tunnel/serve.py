@@ -76,6 +76,7 @@ from omnigent.util.suspend_watch import watch_for_resume
 from omnigent.util.tls import client_ssl_context
 from omnigent.util.tunnel_limits import (
     RUNNER_TUNNEL_MAX_MESSAGE_BYTES,
+    RUNNER_TUNNEL_SILENCE_TIMEOUT_S,
     TUNNEL_KEEPALIVE_PING_INTERVAL_S,
     TUNNEL_KEEPALIVE_PING_TIMEOUT_S,
 )
@@ -1051,13 +1052,14 @@ async def _serve_tunnel_once(
             ssl=ssl_ctx,
             # Protocol keepalive aligned to the server's 90 s app-level budget (not the
             # 20 s library default that drops a busy-but-healthy tunnel — issue #1116).
-            # Also the runner's only liveness probe for a silently-dead server.
+            # Application silence below also detects proxies answering PINGs.
             ping_interval=TUNNEL_KEEPALIVE_PING_INTERVAL_S,
             ping_timeout=TUNNEL_KEEPALIVE_PING_TIMEOUT_S,
         ) as ws,
         diagnostics.monitoring(_report_diagnostics, connection_id=connection_id),
     ):
         diagnostics.settings.update(
+            app_silence_timeout_s=RUNNER_TUNNEL_SILENCE_TIMEOUT_S,
             protocol_ping_interval_s=getattr(ws, "ping_interval", None),
             protocol_ping_timeout_s=getattr(ws, "ping_timeout", None),
             protocol_keepalive_source="websockets_connection",
@@ -1065,6 +1067,31 @@ async def _serve_tunnel_once(
 
         async def send_text(data: str) -> None:
             await diagnostics.send(ws.send, data)
+
+        async def receive_frame() -> str | bytes:
+            try:
+                async with asyncio.timeout(RUNNER_TUNNEL_SILENCE_TIMEOUT_S):
+                    return await ws.recv()
+            except TimeoutError as exc:
+                if shutdown_event is None or not shutdown_event.is_set():
+                    _logger.warning(
+                        "Runner %s received no server frame for %.0fs; reconnecting",
+                        runner_id,
+                        RUNNER_TUNNEL_SILENCE_TIMEOUT_S,
+                        extra=debug_event(
+                            "runner_server_silence_timeout",
+                            session_id=runner_primary_session_id(),
+                            runner_id=runner_id,
+                            connection_id=connection_id,
+                            silence_timeout_s=RUNNER_TUNNEL_SILENCE_TIMEOUT_S,
+                            **diagnostics.snapshot(),
+                        ),
+                    )
+                    transport = getattr(ws, "transport", None)
+                    if transport is not None:
+                        with contextlib.suppress(Exception):
+                            transport.abort()
+                raise ConnectionError("server application ping timeout; reconnecting") from exc
 
         if on_connected is not None:
             on_connected()
@@ -1138,7 +1165,7 @@ async def _serve_tunnel_once(
             if shutdown_event is None:
                 while True:
                     try:
-                        raw = await ws.recv()
+                        raw = await receive_frame()
                     except ConnectionClosedOK as exc:
                         if _websocket_close_code(exc) in _TUNNEL_RECYCLE_CLOSE_CODES:
                             # A server recycle (e.g. 1001) must reach
@@ -1164,7 +1191,7 @@ async def _serve_tunnel_once(
                 shutdown_wait = asyncio.create_task(shutdown_event.wait())
                 try:
                     while True:
-                        recv_task = asyncio.create_task(ws.recv())
+                        recv_task = asyncio.create_task(receive_frame())
                         done, _pending = await asyncio.wait(
                             {recv_task, shutdown_wait},
                             return_when=asyncio.FIRST_COMPLETED,
@@ -1183,7 +1210,7 @@ async def _serve_tunnel_once(
                             except asyncio.CancelledError:
                                 # Normal: the pending read was cancelled.
                                 pass
-                            except WebSocketException:
+                            except (WebSocketException, ConnectionError):
                                 # recv() had already failed with a close on the
                                 # same tick as the shutdown signal. We still
                                 # drain + close (below) so the exit stays quiet,

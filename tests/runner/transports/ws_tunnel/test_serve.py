@@ -2494,6 +2494,104 @@ async def test_serve_tunnel_retries_403_forever_once_connected(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("with_shutdown", [False, True])
+@pytest.mark.parametrize("application_traffic", [False, True])
+async def test_server_silence_reconnects_despite_protocol_pongs(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    with_shutdown: bool,
+    application_traffic: bool,
+) -> None:
+    """A live proxy's control PONGs cannot hide a dead application tunnel."""
+    import websockets
+    from websockets.asyncio.server import ServerConnection
+
+    protocol_pong = asyncio.Event()
+    timeout_s = 0.4 if application_traffic else 0.1
+    monkeypatch.setattr(serve_module, "RUNNER_TUNNEL_SILENCE_TIMEOUT_S", timeout_s, raising=False)
+    monkeypatch.setattr("omnigent.cli_auth.load_databricks_org_id", lambda _url: None)
+
+    async def peer(ws: ServerConnection) -> None:
+        await ws.recv()  # Runner hello.
+        await (await ws.ping())
+        protocol_pong.set()
+        if application_traffic:
+            for n in range(4):
+                await asyncio.sleep(timeout_s * 0.75)
+                await ws.send(encode_frame(PingFrame(ts=n)))
+                pong = json.loads(await ws.recv())
+                assert pong == {"kind": "pong", "ts": n}
+            await ws.close()
+        else:
+            await ws.wait_closed()
+
+    async with websockets.serve(peer, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        call = _serve_tunnel_once(
+            _noop_app,
+            tunnel_url=f"ws://127.0.0.1:{port}/v1/runners/runner_silent/tunnel",
+            server_url=f"http://127.0.0.1:{port}",
+            runner_id="runner_silent",
+            runner_version="0.1.0",
+            shutdown_event=asyncio.Event() if with_shutdown else None,
+        )
+        async with asyncio.timeout(5):
+            if application_traffic:
+                await call
+            else:
+                with pytest.raises(ConnectionError, match="server application ping timeout"):
+                    await call
+
+    assert protocol_pong.is_set()
+    timeouts = [
+        record
+        for record in caplog.records
+        if getattr(record, "event_name", None) == "runner_server_silence_timeout"
+    ]
+    assert len(timeouts) == (0 if application_traffic else 1)
+
+
+@pytest.mark.asyncio
+async def test_server_silence_reconnects_the_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The outer tunnel loop replaces a silent socket without stopping its runner."""
+    import websockets
+    from websockets.asyncio.server import ServerConnection
+
+    shutdown = asyncio.Event()
+    hellos: list[dict[str, Any]] = []
+    reconnects: list[bool] = []
+    monkeypatch.setattr(serve_module, "RUNNER_TUNNEL_SILENCE_TIMEOUT_S", 0.1, raising=False)
+    monkeypatch.setattr("omnigent.cli_auth.load_databricks_org_id", lambda _url: None)
+
+    async def reconnected() -> None:
+        reconnects.append(True)
+
+    async def peer(ws: ServerConnection) -> None:
+        hellos.append(json.loads(await ws.recv()))
+        await (await ws.ping())
+        if len(hellos) == 2:
+            shutdown.set()
+        await ws.wait_closed()
+
+    async with websockets.serve(peer, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        async with asyncio.timeout(5):
+            await serve_tunnel(
+                _noop_app,
+                server_url=f"http://127.0.0.1:{port}",
+                runner_id="runner_silent",
+                runner_version="0.1.0",
+                shutdown_event=shutdown,
+                on_reconnect=reconnected,
+            )
+
+    assert len(hellos) == 2
+    assert reconnects == [True]
+
+
+@pytest.mark.asyncio
 async def test_serve_tunnel_once_suspend_resume_aborts_tunnel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

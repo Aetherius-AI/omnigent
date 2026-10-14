@@ -22,6 +22,7 @@ import uvicorn
 
 from omnigent.util.tunnel_limits import (
     RUNNER_TUNNEL_MAX_MESSAGE_BYTES,
+    RUNNER_TUNNEL_SILENCE_TIMEOUT_S,
     TUNNEL_KEEPALIVE_PING_INTERVAL_S,
     TUNNEL_KEEPALIVE_PING_TIMEOUT_S,
     uvicorn_tunnel_kwargs,
@@ -69,6 +70,24 @@ def test_keepalive_not_stricter_than_app_level_budget() -> None:
             "would drop a busy-but-healthy tunnel with 1011 before the app-level "
             "keepalive fires (issue #1116)."
         )
+
+
+def test_runner_server_silence_allows_pings_and_reconnect_within_grace() -> None:
+    from omnigent.runner.transports.ws_tunnel import serve
+    from omnigent.server.routes import runner_tunnel, sessions
+
+    assert RUNNER_TUNNEL_SILENCE_TIMEOUT_S >= (
+        TUNNEL_KEEPALIVE_PING_INTERVAL_S + TUNNEL_KEEPALIVE_PING_TIMEOUT_S
+    )
+    assert (
+        RUNNER_TUNNEL_SILENCE_TIMEOUT_S
+        + serve._GRACEFUL_SHUTDOWN_CLOSE_TIMEOUT_S
+        + serve._MAX_RECONNECT_DELAY_S * (1 + serve._RECONNECT_JITTER_FRACTION)
+        < (
+            runner_tunnel.PING_INTERVAL_S * runner_tunnel.PING_MISS_THRESHOLD
+            + sessions.RUNNER_DISCONNECT_GRACE_S
+        )
+    )
 
 
 def test_uvicorn_tunnel_kwargs_name_real_uvicorn_options() -> None:
