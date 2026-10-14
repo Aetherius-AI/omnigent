@@ -19,6 +19,7 @@ from typing import Any
 import httpx
 import pytest
 import yaml
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page, expect
 
 from tests._helpers.acp_agent import FAKE_ACP_AGENT_REPLY, FAKE_ACP_AGENT_SCRIPT
@@ -78,7 +79,9 @@ def acp_host_stack(
         isolated_local_server(server_root) as base_url,
         httpx.Client(base_url=base_url, trust_env=False, timeout=10.0) as client,
     ):
-        agents = client.get("/v1/agents", params={"limit": 1000}).json()["data"]
+        agents_response = client.get("/v1/agents", params={"limit": 1000})
+        agents_response.raise_for_status()
+        agents = agents_response.json()["data"]
         agent = next((a for a in agents if a.get("harness") == _ACP_HARNESS), None)
         assert agent is not None, f"server did not seed a {_ACP_HARNESS} picker row: {agents}"
         with isolated_host(
@@ -144,7 +147,10 @@ def test_configured_acp_slug_agent_shows_no_setup_notice(
     try:
         expect(notice).to_have_count(0)
     except AssertionError:
-        notice_text: str | None = notice.first.inner_text().strip()
+        try:
+            notice_text: str | None = notice.first.inner_text().strip()
+        except PlaywrightError:
+            notice_text = "<notice detached before it could be read>"
     else:
         notice_text = None
     page.screenshot(path=str(shots / "composer-notice.png"))

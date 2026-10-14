@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 FAKE_ACP_AGENT_REPLY = "ACP agent reply: hello from fake-agent"
 
 # Speaks the Agent Client Protocol over stdio without a permission round-trip:
@@ -37,4 +39,4 @@ for line in sys.stdin:
             "stopReason": "end_turn",
             "usage": {"inputTokens": 3, "outputTokens": 5, "totalTokens": 8},
         }})
-""".replace("__REPLY__", FAKE_ACP_AGENT_REPLY)
+""".replace('"__REPLY__"', json.dumps(FAKE_ACP_AGENT_REPLY))
