@@ -66,6 +66,28 @@ describe("useApproveHotkey", () => {
     expect(submitApproval).not.toHaveBeenCalled();
   });
 
+  describe.each([
+    { platform: "macOS", isMac: true, modifiers: { metaKey: true } },
+    { platform: "Windows/Linux", isMac: false, modifiers: { ctrlKey: true } },
+  ])("native delivery on $platform", ({ isMac, modifiers }) => {
+    it.each(["sending", "unconfirmed", "ready"])(
+      "only considers the newest pending approval when its delivery is %s",
+      (state) => {
+        blocks = [
+          { ...pending, elicitationId: "older", nativeDelivery: { state: "ready" } },
+          { ...pending, elicitationId: "newer", nativeDelivery: { state } },
+        ];
+        renderHook(() => useApproveHotkey(isMac));
+        press(modifiers);
+        if (state === "ready") {
+          expect(submitApproval).toHaveBeenCalledExactlyOnceWith("newer", "accept");
+        } else {
+          expect(submitApproval).not.toHaveBeenCalled();
+        }
+      },
+    );
+  });
+
   it("still accepts a bare consent prompt that names no fields", () => {
     blocks = [{ ...pending, requestedSchema: { type: "object" } }];
     renderHook(() => useApproveHotkey(true));
