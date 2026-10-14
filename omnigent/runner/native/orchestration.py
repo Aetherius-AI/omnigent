@@ -8884,6 +8884,7 @@ async def _auto_create_claude_terminal(
         # spellings a later ``/model`` can type — a managed picker names
         # rows no pin covers.
         picker_values=stored_claude_picker_values(claude_config, launch_catalog),
+        model_options=launch_catalog,
     )
     _logger.info(
         "Claude terminal provider config resolved: session=%s configured=%s "

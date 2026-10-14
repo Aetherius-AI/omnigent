@@ -24,6 +24,7 @@ from omnigent.harnesses.claude_native.bridge import (
     ClaudeUserPromptPending,
     TmuxSessionNotAdvertised,
     cancellable_injection,
+    confirm_dialog_if_open,
     inject_slash_command,
     inject_user_message,
     is_auth_slash_command,
@@ -32,6 +33,7 @@ from omnigent.harnesses.claude_native.bridge import (
     read_claude_status_model,
     read_launch_model,
     read_model_env,
+    read_model_input_options,
     read_model_picker_values,
 )
 from omnigent.inner.executor import (
@@ -51,8 +53,20 @@ from omnigent.inner.native_attachments import (
     framework_notices,
 )
 from omnigent.models.claude_model_vocabulary import claude_model_command_arg, normalized_model_id
+from omnigent.models.input_modalities import (
+    IMAGE_INPUT_REFUSED_CODE,
+    content_has_image,
+    image_model_refusal,
+    model_input_modalities,
+)
 
 _logger = logging.getLogger(__name__)
+_IMAGE_MODEL_CONFIRM_TIMEOUT_S = 10.0
+_IMAGE_MODEL_CONFIRM_POLL_S = 0.25
+
+
+class _ImageModelRefusal(RuntimeError):
+    """A fresh image cannot reach a model explicitly advertised as text-only."""
 
 
 class ClaudeNativeExecutor(Executor):
@@ -112,6 +126,8 @@ class ClaudeNativeExecutor(Executor):
         del session_key
         if not _session_is_active(self._bridge_dir, self._request_session_id):
             return False
+        if self._image_input_refusal(content) is not None:
+            return False
         text = _content_to_text(content, self._bridge_dir)
         if not text:
             return False
@@ -125,6 +141,8 @@ class ClaudeNativeExecutor(Executor):
             return False
         try:
             async with self._inject_lock:
+                if self._image_input_refusal(content) is not None:
+                    return False
                 await self._inject_prompt(text, framework_notices(content))
         except RuntimeError:
             return False
@@ -181,6 +199,12 @@ class ClaudeNativeExecutor(Executor):
                 )
             )
             return
+        content = _latest_user_content(messages)
+        wanted_model = config.model if config is not None else None
+        refusal = self._image_input_refusal(content, wanted_model)
+        if refusal is not None:
+            yield self._image_refusal_event(refusal)
+            return
         text = _latest_user_text(messages, self._bridge_dir)
         notices = _latest_framework_notices(messages)
         if not text:
@@ -220,16 +244,30 @@ class ClaudeNativeExecutor(Executor):
         # commits, then ``inject_user_message`` (which waits for the input
         # box and verifies its submit) delivers the message — in order,
         # once.
-        wanted_model = config.model if config is not None else None
         # ``/model`` only accepts this session's picker values, aliases, and
         # custom slot; anything else is ignored and the pane keeps its model.
         wanted_model_arg = self._model_command_arg(wanted_model)
         try:
             with telemetry.span("claude_native.inject"):
                 async with self._inject_lock:
+                    refusal = self._image_input_refusal(content, wanted_model)
+                    if refusal is not None:
+                        raise _ImageModelRefusal(refusal)
                     context_path = self._bridge_dir / CLAUDE_FRAMEWORK_CONTEXT_FILE
                     context_path.unlink(missing_ok=True)
                     if wanted_model_arg is not None:
+                        input_options = read_model_input_options(self._bridge_dir)
+                        baseline_model = (
+                            read_claude_status_model(self._bridge_dir)
+                            or self._applied_model
+                            or read_launch_model(self._bridge_dir)
+                        )
+                        confirm_image_transition = (
+                            content_has_image(content)
+                            and model_input_modalities(input_options, baseline_model) == ("text",)
+                            and "image"
+                            in (model_input_modalities(input_options, wanted_model) or ())
+                        )
                         # Accepted trade-off: ``/model <id>`` also saves the
                         # pick as the person's global default for new Claude
                         # sessions. Runs to completion before the message
@@ -244,10 +282,19 @@ class ClaudeNativeExecutor(Executor):
                                 confirm_hint=SWITCH_MODEL_DIALOG_HINT,
                             )
                         )
+                        if confirm_image_transition:
+                            assert wanted_model is not None
+                            await self._confirm_image_model(wanted_model, input_options)
                         # Track the routed id, not the alias: the next turn's
                         # comparison is against what routing asked for.
                         self._applied_model = wanted_model
+                    refusal = self._image_input_refusal(content)
+                    if refusal is not None:
+                        raise _ImageModelRefusal(refusal)
                     await self._inject_prompt(text, notices)
+        except _ImageModelRefusal as exc:
+            yield self._image_refusal_event(str(exc))
+            return
         except ClaudeTerminalExited as exc:
             # Claude Code exits 0 on /quit or a closed window. The turn still
             # fails, but the person's own teardown is not a defect; a pane that
@@ -329,6 +376,60 @@ class ClaudeNativeExecutor(Executor):
             yield ExecutorError(message=describe_exception(exc))
             return
         yield TurnComplete(response=None)
+
+    def _image_input_refusal(
+        self, content: EnqueuedContent, wanted_model: str | None = None
+    ) -> str | None:
+        if not content_has_image(content):
+            return None
+        effective_model = (
+            wanted_model
+            if wanted_model is not None and self._model_command_arg(wanted_model) is not None
+            else read_claude_status_model(self._bridge_dir)
+            or self._applied_model
+            or read_launch_model(self._bridge_dir)
+        )
+        if model_input_modalities(read_model_input_options(self._bridge_dir), effective_model) == (
+            "text",
+        ):
+            assert effective_model is not None
+            return image_model_refusal(effective_model)
+        return None
+
+    @staticmethod
+    def _image_refusal_event(message: str) -> ExecutorError:
+        return ExecutorError(
+            message=message,
+            code=IMAGE_INPUT_REFUSED_CODE,
+            title="Choose a model that supports images",
+            remediation="Select a model that supports images, then resend this message.",
+            undelivered=True,
+            preserve_session=True,
+        )
+
+    async def _confirm_image_model(
+        self, wanted_model: str, options: list[dict[str, object]]
+    ) -> None:
+        expected = {wanted_model}
+        for row in options:
+            if wanted_model in (row.get("id"), row.get("model")):
+                expected.update(
+                    value for key in ("id", "model") if isinstance((value := row.get(key)), str)
+                )
+        deadline = asyncio.get_running_loop().time() + _IMAGE_MODEL_CONFIRM_TIMEOUT_S
+        while True:
+            current = read_claude_status_model(self._bridge_dir)
+            if current in expected and "image" in (model_input_modalities(options, current) or ()):
+                return
+            if asyncio.get_running_loop().time() >= deadline:
+                raise _ImageModelRefusal(
+                    "The terminal has not confirmed the model change, so the image was not sent. "
+                    "Choose a model that supports images, then resend the complete message."
+                )
+            await asyncio.to_thread(
+                confirm_dialog_if_open, self._bridge_dir, hint=SWITCH_MODEL_DIALOG_HINT
+            )
+            await asyncio.sleep(_IMAGE_MODEL_CONFIRM_POLL_S)
 
     async def _inject(self, operation: Callable[[], None]) -> None:
         """Drain cancelled delivery workers before releasing the pane's injection lock."""
@@ -524,10 +625,14 @@ def _latest_user_text(messages: list[Message], bridge_dir: Path) -> str:
     :returns: Concatenated latest user message text, or ``""`` when
         no user text is present.
     """
+    return _content_to_text(_latest_user_content(messages), bridge_dir)
+
+
+def _latest_user_content(messages: list[Message]) -> EnqueuedContent:
     for message in reversed(messages):
         if message.get("role") == "user":
-            return _content_to_text(message.get("content"), bridge_dir)
-    return ""
+            return message.get("content")
+    return None
 
 
 def _content_to_text(content: EnqueuedContent, bridge_dir: Path) -> str:

@@ -7470,10 +7470,12 @@ async def test_relay_fences_cancelled_turn_and_resumes_on_next_turn(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fail_first_append", [False, True])
+@pytest.mark.parametrize("error_code", ["databricks_sign_in_pending", "unsupported_image_input"])
 async def test_relay_settles_queued_native_message_on_failed_turn(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     fail_first_append: bool,
+    error_code: str,
 ) -> None:
     """A failed native turn commits the queued web message ahead of its error item.
 
@@ -7531,7 +7533,7 @@ async def test_relay_settles_queued_native_message_on_failed_turn(
                         "id": "resp_fail",
                         "model": "codex",
                         "error": {
-                            "code": "databricks_sign_in_pending",
+                            "code": error_code,
                             "message": "Codex is waiting for a sign-in in the terminal.",
                             # The harness says the message never reached it.
                             "undelivered": True,
@@ -7545,7 +7547,7 @@ async def test_relay_settles_queued_native_message_on_failed_turn(
                     "status": "failed",
                     "response_id": "resp_fail",
                     "error": {
-                        "code": "databricks_sign_in_pending",
+                        "code": error_code,
                         "message": "Codex is waiting for a sign-in in the terminal.",
                     },
                 }
@@ -7595,7 +7597,14 @@ async def test_relay_settles_queued_native_message_on_failed_turn(
         # Both items share the failed turn's id so they group in one bubble.
         assert message.response_id == "resp_fail"
         assert error.response_id == "resp_fail"
-        assert error.data.code == "databricks_sign_in_pending"
+        assert error.data.code == error_code
+        original_stable_id = "7f3a9c1e5b2d4f6a8c0e1d2b3a4f5c6d"
+        if error_code == "unsupported_image_input":
+            assert original_stable_id not in store.persisted_by_stable_id
+            assert message.data.delivery_status == "undelivered"
+        else:
+            assert store.persisted_by_stable_id[original_stable_id] is message
+            assert message.data.delivery_status is None
         # Only the failed turn's own message settled; the next one stays queued.
         assert [e["pending_id"] for e in pending_inputs.snapshot_for(sid)] == [queued_next]
         consumed = [e for e in published if e.get("type") == "session.input.consumed"]
@@ -9501,5 +9510,478 @@ async def test_native_message_that_is_not_a_claude_btw_is_still_queued(
         assert result.pending_id is not None
         assert [entry["content"] for entry in pending_inputs.snapshot_for(sid)] == [content]
         assert client.post_json_calls[-1][0] == f"/v1/sessions/{sid}/events"
+    finally:
+        pending_inputs.reset_for_tests()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("live_status", "stable_id", "catalog_state"),
+    [
+        ("idle", None, "warm"),
+        ("running", "a" * 32, "warm"),
+        ("idle", "a" * 32, "cold"),
+        ("running", None, "stale"),
+    ],
+)
+async def test_native_image_preflight_retains_refused_input_without_starting_turn(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    live_status: str,
+    stable_id: str | None,
+    catalog_state: str,
+    tmp_path: Path,
+) -> None:
+    from omnigent.runtime import pending_inputs
+    from omnigent.server.routes._sessions import orchestration
+
+    sid = "64a784c3aa907d1774f44313546947c6"
+    store = app.state.test_conversation_store
+    conv = store.get_conversation(sid)
+    assert conv is not None
+    conv.reported_model = "managed.text-model"
+    conv.model_override = "managed.image-model"
+    models = [{"id": "managed.text-model", "input_modalities": ["text"]}]
+    fake_runner = _FakeRunnerClient(
+        payload={},
+        responses={
+            f"/v1/sessions/{sid}/model-options": (200, {"models": models}),
+        },
+    )
+    set_runner_router(_FakeRunnerRouter(fake_runner))  # type: ignore[arg-type]
+    set_runner_client(fake_runner)  # type: ignore[arg-type]
+    if catalog_state == "cold":
+        monkeypatch.delitem(orchestration._model_options_cache, sid, raising=False)
+    else:
+        monkeypatch.setitem(orchestration._model_options_cache, sid, models)
+    monkeypatch.setattr(
+        orchestration, "_model_options_stale", {sid} if catalog_state == "stale" else set()
+    )
+    monkeypatch.setitem(orchestration._session_status_cache, sid, live_status)
+    published: list[dict[str, Any]] = []
+    monkeypatch.setattr(session_stream, "publish", lambda _sid, event: published.append(event))
+    content = [
+        {"type": "input_image", "image_url": "data:image/png;base64,aW1hZ2U="},
+        {"type": "input_text", "text": "Keep the image and this text."},
+    ]
+    data: dict[str, Any] = {"role": "user", "content": content}
+    if stable_id is not None:
+        data["stable_id"] = stable_id
+    pending_inputs.reset_for_tests()
+    try:
+        response = await client.post(
+            f"/v1/sessions/{sid}/events", json={"type": "message", "data": data}
+        )
+        assert response.status_code == 400, response.text
+        assert response.json()["error"]["code"] == "invalid_input"
+        assert "Choose a model that supports images" in response.json()["error"]["message"]
+        assert not any(path.endswith("/events") for _method, path in fake_runner.calls)
+        if catalog_state != "warm":
+            assert ("GET", f"/v1/sessions/{sid}/model-options") in fake_runner.calls
+        assert orchestration._session_status_cache[sid] == live_status
+        assert not any(event.get("type") == "response.failed" for event in published)
+        assert not any(event.get("status") == "failed" for event in published)
+        assert pending_inputs.snapshot_for(sid) == []
+        assert [item.type for item in store.appended_items] == ["message", "error"]
+        message, error = store.appended_items
+        assert message.data.content == content
+        assert message.data.user_authored
+        assert message.data.delivery_status == "undelivered"
+        assert error.response_id == message.response_id
+        assert error.data.code == "unsupported_image_input"
+        assert error.data.title == "Image was not sent"
+        assert "Choose a model that supports images" in error.data.remediation
+        reloaded = await client.get(f"/v1/sessions/{sid}/items")
+        assert reloaded.status_code == 200, reloaded.text
+        rows = reloaded.json()["data"]
+        assert rows[0]["content"] == content
+        assert rows[0]["delivery_status"] == "undelivered"
+        assert rows[1]["code"] == "unsupported_image_input"
+        assert rows[1]["title"] == "Image was not sent"
+        from omnigent.harnesses.claude_native import main as claude_native
+
+        monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path / "data"))
+        records = claude_native._claude_transcript_records_from_session_items(
+            rows,
+            session_id=sid,
+            external_session_id="native-session",
+            cwd=tmp_path,
+            bridge_dir=tmp_path / "bridge",
+        )
+        assert records == []
+        assert not (tmp_path / "data").exists()
+    finally:
+        pending_inputs.reset_for_tests()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("modalities", [["text", "image"], None, ["unsupported"]])
+async def test_native_image_preflight_preserves_supported_and_unknown_model_behavior(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    modalities: list[str] | None,
+) -> None:
+    from omnigent.runtime import pending_inputs
+    from omnigent.server.routes._sessions import orchestration
+
+    sid = "64a784c3aa907d1774f44313546947c6"
+    store = app.state.test_conversation_store
+    conv = store.get_conversation(sid)
+    assert conv is not None
+    conv.reported_model = "managed.model"
+    fake_runner = _FakeRunnerClient(payload={})
+    set_runner_router(_FakeRunnerRouter(fake_runner))  # type: ignore[arg-type]
+    set_runner_client(fake_runner)  # type: ignore[arg-type]
+    row: dict[str, Any] = {"id": "managed.model"}
+    if modalities is not None:
+        row["input_modalities"] = modalities
+    monkeypatch.setitem(orchestration._model_options_cache, sid, [row])
+    monkeypatch.setattr(orchestration, "_model_options_stale", set())
+    pending_inputs.reset_for_tests()
+    try:
+        response = await client.post(
+            f"/v1/sessions/{sid}/events",
+            json={
+                "type": "message",
+                "data": {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_image", "image_url": "data:image/png;base64,aW1hZ2U="},
+                        {"type": "input_text", "text": "Image"},
+                    ],
+                },
+            },
+        )
+        assert response.status_code == 202, response.text
+        assert sum(path.endswith("/events") for _method, path in fake_runner.calls) == 1
+        assert not store.appended_items
+    finally:
+        pending_inputs.reset_for_tests()
+
+
+@pytest.mark.asyncio
+async def test_native_image_preflight_resend_is_delivered_once_and_resumes_accepted_input(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from omnigent.harnesses.claude_native import main as claude_native
+    from omnigent.runtime import pending_inputs
+    from omnigent.server.routes._sessions import orchestration
+
+    sid = "64a784c3aa907d1774f44313546947c6"
+    store = app.state.test_conversation_store
+    conv = store.get_conversation(sid)
+    assert conv is not None
+    conv.reported_model = "managed.text-model"
+    fake_runner = _FakeRunnerClient(payload={})
+    set_runner_router(_FakeRunnerRouter(fake_runner))  # type: ignore[arg-type]
+    set_runner_client(fake_runner)  # type: ignore[arg-type]
+    monkeypatch.setitem(
+        orchestration._model_options_cache,
+        sid,
+        [
+            {"id": "managed.text-model", "input_modalities": ["text"]},
+            {"id": "managed.image-model", "input_modalities": ["text", "image"]},
+        ],
+    )
+    monkeypatch.setattr(orchestration, "_model_options_stale", set())
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path / "data"))
+    content = [
+        {"type": "input_image", "image_url": "data:image/png;base64,aW1hZ2U="},
+        {"type": "input_text", "text": "Review this image."},
+    ]
+    body = {"type": "message", "data": {"role": "user", "content": content, "stable_id": "c" * 32}}
+    pending_inputs.reset_for_tests()
+    try:
+        first = await client.post(f"/v1/sessions/{sid}/events", json=body)
+        assert first.status_code == 400
+        assert not any(path.endswith("/events") for _method, path in fake_runner.calls)
+        conv.reported_model = "managed.image-model"
+        second = await client.post(f"/v1/sessions/{sid}/events", json=body)
+        assert second.status_code == 202, second.text
+        retry = await client.post(f"/v1/sessions/{sid}/events", json=body)
+        assert retry.status_code == 202, retry.text
+        assert sum(path.endswith("/events") for _method, path in fake_runner.calls) == 1
+        forwarded = [
+            data for path, data in fake_runner.post_json_calls if path.endswith("/events")
+        ]
+        assert forwarded[0]["stable_id"] == "c" * 32
+        assert pending_inputs.snapshot_for(sid)[0]["content"] == content
+        mirror = await client.post(
+            f"/v1/sessions/{sid}/events",
+            json={
+                "type": "external_conversation_item",
+                "data": {
+                    "item_type": "message",
+                    "item_data": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "[Attached: /private/image.png]\n\nReview this image.",
+                            }
+                        ],
+                    },
+                    "response_id": "accepted-response",
+                    "source_id": "native-accepted-image",
+                },
+            },
+        )
+        assert mirror.status_code == 202, mirror.text
+        assert pending_inputs.snapshot_for(sid) == []
+        reloaded = await client.get(f"/v1/sessions/{sid}/items")
+        assert reloaded.status_code == 200
+        rows = reloaded.json()["data"]
+        assert [row["type"] for row in rows] == ["message", "error", "message"]
+        assert rows[0]["content"] == content
+        assert rows[2]["content"][0] == content[0]
+        assert rows[2].get("delivery_status") is None
+        assert (
+            sum(
+                row["role"] == "user" and row.get("delivery_status") is None
+                for row in rows
+                if row["type"] == "message"
+            )
+            == 1
+        )
+        records = claude_native._claude_transcript_records_from_session_items(
+            rows,
+            session_id=sid,
+            external_session_id="native-session",
+            cwd=tmp_path,
+            bridge_dir=tmp_path / "bridge",
+        )
+        assert len(records) == 1
+        assert records[0]["type"] == "user"
+        assert "Review this image." in str(records[0]["message"])
+    finally:
+        pending_inputs.reset_for_tests()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("compatible_retry", [False, True])
+async def test_native_image_preflight_retention_failure_restores_input_and_allows_retry(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    compatible_retry: bool,
+) -> None:
+    from omnigent.runtime import pending_inputs
+    from omnigent.server.routes._sessions import orchestration
+
+    sid = "64a784c3aa907d1774f44313546947c6"
+    store = app.state.test_conversation_store
+    conv = store.get_conversation(sid)
+    assert conv is not None
+    conv.reported_model = "managed.text-model"
+    fake_runner = _FakeRunnerClient(payload={})
+    set_runner_router(_FakeRunnerRouter(fake_runner))  # type: ignore[arg-type]
+    set_runner_client(fake_runner)  # type: ignore[arg-type]
+    monkeypatch.setitem(
+        orchestration._model_options_cache,
+        sid,
+        [
+            {"id": "managed.text-model", "input_modalities": ["text"]},
+            {"id": "managed.image-model", "input_modalities": ["text", "image"]},
+        ],
+    )
+    monkeypatch.setattr(orchestration, "_model_options_stale", set())
+    original_append = store.append
+    failures_left = 1
+
+    def append(conversation_id: str, items: list[Any]) -> list[Any]:
+        nonlocal failures_left
+        if failures_left:
+            failures_left -= 1
+            raise RuntimeError("database unavailable")
+        return original_append(conversation_id, items)
+
+    monkeypatch.setattr(store, "append", append)
+    content = [
+        {"type": "input_image", "image_url": "data:image/png;base64,aW1hZ2U="},
+        {"type": "input_text", "text": "Keep this unsent message."},
+    ]
+    stable_id = "d" * 32
+    body = {
+        "type": "message",
+        "data": {"role": "user", "content": content, "stable_id": stable_id},
+    }
+    pending_inputs.reset_for_tests()
+    try:
+        first = await client.post(f"/v1/sessions/{sid}/events", json=body)
+        assert first.status_code == 500, first.text
+        assert "Could not retain the unsent message" in first.json()["error"]["message"]
+        assert not store.appended_items
+        assert pending_inputs.snapshot_for(sid)[0]["content"] == content
+        pending_id = pending_inputs.pending_id_for_stable_id(sid, stable_id)
+        assert pending_id is not None
+        assert (
+            pending_inputs.delivery_attributes_for(sid, pending_id)["last_delivery_stage"]
+            == "preflight_refused"
+        )
+        assert pending_inputs.resolve_oldest(sid) is None
+        assert (
+            pending_inputs.resolve_matching_text(sid, "Keep this unsent message.").matched is None
+        )
+        assert not any(path.endswith("/events") for _method, path in fake_runner.calls)
+        if compatible_retry:
+            conv.reported_model = "managed.image-model"
+        retry = await client.post(f"/v1/sessions/{sid}/events", json=body)
+        assert retry.status_code == (202 if compatible_retry else 400), retry.text
+        assert sum(path.endswith("/events") for _method, path in fake_runner.calls) == int(
+            compatible_retry
+        )
+        assert stable_id not in store.persisted_by_stable_id
+        if compatible_retry:
+            assert len(pending_inputs.snapshot_for(sid)) == 1
+            assert pending_inputs.snapshot_for(sid)[0]["content"] == content
+            assert pending_inputs.pending_id_for_stable_id(sid, stable_id) != pending_id
+        else:
+            assert pending_inputs.snapshot_for(sid) == []
+            assert [item.type for item in store.appended_items] == ["message", "error"]
+            assert store.appended_items[0].data.content == content
+            assert store.appended_items[0].data.delivery_status == "undelivered"
+    finally:
+        pending_inputs.reset_for_tests()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("routed_model", ["managed.text-model", "managed.image-model"])
+async def test_native_image_preflight_validates_routed_model_before_persisting_it(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    routed_model: str,
+) -> None:
+    from omnigent.runtime import pending_inputs
+    from omnigent.server import smart_routing
+    from omnigent.server.routes._sessions import orchestration
+
+    sid = "64a784c3aa907d1774f44313546947c6"
+    store = app.state.test_conversation_store
+    conv = store.get_conversation(sid)
+    assert conv is not None
+    conv.reported_model = (
+        "managed.image-model" if routed_model == "managed.text-model" else "managed.text-model"
+    )
+    conv.cost_control_mode_override = "on"
+    fake_runner = _FakeRunnerClient(payload={})
+    set_runner_router(_FakeRunnerRouter(fake_runner))  # type: ignore[arg-type]
+    set_runner_client(fake_runner)  # type: ignore[arg-type]
+    monkeypatch.setitem(
+        orchestration._model_options_cache,
+        sid,
+        [
+            {"id": "managed.text-model", "input_modalities": ["text"]},
+            {"id": "managed.image-model", "input_modalities": ["text", "image"]},
+        ],
+    )
+    monkeypatch.setattr(orchestration, "_model_options_stale", set())
+
+    async def route(*_args: object, **_kwargs: object) -> tuple[str, None, None]:
+        return routed_model, None, None
+
+    monkeypatch.setattr(smart_routing, "route_turn_or_decline", route)
+    updates: list[dict[str, Any]] = []
+    original_update = store.update_conversation
+
+    def update(conversation_id: str, **kwargs: Any) -> Any:
+        updates.append(kwargs)
+        return original_update(conversation_id, **kwargs)
+
+    monkeypatch.setattr(store, "update_conversation", update)
+    pending_inputs.reset_for_tests()
+    try:
+        response = await client.post(
+            f"/v1/sessions/{sid}/events",
+            json={
+                "type": "message",
+                "data": {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_image", "image_url": "data:image/png;base64,aW1hZ2U="},
+                        {"type": "input_text", "text": "Review this image."},
+                    ],
+                },
+            },
+        )
+        compatible = routed_model == "managed.image-model"
+        assert response.status_code == (202 if compatible else 400), response.text
+        assert sum(path.endswith("/events") for _method, path in fake_runner.calls) == int(
+            compatible
+        )
+        model_updates = [row["model_override"] for row in updates if "model_override" in row]
+        assert model_updates == ([routed_model] if compatible else [])
+    finally:
+        pending_inputs.reset_for_tests()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("block_type", ["input_image", "input_file"])
+async def test_native_image_preflight_refuses_uploaded_image_without_reading_bytes(
+    file_client: httpx.AsyncClient,
+    file_conv_store: _ConversationStore,
+    artifact_store: _InMemoryArtifactStore,
+    monkeypatch: pytest.MonkeyPatch,
+    block_type: str,
+) -> None:
+    from omnigent.runtime import pending_inputs
+    from omnigent.server.routes._sessions import orchestration
+
+    sid = "64a784c3aa907d1774f44313546947c6"
+    upload = await file_client.post(
+        f"/v1/sessions/{sid}/resources/files",
+        files={"file": ("photo.png", b"image-bytes", "image/png")},
+    )
+    assert upload.status_code == 201, upload.text
+    file_id = upload.json()["id"]
+    conv = file_conv_store.get_conversation(sid)
+    assert conv is not None
+    conv.reported_model = "managed.text-model"
+    fake_runner = _FakeRunnerClient(payload={})
+    set_runner_router(_FakeRunnerRouter(fake_runner))  # type: ignore[arg-type]
+    set_runner_client(fake_runner)  # type: ignore[arg-type]
+    monkeypatch.setitem(
+        orchestration._model_options_cache,
+        sid,
+        [
+            {"id": "managed.text-model", "input_modalities": ["text"]},
+        ],
+    )
+    monkeypatch.setattr(orchestration, "_model_options_stale", set())
+
+    def unexpected_read(*_args: object) -> bytes:
+        pytest.fail("image preflight read attachment bytes")
+
+    monkeypatch.setattr(artifact_store, "get", unexpected_read)
+    content = [
+        {"type": block_type, "file_id": file_id, "filename": "client-label.txt"},
+        {"type": "input_text", "text": "Keep this uploaded image."},
+    ]
+    pending_inputs.reset_for_tests()
+    try:
+        response = await file_client.post(
+            f"/v1/sessions/{sid}/events",
+            json={
+                "type": "message",
+                "data": {"role": "user", "content": content},
+            },
+        )
+        assert response.status_code == 400, response.text
+        assert response.json()["error"]["code"] == "invalid_input"
+        assert not any(path.endswith("/events") for _method, path in fake_runner.calls)
+        reloaded = await file_client.get(f"/v1/sessions/{sid}/items")
+        assert reloaded.status_code == 200, reloaded.text
+        message, error = [
+            row for row in reloaded.json()["data"] if row["type"] in {"message", "error"}
+        ]
+        assert message["content"] == content
+        assert message["delivery_status"] == "undelivered"
+        assert error["code"] == "unsupported_image_input"
+        assert pending_inputs.snapshot_for(sid) == []
     finally:
         pending_inputs.reset_for_tests()

@@ -1679,6 +1679,7 @@ def prepare_bridge_dir(
     launch_model: str | None = None,
     launch_env: Mapping[str, str] | None = None,
     picker_values: Sequence[str] | None = None,
+    model_options: Sequence[Mapping[str, object]] | None = None,
     sandbox: OSEnvSandboxSpec | None = None,
 ) -> Path:
     """
@@ -1706,6 +1707,7 @@ def prepare_bridge_dir(
         offers, e.g. ``["system.ai.glm-5-3"]``. Persisted for the same
         translation: a gateway-managed picker names rows by served id, and
         no pin spells those.
+    :param model_options: Launch-exact catalog rows with optional input metadata.
     :param sandbox: Resolved ``os_env.sandbox`` for this session (the
         agent spec's declared sandbox, already overridden by any
         ``enforce_sandbox``/``force_sandbox`` policy verdict). Persisted
@@ -1748,6 +1750,10 @@ def prepare_bridge_dir(
             payload["model_env"] = model_env
         if picker_values is not None:
             payload["model_picker_values"] = list(picker_values)
+        if model_options is not None:
+            from omnigent.models.input_modalities import model_modality_options
+
+            payload["model_input_options"] = model_modality_options(model_options)
         if sandbox is not None:
             payload["sandbox"] = _bridge_sandbox_payload(sandbox)
         _write_json_file(bridge_dir / _CONFIG_FILE, payload)
@@ -2078,6 +2084,7 @@ def record_model_vocabulary(
     launch_env: Mapping[str, str] | None,
     launch_model: str | None,
     picker_values: Sequence[str] | None = None,
+    model_options: Sequence[Mapping[str, object]] | None = None,
 ) -> None:
     """
     Persist the launch's model vocabulary after the bridge dir exists.
@@ -2096,6 +2103,7 @@ def record_model_vocabulary(
         ``None``.
     :param picker_values: The ``/model`` spellings this session's picker
         offers, or ``None`` when the catalog is unknown. An empty list clears it.
+    :param model_options: Launch-exact optional input metadata; an empty list clears it.
     :returns: None.
     """
     # Read-modify-write under the bridge dir's cross-process lock so a
@@ -2124,8 +2132,25 @@ def record_model_vocabulary(
         if launch_model and config.get("launch_model") != launch_model:
             config["launch_model"] = launch_model
             changed = True
+        if model_options is not None:
+            from omnigent.models.input_modalities import model_modality_options
+
+            options = model_modality_options(model_options)
+            if config.get("model_input_options") != options:
+                config["model_input_options"] = options
+                changed = True
         if changed:
             _write_json_file(bridge_dir / _CONFIG_FILE, config)
+
+
+def read_model_input_options(bridge_dir: Path) -> list[dict[str, object]]:
+    """Read this launch's optional exact-model input metadata."""
+    from omnigent.models.input_modalities import model_modality_options
+
+    config = _read_json_file(bridge_dir / _CONFIG_FILE)
+    return model_modality_options(
+        config.get("model_input_options") if isinstance(config, dict) else None
+    )
 
 
 @contextlib.contextmanager

@@ -69,6 +69,7 @@ from omnigent.host.frames import (
 )
 from omnigent.llms.context_window import resolve_effective_context_window
 from omnigent.mcp_selection import mcp_selection_revision
+from omnigent.models.input_modalities import IMAGE_INPUT_REFUSED_CODE
 from omnigent.models.model_metadata import concrete_reported_model
 from omnigent.native.failure_telemetry import FailureContext, normalize_failure_context
 from omnigent.native.input_diagnostics import (
@@ -3237,6 +3238,10 @@ async def _settle_undelivered_native_input(
     session_id: str,
     response_id: str | None,
     input_stable_id: str | None,
+    *,
+    pending_id: str | None = None,
+    refusal_error: ErrorData | None = None,
+    preserve_retry_identity: bool = False,
 ) -> None:
     """
     Commit a failed native turn's own queued web message as a user item.
@@ -3259,25 +3264,53 @@ async def _settle_undelivered_native_input(
     :param input_stable_id: The web stable id the runner stamped on the failed
         turn, passed only when the harness reported the failure as undelivered;
         ``None`` settles nothing.
+    :param pending_id: Exact queued input owned by a pre-delivery request refusal.
+    :param refusal_error: Durable request validation paired with the unsent input.
+    :param preserve_retry_identity: Keep a refused input's client id free for resend.
     """
-    if conversation_store is None or input_stable_id is None:
+    if conversation_store is None:
         return
-    pending_id = pending_inputs.pending_id_for_stable_id(session_id, input_stable_id)
+    if pending_id is None and input_stable_id is not None:
+        pending_id = pending_inputs.pending_id_for_stable_id(session_id, input_stable_id)
     if pending_id is None:
         return
     drained = pending_inputs.resolve(session_id, pending_id)
     if drained is None:
         return
+    turn_id = response_id or generate_task_id()
+    stable_id = drained.stable_id
+    if refusal_error is not None or preserve_retry_identity:
+        stable_id = uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"native-input-refused:{session_id}:{drained.stable_id or drained.pending_id}",
+        ).hex
     item = NewConversationItem(
         type="message",
-        response_id=response_id or generate_task_id(),
-        data=MessageData(role="user", content=drained.content, user_authored=True),
+        response_id=turn_id,
+        data=MessageData(
+            role="user",
+            content=drained.content,
+            user_authored=True,
+            delivery_status=(
+                "undelivered" if refusal_error is not None or preserve_retry_identity else None
+            ),
+        ),
         created_by=drained.created_by,
-        stable_id=drained.stable_id,
+        stable_id=stable_id,
     )
+    items = [item]
+    if refusal_error is not None:
+        items.append(
+            NewConversationItem(
+                type="error",
+                response_id=turn_id,
+                data=refusal_error,
+                stable_id=uuid.uuid5(uuid.NAMESPACE_URL, f"{stable_id}:validation").hex,
+            )
+        )
     try:
-        persisted = await asyncio.to_thread(conversation_store.append, session_id, [item])
-    except Exception:  # noqa: BLE001 — the error item that follows still records the failure
+        persisted = await asyncio.to_thread(conversation_store.append, session_id, items)
+    except Exception:  # noqa: BLE001 — restore the input when persistence fails
         _logger.exception(
             "Relay: could not persist the undelivered native message for session=%s",
             session_id,
@@ -6061,6 +6094,108 @@ async def _native_turn_catalog(
     return models or None
 
 
+async def _validate_native_image_input(
+    session_id: str,
+    conv: Conversation,
+    body: SessionEventInput,
+    runner_client: httpx.AsyncClient,
+    conversation_store: ConversationStore,
+    *,
+    pending_id: str | None,
+    model_override: str | None = None,
+    file_store: FileStore | None = None,
+) -> None:
+    """Refuse a known text-only model before a fresh image reaches its native turn."""
+    from omnigent.models.input_modalities import (
+        content_has_image,
+        image_model_refusal,
+        model_input_modalities,
+    )
+
+    if _native_pane_harness(conv) != "claude-native":
+        return
+    content = body.data.get("content")
+    has_image = content_has_image(content)
+    possible_files = (
+        [
+            block["file_id"]
+            for block in content
+            if isinstance(block, dict)
+            and block.get("type") == "input_file"
+            and isinstance(block.get("file_id"), str)
+        ]
+        if isinstance(content, list) and file_store is not None
+        else []
+    )
+    if not has_image and not possible_files:
+        return
+    await _refresh_stale_native_model_options(session_id, runner_client)
+    options = _model_options_cache.get(session_id)
+    if not options:
+        # The launch-exact listing may still be warming on a first message.
+        # Unknown metadata leaves delivery's existing behavior intact.
+        try:
+            await asyncio.wait_for(
+                _load_model_options(
+                    runner_client,
+                    session_id,
+                    f"/v1/sessions/{session_id}/model-options",
+                ),
+                timeout=_ROUTING_CATALOG_WAIT_S,
+            )
+        except (TimeoutError, httpx.HTTPError, ConnectionError):
+            return
+        options = _model_options_cache.get(session_id)
+    if not options:
+        return
+    effective_model = model_override or conv.reported_model or conv.model_override
+    if effective_model is None:
+        defaults = [option for option in options if option.get("isDefault") is True]
+        if len(defaults) == 1:
+            effective_model = defaults[0].get("model") or defaults[0].get("id")
+    if model_input_modalities(options, effective_model) != ("text",):
+        return
+    if not has_image and file_store is not None:
+        from omnigent.inner.native_attachments import requires_filesystem
+        from omnigent.runtime.content_resolver import _resolve_content_type
+
+        for file_id in possible_files:
+            try:
+                metadata = await asyncio.to_thread(file_store.get, file_id, session_id=session_id)
+            except Exception:  # noqa: BLE001 — unreadable optional metadata stays unknown
+                continue
+            if metadata is not None and not requires_filesystem(metadata.filename):
+                has_image = _resolve_content_type(
+                    metadata.content_type, metadata.filename
+                ).startswith("image/")
+                if has_image:
+                    break
+    if not has_image:
+        return
+    assert effective_model is not None
+    # No runner request has accepted this input. Keep its complete image/text
+    # body durably, without manufacturing a failed turn or changing a live one.
+    if pending_id is not None:
+        pending_inputs.mark_delivery_stage(session_id, pending_id, "preflight_refused")
+    await _settle_undelivered_native_input(
+        conversation_store,
+        session_id,
+        None,
+        None,
+        pending_id=pending_id,
+        refusal_error=ErrorData(
+            source="harness",
+            code=IMAGE_INPUT_REFUSED_CODE,
+            message=image_model_refusal(effective_model),
+            title="Image was not sent",
+            remediation="Choose a model that supports images, then resend the complete message.",
+        ),
+    )
+    if pending_id is not None and pending_inputs.delivery_attributes_for(session_id, pending_id):
+        raise OmnigentError("Could not retain the unsent message. Please retry.")
+    raise OmnigentError(image_model_refusal(effective_model), code=ErrorCode.INVALID_INPUT)
+
+
 def _routed_turn_model_spelling(
     session_id: str,
     conv: Conversation,
@@ -7410,6 +7545,16 @@ async def _dispatch_session_event_to_runner_impl(
             repeated_pending_id = pending_inputs.pending_id_for_stable_id(
                 session_id, web_stable_id
             )
+            if (
+                repeated_pending_id is not None
+                and pending_inputs.delivery_attributes_for(session_id, repeated_pending_id).get(
+                    "last_delivery_stage"
+                )
+                == "preflight_refused"
+            ):
+                # A retention failure left a copy that never reached the runner.
+                pending_inputs.resolve(session_id, repeated_pending_id)
+                repeated_pending_id = None
             if repeated_pending_id is not None:
                 # A client retry of a send the runner already received (its
                 # response was lost in flight). Forwarding it again would run
@@ -7546,6 +7691,16 @@ async def _dispatch_session_event_to_runner_impl(
                         else _native_routed_model
                     )
                 if _native_applied_model is not None:
+                    await _validate_native_image_input(
+                        session_id,
+                        conv,
+                        body,
+                        runner_client,
+                        conversation_store,
+                        pending_id=pending_id,
+                        model_override=_native_routed_model,
+                        file_store=file_store,
+                    )
                     try:
                         await asyncio.to_thread(
                             conversation_store.update_conversation,
@@ -7568,6 +7723,16 @@ async def _dispatch_session_event_to_runner_impl(
         # dropping the first message). model_override alone is applied only
         # at spawn, so the in-band switch is what makes routing take on an
         # already-running pane.
+        await _validate_native_image_input(
+            session_id,
+            conv,
+            body,
+            runner_client,
+            conversation_store,
+            pending_id=pending_id,
+            model_override=(_native_routed_model if _native_applied_model is not None else None),
+            file_store=file_store,
+        )
         forwarded = False
         try:
             if pending_id is not None:
@@ -8648,6 +8813,14 @@ async def _relay_runner_stream_once(
                         # harness, so the web message it carried was never
                         # mirrored back: commit it ahead of the error item.
                         raw_input_stable_id = event.get("input_stable_id")
+                        failed_response = event.get("response")
+                        raw_error = (
+                            failed_response.get("error")
+                            if isinstance(failed_response, dict)
+                            else None
+                        )
+                        if not isinstance(raw_error, dict):
+                            raw_error = event.get("error")
                         await _settle_undelivered_native_input(
                             conversation_store,
                             session_id,
@@ -8657,6 +8830,11 @@ async def _relay_runner_stream_once(
                                 if isinstance(raw_input_stable_id, str)
                                 and _failed_event_undelivered(event)
                                 else None
+                            ),
+                            preserve_retry_identity=(
+                                _failed_event_undelivered(event)
+                                and isinstance(raw_error, dict)
+                                and raw_error.get("code") == IMAGE_INPUT_REFUSED_CODE
                             ),
                         )
                     error_item = _error_item_from_sse(

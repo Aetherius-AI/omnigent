@@ -1015,3 +1015,55 @@ def test_claude_managed_model_picker_reads_replacement_options(tmp_path: Path) -
         ("gateway-opus", "Opus"),
         ("gateway-sonnet", "Sonnet"),
     )
+
+
+@pytest.mark.parametrize(
+    "high_payload,expected",
+    [
+        ({}, {}),
+        ({"env": {}}, {}),
+        ({"env": []}, {}),
+        ({"env": {"OMNIGENT_CLAUDE_MODEL_INPUT_MODALITIES": "malformed"}}, {}),
+        (
+            {"env": {"OMNIGENT_CLAUDE_MODEL_INPUT_MODALITIES": '{"model":["text"]}'}},
+            {"model": ("text",)},
+        ),
+    ],
+)
+def test_claude_managed_input_modalities_first_readable_tier_is_authoritative(
+    tmp_path: Path, high_payload: object, expected: dict[str, tuple[str, ...]]
+) -> None:
+    high = tmp_path / "high.json"
+    low = tmp_path / "low.json"
+    high.write_text(json.dumps(high_payload))
+    low.write_text(
+        json.dumps(
+            {"env": {"OMNIGENT_CLAUDE_MODEL_INPUT_MODALITIES": '{"model":["image","text"]}'}}
+        )
+    )
+    assert ambient.claude_managed_model_input_modalities((high, low)) == expected
+
+
+@pytest.mark.parametrize(
+    "high_content", [None, "invalid-json", "[]", "[" * 1100 + "0" + "]" * 1100]
+)
+def test_claude_managed_input_modalities_skips_unreadable_or_nonobject_tiers(
+    tmp_path: Path, high_content: str | None
+) -> None:
+    high = tmp_path / "high.json"
+    low = tmp_path / "low.json"
+    if high_content is not None:
+        high.write_text(high_content)
+    low.write_text(
+        json.dumps(
+            {"env": {"OMNIGENT_CLAUDE_MODEL_INPUT_MODALITIES": '{"model":["text"],"invalid":[]}'}}
+        )
+    )
+    assert ambient.claude_managed_model_input_modalities((high, low)) == {"model": ("text",)}
+
+
+def test_claude_managed_input_modalities_does_not_read_process_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OMNIGENT_CLAUDE_MODEL_INPUT_MODALITIES", '{"model":["image"]}')
+    assert ambient.claude_managed_model_input_modalities((tmp_path / "absent.json",)) == {}

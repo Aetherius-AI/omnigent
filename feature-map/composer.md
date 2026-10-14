@@ -36,7 +36,8 @@ and steers messages while the agent is busy.
 - `new-command`: `/new` opens a blank new-session composer in the same project;
   working-directory selection follows the project's defaults, not the old session.
 - `attachments`: attach button, paste, and drop onto the transcript; chips can
-  be removed. State: unsupported file type rejected without losing the message.
+  be removed. States: unsupported file type rejected without losing the message;
+  Claude models advertised as text-only refuse fresh images and retain the input.
 - `send-shortcut`: Enter or Mod+Enter, chosen in settings; only one gesture sends.
   Shift+Enter and Alt/Option+Enter insert a newline in both composers.
 - `new-session-hotkey`: ⌘/Ctrl+Alt+N opens and focuses the new-session composer.
@@ -225,6 +226,15 @@ Other connection providers alone do not enable the managed MCP picker.
   `tests/browser_ui/chat/test_composer_attachments.py::test_attach_supported_files_and_remove`,
   `tests/browser_ui/chat/test_composer_attachments.py::test_file_dropped_on_the_transcript_attaches`,
   `tests/browser_ui/chat/test_composer_attachments.py::test_landing_rejects_unsupported_type_and_keeps_message`
+  Claude's server validation and reload behavior are covered by
+  `tests/server/routes/test_session_resources.py::test_native_image_preflight_retains_refused_input_without_starting_turn`
+  and `tests/server/routes/test_session_resources.py::test_native_image_preflight_refuses_uploaded_image_without_reading_bytes`
+  (component tests; plain pytest). On a host with managed capability metadata,
+  manually send an image by attach, paste, and drop, both from a new session
+  and an existing session using a known text-only Claude model. Expect “Image
+  was not sent,” retained image and text after reload, and one delivery after
+  choosing a compatible model and explicitly resending. See
+  [the capability contract](../docs/claude-input-modalities.md).
 - **`send-shortcut`:**
   `tests/e2e_ui/chat/test_composer_submit_shortcut.py::test_submit_with_mod_enter_persists_and_is_the_only_send_gesture`,
   `tests/e2e_ui/chat/test_composer_submit_shortcut.py::test_alt_enter_inserts_newline_in_both_composers`

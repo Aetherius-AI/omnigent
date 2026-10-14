@@ -429,10 +429,10 @@ def delivery_attributes_for(conversation_id: str, pending_id: str) -> dict[str, 
 def mark_delivery_stage(
     conversation_id: str,
     pending_id: str,
-    stage: Literal["forward_requested", "forward_accepted"],
+    stage: Literal["preflight_refused", "forward_requested", "forward_accepted"],
 ) -> None:
     """Remember the latest server-observed stage while an input is still pending."""
-    if stage not in {"forward_requested", "forward_accepted"}:
+    if stage not in {"preflight_refused", "forward_requested", "forward_accepted"}:
         log_input_event(
             logging.getLogger(__name__),
             "native_input_invalid_delivery_stage",
@@ -509,7 +509,13 @@ def resolve_oldest(conversation_id: str, *, hold: bool = False) -> DrainedInput 
             return None
         # Insertion order = FIFO; the first live, unheld key is the oldest entry.
         oldest_id = next(
-            (pid for pid, entry in entries.items() if not entry.held and not entry.interrupted),
+            (
+                pid
+                for pid, entry in entries.items()
+                if not entry.held
+                and not entry.interrupted
+                and entry.last_delivery_stage != "preflight_refused"
+            ),
             None,
         )
         if oldest_id is None:
@@ -686,7 +692,11 @@ def resolve_matching_text(
         entries = _pending.get(conversation_id)
         if entries is None:
             return MatchedDrain(matched=None, skipped=[])
-        ordered = [(pid, entry) for pid, entry in entries.items() if not entry.held]
+        ordered = [
+            (pid, entry)
+            for pid, entry in entries.items()
+            if not entry.held and entry.last_delivery_stage != "preflight_refused"
+        ]
         texts = [
             _shell_command_text(entry.content)
             if shell_command

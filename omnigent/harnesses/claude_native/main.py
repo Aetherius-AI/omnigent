@@ -1301,7 +1301,10 @@ def claude_catalog_fingerprint(claude_config: ClaudeNativeUcodeConfig | None) ->
     """
     from omnigent.claude_launcher import resolve_claude_launch
     from omnigent.models.model_catalog_store import binary_identity, fingerprint_of
-    from omnigent.onboarding.ambient import claude_managed_model_picker
+    from omnigent.onboarding.ambient import (
+        claude_managed_model_input_modalities,
+        claude_managed_model_picker,
+    )
 
     command, _ = resolve_claude_launch("claude", [])
     ambient_gateway = None
@@ -1310,7 +1313,7 @@ def claude_catalog_fingerprint(claude_config: ClaudeNativeUcodeConfig | None) ->
         ambient_gateway = managed_base_url or os.environ.get(_UCODE_CLAUDE_BASE_URL_ENV)
     return fingerprint_of(
         "claude-native",
-        "control-picker-v3",
+        "control-picker-v4",
         sorted(claude_config.env.items()) if claude_config is not None else None,
         claude_config.api_key_helper if claude_config is not None else None,
         claude_config.model if claude_config is not None else None,
@@ -1318,6 +1321,7 @@ def claude_catalog_fingerprint(claude_config: ClaudeNativeUcodeConfig | None) ->
         binary_identity(command),
         ambient_gateway,
         claude_managed_model_picker() if claude_config is None else None,
+        claude_managed_model_input_modalities() if claude_config is None else None,
     )
 
 
@@ -1403,6 +1407,15 @@ async def claude_model_catalog(
                     "isDefault": True,
                 }
             )
+    if claude_config is None:
+        from omnigent.onboarding.ambient import claude_managed_model_input_modalities
+
+        metadata = claude_managed_model_input_modalities()
+        for row in out:
+            model = row.get("model") or row.get("id")
+            modalities = metadata.get(model) if isinstance(model, str) else None
+            if modalities is not None:
+                row["input_modalities"] = list(modalities)
     return out
 
 
@@ -5151,6 +5164,7 @@ async def _prepare_claude_terminal(
             launch_model=claude_config.model if claude_config else None,
             launch_env=claude_config.env if claude_config else None,
             picker_values=stored_claude_picker_values(claude_config),
+            model_options=stored_claude_catalog_rows(claude_config),
         )
         _mark_startup_step(
             startup_profiler,
@@ -5588,6 +5602,12 @@ def _claude_transcript_records_from_session_items(
     snapshot_item_ids: set[str] = set()
     previous_item: _JsonObject | None = None
     for index, item in enumerate(items):
+        if (
+            item.get("type") == "message"
+            and item.get("role") == "user"
+            and item.get("delivery_status") == "undelivered"
+        ):
+            continue
         item_id = item.get("id")
         if isinstance(item_id, str) and item_id in snapshot_item_ids:
             continue

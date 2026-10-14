@@ -7610,6 +7610,92 @@ def test_model_env_round_trips_the_launch_vocabulary(
     }
 
 
+def test_bridge_input_modalities_round_trip_refresh_and_clear(tmp_path: Path) -> None:
+    model = "system.ai.glm-5-3"
+    rows = [
+        {"id": "glm", "model": model, "input_modalities": ["text"], "displayName": "GLM"},
+        {"id": "unknown", "model": "unknown"},
+    ]
+    bridge_dir = prepare_bridge_dir("conv_modality", workspace=tmp_path, model_options=rows)
+    assert claude_native_bridge.read_model_input_options(bridge_dir) == [
+        {"id": "glm", "model": model, "input_modalities": ["text"]},
+        {"id": "unknown", "model": "unknown"},
+    ]
+    claude_native_bridge.record_model_vocabulary(bridge_dir, launch_env=None, launch_model=None)
+    assert claude_native_bridge.read_model_input_options(bridge_dir)
+    claude_native_bridge.record_model_vocabulary(
+        bridge_dir,
+        launch_env=None,
+        launch_model=None,
+        model_options=[{"id": "new-model", "input_modalities": ["text", "image"]}],
+    )
+    assert claude_native_bridge.read_model_input_options(bridge_dir) == [
+        {"id": "new-model", "input_modalities": ["image", "text"]}
+    ]
+    claude_native_bridge.record_model_vocabulary(
+        bridge_dir, launch_env=None, launch_model=None, model_options=[]
+    )
+    assert claude_native_bridge.read_model_input_options(bridge_dir) == []
+
+
+def test_repreparing_bridge_drops_previous_launch_input_modalities(tmp_path: Path) -> None:
+    bridge_dir = prepare_bridge_dir(
+        "conv_modality",
+        workspace=tmp_path,
+        model_options=[{"id": "old-provider-model", "input_modalities": ["text"]}],
+    )
+    prepare_bridge_dir("conv_modality", workspace=tmp_path)
+    assert claude_native_bridge.read_model_input_options(bridge_dir) == []
+
+
+@pytest.mark.parametrize(
+    "unknown_metadata",
+    [{}, {"input_modalities": None}, {"input_modalities": ["unsupported"]}],
+)
+def test_bridge_input_modalities_preserve_conflicting_unknown_rows(
+    tmp_path: Path, unknown_metadata: dict[str, object]
+) -> None:
+    from omnigent.models.input_modalities import model_input_modalities
+
+    rows = [
+        {"id": "alias", "model": "model", "input_modalities": ["text"]},
+        {"id": "alias", "model": "model", **unknown_metadata},
+    ]
+    bridge_dir = prepare_bridge_dir("conv_conflicting", workspace=tmp_path, model_options=rows)
+    options = claude_native_bridge.read_model_input_options(bridge_dir)
+    assert len(options) == 2
+    assert model_input_modalities(options, "alias") is None
+    assert model_input_modalities(options, "model") is None
+
+    claude_native_bridge.record_model_vocabulary(
+        bridge_dir,
+        launch_env=None,
+        launch_model=None,
+        model_options=[{"id": "alias", "model": "model", "input_modalities": ["text"]}],
+    )
+    assert model_input_modalities(
+        claude_native_bridge.read_model_input_options(bridge_dir), "model"
+    ) == ("text",)
+    claude_native_bridge.record_model_vocabulary(
+        bridge_dir, launch_env=None, launch_model=None, model_options=rows
+    )
+    assert (
+        model_input_modalities(claude_native_bridge.read_model_input_options(bridge_dir), "model")
+        is None
+    )
+
+
+@pytest.mark.parametrize("content", [None, "invalid-json", "[]", '{"model_input_options":{}}'])
+def test_bridge_input_modalities_missing_or_malformed_remain_unknown(
+    tmp_path: Path, content: str | None
+) -> None:
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    if content is not None:
+        (bridge_dir / "bridge.json").write_text(content)
+    assert claude_native_bridge.read_model_input_options(bridge_dir) == []
+
+
 def test_record_model_vocabulary_backfills_a_runner_prepared_bridge(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

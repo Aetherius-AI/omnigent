@@ -13,6 +13,68 @@ import pytest
 from omnigent.harnesses.claude_native import main as claude_native
 
 
+@pytest.mark.parametrize("configured", [False, True])
+async def test_managed_input_metadata_enriches_only_available_exact_models(
+    monkeypatch: pytest.MonkeyPatch, configured: bool
+) -> None:
+    model = "system.ai.glm-5-3"
+    _stub_picker(
+        monkeypatch,
+        [
+            {"value": "glm-alias", "resolvedModel": model, "displayName": "GLM"},
+            {"value": "unknown", "resolvedModel": "unknown", "displayName": "Unknown"},
+            {"value": "disabled", "resolvedModel": "disabled", "disabled": True},
+        ],
+        default=model,
+    )
+    metadata_reads: list[bool] = []
+
+    def managed_metadata() -> dict[str, tuple[str, ...]]:
+        metadata_reads.append(True)
+        return {
+            model: ("text",),
+            "glm-alias": ("image", "text"),
+            "disabled": ("image", "text"),
+            "off-picker": ("image", "text"),
+        }
+
+    monkeypatch.setattr(
+        "omnigent.onboarding.ambient.claude_managed_model_input_modalities", managed_metadata
+    )
+    config = claude_native.ClaudeNativeUcodeConfig(env={}, model=model) if configured else None
+    rows = await claude_native.claude_model_catalog(config)
+    assert rows is not None
+    assert [row["model"] for row in rows] == [model, "unknown"]
+    assert "input_modalities" not in rows[1]
+    if configured:
+        assert "input_modalities" not in rows[0]
+        assert metadata_reads == []
+    else:
+        assert rows[0]["input_modalities"] == ["text"]
+        assert metadata_reads == [True]
+
+
+def test_catalog_fingerprint_tracks_managed_metadata_without_crossing_provider_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = {"system.ai.glm-5-3": ("text",)}
+    monkeypatch.setattr(
+        "omnigent.onboarding.ambient.claude_managed_model_input_modalities", lambda: metadata
+    )
+    monkeypatch.setattr(
+        "omnigent.claude_launcher.resolve_claude_launch", lambda *args: ("claude", [])
+    )
+    monkeypatch.setattr(
+        "omnigent.models.model_catalog_store.binary_identity", lambda command: ("claude", 1, 2)
+    )
+    configured = claude_native.ClaudeNativeUcodeConfig(env={}, model="system.ai.glm-5-3")
+    ambient_before = claude_native.claude_catalog_fingerprint(None)
+    provider_before = claude_native.claude_catalog_fingerprint(configured)
+    metadata["system.ai.glm-5-3"] = ("image", "text")
+    assert claude_native.claude_catalog_fingerprint(None) != ambient_before
+    assert claude_native.claude_catalog_fingerprint(configured) == provider_before
+
+
 def _stub_picker(
     monkeypatch: pytest.MonkeyPatch,
     models: list[dict[str, Any]] | None,

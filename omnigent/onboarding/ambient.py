@@ -567,6 +567,29 @@ def claude_managed_model_picker(
     return ()
 
 
+def claude_managed_model_input_modalities(
+    paths: tuple[Path, ...] | None = None,
+) -> dict[str, tuple[str, ...]]:
+    """Read optional model metadata from the same managed-settings tier as the CLI."""
+    from omnigent.models.input_modalities import (
+        CLAUDE_MODEL_INPUT_MODALITIES_ENV,
+        parse_model_input_modalities,
+    )
+
+    for path in CLAUDE_CODE_MANAGED_SETTINGS_PATHS if paths is None else paths:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, RecursionError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        env = payload.get("env")
+        return parse_model_input_modalities(
+            env.get(CLAUDE_MODEL_INPUT_MODALITIES_ENV) if isinstance(env, dict) else None
+        )
+    return {}
+
+
 def claude_managed_gateway_display_name(paths: tuple[Path, ...] | None = None) -> str | None:
     """A human label for the managed-settings credential, when one is delivered.
 

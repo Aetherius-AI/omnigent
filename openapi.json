@@ -3712,6 +3712,19 @@
             "title": "Content",
             "type": "array"
           },
+          "delivery_status": {
+            "anyOf": [
+              {
+                "const": "undelivered",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`\"undelivered\"` preserves refused user input for display without replaying it into the native agent's context.",
+            "title": "Delivery Status"
+          },
           "interrupted": {
             "default": false,
             "description": "`True` when an assistant message is a durable partial response from an interrupted external-native turn, e.g. Codex `turn/completed` with status `\"interrupted\"`. Defaults to `False` and is omitted from serialized payloads in that case.",
