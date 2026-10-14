@@ -49,18 +49,21 @@ function textNode(text: string, marks: JSONContent["marks"]): JSONContent {
 
 /**
  * Inverse of `splitSoftBreaks`: turn every softBreak back into a "\n" text
- * node with the same marks and re-merge adjacent same-mark text, so the
+ * node with the same marks and merge it into its same-mark neighbours, so the
  * serialiser sees exactly the document it would have seen without the split
- * (a mark spanning a soft break stays one `**…**` run).
+ * (a mark spanning a soft break stays one `**…**` run). Text that was never
+ * split apart is left alone.
  */
 function joinSoftBreaks(node: JSONContent): JSONContent {
   if (node.content == null) return node;
   const content: JSONContent[] = [];
+  let afterBreak = false;
   for (const child of node.content) {
-    const next =
-      child.type === SOFT_BREAK_NODE ? textNode("\n", child.marks) : joinSoftBreaks(child);
+    const isBreak = child.type === SOFT_BREAK_NODE;
+    const next = isBreak ? textNode("\n", child.marks) : joinSoftBreaks(child);
     const prev = content[content.length - 1];
     if (
+      (isBreak || afterBreak) &&
       prev?.type === "text" &&
       next.type === "text" &&
       marksEqual(prev.marks ?? [], next.marks ?? [])
@@ -69,6 +72,7 @@ function joinSoftBreaks(node: JSONContent): JSONContent {
     } else {
       content.push(next);
     }
+    afterBreak = isBreak;
   }
   return { ...node, content };
 }
@@ -93,7 +97,8 @@ export function installMarkdownSerializerPatch(): void {
       content: JSONContent,
       ...rest: unknown[]
     ) {
-      return originalSerialize.call(this, joinSoftBreaks(content), ...rest);
+      const joined = hasSoftBreakNode(this) ? joinSoftBreaks(content) : content;
+      return originalSerialize.call(this, joined, ...rest);
     };
   }
   const proto = MarkdownManager.prototype as unknown as SerializerInternals;
@@ -151,22 +156,18 @@ function wrapLooseInlineRuns(node: JSONContent): JSONContent {
   };
 }
 
-/** Node types whose text keeps literal newlines; never split into soft breaks. */
-const VERBATIM_TEXT_TYPES = new Set(["codeBlock"]);
-
 /**
  * Replace each "\n" inside prose text with a softBreak node carrying the same
  * marks, so hard-wrapped source reflows to the editor width instead of
- * rendering one visual line per source line (see TipTapSoftBreak.ts).
+ * rendering one visual line per source line (see TipTapSoftBreak.ts). Nodes in
+ * `verbatim` (the manager's `code: true` types) keep their literal newlines.
  */
-function splitSoftBreaks(node: JSONContent): JSONContent {
-  if (node.content == null || (node.type != null && VERBATIM_TEXT_TYPES.has(node.type))) {
-    return node;
-  }
+function splitSoftBreaks(node: JSONContent, verbatim: ReadonlySet<string>): JSONContent {
+  if (node.content == null || (node.type != null && verbatim.has(node.type))) return node;
   const content: JSONContent[] = [];
   for (const child of node.content) {
     if (child.type !== "text" || !child.text?.includes("\n")) {
-      content.push(splitSoftBreaks(child));
+      content.push(splitSoftBreaks(child, verbatim));
       continue;
     }
     child.text.split("\n").forEach((part, i) => {
@@ -222,6 +223,8 @@ export function installMarkdownParserPatch(): void {
   const originalParse = proto.parse;
   proto.parse = function (this: MarkdownManager, markdown: string): JSONContent {
     const doc = wrapLooseInlineRuns(originalParse.call(this, markdown));
-    return hasSoftBreakNode(this) ? splitSoftBreaks(doc) : doc;
+    if (!hasSoftBreakNode(this)) return doc;
+    const { codeTypes } = this as unknown as SerializerInternals;
+    return splitSoftBreaks(doc, codeTypes ?? new Set(["codeBlock"]));
   };
 }

@@ -44,10 +44,8 @@ _MARKDOWN_CONTENT = f"""\
 A second paragraph that stays on one line.
 """
 
-# Horizontal extent of a paragraph's rendered text lines relative to its box.
-# Runs on the root element itself and reports an error instead of a number when
-# the paragraph is missing or has no laid-out text, so a hidden viewer instance
-# cannot produce a misleading result.
+# Measure how far a paragraph's text extends across its box; returns an error
+# object instead of numbers when the paragraph is missing or hidden.
 _PARAGRAPH_LAYOUT_JS = """
 (root, prefix) => {
   const paragraph = [...root.querySelectorAll("p")]
@@ -188,5 +186,5 @@ def test_edit_mode_reflows_hard_wrapped_paragraph_to_viewer_width(
     first_word = _INTRO_LINES[1].split(" ", 1)[0]
     editor.locator("h1").click()
     assert editor.evaluate(_SELECT_ACROSS_SOFT_BREAK_JS, [last_word, first_word]) == "ok"
-    page.keyboard.press("Control+c")
+    page.keyboard.press("ControlOrMeta+c")
     assert page.evaluate("window.__copiedText") == f"{last_word}\n{first_word}"

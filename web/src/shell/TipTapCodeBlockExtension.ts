@@ -17,18 +17,21 @@ export const CodeBlockWithLanguage = CodeBlock.extend({
 
   // A code block holds text only, so converting a hard-wrapped paragraph would
   // drop its softBreak leaves and join the lines; restore them as "\n" first.
+  // The transaction is dispatched even when a command fails, so check first.
   addCommands() {
     return {
       ...this.parent?.(),
       setCodeBlock:
         (attributes) =>
-        ({ tr, state, commands }) => {
+        ({ tr, state, commands, can }) => {
+          if (!can().setNode(this.name, attributes)) return false;
           softBreaksToNewlines(tr, state.selection.from, state.selection.to);
           return commands.setNode(this.name, attributes);
         },
       toggleCodeBlock:
         (attributes) =>
-        ({ tr, state, commands }) => {
+        ({ tr, state, commands, can }) => {
+          if (!can().toggleNode(this.name, "paragraph", attributes)) return false;
           softBreaksToNewlines(tr, state.selection.from, state.selection.to);
           return commands.toggleNode(this.name, "paragraph", attributes);
         },
