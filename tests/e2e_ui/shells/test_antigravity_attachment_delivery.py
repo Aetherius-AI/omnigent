@@ -21,7 +21,10 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import Browser, Page, expect
 
-from omnigent.harnesses.antigravity_native.bridge import _AGY_IDLE_MARKER
+from omnigent.harnesses.antigravity_native.bridge import (
+    _AGY_IDLE_MARKER,
+    _format_pane_debug_tail,
+)
 from tests.e2e_ui.fork_session.test_fork_preserves_image_attachment import _PNG_B64
 from tests.e2e_ui.shells.test_antigravity_tmux_recovery import (  # noqa: F401 (fixtures)
     AntigravitySession,
@@ -41,7 +44,9 @@ pytestmark = [
 _ASSISTANT = '[data-testid="message-bubble"][data-role="assistant"]'
 # Long and space-free so the materialized '[Attached: <path>]' line exceeds the
 # chat view's attached pane width and agy wraps it after the colon.
-_SCREENSHOT_NAME = "omnigent-web-composer-attachment-screenshot-1280x720.png"
+_SCREENSHOT_NAME = "omnigent-web-composer-image-attachment-screenshot-1280x720-chat-view.png"
+# Shortest possible composer row for that attachment; a narrower pane must wrap it.
+_WRAP_FORCING_WIDTH = len(f"> [Attached: /attachments/{'0' * 32}/{_SCREENSHOT_NAME}]")
 
 
 def _pane_text(session: AntigravitySession) -> str:
@@ -69,6 +74,11 @@ def _send_attachment_turn(
     expect(page.get_by_role("button", name=f"Remove {png.name}")).to_be_visible(timeout=10_000)
     composer.fill(f"Reply {token}. No tools.")
     pane_size = _pane_size(session)
+    width = int(pane_size.split("x")[0]) if "x" in pane_size else 0
+    assert 0 < width < _WRAP_FORCING_WIDTH, (
+        f"pane {pane_size} must be narrower than {_WRAP_FORCING_WIDTH} columns so agy wraps "
+        "the attachment line; otherwise this test passes without exercising the bug"
+    )
     page.get_by_role("button", name="Send", exact=True).click()
 
     error_pill = page.get_by_test_id("error-pill")
@@ -76,7 +86,10 @@ def _send_attachment_turn(
     # for a reply that raced the delivery error.
     reply = page.locator(_ASSISTANT).filter(has_text=token)
     expect(reply.or_(error_pill).first).to_be_visible(timeout=120_000)
-    pane = _pane_text(session)
+    if not error_pill.count():
+        expect(reply).to_have_count(1)
+        expect(page.get_by_test_id("working-indicator")).to_have_count(0, timeout=60_000)
+    # Re-check once the turn settled so a late error pill still gets the diagnostics.
     if error_pill.count():
         error_pill.first.click()
         message = page.get_by_test_id("error-message-content")
@@ -86,11 +99,9 @@ def _send_attachment_turn(
         page.screenshot(path=str(evidence / "delivery-error.png"))
         pytest.fail(
             f"the attachment turn was not delivered to agy (pane {pane_size}):\n"
-            f"{message.inner_text()}\n--- agy pane ---\n{pane}"
+            f"{message.inner_text()}\n--- agy pane (redacted tail) ---\n"
+            f"{_format_pane_debug_tail(_pane_text(session))}"
         )
-    expect(reply).to_have_count(1)
-    expect(page.get_by_test_id("working-indicator")).to_have_count(0, timeout=60_000)
-    expect(error_pill).to_have_count(0)
     # Hold the delivered reply so a recording of the journey shows it.
     page.wait_for_timeout(1_500)
 

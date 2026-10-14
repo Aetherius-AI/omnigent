@@ -1084,9 +1084,7 @@ _AGY_ACTIVE_MARKER = "esc to cancel"
 # so both the render gate and the submit verification key off the placeholder
 # appearing and then leaving the composer.
 _AGY_PASTE_PLACEHOLDER_RE = re.compile(r"\[Pasted text #\d+[^\]]*\]")
-# Used only by _draft_in_input_region's wrap-tolerant fallback match, to collapse
-# an app-level word-wrap break (and whatever it did to the space at that break)
-# out of both sides of the comparison.
+# Collapses agy's word-wrap breaks out of both sides of the fallback needle match.
 _WHITESPACE_RE = re.compile(r"\s+")
 # agy's notice when a turn is submitted before its startup account-eligibility
 # check settles. The composer footer mounts ~3s after launch but eligibility is
@@ -1409,19 +1407,9 @@ def _draft_in_input_region(pane: str, needle: str, baseline_region: str) -> bool
     pre-paste baseline counts as present — so short messages are still render- and
     submit-verified by composer state instead of being submitted blind.
 
-    A message under the ~13-line collapse threshold (see
-    :data:`_AGY_PASTE_PLACEHOLDER_RE`) "renders verbatim" — but verbatim means agy
-    word-wraps it at ITS OWN idea of the pane width, on its own account (this is
-    an Ink-style renderer emitting real lines, not the terminal reflowing after
-    the fact — ``tmux capture-pane -J`` cannot undo it). A first-line needle that
-    lands on a wrap boundary then matches no single rendered line, even though the
-    text is plainly visible split across two. Observed reliably at the 80x24 a
-    fresh terminal is deliberately spawned at (see ``inner/terminal.py``) — before
-    a client ever attaches to grow it — with an attachment reference as the first
-    line (``"[Attached: <long path>]"`` has one internal space, so agy's wrap
-    point is essentially fixed and the needle is cut in the same place every
-    time). The per-line checks below usually suffice and are tried first; the
-    whitespace-collapsed join is the fallback for exactly this wrap case.
+    agy word-wraps a long first line (such as ``[Attached: <path>]``) at its own
+    pane width, so the needle can span composer rows: the per-row checks run
+    first and a whitespace-collapsed comparison of the joined rows is the fallback.
     """
     region = _agy_input_region(pane)
     if region == baseline_region:
@@ -1441,16 +1429,12 @@ def _draft_in_input_region(pane: str, needle: str, baseline_region: str) -> bool
         for line in candidates
     ):
         return True
-    # Wrap-tolerant fallback: join every candidate line and strip all whitespace
-    # from both sides before matching, so a wrap that splits the needle across
-    # lines — or drops/shifts the space at the break, as a word-wrap typically
-    # does — can no longer defeat the check. False positives are not a
-    # correctness risk: this only gates when Enter is pressed, never what is
-    # sent (the full `content` already left via the paste buffer either way),
-    # and `_submit_needle` already requires >= 4 non-space characters.
+    # A wrapped first line splits the needle across rows, so compare the joined
+    # rows with whitespace collapsed. This only adds "draft present" verdicts (it
+    # can delay a submit, never confirm one) and rejects a short collapsed needle.
     haystack = _WHITESPACE_RE.sub("", "".join(candidates))
     flat_needle = _WHITESPACE_RE.sub("", normalized_needle)
-    return bool(flat_needle) and flat_needle in haystack
+    return len(flat_needle) >= 4 and flat_needle in haystack
 
 
 def _agy_draft_candidate_lines(region: str) -> list[str]:

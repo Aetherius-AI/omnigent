@@ -1115,6 +1115,25 @@ def test_draft_in_input_region_wrap_fallback_does_not_match_unrelated_text() -> 
     baseline = _mod._agy_input_region(f"{sep}\n>\n{sep}")
     pane = f"{sep}\n> some completely unrelated leftover draft\n{sep}"
     assert not _mod._draft_in_input_region(pane, "[Attached: /data/.omnige", baseline)
+    # Collapsing whitespace must not shrink a needle into an incidental substring.
+    assert _mod._submit_needle("a  b") == "a  b"
+    assert not _mod._draft_in_input_region(f"{sep}\n> tab\n{sep}", "a  b", baseline)
+
+
+def test_draft_in_input_region_wrap_fallback_ignores_stale_same_root_attachment() -> None:
+    """A stale draft naming another attachment under the same root is caught by the baseline.
+
+    Every attachment under one root shares the 24-char needle, so the collision is
+    tolerable only because an unchanged composer never counts as the new draft.
+    """
+    sep = "─" * 80
+    stale = (
+        f"{sep}\n> [Attached:\n"
+        "  /data/.omnigent/attachments/0ce1f3f0edd2e9ab677e00516b0d1ffe/other.png]\n"
+        f"{sep}"
+    )
+    baseline = _mod._agy_input_region(stale)
+    assert not _mod._draft_in_input_region(stale, "[Attached: /data/.omnige", baseline)
 
 
 def test_inject_user_message_via_tui_submits_a_collapsed_paste(
