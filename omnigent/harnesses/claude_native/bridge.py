@@ -400,14 +400,10 @@ _OVERLAY_SURFACE = "an overlay"
 # lacks it is not such a surface — e.g. a launch wrapper's output before
 # Claude Code has drawn its input box — and an Escape cannot clear it.
 _ESCAPE_DISMISS_HINT = re.compile(r"\bEsc to \w", re.IGNORECASE)
-# The paired choices of a dialog whose Escape quits Claude Code: the workspace
-# trust dialog's "No, exit" beside "Yes, I trust this folder". Read per option row
-# by :func:`_exit_option_in_dialog`, never against the whole capture.
+# Workspace-trust choices whose Escape quits Claude Code (see _exit_option_in_dialog).
 _EXIT_OPTION_ROW = re.compile(r"\s*(?:❯\s*)?(?:\d+\.\s*)?No, exit\s*")
 _AFFIRMATIVE_OPTION_ROW = re.compile(r"\s*(?:❯\s*)?(?:\d+\.\s*)?Yes\b.*")
-# Rows directly above a dialog's footer that can hold its quitting pair: the two
-# options plus one hint row between them and the footer. Anything higher belongs
-# to a different dialog or to the transcript.
+# Two option rows plus one optional hint row before the footer.
 _DIALOG_OPTION_ROWS = 3
 # Titles of the confirmation dialog Claude Code pops when a switch invalidates
 # the prompt cache — one component, titled for what is being switched. It only
@@ -4703,9 +4699,9 @@ def inject_slash_command(
     if reclaim.surface is not None:
         # No readiness gate follows; a blind Enter would answer the dialog. Read
         # the frame the reclaim classified, not a fresh one that may have torn.
-        headline = _terminal_dialog_headline(reclaim.pane)
-        if headline is not None and _exit_option_in_dialog(reclaim.pane):
+        if _exit_option_in_dialog(reclaim.pane):
             # Dismissing this dialog quits Claude Code, so name it instead.
+            headline = _terminal_dialog_headline(reclaim.pane) or "a startup prompt"
             raise ClaudeTerminalDialog(
                 f"Claude Code is waiting for an answer in its terminal ({headline}), so the "
                 "command was not sent. Open the terminal, answer the prompt, then retry."

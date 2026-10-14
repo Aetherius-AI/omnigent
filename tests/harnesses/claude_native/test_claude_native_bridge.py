@@ -11343,6 +11343,33 @@ def test_inject_slash_command_names_the_quitting_dialog_from_the_frame_it_read(
     )
 
 
+def test_inject_slash_command_refuses_a_numbered_quitting_dialog_without_a_headline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A quitting dialog is refused by its option pair even without a selector row.
+
+    The headline reader needs the ❯ selector, but the pair alone decides that
+    Escape would quit Claude Code, so the refusal still asks for an answer
+    rather than advising a dismissal.
+    """
+    bridge_dir = _picker_bridge_dir(tmp_path)
+    numbered = _TRUST_DIALOG_PANE.replace(" ❯ No, exit", " 1. No, exit").replace(
+        "   Yes, I trust this folder", " 2. Yes, I trust this folder"
+    )
+    assert claude_native_bridge._terminal_dialog_headline(numbered) is None
+    sends = _fake_tmux(monkeypatch, [numbered])
+
+    with pytest.raises(claude_native_bridge.ClaudeTerminalDialog) as excinfo:
+        claude_native_bridge.inject_slash_command(bridge_dir, command="/compact")
+
+    assert sends == []
+    assert str(excinfo.value).startswith(
+        "Claude Code is waiting for an answer in its terminal (a startup prompt)"
+    )
+
+
 def test_wait_for_claude_prompt_ready_fails_fast_on_a_terminal_dialog(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
