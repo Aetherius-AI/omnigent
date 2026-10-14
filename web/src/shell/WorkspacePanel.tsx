@@ -932,6 +932,13 @@ function WorkspacePanelImpl({
           if (sendFailed) throw new Error("side chat send failed");
         });
     }
+    // A pending tab persists across reloads and may outlive the restriction that
+    // now disables the entry points; reject locally with the known reason and keep
+    // the draft rather than letting its first send reach the server-side fork.
+    if (sideChatUnavailable !== undefined) {
+      toast.error(sideChatUnavailable);
+      return Promise.reject(new Error(sideChatUnavailable));
+    }
     return createSideChat(conversationId).then(
       ({ childSessionId }) => {
         // We have the child id here, so rekey THIS pending tab directly — no

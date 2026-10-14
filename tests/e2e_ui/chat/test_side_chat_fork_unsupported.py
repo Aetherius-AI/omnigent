@@ -102,10 +102,8 @@ def test_side_chat_entry_points_follow_fork_restriction(
     close_menu(page)
 
     composer.fill("/")
-    # /help is an ungated built-in, so the open command menu always lists it; assert it
-    # first to prove the menu rendered. /side is dropped from the command map entirely
-    # when side chat is unavailable (not filtered by the query), so its absence from that
-    # same menu is a withheld suggestion rather than a slow render.
+    # /help is ungated, so it proves the command menu opened; /side is dropped from
+    # the command map when side chat is unavailable, so its absence is a withheld entry.
     expect(page.get_by_test_id("slash-menu-item-help")).to_be_visible()
     expect(page.get_by_test_id("slash-menu-item-side")).to_have_count(0)
 

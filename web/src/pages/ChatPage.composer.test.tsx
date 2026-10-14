@@ -4476,9 +4476,12 @@ describe("Composer /side on a fork-restricted session", () => {
     expect(ta).toHaveValue("/side resize the panel");
   });
 
-  it("withholds the /side slash suggestion", () => {
+  it("withholds the /side slash suggestion while listing other commands", () => {
     render(<Composer {...composerProps({ onSendSlashCommand: vi.fn() })} />);
-    fireEvent.change(textarea(), { target: { value: "/side" } });
+    fireEvent.change(textarea(), { target: { value: "/" } });
+    // Positive control: the menu opened and still lists ungated built-ins, so a
+    // missing /side is a withheld entry rather than an unopened or empty menu.
+    expect(screen.getByTestId("slash-menu-item-help")).toBeVisible();
     expect(screen.queryByTestId("slash-menu-item-side")).toBeNull();
   });
 });

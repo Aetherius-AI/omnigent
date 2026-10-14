@@ -55,7 +55,8 @@ export function ComposerAddMenu({
   /** Start a new side chat (a fork of this conversation opened as a rail tab).
    *  Absent when the session can't host one. */
   onSideChat?: () => void;
-  /** Keeps the side-chat entry listed but disabled, explaining why it can't start now. */
+  /** Keeps the side-chat entry listed but disabled, explaining why it can't start
+   *  now. Only takes effect when `onSideChat` is also passed. */
   sideChatDisabledReason?: string;
   projects?: readonly { name: string }[];
   onProjectSelect?: (name: string) => void;
