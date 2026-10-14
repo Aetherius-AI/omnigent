@@ -584,6 +584,8 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
                 "before app-server start"
             )
             self.started = True
+            # Startup may replace the reserved port before consumers attach.
+            self.listen_url = "ws://127.0.0.1:45678"
 
         async def close(self) -> None:
             """:returns: None."""

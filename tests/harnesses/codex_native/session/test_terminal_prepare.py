@@ -157,12 +157,15 @@ async def test_prepare_codex_terminal_resumes_with_launch_provider(
     overrides: list[str],
     expected_provider: str | None,
 ) -> None:
-    """CLI cold resume applies the configured provider before attaching the TUI."""
+    """CLI cold resume keeps its provider and the endpoint startup actually selected."""
     from unittest.mock import AsyncMock
 
     from omnigent.harnesses.codex_native.app_server import NativeCodexLaunch
 
-    server = SimpleNamespace(start=AsyncMock(), close=AsyncMock(), codex_cli_version=(0, 156, 1))
+    async def start() -> None:
+        server.listen_url = "ws://127.0.0.1:45678"
+
+    server = SimpleNamespace(start=start, close=AsyncMock(), codex_cli_version=(0, 156, 1))
     preload = AsyncMock(side_effect=RuntimeError("stop after resume"))
     monkeypatch.setattr("omnigent.harnesses.codex_native.bridge._BRIDGE_ROOT", tmp_path)
     monkeypatch.setattr(
@@ -198,6 +201,7 @@ async def test_prepare_codex_terminal_resumes_with_launch_provider(
         )
 
     preload.assert_awaited_once()
+    assert preload.await_args.args[0] == server.listen_url
     assert preload.await_args.kwargs["model_provider"] == expected_provider
     server.close.assert_awaited_once()
 

@@ -1284,6 +1284,8 @@ async def _prepare_codex_terminal(
         launched_terminal: LaunchedCodexTerminal | None = None
         try:
             await app_server.start()
+            assert app_server.listen_url is not None
+            codex_ws_url = app_server.listen_url
             if thread_id is None:
                 event_client = client_for_transport(
                     codex_ws_url,

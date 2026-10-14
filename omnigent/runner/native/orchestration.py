@@ -5369,6 +5369,8 @@ async def _auto_create_codex_terminal(
     )
     app_server.listen_url = codex_ws_url
     await app_server.start()
+    assert app_server.listen_url is not None
+    codex_ws_url = app_server.listen_url
     _AUTO_CODEX_APP_SERVERS[session_id] = app_server
 
     event_client = CodexAppServerClient(

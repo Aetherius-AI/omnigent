@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import Mock
 
+import psutil
 import pytest
 
 from omnigent.errors import ErrorCode, OmnigentError
@@ -454,3 +457,247 @@ async def test_start_reports_a_removed_workspace_before_any_setup(
     assert failure.value.code == ErrorCode.WORKSPACE_MISSING
     assert server.proc is None
     assert not codex_home.exists()
+
+
+@pytest.fixture
+def loopback_startup_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[CodexNativeAppServer, Path]:
+    """Real process/JSON-RPC peer with caller-controlled startup failures."""
+    source_home = tmp_path / "source-codex-home"
+    source_home.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(source_home))
+    monkeypatch.setenv("OMNIGENT_CODEX_NATIVE_STATE_DIR", str(tmp_path / "state"))
+    attempts = tmp_path / "attempts.jsonl"
+    executable = tmp_path / "synthetic-codex"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import asyncio, json, os, sys, tomllib\n"
+        "from pathlib import Path\n"
+        "from urllib.parse import urlsplit\n"
+        "from websockets.asyncio.server import serve\n"
+        "if '--version' in sys.argv:\n"
+        "    print('codex-cli 0.128.0'); sys.exit(0)\n"
+        "url = sys.argv[sys.argv.index('--listen') + 1]\n"
+        "config = tomllib.loads((Path(os.environ['CODEX_HOME']) / 'config.toml').read_text())\n"
+        "provider = config.get('model_providers', {}).get('synthetic', {}).get('base_url')\n"
+        f"with Path({str(attempts)!r}).open('a') as output:\n"
+        "    output.write(json.dumps({'pid': os.getpid(), 'url': url, "
+        "'provider': provider}) + '\\n')\n"
+        "failure = os.environ.get('SYNTHETIC_CODEX_START_ERROR')\n"
+        "if failure:\n"
+        "    print(failure, file=sys.stderr); sys.exit(1)\n"
+        "if os.environ.get('SYNTHETIC_CODEX_PAUSE_RETRY') and "
+        f"len(Path({str(attempts)!r}).read_text().splitlines()) > 1:\n"
+        "    asyncio.run(asyncio.sleep(3600)); sys.exit(0)\n"
+        "async def handler(ws):\n"
+        "    async for raw in ws:\n"
+        "        request = json.loads(raw)\n"
+        "        if 'id' in request:\n"
+        "            await ws.send(json.dumps({'id': request['id'], 'result': {}}))\n"
+        "async def main():\n"
+        "    try:\n"
+        "        async with serve(handler, '127.0.0.1', urlsplit(url).port):\n"
+        "            await asyncio.Future()\n"
+        "    except OSError as error:\n"
+        "        print(f'Error: Address in use (os error {error.errno})', file=sys.stderr)\n"
+        "        sys.exit(1)\n"
+        "asyncio.run(main())\n"
+    )
+    executable.chmod(0o755)
+
+    server = _test_app_server(tmp_path, tmp_path / "codex-home", tmp_path / "bridge", workspace)
+    server.codex_path = str(executable)
+    server.reconcile_process_registry = False
+    return server, attempts
+
+
+async def _reject_loopback_connection(
+    _reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+) -> None:
+    writer.close()
+    await writer.wait_closed()
+
+
+@pytest.mark.posix_only
+async def test_start_recovers_from_an_occupied_loopback_port(
+    loopback_startup_server: tuple[CodexNativeAppServer, Path],
+) -> None:
+    """A real competing listener survives while the owned child moves ports."""
+    server, attempts = loopback_startup_server
+    foreign = await asyncio.start_server(_reject_loopback_connection, "127.0.0.1", 0)
+    occupied_port = foreign.sockets[0].getsockname()[1]
+    server.listen_url = f"ws://127.0.0.1:{occupied_port}"
+    server.config_overrides = [
+        'model_provider="synthetic"',
+        'model_providers.synthetic={name="Synthetic", '
+        'base_url="https://provider.example.test/v1", wire_api="responses"}',
+    ]
+    process = None
+    try:
+        await server.start()
+        process = server.proc
+        assert process is not None and process.returncode is None
+        spawned = [json.loads(line) for line in attempts.read_text().splitlines()]
+        assert len(spawned) == 2
+        assert all(child["provider"] == "https://provider.example.test/v1" for child in spawned)
+        assert spawned[0]["url"] == f"ws://127.0.0.1:{occupied_port}"
+        assert spawned[1]["url"] == server.listen_url != spawned[0]["url"]
+        assert not psutil.pid_exists(spawned[0]["pid"])
+        assert foreign.is_serving()
+        reader, writer = await asyncio.open_connection("127.0.0.1", occupied_port)
+        writer.close()
+        await writer.wait_closed()
+        assert await reader.read() == b""
+    finally:
+        await server.close()
+        foreign.close()
+        await foreign.wait_closed()
+    assert process is not None and process.returncode is not None
+    assert server.proc is None and server.stderr_task is None
+
+
+@pytest.mark.posix_only
+async def test_start_stops_after_one_fresh_port_retry(
+    loopback_startup_server: tuple[CodexNativeAppServer, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second actual collision remains a failure without touching either owner."""
+    server, attempts = loopback_startup_server
+    first = await asyncio.start_server(_reject_loopback_connection, "127.0.0.1", 0)
+    second = await asyncio.start_server(_reject_loopback_connection, "127.0.0.1", 0)
+    server.listen_url = f"ws://127.0.0.1:{first.sockets[0].getsockname()[1]}"
+    monkeypatch.setattr(
+        "omnigent.harnesses.codex_native.app_server._allocate_loopback_port",
+        lambda: second.sockets[0].getsockname()[1],
+    )
+    try:
+        with pytest.raises(RuntimeError, match=r"Address .*in use") as failure:
+            await server.start()
+        assert type(failure.value) is RuntimeError
+        assert len(attempts.read_text().splitlines()) == 2
+        assert first.is_serving() and second.is_serving()
+        assert server.proc is None and server.stderr_task is None
+    finally:
+        await server.close()
+        first.close()
+        second.close()
+        await first.wait_closed()
+        await second.wait_closed()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["Error: Model provider `missing` not found", "Error: Address in use in config"],
+)
+@pytest.mark.posix_only
+async def test_start_preserves_other_owned_child_failures(
+    loopback_startup_server: tuple[CodexNativeAppServer, Path], failure: str
+) -> None:
+    server, attempts = loopback_startup_server
+    foreign = await asyncio.start_server(_reject_loopback_connection, "127.0.0.1", 0)
+    endpoint = f"ws://127.0.0.1:{foreign.sockets[0].getsockname()[1]}"
+    server.listen_url = endpoint
+    server.env["SYNTHETIC_CODEX_START_ERROR"] = failure
+    try:
+        with pytest.raises(RuntimeError, match=failure.replace("`", "[`]")):
+            await server.start()
+        assert len(attempts.read_text().splitlines()) == 1
+        assert server.listen_url == endpoint
+        assert server.proc is None and server.stderr_task is None
+        assert foreign.is_serving()
+    finally:
+        await server.close()
+        foreign.close()
+        await foreign.wait_closed()
+
+
+@pytest.mark.posix_only
+async def test_cancellation_during_fresh_port_retry_reaps_the_owned_child(
+    loopback_startup_server: tuple[CodexNativeAppServer, Path],
+) -> None:
+    server, attempts = loopback_startup_server
+    foreign = await asyncio.start_server(_reject_loopback_connection, "127.0.0.1", 0)
+    server.listen_url = f"ws://127.0.0.1:{foreign.sockets[0].getsockname()[1]}"
+    server.env["SYNTHETIC_CODEX_PAUSE_RETRY"] = "1"
+    task = asyncio.create_task(server.start())
+    try:
+        async with asyncio.timeout(10):
+            while not attempts.exists() or len(attempts.read_text().splitlines()) < 2:
+                await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        spawned = [json.loads(line) for line in attempts.read_text().splitlines()]
+        assert len(spawned) == 2
+        assert all(not psutil.pid_exists(child["pid"]) for child in spawned)
+        assert server.proc is None and server.stderr_task is None
+        assert foreign.is_serving()
+    finally:
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        await server.close()
+        foreign.close()
+        await foreign.wait_closed()
+
+
+@pytest.mark.parametrize("cleanup_cost", [0.0, 20.0])
+async def test_collision_retry_shares_the_original_readiness_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cleanup_cost: float
+) -> None:
+    """A collision after 45 seconds leaves 15 seconds, rather than a new minute."""
+    from types import SimpleNamespace
+
+    from omnigent.harnesses.codex_native import app_server as module
+
+    loop = asyncio.get_running_loop()
+    real_time = loop.time
+    offset = 0.0
+    monkeypatch.setattr(loop, "time", lambda: real_time() + offset)
+    attempts = 0
+    connects = 0
+
+    async def capture_exit() -> None:
+        nonlocal offset
+        offset += 45.0
+
+    class RefusingClient:
+        async def connect(self) -> None:
+            nonlocal offset, connects
+            connects += 1
+            offset += 20.0
+            raise OSError("listener not ready")
+
+        async def close(self) -> None:
+            pass
+
+    async def spawn(self: CodexNativeAppServer) -> None:
+        nonlocal attempts
+        attempts += 1
+        self.proc = SimpleNamespace(returncode=1 if attempts == 1 else None)
+        self.recent_stderr = ["Error: Address in use (os error 98)"] if attempts == 1 else []
+        self.stderr_task = asyncio.create_task(capture_exit()) if attempts == 1 else None
+
+    original_close = module.CodexNativeAppServer.close
+
+    async def close(self: CodexNativeAppServer) -> None:
+        nonlocal offset
+        await original_close(self)
+        offset += cleanup_cost
+
+    monkeypatch.setattr(module.CodexNativeAppServer, "close", close)
+    monkeypatch.setattr(module.CodexNativeAppServer, "_spawn_process", spawn)
+    monkeypatch.setattr(module, "CodexAppServerClient", lambda *args, **kwargs: RefusingClient())
+    server = _test_app_server(tmp_path, tmp_path / "home", tmp_path / "bridge", tmp_path)
+    server.listen_url = "ws://127.0.0.1:45001"
+    expected_error = r"Address .*in use" if cleanup_cost else "Timed out after 60s"
+    with pytest.raises(RuntimeError, match=expected_error):
+        await server._start_owned_listener()
+    assert attempts == (1 if cleanup_cost else 2)
+    assert connects == (0 if cleanup_cost else 1)
+    if cleanup_cost:
+        assert server.proc is None

@@ -133,6 +133,7 @@ _CONNECT_TIMEOUT_SECONDS = 10.0
 # 10 s to start codex. Match the 60 s native-terminal readiness budget; a child
 # that exits early still fails at once.
 _APP_SERVER_READY_TIMEOUT_SECONDS = 60.0
+_APP_SERVER_BIND_ATTEMPTS = 2
 # Initialization and model/list can stall after the listener becomes ready.
 _MODEL_CATALOG_PROBE_TIMEOUT_SECONDS = 30.0
 _MODEL_DISCOVERY_CACHE_SECONDS = 300.0
@@ -1905,6 +1906,10 @@ def _build_native_codex_app_server_argv(
     return argv
 
 
+class _CodexAppServerBindCollision(RuntimeError):
+    """The owned child exited before readiness because its loopback port was taken."""
+
+
 @dataclass
 class CodexNativeAppServer:
     """
@@ -2010,14 +2015,19 @@ class CodexNativeAppServer:
     certificate_failure: CertificateFailure | None = field(default=None, init=False)
     _stderr_diagnostics: CodexStderrDiagnostics | None = field(default=None, init=False)
 
+    _readiness_deadline: float | None = field(default=None, init=False, repr=False)
+
     async def start(self) -> None:
         """
         Start the Codex app-server and wait for the socket.
+
+        A proven loopback bind collision may replace ``listen_url`` before returning.
 
         :returns: None.
         :raises OmnigentError: ``WORKSPACE_MISSING`` when the session's working
             directory was removed, e.g. a deleted git worktree.
         """
+        self._readiness_deadline = None
         if not self.cwd.is_dir():
             # Spawning in it would only fail with a bare ENOENT; name the cause.
             raise OmnigentError(
@@ -2178,67 +2188,11 @@ class CodexNativeAppServer:
                 )
         if self.reconcile_process_registry:
             reconcile_codex_native_process_registry()
-        resolved_listen = self.listen_url or f"unix://{self.socket_path}"
-        effort_catalog_transport = self.listen_url or str(self.socket_path)
-        _effort_catalog_cache.pop(effort_catalog_transport, None)
-        _effort_catalog_misses.pop(effort_catalog_transport, None)
-        self.process_registry_tag = f"codex-native-{uuid.uuid4().hex}"
-        tagged_argv0 = (
-            f"{Path(self.codex_path).name} "
-            f"{codex_native_session_tag_cmdline_arg(self.process_registry_tag)}"
-        )
-        argv = _build_native_codex_app_server_argv(
-            tagged_argv0=tagged_argv0,
-            listen_url=resolved_listen,
-            config_overrides=self.config_overrides,
-        )
-        proc_env = codex_app_server_diagnostic_env(
-            {**self.env, "CODEX_HOME": str(self.codex_home)}
-        )
-        self.process_owner_lock = acquire_codex_native_process_owner_lock()
+        # Hooks are prepared before spawn and trusted before any turn can run.
+        # Failed or cancelled startup closes only its owned child.
         try:
-            self.proc = await asyncio.create_subprocess_exec(
-                *argv,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.PIPE,
-                env=proc_env,
-                cwd=str(self.cwd),
-                executable=self.codex_path,
-                **_proc.spawn_kwargs(),
-            )
-        except BaseException:
-            if self.process_owner_lock is not None:
-                self.process_owner_lock.close()
-                self.process_owner_lock = None
-            raise
-        if self.process_owner_lock is not None:
-            register_codex_native_process(
-                pid=self.proc.pid,
-                pgid=_process_group_id(self.proc),
-                session_tag=self.process_registry_tag,
-                owner_lock_path=self.process_owner_lock.path,
-            )
-        self.recent_stderr = []
-        self.stderr_task = asyncio.create_task(
-            self._stderr_loop(),
-            name="codex-native-app-server-stderr",
-        )
-        # Ordering invariant: hooks.json is written before the spawn above,
-        # and the trust handshake must complete before the first turn — codex
-        # resolves trust when it dispatches a hook, so trust landing after the
-        # spawn is fine, but a turn started before it runs unhooked. The
-        # handshake cannot precede the spawn (``hooks/list`` is an app-server
-        # RPC), so callers must not launch the TUI or dispatch a turn until
-        # ``start()`` returns.
-        # Readiness failure (the app-server never came up) is fatal and
-        # tears down the subprocess so it is not orphaned. Policy-hook
-        # trust, by contrast, is best-effort: a trust failure degrades the
-        # session to "no enforcement" with a surfaced reason rather than
-        # blocking session creation (fail-open). ``BaseException`` on the
-        # outer guard so a cancellation mid-trust still tears down.
-        try:
-            startup_client = await self._wait_until_ready()
+            startup_client = await self._start_owned_listener()
+            effort_catalog_transport = self.listen_url or str(self.socket_path)
             try:
                 # Standalone CLI launches may have no shared catalog snapshot.
                 # Correct their copied defaults before a TUI creates its thread.
@@ -2296,6 +2250,80 @@ class CodexNativeAppServer:
         except BaseException:
             await self.close()
             raise
+
+    async def _start_owned_listener(self) -> CodexAppServerClient:
+        """Retry one proven bind collision within the original readiness deadline."""
+        attempt = 0
+        while True:
+            await self._spawn_process()
+            try:
+                return await self._wait_until_ready()
+            except _CodexAppServerBindCollision as exc:
+                deadline = self._readiness_deadline
+                if (
+                    attempt + 1 >= _APP_SERVER_BIND_ATTEMPTS
+                    or deadline is None
+                    or asyncio.get_running_loop().time() >= deadline
+                ):
+                    raise RuntimeError(str(exc)) from None
+                await self.close()
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise RuntimeError(str(exc)) from None
+                attempt += 1
+                self.listen_url = f"ws://127.0.0.1:{_allocate_loopback_port()}"
+                _logger.info(
+                    "Codex app-server loopback port was taken; retrying startup on a new port",
+                    extra={"session_id": self.session_id},
+                )
+
+    async def _spawn_process(self) -> None:
+        """Spawn one owned child at the current listener address."""
+        resolved_listen = self.listen_url or f"unix://{self.socket_path}"
+        effort_catalog_transport = self.listen_url or str(self.socket_path)
+        _effort_catalog_cache.pop(effort_catalog_transport, None)
+        _effort_catalog_misses.pop(effort_catalog_transport, None)
+        self.process_registry_tag = f"codex-native-{uuid.uuid4().hex}"
+        tagged_argv0 = (
+            f"{Path(self.codex_path).name} "
+            f"{codex_native_session_tag_cmdline_arg(self.process_registry_tag)}"
+        )
+        argv = _build_native_codex_app_server_argv(
+            tagged_argv0=tagged_argv0,
+            listen_url=resolved_listen,
+            config_overrides=self.config_overrides,
+        )
+        proc_env = codex_app_server_diagnostic_env(
+            {**self.env, "CODEX_HOME": str(self.codex_home)}
+        )
+        self.process_owner_lock = acquire_codex_native_process_owner_lock()
+        try:
+            self.proc = await asyncio.create_subprocess_exec(
+                *argv,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+                env=proc_env,
+                cwd=str(self.cwd),
+                executable=self.codex_path,
+                **_proc.spawn_kwargs(),
+            )
+        except BaseException:
+            if self.process_owner_lock is not None:
+                self.process_owner_lock.close()
+                self.process_owner_lock = None
+            raise
+        if self.process_owner_lock is not None:
+            register_codex_native_process(
+                pid=self.proc.pid,
+                pgid=_process_group_id(self.proc),
+                session_tag=self.process_registry_tag,
+                owner_lock_path=self.process_owner_lock.path,
+            )
+        self.recent_stderr = []
+        self.stderr_task = asyncio.create_task(
+            self._stderr_loop(),
+            name="codex-native-app-server-stderr",
+        )
 
     async def _trust_policy_hooks(self, *, client: CodexAppServerClient | None = None) -> None:
         """
@@ -2490,12 +2518,32 @@ class CodexNativeAppServer:
         :raises RuntimeError: If the app-server exits or never
             becomes ready within ``_APP_SERVER_READY_TIMEOUT_SECONDS``.
         """
-        deadline = asyncio.get_running_loop().time() + _APP_SERVER_READY_TIMEOUT_SECONDS
+        loop = asyncio.get_running_loop()
+        if self._readiness_deadline is None:
+            self._readiness_deadline = loop.time() + _APP_SERVER_READY_TIMEOUT_SECONDS
+        deadline = self._readiness_deadline
         last_error: Exception | None = None
-        while asyncio.get_running_loop().time() < deadline:
+        while loop.time() < deadline:
             if self.proc is not None and self.proc.returncode is not None:
+                if self.stderr_task is not None:
+                    await asyncio.wait(
+                        {self.stderr_task}, timeout=max(0.0, min(0.1, deadline - loop.time()))
+                    )
                 detail = " | ".join((self.recent_stderr or [])[-5:])
-                raise RuntimeError(f"Codex app-server exited early: {detail}")
+                message = f"Codex app-server exited early: {detail}"
+                if (
+                    self.listen_url is not None
+                    and self.listen_url.startswith("ws://127.0.0.1:")
+                    and any(
+                        re.fullmatch(
+                            r"Error: Address (?:already )?in use \(os error (?:48|98|10048)\)",
+                            line.strip(),
+                        )
+                        for line in self.recent_stderr or []
+                    )
+                ):
+                    raise _CodexAppServerBindCollision(message)
+                raise RuntimeError(message)
             client: CodexAppServerClient | None = None
             try:
                 if self.listen_url and self.listen_url.startswith("ws://"):
