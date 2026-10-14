@@ -647,8 +647,7 @@ async def test_readiness_failure_records_app_server_state_before_cleanup(
     snapshots = [
         record.attributes
         for record in caplog.records
-        if isinstance(getattr(record, "attributes", None), dict)
-        and "app_server_pid" in record.attributes
+        if getattr(record, "event_name", None) == "codex_app_server_start_failed"
     ]
     assert snapshots, "readiness failure logged no app-server state before cleanup"
     [snapshot] = snapshots
