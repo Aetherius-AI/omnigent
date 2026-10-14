@@ -85,6 +85,8 @@ from omnigent.util.reasoning_effort import (
 
 _logger = logging.getLogger(__name__)
 
+_MAX_NATIVE_INPUT_TEXT_CHARS = 1_048_576
+
 _LEGACY_BRIDGE_STATE_WAIT_SECONDS = 60.0
 _BRIDGE_STATE_FAST_POLL_SECONDS = 0.05
 _BRIDGE_STATE_FAST_POLL_WINDOW_SECONDS = 2.0
@@ -690,6 +692,14 @@ class CodexNativeExecutor(Executor):
         if not input_items:
             yield ExecutorError(message="Codex native turn had no user input to send")
             return
+        if _input_text_chars(input_items) > _MAX_NATIVE_INPUT_TEXT_CHARS:
+            yield ExecutorError(
+                message="The message exceeds Codex's text-input limit of 1,048,576 characters.",
+                title="Message too large for Codex",
+                remediation="Attach the text as a file, or shorten it, then retry.",
+                undelivered=True,
+            )
+            return
         # Wait for the bridge to boot OUTSIDE the injection lock. Poll quickly
         # during the expected startup window, then back off. Once state exists,
         # the decision/RPC/write below runs under the lock — re-reading state
@@ -982,6 +992,7 @@ def _content_to_input_items(content: object, bridge_dir: Path) -> list[dict[str,
         return [{"type": "text", "text": content}] if content else []
     if isinstance(content, list):
         items: list[dict[str, object]] = []
+        text_files: list[tuple[int, Mapping[str, object]]] = []
         for raw_block in content:
             block = _json_object(raw_block)
             if block is None:
@@ -1013,11 +1024,26 @@ def _content_to_input_items(content: object, bridge_dir: Path) -> list[dict[str,
             elif block_type == "input_file":
                 file_item = _file_block_to_input_item(block, bridge_dir)
                 if file_item is not None:
+                    text_files.append((len(items), block))
                     items.append(file_item)
+        size = _input_text_chars(items)
+        for index, block in sorted(
+            text_files, key=lambda pair: len(str(items[pair[0]].get("text", ""))), reverse=True
+        ):
+            if size <= _MAX_NATIVE_INPUT_TEXT_CHARS:
+                break
+            reference = attachment_reference_line(block, bridge_dir)
+            size += len(reference) - len(str(items[index].get("text", "")))
+            items[index] = {"type": "text", "text": reference}
         return items
     if content is None:
         return []
     return [{"type": "text", "text": json.dumps(content, ensure_ascii=True)}]
+
+
+def _input_text_chars(items: list[dict[str, object]]) -> int:
+    """Count the native request's aggregate text, excluding image paths."""
+    return sum(len(text) for item in items if isinstance(text := item.get("text"), str))
 
 
 def _requires_filesystem(block: Mapping[str, object]) -> bool:
