@@ -392,14 +392,9 @@ def get_runner_id() -> str | None:
 
 
 def set_remote_routing_available(available: bool) -> None:
-    """Record whether the attached server can route, for a runner process.
+    """Record whether this runner's attached server can route.
 
-    The routing backends live in the server process, so a runner has none of
-    its own; without this it reads routing as unavailable and hides
-    ``sys_advise_models`` even from sessions whose server routes. Runners set
-    it from the session-init envelope.
-
-    :param available: What the server reported.
+    :param available: The server's answer from the session-init envelope.
     """
     # Caps are built lazily, so this may be the process's first caps access.
     get_caps().remote_routing_available = available

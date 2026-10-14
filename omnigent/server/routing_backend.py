@@ -293,13 +293,16 @@ def routing_available(caps: Any) -> bool:  # type: ignore[explicit-any]  # Runti
     that let a deployment configuring only ``routing_backends`` report routing
     off while the server routed anyway.
 
-    A runner reports what its SERVER can answer with: the backends live in the
-    server process, so a runner attached to a remote one carries none itself
-    and reads its availability off ``remote_routing_available`` instead.
+    A runner holds no backends of its own (they live in the server process), so
+    it reads its server's answer off ``remote_routing_available`` instead. A
+    process that owns backends keeps its own answer, so a stale remote flag
+    cannot mask a router that has stopped answering.
 
     :param caps: A ``RuntimeCaps`` (or structural equivalent), or ``None``.
     :returns: ``True`` when at least one router can answer.
     """
-    if caps is not None and getattr(caps, "remote_routing_available", False):
+    if any(routing_sources(caps).values()):
         return True
-    return any(routing_sources(caps).values())
+    return backends_from_caps(caps) == RoutingBackends() and bool(
+        getattr(caps, "remote_routing_available", False)
+    )

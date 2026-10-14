@@ -237,6 +237,7 @@ def test_routing_available_from_a_legacy_single_client() -> None:
             routing_client=None,
             policy_llm_connection_factory=None,
         ),
+        SimpleNamespace(remote_routing_available=False),
     ],
 )
 def test_routing_unavailable_when_nothing_is_configured(caps: Any) -> None:
@@ -410,7 +411,13 @@ def test_routing_available_trusts_a_runners_remote_server() -> None:
     assert routing_available(SimpleNamespace(remote_routing_available=True)) is True
 
 
-def test_routing_available_stays_off_without_backends_or_a_remote_router() -> None:
-    assert routing_available(SimpleNamespace(remote_routing_available=False)) is False
-    assert routing_available(SimpleNamespace()) is False
-    assert routing_available(None) is False
+def test_routing_available_keeps_its_own_answer_when_it_owns_backends() -> None:
+    """A process with backends answers for itself; a remote flag cannot mask a tripped router."""
+    caps = _caps(
+        routing_backends=RoutingBackends(external=_Tripped()),
+        routing_client=None,
+        policy_llm_connection_factory=None,
+        remote_routing_available=True,
+    )
+    assert routing_sources(caps) == {"external": False, "oss": False}
+    assert routing_available(caps) is False
