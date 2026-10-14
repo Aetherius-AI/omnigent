@@ -656,9 +656,11 @@ def test_configured_harness_map_all_true_with_clis(
 
 
 def test_configured_harness_map_enumerates_configured_acp_slugs(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """Expose every configured ACP slug, including collision suffixes, as launchable."""
+    _no_clis_installed(monkeypatch)
     (tmp_path / "config.yaml").write_text(
         yaml.safe_dump(
             {
@@ -681,9 +683,11 @@ def test_configured_harness_map_enumerates_configured_acp_slugs(
 
 
 def test_configured_harness_map_omits_acp_slugs_for_malformed_config(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """A malformed ACP block yields no slug keys and reads the generic acp as unready."""
+    _no_clis_installed(monkeypatch)
     (tmp_path / "config.yaml").write_text(
         yaml.safe_dump(
             {"acp": {"agents": [{"name": "X", "command": "y", "omnigent_mcp": "nope"}]}}

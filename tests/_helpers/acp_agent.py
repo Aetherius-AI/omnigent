@@ -41,4 +41,5 @@ for line in sys.stdin:
         }})
 """.replace('"__REPLY__"', json.dumps(FAKE_ACP_AGENT_REPLY))
 
-assert "__REPLY__" not in FAKE_ACP_AGENT_SCRIPT, "reply placeholder was not substituted"
+if "__REPLY__" in FAKE_ACP_AGENT_SCRIPT:
+    raise ValueError("reply placeholder was not substituted")
