@@ -9,6 +9,7 @@ endpoint (no agent run).
 
 from __future__ import annotations
 
+import contextlib
 import re
 import textwrap
 from collections.abc import Iterator
@@ -32,10 +33,11 @@ _INTRO_TEXT = (
 )
 
 # Prose hard-wrapped at 80 columns, the way editors and agents commonly write it.
+_INTRO_LINES = textwrap.fill(_INTRO_TEXT, width=80).split("\n")
 _MARKDOWN_CONTENT = f"""\
 # Wrapped Design Document
 
-{textwrap.fill(_INTRO_TEXT, width=80)}
+{chr(10).join(_INTRO_LINES)}
 
 ## Goals
 
@@ -43,11 +45,14 @@ A second paragraph that stays on one line.
 """
 
 # Horizontal extent of a paragraph's rendered text lines relative to its box.
+# Runs on the root element itself and reports an error instead of a number when
+# the paragraph is missing or has no laid-out text, so a hidden viewer instance
+# cannot produce a misleading result.
 _PARAGRAPH_LAYOUT_JS = """
-([rootSelector, prefix]) => {
-  const root = document.querySelector(rootSelector);
+(root, prefix) => {
   const paragraph = [...root.querySelectorAll("p")]
     .find((el) => el.textContent.startsWith(prefix));
+  if (!paragraph) return {error: `no paragraph starting with ${JSON.stringify(prefix)}`};
   const range = document.createRange();
   range.selectNodeContents(paragraph);
   const lines = [];
@@ -61,6 +66,7 @@ _PARAGRAPH_LAYOUT_JS = """
       lines.push({top: rect.top, left: rect.left, right: rect.right});
     }
   }
+  if (lines.length === 0) return {error: "paragraph has no laid-out text (hidden?)"};
   const box = paragraph.getBoundingClientRect();
   const textRight = Math.max(...lines.map((l) => l.right));
   return {
@@ -90,11 +96,43 @@ def seeded_wrapped_markdown_session(
         yield (base_url, session_id)
     finally:
         # Deleting the session keeps its workspace files, so remove the seed here.
-        httpx.delete(file_url, timeout=10.0)
+        # A cleanup failure must not mask the test's own result.
+        with contextlib.suppress(httpx.HTTPError):
+            httpx.delete(file_url, timeout=10.0)
 
 
-def _paragraph_layout(page: Page, root_selector: str) -> dict[str, float]:
-    return page.evaluate(_PARAGRAPH_LAYOUT_JS, [root_selector, "This design note"])
+# Select from the last word before the first soft break to the first word after it
+# and record what the next copy puts on the clipboard as plain text.
+_SELECT_ACROSS_SOFT_BREAK_JS = """
+(editor, [lastWord, firstWord]) => {
+  const span = editor.querySelector("span.md-soft-break");
+  const before = span && span.previousSibling;
+  const after = span && span.nextSibling;
+  const isText = (node) => node && node.nodeType === Node.TEXT_NODE;
+  if (!isText(before) || !isText(after)) {
+    return "first soft break is not between two text nodes";
+  }
+  const range = document.createRange();
+  range.setStart(before, before.textContent.length - lastWord.length);
+  range.setEnd(after, firstWord.length);
+  const selection = window.getSelection();
+  selection.removeAllRanges();
+  selection.addRange(range);
+  window.__copiedText = null;
+  document.addEventListener(
+    "copy",
+    (event) => { window.__copiedText = event.clipboardData.getData("text/plain"); },
+    { once: true },
+  );
+  return "ok";
+}
+"""
+
+
+def _paragraph_layout(file_viewer: Locator, root_selector: str) -> dict[str, float]:
+    layout = file_viewer.locator(root_selector).evaluate(_PARAGRAPH_LAYOUT_JS, "This design note")
+    assert "error" not in layout, layout["error"]
+    return layout
 
 
 def _open_file_full_screen(page: Page, base_url: str, session_id: str) -> Locator:
@@ -129,14 +167,14 @@ def test_edit_mode_reflows_hard_wrapped_paragraph_to_viewer_width(
         has_text="This design note"
     )
     expect(preview_paragraph).to_be_visible(timeout=10_000)
-    preview = _paragraph_layout(page, ".markdown-preview")
+    preview = _paragraph_layout(file_viewer, ".markdown-preview")
     assert preview["fillRatio"] > 0.9, preview
 
     switch_markdown_view_mode(page, file_viewer, "Edit")
     editor = file_viewer.locator("[contenteditable='true']")
     expect(editor).to_be_visible(timeout=10_000)
     expect(editor.locator("h1")).to_contain_text("Wrapped Design Document")
-    edit = _paragraph_layout(page, ".ProseMirror")
+    edit = _paragraph_layout(file_viewer, ".ProseMirror")
     # Wide enough that eighty-column lines cannot fill the box by themselves.
     assert edit["paragraphWidth"] > 900, edit
     assert edit["fillRatio"] > 0.9, (
@@ -144,3 +182,11 @@ def test_edit_mode_reflows_hard_wrapped_paragraph_to_viewer_width(
         f"paragraph box over {edit['lineCount']} lines; Preview spans "
         f"{preview['fillRatio']:.0%} over {preview['lineCount']} lines"
     )
+
+    # Copying across the reflowed line still yields the source newline, not a space.
+    last_word = _INTRO_LINES[0].rsplit(" ", 1)[1]
+    first_word = _INTRO_LINES[1].split(" ", 1)[0]
+    editor.locator("h1").click()
+    assert editor.evaluate(_SELECT_ACROSS_SOFT_BREAK_JS, [last_word, first_word]) == "ok"
+    page.keyboard.press("Control+c")
+    assert page.evaluate("window.__copiedText") == f"{last_word}\n{first_word}"

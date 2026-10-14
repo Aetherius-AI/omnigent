@@ -1,13 +1,7 @@
-// Soft line break: a newline inside a paragraph's markdown source.
-//
-// @tiptap/markdown keeps those newlines as "\n" in text nodes, and ProseMirror's
-// editing CSS (white-space: break-spaces) draws each one as a line break, so a
-// hard-wrapped paragraph reads as short lines in Edit mode while Preview reflows
-// it. This node stands in for each soft break and renders as one collapsible
-// space; the patches in tiptapMarkdownPatches.ts split "\n" into these nodes
-// after parsing and join them back before serialising, so saves stay
-// byte-identical. textBetween()/getText()/clipboard still read "\n", so comment
-// anchors keep matching the raw file.
+// Soft line break: a newline inside a paragraph's markdown source. @tiptap/markdown
+// keeps it as "\n" and ProseMirror's break-spaces CSS draws it as a line break, so
+// hard-wrapped prose read as short lines in Edit mode. This inline leaf renders as a
+// collapsible space instead; tiptapMarkdownPatches.ts splits and rejoins it around "\n".
 
 import { Node, mergeAttributes } from "@tiptap/core";
 
@@ -36,7 +30,8 @@ export const SoftBreak = Node.create({
   },
 
   // ProseMirror's textBetween() reads leaf text from the schema spec, which
-  // TipTap's renderText does not populate.
+  // TipTap's renderText does not populate; both keep comment anchors and copied
+  // text byte-identical to the raw file.
   extendNodeSchema(extension) {
     return extension.name === SOFT_BREAK_NODE ? { leafText: () => "\n" } : {};
   },

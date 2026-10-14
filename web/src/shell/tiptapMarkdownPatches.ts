@@ -178,6 +178,13 @@ interface ParserInternals {
   extensions: { name: string }[];
 }
 
+/** Whether this manager's editor registered the SoftBreak node; false if the
+ *  private field disappears upstream, so parsing degrades to plain "\n" text. */
+function hasSoftBreakNode(manager: MarkdownManager): boolean {
+  const { extensions } = manager as unknown as Partial<ParserInternals>;
+  return extensions?.some((ext) => ext.name === SOFT_BREAK_NODE) ?? false;
+}
+
 let parserPatchInstalled = false;
 
 /**
@@ -207,8 +214,6 @@ export function installMarkdownParserPatch(): void {
   const originalParse = proto.parse;
   proto.parse = function (this: MarkdownManager, markdown: string): JSONContent {
     const doc = wrapLooseInlineRuns(originalParse.call(this, markdown));
-    const { extensions } = this as unknown as ParserInternals;
-    const hasSoftBreak = extensions.some((ext) => ext.name === SOFT_BREAK_NODE);
-    return hasSoftBreak ? splitSoftBreaks(doc) : doc;
+    return hasSoftBreakNode(this) ? splitSoftBreaks(doc) : doc;
   };
 }
