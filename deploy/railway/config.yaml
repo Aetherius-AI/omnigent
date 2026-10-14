@@ -8,4 +8,4 @@ sandbox:
   provider: modal
   server_url: __OMNIGENT_SERVER_URL__
   modal:
-    secrets: [omnigent-llm]
+    secrets: [omnigent-llm, omnigent-git]
