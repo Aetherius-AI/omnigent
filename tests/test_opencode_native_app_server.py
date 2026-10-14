@@ -146,16 +146,6 @@ def test_filtered_server_env_drops_global_opencode_config(
     assert env["XDG_CONFIG_HOME"] == str(tmp_path / "xdg-config")
 
 
-def _gh_config_dir(env: dict[str, str]) -> Path:
-    # gh resolves its config dir as GH_CONFIG_DIR, else $XDG_CONFIG_HOME/gh,
-    # else $HOME/.config/gh (see `gh help environment`).
-    if env.get("GH_CONFIG_DIR"):
-        return Path(env["GH_CONFIG_DIR"])
-    if env.get("XDG_CONFIG_HOME"):
-        return Path(env["XDG_CONFIG_HOME"]) / "gh"
-    return Path(env["HOME"]) / ".config" / "gh"
-
-
 @pytest.mark.parametrize("host_layout", ["home_config", "xdg_config_home", "gh_config_dir"])
 def test_filtered_server_env_keeps_host_gh_login_visible(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, host_layout: str
@@ -180,11 +170,30 @@ def test_filtered_server_env_keeps_host_gh_login_visible(
 
     env = filtered_server_env(bridge_dir=tmp_path / "bridge", auth_secret="pw")
 
-    resolved = _gh_config_dir(env)
-    assert (resolved / "hosts.yml").is_file(), (
-        f"gh resolves config to {resolved}, which hides the host login at {gh_config}"
-    )
-    # OpenCode's own config stays isolated in the per-session dir.
+    # gh reads its config from GH_CONFIG_DIR, so pinning it at the host's gh
+    # dir keeps the host login reachable from the agent shell...
+    assert env["GH_CONFIG_DIR"] == str(gh_config)
+    assert (Path(env["GH_CONFIG_DIR"]) / "hosts.yml").is_file()
+    # ...while OpenCode's own config stays isolated in the per-session dir.
+    assert env["XDG_CONFIG_HOME"] == str(tmp_path / "bridge" / "xdg-config")
+
+
+def test_filtered_server_env_without_host_gh_dir_stays_isolated(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With no resolvable host gh dir, env construction still succeeds and omits
+    GH_CONFIG_DIR rather than raising, keeping the XDG isolation intact."""
+    monkeypatch.delenv("GH_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("OMNIGENT_RUNNER_ENV_PASSTHROUGH", raising=False)
+
+    def _no_host_dir() -> str:
+        raise RuntimeError("host gh config dir unknown")
+
+    monkeypatch.setattr(appsrv, "gh_config_dir", _no_host_dir)
+
+    env = filtered_server_env(bridge_dir=tmp_path / "bridge", auth_secret="pw")
+
+    assert "GH_CONFIG_DIR" not in env
     assert env["XDG_CONFIG_HOME"] == str(tmp_path / "bridge" / "xdg-config")
 
 
