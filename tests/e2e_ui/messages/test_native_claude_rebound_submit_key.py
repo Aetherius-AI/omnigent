@@ -359,9 +359,14 @@ def test_effort_command_applies_when_enter_is_rebound(
     # settings show whether the typed command was ever submitted.
     applied = _wait_for_claude_effort(session.claude_config_dir, "high")
     screen = _terminal_screen(session.base_url, session.session_id)
-    persisted = httpx.get(
-        f"{session.base_url}/v1/sessions/{session.session_id}", timeout=10.0
-    ).json()
+    try:
+        persisted = httpx.get(
+            f"{session.base_url}/v1/sessions/{session.session_id}", timeout=10.0
+        ).json()
+    except (httpx.HTTPError, ValueError) as exc:
+        # Evidence only; the assertion below must not be masked by its collection.
+        _log.warning("session fetch failed while collecting evidence: %s", exc)
+        persisted = {}
     assert applied, (
         f"/effort high never reached Claude Code (PATCH returned HTTP {patched.value.status}; "
         f"session reasoning_effort={persisted.get('reasoning_effort')!r}).\n"

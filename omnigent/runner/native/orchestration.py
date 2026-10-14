@@ -198,27 +198,25 @@ def _claude_instance_config_dir(instance: TerminalInstance) -> Path | None:
     Return the Claude config dir a launched pane's process reads, if it is known.
 
     Injection honors the keybindings there, so this follows the launch env and
-    cwd the way trust seeding does, ``env`` wrapper included. An ``env`` wrapper
-    whose form is not modeled could point Claude at another directory, so it
-    yields ``None`` and injection keeps the Enter submit.
+    cwd the way trust seeding does, ``env`` wrapper included. It yields ``None``
+    — and injection keeps the Enter submit — when the directory cannot be pinned
+    down: an ``env`` wrapper whose form is not modeled, or a relative directory
+    with no pane cwd to anchor it.
 
     :param instance: The launched Claude terminal instance.
     :returns: The config directory, or ``None`` when it cannot be resolved.
     """
     from omnigent.harnesses.claude_native.bridge import claude_config_dir
 
-    command = instance.command or ""
-    if (
-        Path(command).name == "env"
-        and env_wrapper_environment(
-            command, list(instance.args), _claude_terminal_pre_wrapper_env(instance)
-        )
-        is None
-    ):
+    env, modeled = _claude_terminal_launch_env_modeled(instance)
+    if not modeled:
         return None
-    return claude_config_dir(
-        cwd=_claude_instance_launch_cwd(instance), env=_claude_terminal_launch_env(instance)
-    )
+    cwd = _claude_instance_launch_cwd(instance)
+    if cwd is None:
+        chosen = env.get("CLAUDE_CONFIG_DIR") or os.path.join(env.get("HOME") or "", ".claude")
+        if not os.path.isabs(chosen):
+            return None
+    return claude_config_dir(cwd=cwd, env=env)
 
 
 # Background transcript-forwarder tasks for host-spawned claude-native and
@@ -7595,19 +7593,19 @@ def _claude_instance_launch_cwd(instance: TerminalInstance) -> Path | None:
 
     The pane's cwd with an ``env -C``/``--chdir`` wrapper directory applied the
     way ``chdir(2)`` does, mirroring :func:`_claude_terminal_launch_cwd` for a
-    pane that already launched; ``None`` when the pane recorded no cwd and the
-    wrapper changes none.
+    pane that already launched. ``None`` when the pane recorded no cwd: a
+    relative wrapper directory has nothing to anchor to then.
 
     :param instance: The launched Claude terminal instance.
     :returns: The resolved cwd, e.g. ``Path("/home/user/repo/sub")``, or ``None``.
     """
-    cwd = Path(instance.launch_cwd) if instance.launch_cwd else None
+    if not instance.launch_cwd:
+        return None
+    cwd = Path(instance.launch_cwd)
     chdir = env_wrapper_chdir(
         instance.command or "", list(instance.args), _claude_terminal_pre_wrapper_env(instance)
     )
-    if chdir is None:
-        return cwd
-    return (cwd or Path(os.getcwd())) / chdir
+    return cwd if chdir is None else cwd / chdir
 
 
 def _claude_terminal_pre_wrapper_env(spec: _ClaudeLaunchSource) -> dict[str, str]:
@@ -7627,35 +7625,54 @@ def _claude_terminal_pre_wrapper_env(spec: _ClaudeLaunchSource) -> dict[str, str
     )
 
 
-def _claude_terminal_launch_env(spec: _ClaudeLaunchSource) -> dict[str, str]:
+def _claude_terminal_launch_env_modeled(
+    spec: _ClaudeLaunchSource,
+) -> tuple[dict[str, str], bool]:
     """
-    Return the environment the native Claude terminal process starts with.
+    Return the Claude pane's launch environment and whether its wrapper was modeled.
 
     Mirrors the pane launch: the runner environment (when inherited), the
     spec's overrides and removals, then the options and assignments of an
-    ``env`` wrapper command. Trust seeding uses it so the runner writes the
-    global config file this Claude process will read, and the tmux target
-    advertisement so injection reads the keybindings that process loads.
+    ``env`` wrapper command. An ``env`` wrapper form the parser does not model
+    leaves the pre-wrapper environment in place and is reported as unmodeled,
+    since the wrapper's own changes are unknown.
 
     :param spec: The Claude terminal launch spec, or its live instance, e.g.
         one with ``command="env"`` and
         ``args=["CLAUDE_CONFIG_DIR=/srv/claude", "claude"]``.
-    :returns: The effective environment, e.g.
-        ``{"HOME": "/home/user", "CLAUDE_CONFIG_DIR": "/srv/claude"}``.
+    :returns: ``(environment, modeled)``, e.g.
+        ``({"HOME": "/home/user", "CLAUDE_CONFIG_DIR": "/srv/claude"}, True)``.
     """
     env = _claude_terminal_pre_wrapper_env(spec)
     wrapper = env_wrapper_environment(spec.command or "", list(spec.args), env)
-    if wrapper is None and Path(spec.command or "").name == "env":
-        _logger.info(
-            "Claude terminal env wrapper form is not modeled; using the pre-wrapper environment"
-        )
-    if wrapper is not None:
-        if not wrapper.inherit:
-            env = {}
-        for key in wrapper.unset:
-            env.pop(key, None)
-        env.update(wrapper.variables)
-    return env
+    if wrapper is None:
+        if Path(spec.command or "").name == "env":
+            _logger.info(
+                "Claude terminal env wrapper form is not modeled; using the pre-wrapper "
+                "environment"
+            )
+            return env, False
+        return env, True
+    if not wrapper.inherit:
+        env = {}
+    for key in wrapper.unset:
+        env.pop(key, None)
+    env.update(wrapper.variables)
+    return env, True
+
+
+def _claude_terminal_launch_env(spec: _ClaudeLaunchSource) -> dict[str, str]:
+    """
+    Return the environment the native Claude terminal process starts with.
+
+    Trust seeding uses it so the runner writes the global config file this
+    Claude process will read; see :func:`_claude_terminal_launch_env_modeled`.
+
+    :param spec: The Claude terminal launch spec, or its live instance.
+    :returns: The effective environment, e.g.
+        ``{"HOME": "/home/user", "CLAUDE_CONFIG_DIR": "/srv/claude"}``.
+    """
+    return _claude_terminal_launch_env_modeled(spec)[0]
 
 
 def _publish_terminal_pending(

@@ -900,20 +900,34 @@ def test_claude_trust_seeding_never_expands_runner_auth_secrets(
 
 
 @pytest.mark.parametrize(
-    ("args", "expected_config_dir"),
+    ("args", "launch_cwd", "expected_config_dir"),
     [
-        (["CLAUDE_CONFIG_DIR=wrapped/claude", "claude"], "/work/wrapped/claude"),
+        (["CLAUDE_CONFIG_DIR=wrapped/claude", "claude"], "/work", "/work/wrapped/claude"),
         # ``env -C`` moves Claude's cwd, so a relative dir resolves from there.
-        (["-C", "sub", "CLAUDE_CONFIG_DIR=wrapped/claude", "claude"], "/work/sub/wrapped/claude"),
+        (
+            ["-C", "sub", "CLAUDE_CONFIG_DIR=wrapped/claude", "claude"],
+            "/work",
+            "/work/sub/wrapped/claude",
+        ),
         # An unmodeled wrapper form could select any directory: advertise none.
-        (["-v", "CLAUDE_CONFIG_DIR=wrapped/claude", "claude"], None),
+        (["-v", "CLAUDE_CONFIG_DIR=wrapped/claude", "claude"], "/work", None),
+        # Without the pane's cwd a relative dir has no anchor: advertise none.
+        (["CLAUDE_CONFIG_DIR=wrapped/claude", "claude"], None, None),
+        (["CLAUDE_CONFIG_DIR=/srv/claude", "claude"], None, "/srv/claude"),
     ],
-    ids=["wrapper-env", "wrapper-chdir", "wrapper-unmodeled"],
+    ids=[
+        "wrapper-env",
+        "wrapper-chdir",
+        "wrapper-unmodeled",
+        "no-pane-cwd-relative",
+        "no-pane-cwd-absolute",
+    ],
 )
 def test_publish_tmux_target_advertises_the_config_dir_the_pane_reads(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     args: list[str],
+    launch_cwd: str | None,
     expected_config_dir: str | None,
 ) -> None:
     """
@@ -923,6 +937,7 @@ def test_publish_tmux_target_advertises_the_config_dir_the_pane_reads(
     in the directory the wrapper selects is honored rather than the runner's own.
 
     :param args: The ``env`` wrapper's arguments.
+    :param launch_cwd: The pane cwd the launch recorded, or ``None``.
     :param expected_config_dir: The directory Claude reads its config from, or
         ``None`` when the launch must not advertise one.
     """
@@ -937,7 +952,7 @@ def test_publish_tmux_target_advertises_the_config_dir_the_pane_reads(
     instance = make_test_terminal_instance("claude", "main", tmp_path)
     instance.command = "env"
     instance.args = args
-    instance.launch_cwd = "/work"
+    instance.launch_cwd = launch_cwd
     registry = SimpleNamespace(terminal_registry=SimpleNamespace(get=lambda *_args: instance))
 
     orchestration._publish_tmux_target_for_bridge(
