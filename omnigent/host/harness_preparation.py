@@ -53,11 +53,16 @@ def prepare_host_harnesses() -> bool:
     for key in _MANAGED_HARNESS_KEYS:
         if harness_install_spec(key) is None:
             continue
-        threading.Thread(
+        worker = threading.Thread(
             target=_install_missing_harness,
             args=(key,),
             name=f"host-harness-prepare-{key}",
             daemon=True,
-        ).start()
+        )
+        try:
+            worker.start()
+        except RuntimeError:  # thread exhaustion must not abort host boot
+            _logger.exception("Harness preparation: could not start the %r installer", key)
+            continue
         started = True
     return started

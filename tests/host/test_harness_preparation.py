@@ -22,8 +22,7 @@ class _SyncThread:
         *,
         target: Callable[..., object],
         args: Sequence[object] = (),
-        name: str | None = None,
-        daemon: bool | None = None,
+        **_thread_kwargs: object,
     ) -> None:
         self._target = target
         self._args = tuple(args)
@@ -78,7 +77,10 @@ def test_present_pi_is_never_upgraded(monkeypatch: pytest.MonkeyPatch, probe: st
     monkeypatch.delenv("OMNIGENT_PI_PATH", raising=False)
     monkeypatch.setattr(hi, "resolve_cli_binary", lambda _name: "/opt/pi/bin/pi")
 
-    def version_probe(*_a: object, **_k: object) -> bool:
+    probes: list[tuple[object, ...]] = []
+
+    def version_probe(*args: object, **_k: object) -> bool:
+        probes.append(args)
         if probe == "probe failed":
             raise RuntimeError("pi --version exploded")
         return False
@@ -88,6 +90,8 @@ def test_present_pi_is_never_upgraded(monkeypatch: pytest.MonkeyPatch, probe: st
     monkeypatch.setattr(hp, "try_install_harness_cli", lambda key: attempts.append(key))
     assert hp.prepare_host_harnesses() is True
     assert attempts == []
+    # Presence alone decides here; the version probe is never consulted.
+    assert probes == []
 
 
 @pytest.mark.usefixtures("inline_threads")
@@ -115,6 +119,20 @@ def test_install_failure_does_not_propagate(monkeypatch: pytest.MonkeyPatch, fai
     # Best-effort: a failing lookup or installer must leave the daemon starting
     # normally, not crash host boot.
     assert hp.prepare_host_harnesses() is True
+
+
+def test_worker_start_failure_does_not_propagate(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("IS_SANDBOX", "1")
+
+    class _UnstartableThread(_SyncThread):
+        def start(self) -> None:
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(hp.threading, "Thread", _UnstartableThread)
+    attempts = _record_installs(monkeypatch, present=False)
+    # Thread exhaustion is logged; host boot continues without preparation.
+    assert hp.prepare_host_harnesses() is False
+    assert attempts == []
 
 
 def test_preparation_returns_before_the_install_finishes(monkeypatch: pytest.MonkeyPatch) -> None:

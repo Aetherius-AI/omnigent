@@ -1672,11 +1672,13 @@ def test_missing_harness_cli_flags_outdated_version(
     assert spec.binary == "opencode"
 
 
+@pytest.mark.parametrize("compatible", [True, False])
 def test_concurrent_installs_of_one_package_are_serialized(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, compatible: bool
 ) -> None:
     """Host boot preparation and a UI install request never run two installers of
-    the same package at once."""
+    the same package at once. The caller that waited skips a now-compatible
+    install but still upgrades a binary whose version is too low."""
     import threading
     import time
 
@@ -1685,16 +1687,19 @@ def test_concurrent_installs_of_one_package_are_serialized(
     binary = tmp_path / "pi"
     binary.write_text("")
     monkeypatch.setattr(hi, "resolve_cli_binary", lambda _name: str(binary))
+    monkeypatch.setattr(hi, "_harness_cli_version_satisfies", lambda *_a, **_k: compatible)
     active = 0
     peak = 0
+    runs = 0
     guard = threading.Lock()
 
     def _slow_run(cmd, **_kwargs):
-        nonlocal active, peak
+        nonlocal active, peak, runs
         with guard:
             active += 1
+            runs += 1
             peak = max(peak, active)
-        time.sleep(0.05)
+        time.sleep(0.5)
         with guard:
             active -= 1
         return subprocess.CompletedProcess(cmd, 0)
@@ -1709,5 +1714,7 @@ def test_concurrent_installs_of_one_package_are_serialized(
         thread.start()
     for thread in threads:
         thread.join(timeout=10)
+        assert not thread.is_alive(), "install thread deadlocked on the install lock"
     assert [result.installed for result in results] == [True, True]
     assert peak == 1
+    assert runs == (1 if compatible else 2)

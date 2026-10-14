@@ -1114,8 +1114,18 @@ def try_install_harness_cli(key: str) -> HarnessInstallResult:
     # harness_install_command would have raised for a spec-less key, so spec is
     # non-None past this point.
     assert spec is not None
-    with _install_lock(spec):
+    lock = _install_lock(spec)
+    waited = not lock.acquire(blocking=False)
+    if waited:
+        lock.acquire()
+    try:
+        # Another caller just installed this package: skip the redundant run
+        # unless the CLI still misses its version range (an upgrade is wanted).
+        if waited and harness_cli_installed(key):
+            return HarnessInstallResult(True, None)
         return _run_installer(spec, cmd)
+    finally:
+        lock.release()
 
 
 def _run_installer(spec: HarnessInstallSpec, cmd: list[str]) -> HarnessInstallResult:
