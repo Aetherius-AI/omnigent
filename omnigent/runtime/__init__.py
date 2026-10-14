@@ -392,7 +392,9 @@ def get_runner_id() -> str | None:
 
 
 def set_remote_routing_available(available: bool) -> None:
-    """Record whether this runner's attached server can route.
+    """Record remote routing availability on the lazily built caps.
+
+    Runners never call :func:`init`, which would replace the caps object.
 
     :param available: The server's answer from the session-init envelope.
     """

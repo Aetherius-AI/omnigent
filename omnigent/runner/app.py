@@ -196,6 +196,7 @@ from omnigent.runner.subagent_work import (
     unregister_child_session,
     unregister_subagent_work_for_session,
 )
+from omnigent.runtime import set_remote_routing_available
 from omnigent.runtime.harnesses.process_manager import HarnessProcessManager, NoLiveHarnessError
 from omnigent.runtime.prompt import (
     build_instructions,
@@ -2066,8 +2067,6 @@ def create_runner_app(
         if envelope.session_id != session_id or envelope.agent_id != agent_id:
             raise ValueError("session initialization envelope identity mismatch")
         validate_runner_inference_config(envelope.snapshot.inference_config)
-
-        from omnigent.runtime import set_remote_routing_available
 
         global _server_version
         _server_version = envelope.server_version
