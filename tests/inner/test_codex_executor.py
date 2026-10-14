@@ -4505,9 +4505,74 @@ def test_materialize_codex_provider_config_backfills_only_missing_selected_provi
     assert config_path.stat().st_mode & 0o777 == 0o600
 
 
-@pytest.mark.parametrize("private_config", ["model_providers = [", "model_providers = 42\n"])
+@pytest.mark.parametrize("source_failure", ["toml", "utf8", "read", "stat"])
+def test_materialize_codex_provider_config_skips_unusable_optional_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_failure: str
+) -> None:
+    """A host source failure cannot preempt providers supplied by other Codex layers."""
+    import tomllib
+
+    from omnigent.inner.codex_executor import materialize_codex_provider_config
+    from omnigent.spec.types import RetryPolicy
+
+    private = tmp_path / "private"
+    private.mkdir()
+    config_path = private / "config.toml"
+    original_private = (
+        'model = "private-model"\n'
+        '[model_providers.existing]\nname = "Private"\nbase_url = "https://private.example.test"\n'
+    )
+    config_path.write_text(original_private)
+    source = tmp_path / "source"
+    source.mkdir()
+    source_path = source / "config.toml"
+    original_source = (
+        b"model_providers = ["
+        if source_failure == "toml"
+        else b"\xff"
+        if source_failure == "utf8"
+        else b""
+    )
+    source_path.write_bytes(original_source)
+    read_text = Path.read_text
+    is_file = Path.is_file
+
+    def read(path: Path, encoding: str | None = None, errors: str | None = None) -> str:
+        if path == source_path and source_failure == "read":
+            raise PermissionError("source read unavailable")
+        return read_text(path, encoding=encoding, errors=errors)
+
+    def exists(path: Path) -> bool:
+        if path == source_path and source_failure == "stat":
+            raise OSError("source metadata unavailable")
+        return is_file(path)
+
+    monkeypatch.setattr(Path, "read_text", read)
+    monkeypatch.setattr(Path, "is_file", exists)
+    overrides = ['model_provider="managed_gateway"']
+
+    assert (
+        materialize_codex_provider_config(
+            private, overrides, source_home=source, retry_policy=RetryPolicy(max_retries=9)
+        )
+        == overrides
+    )
+    config = tomllib.loads(config_path.read_text())
+    assert config["model"] == "private-model"
+    assert set(config["model_providers"]) == {"existing"}
+    existing = config["model_providers"]["existing"]
+    assert existing["name"] == "Private"
+    assert existing["base_url"] == "https://private.example.test"
+    assert existing["request_max_retries"] == existing["stream_max_retries"] == 9
+    assert source_path.read_bytes() == original_source
+    assert config_path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize(
+    "private_config", [b"model_providers = [", b"model_providers = 42\n", b"\xff"]
+)
 def test_materialize_codex_provider_config_preserves_invalid_private_config(
-    tmp_path: Path, private_config: str
+    tmp_path: Path, private_config: bytes
 ) -> None:
     """A source definition cannot replace malformed private configuration."""
     import tomlkit
@@ -4517,7 +4582,7 @@ def test_materialize_codex_provider_config_preserves_invalid_private_config(
     private = tmp_path / "private"
     private.mkdir()
     config_path = private / "config.toml"
-    config_path.write_text(private_config)
+    config_path.write_bytes(private_config)
     source = tmp_path / "source"
     source.mkdir()
     (source / "config.toml").write_text('[model_providers.gateway]\nname = "Gateway"\n')
@@ -4527,7 +4592,7 @@ def test_materialize_codex_provider_config_preserves_invalid_private_config(
             private, ['model_provider="gateway"'], source_home=source
         )
 
-    assert config_path.read_text() == private_config
+    assert config_path.read_bytes() == private_config
 
 
 def test_materialize_codex_provider_config_leaves_builtin_provider_tables_untouched(

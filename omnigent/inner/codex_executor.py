@@ -1361,11 +1361,14 @@ def materialize_codex_provider_config(
             and (providers is None or selected not in providers)
         ):
             source_path = source_home / "config.toml"
-            source = (
-                tomlkit.parse(source_path.read_text(encoding="utf-8"))
-                if source_path.is_file()
-                else {}
-            )
+            try:
+                source = (
+                    tomlkit.parse(source_path.read_text(encoding="utf-8"))
+                    if source_path.is_file()
+                    else {}
+                )
+            except (OSError, UnicodeDecodeError, tomlkit.exceptions.TOMLKitError):
+                source = {}
             source_providers = source.get("model_providers")
             source_provider = (
                 source_providers.get(selected)
