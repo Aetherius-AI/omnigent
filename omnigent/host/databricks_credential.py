@@ -212,12 +212,9 @@ def broker_token_command(host: str, cfg_path: Path | None = None) -> str | None:
 
 
 def managed_connect_workspace_host() -> str | None:
-    """Workspace host of a managed-connect host, else ``None``.
-
-    Present only when :func:`configure_host_databricks` wrote the host-only
-    ``[omnigent]`` profile and a broker sidecar for that workspace. The harness
-    broker fallbacks and the readiness map share this so they answer alike.
-    """
+    """Workspace host of a managed-connect host, else ``None``: set only when
+    :func:`configure_host_databricks` wrote the host-only ``[omnigent]`` profile and
+    a broker sidecar for it. Shared by the harness broker fallbacks and readiness."""
     from omnigent.inner.databricks_executor import _read_databrickscfg_host
 
     host = _read_databrickscfg_host(HOST_DATABRICKS_PROFILE)

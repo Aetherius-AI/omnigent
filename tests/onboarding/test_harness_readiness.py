@@ -391,11 +391,9 @@ def _managed_connect_host(
 def test_pi_ready_via_managed_connect_broker_without_provider_entry(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Installed Pi with no ``providers:`` entry reads ready on a managed-connect host.
-
-    Launch routes such a host through the owner's Databricks broker, so the
-    picker must not block it as needs-auth.
-    """
+    """Installed Pi with no ``providers:`` entry reads ready on a managed-connect
+    host: launch routes it through the owner's Databricks broker, so the picker
+    must not block it as needs-auth."""
     _all_clis_installed(monkeypatch)
     _managed_connect_host(monkeypatch, tmp_path, sidecar=True)
     result = configured_harness_map()
