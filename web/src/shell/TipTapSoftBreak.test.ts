@@ -216,7 +216,8 @@ describe("SoftBreak code-block conversion", () => {
     expect(editor.commands.toggleCodeBlock()).toBe(true);
     const paragraph = editor.state.doc.child(0);
     expect(paragraph.type.name).toBe("paragraph");
-    expect(paragraph.textContent).toBe("alpha\nbeta");
+    expect(paragraph.childCount).toBe(3);
+    expect(paragraph.child(1).type.name).toBe("hardBreak");
     expect(editor.getMarkdown().trim()).toBe("alpha  \nbeta");
   });
 
