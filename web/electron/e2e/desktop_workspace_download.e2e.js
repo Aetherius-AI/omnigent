@@ -5,8 +5,6 @@
 // Run from web/electron after building the SPA:
 //   OMNIGENT_PYTHON=../../.venv/bin/python OMNIGENT_PW_NO_SANDBOX=1 \
 //     xvfb-run -a node --test e2e/desktop_workspace_download.e2e.js
-// Optional: OMNIGENT_ROUTING_WEB_UI_DIST (prebuilt routing bundle) and
-// OMNIGENT_DESKTOP_RECORD_DIR (recordings + ingress log; paces the journey).
 
 "use strict";
 
@@ -28,6 +26,7 @@ const { spawnHost, createHostSession } = require("./fixtures/hostStack");
 const { startRoutingIngress } = require("./fixtures/routingIngress");
 
 const deps = desktopDepsAvailable();
+// Recordings, screenshots and the ingress log; an explicit dir also paces the journey.
 const RECORD_DIR =
   process.env.OMNIGENT_DESKTOP_RECORD_DIR ||
   path.join(__dirname, "recordings", "desktop-workspace-download");
@@ -47,7 +46,7 @@ function sleep(ms) {
 const PACED = Boolean(process.env.OMNIGENT_DESKTOP_RECORD_DIR);
 const pace = (ms) => (PACED ? sleep(ms) : Promise.resolve());
 
-/** A standalone SPA bundle with host routing on, built once unless supplied. */
+/** A standalone SPA bundle with host routing on: OMNIGENT_ROUTING_WEB_UI_DIST, else built once. */
 function ensureRoutingDist(tmpDir) {
   const given = process.env.OMNIGENT_ROUTING_WEB_UI_DIST;
   if (given && fs.existsSync(path.join(given, "index.html"))) return given;
@@ -56,7 +55,13 @@ function ensureRoutingDist(tmpDir) {
   const result = spawnSync(
     path.join(web, "node_modules", ".bin", "vite"),
     ["build", "--outDir", out, "--emptyOutDir"],
-    { cwd: web, env: { ...process.env, VITE_OMNIGENT_HOST_ROUTING: "true" }, encoding: "utf8" },
+    {
+      cwd: web,
+      env: { ...process.env, VITE_OMNIGENT_HOST_ROUTING: "true" },
+      encoding: "utf8",
+      timeout: 300_000,
+      maxBuffer: 16 * 1024 * 1024,
+    },
   );
   if (result.status !== 0) {
     throw new Error(`routing SPA build failed:\n${(result.stderr || result.stdout).slice(-3000)}`);
@@ -278,9 +283,10 @@ describe(
           r.path.includes("download=true"),
         );
         fs.writeFileSync(path.join(recordDir, "observed.json"), JSON.stringify(observed, null, 2));
-        // Stop filming before the window closes so the clip ends on the app state.
-        await stopDisplayCapture();
-        await electronApp.close();
+        // Stop filming before the window closes so the clip ends on the app state;
+        // never let teardown mask the test's own failure or skip the cleanup below.
+        await stopDisplayCapture().catch(() => {});
+        await electronApp.close().catch(() => {});
         saveRecording(recordDir, "routed-download");
         fs.rmSync(userDataDir, { recursive: true, force: true });
       }
@@ -348,8 +354,8 @@ describe(
           JSON.stringify({ downloads }, null, 2),
         );
       } finally {
-        await stopDisplayCapture();
-        await electronApp.close();
+        await stopDisplayCapture().catch(() => {});
+        await electronApp.close().catch(() => {});
         saveRecording(recordDir, "direct-download");
         fs.rmSync(userDataDir, { recursive: true, force: true });
       }

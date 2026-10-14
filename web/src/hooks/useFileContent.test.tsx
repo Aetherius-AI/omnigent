@@ -264,10 +264,9 @@ describe("downloadWorkspaceFile", () => {
     ["the Android shell", isAndroidShell],
     ["the Electron shell", isElectronShell],
   ])("fetches the bytes through the app's transport in %s", async (_label, predicate) => {
-    // The embed host supplies auth headers and replica routing that a bare
-    // navigation lacks, the mobile shells save http(s) downloads outside the
-    // WebView's session, and the desktop shell's anchors would miss the routing
-    // and identity headers the SPA stamps, so the bytes come through authenticatedFetch.
+    // These hosts cannot use a bare anchor (auth/routing headers or WebView
+    // session scope), so the bytes come through authenticatedFetch; the
+    // `downloadWorkspaceFile` docstring has the per-shell rationale.
     vi.mocked(predicate).mockReturnValueOnce(true);
     const file = new Blob(["print('hi')"], { type: "text/x-python" });
     fetchMock.mockResolvedValueOnce(blobResponse(file));
