@@ -57,6 +57,10 @@ view appear in the session.
 **CLI:** run `omnigent <name>` from the matrix below; add `--resume` with or
 without a session ID to resume.
 
+**Approval inbox:** open Inbox in the sidebar to answer a pending permission
+without opening its session. Antigravity's Chat and Inbox cards both offer
+the advertised session and saved-rule choices.
+
 **Skill contents:** Settings → Harnesses → configured harness card (or gear),
 then Skills → a skill, or Plugins → a plugin → a skill. Back returns to the
 list or plugin.
@@ -129,6 +133,14 @@ the extra fields. Resolver and raw-tunnel checks:
 `tests/server/integration/test_host_tunnel_route.py::test_startup_http_through_real_tunnel`.
 
 Cross-harness journeys:
+
+- **Antigravity permission choices (Chat and Inbox):**
+  `tests/e2e_ui/approvals/test_agy_permission_full_prompt.py::test_agy_permission_persist_request_round_trip`
+  uses a recorded permission prompt and the real server to check both choices
+  on both surfaces. Chat records the choice as requested, since Antigravity
+  does not confirm rule persistence. This does not run a live Antigravity
+  terminal or prove that a rule is saved. Saved rules belong to the current
+  Omnigent session; new sessions have separate settings.
 
 - **`launch-cli` and `launch-web`, Pi CLI compatibility (own environment):**
   `tests/e2e/test_pi_native_cli_version_floor_e2e.py::test_real_pi_cli_version_floor`
@@ -325,7 +337,8 @@ Cross-harness journeys:
   a web message through the public bridge into a real retained dead tmux pane.
   It checks prompt budgets equal to the hard cap and early exit detection with
   longer budgets. `test_claude_native_slow_ready.py` checks successful delivery
-  after slow startup, an early crash, and the live-pane timeout. These tests
+  after slow startup, an early crash, the live-pane timeout, and content-free
+  failing-operation evidence when tmux exits after readiness. These tests
   exercise the injection used by existing-session and first-message composers;
   CLI typing bypasses the web injection gate. They do not run a vendor model.
 - **`disconnect`, Codex transport (plain `uv run pytest`, no vendor CLI):**

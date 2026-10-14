@@ -93,6 +93,18 @@ verify-env run -- python -m pytest <test> --ui-skip-build --video=on \
 - **`tmux-outage`:**
   `tests/e2e_ui/shells/test_antigravity_tmux_recovery.py::test_antigravity_survives_probe_outage_then_detects_exit`
   (opt-in; Antigravity only).
+- **Launch failure and cancellation (plain `uv run pytest`, own tmux):**
+  `tests/terminals/test_launch_failure_cleanup.py` checks a missing tmux
+  executable at spawn and cancellation after a real pane starts, including
+  during the initial liveness check. Each must release its private directory
+  and tmux server before registry ownership; a caller cancelled during that
+  cleanup still gets a completed close first. This registry is shared by native
+  agent terminals, user shells, and `sys_terminal_launch`; no vendor model or
+  browser is used in these process checks.
+  `tests/e2e/test_terminal_launch_retry_cleanup_e2e.py` also drives the runner's
+  resource facade through three failed launches and a successful retry for
+  Claude/Codex terminal roles and an auxiliary shell. The successful real pane
+  must accept input, and final cleanup must release every allocated instance.
 - **`hidden-terminal`:**
   `tests/e2e_ui/chat/test_hidden_terminal_scrollbar.py::test_hidden_terminal_scrollbar_never_paints_over_foreground`
 - **`dialog-routing`:**
