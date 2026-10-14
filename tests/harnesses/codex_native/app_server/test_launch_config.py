@@ -392,6 +392,7 @@ def test_codex_login_launch_pins_a_gateway_spelled_pick_in_codex_spelling(
     [
         # No override and no custom default: codex's built-in openai provider.
         pytest.param(None, "", "gpt-6.1-sol", id="no-override-builtin-default"),
+        pytest.param(None, None, "gpt-6.1-sol", id="no-override-no-config-file"),
         # The shared config.toml selects a gateway, top-level or via its profile.
         pytest.param(
             None,
@@ -401,7 +402,8 @@ def test_codex_login_launch_pins_a_gateway_spelled_pick_in_codex_spelling(
         ),
         pytest.param(
             None,
-            'model_provider = "openai"\nprofile = "db"\n[profiles.db]\nmodel_provider = "Databricks"\n',
+            'model_provider = "openai"\nprofile = "db"\n'
+            '[profiles.db]\nmodel_provider = "Databricks"\n',
             "system.ai.gpt-6-1-sol",
             id="no-override-profile-gateway-outranks-top-level",
         ),
@@ -427,7 +429,7 @@ def test_pick_translates_only_when_codex_login_serves_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     extra_overrides: list[str] | None,
-    shared_config: str,
+    shared_config: str | None,
     expected_pin: str,
 ) -> None:
     """
@@ -436,11 +438,13 @@ def test_pick_translates_only_when_codex_login_serves_it(
     Codex resolves its provider from the ``-c`` overrides (last one wins), then
     the shared config.toml (active profile before top-level), then its built-in
     ``openai`` provider. A gateway reached on any of those paths knows the model
-    by its catalog id, so the pick reaches codex as given.
+    by its catalog id, so the pick reaches codex as given. A fresh login with no
+    shared config at all is the built-in default too.
     """
     source_home = tmp_path / "source"
     source_home.mkdir()
-    (source_home / "config.toml").write_text(shared_config, encoding="utf-8")
+    if shared_config is not None:
+        (source_home / "config.toml").write_text(shared_config, encoding="utf-8")
     monkeypatch.setenv("CODEX_HOME", str(source_home))
     monkeypatch.setattr(
         "omnigent.harnesses.codex_native.app_server._find_codex_cli",
@@ -461,6 +465,36 @@ def test_pick_translates_only_when_codex_login_serves_it(
 
     assert app_server.pinned_model == expected_pin
     assert f"model={json.dumps(expected_pin)}" in app_server.config_overrides
+
+
+def test_file_profile_selecting_codex_login_translates_over_a_gateway_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``--profile`` file that selects codex's login outranks a gateway in the shared root."""
+    source_home = tmp_path / "source"
+    source_home.mkdir()
+    (source_home / "config.toml").write_text('model_provider = "Databricks"\n', encoding="utf-8")
+    (source_home / "x.config.toml").write_text('model_provider = "openai"\n', encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(source_home))
+    monkeypatch.setattr(
+        "omnigent.harnesses.codex_native.app_server._find_codex_cli",
+        lambda: sys.executable,
+    )
+
+    app_server = build_codex_native_server(
+        socket_path=tmp_path / "codex.sock",
+        codex_home=tmp_path / "codex-home",
+        cwd=tmp_path,
+        model="system.ai.gpt-6-1-sol",
+        profile=None,
+        bridge_dir=tmp_path / "bridge",
+        ap_server_url=None,
+        ap_auth_headers={},
+        terminal_launch_args=["--profile", "x"],
+    )
+
+    assert app_server.config_profile == "x"
+    assert app_server.pinned_model == "gpt-6.1-sol"
 
 
 @pytest.mark.parametrize("model", [None, "system.ai.gpt-6-1-sol"], ids=["default-model", "pick"])
