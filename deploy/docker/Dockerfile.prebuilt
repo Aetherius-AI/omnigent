@@ -6,6 +6,14 @@
 ARG OMNIGENT_IMAGE=ghcr.io/omnigent-ai/omnigent-server:latest
 FROM ${OMNIGENT_IMAGE}
 
-# Bake the Railway server config in so managed sandboxes are configured from
-# source control; the service selects it with OMNIGENT_CONFIG.
-COPY deploy/railway/config.yaml /etc/omnigent/config.yaml
+# Render the Railway server config from its template so the public URL is
+# supplied by the OMNIGENT_SERVER_URL build arg rather than committed. When the
+# arg is empty no config is written and the server falls back to env settings.
+ARG OMNIGENT_SERVER_URL=
+COPY deploy/railway/config.yaml /tmp/railway-config.yaml
+RUN if [ -n "${OMNIGENT_SERVER_URL}" ]; then \
+        mkdir -p /etc/omnigent \
+        && sed "s|__OMNIGENT_SERVER_URL__|${OMNIGENT_SERVER_URL}|" /tmp/railway-config.yaml \
+           > /etc/omnigent/config.yaml; \
+    fi \
+    && rm -f /tmp/railway-config.yaml
