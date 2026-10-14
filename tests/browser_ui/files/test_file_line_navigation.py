@@ -507,7 +507,9 @@ def test_large_diff_has_bounded_computation(
         expect(viewer.get_by_role("status")).to_have_text("", timeout=5000)
         expect(editor).to_have_attribute("data-refinement-identity", "same-editor")
         # Let Monaco finish painting the newly applied result before comparing positions.
-        page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
+        page.evaluate(
+            "() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))"
+        )
         after_scroll = editor.locator(".modified .view-line").evaluate_all(visible_text)
         assert before_scroll == after_scroll
         computations = page.evaluate("window.diffComputations")

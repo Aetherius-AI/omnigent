@@ -1,15 +1,17 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { createMonacoWorker } from "./createMonacoWorker";
 
-function setup() {
+function setup(failConstruction = false) {
   const workers: FakeWorker[] = [];
   class FakeWorker extends EventTarget {
     postMessage = vi.fn();
     terminate = vi.fn();
     onmessage: ((event: { data: unknown }) => void) | null = null;
     onerror: ((event: { preventDefault: () => void }) => void) | null = null;
+    onmessageerror: (() => void) | null = null;
     constructor() {
       super();
+      if (failConstruction && workers.length) throw new Error("Worker unavailable");
       workers.push(this);
     }
   }
@@ -41,20 +43,36 @@ it("keeps control messages out of Monaco RPC and returns refined results", () =>
   expect(workers[1].terminate).toHaveBeenCalledTimes(1);
 });
 
-it.each(["cancel", "parent-disposal", "error"])("terminates refinement on %s", (reason) => {
-  const { parent, workers, request } = setup();
+it.each(["cancel", "parent-disposal", "error", "messageerror"])(
+  "terminates refinement on %s",
+  (reason) => {
+    const { parent, workers, request } = setup();
+    request();
+    if (reason === "cancel")
+      parent.dispatchEvent(
+        new MessageEvent("message", { data: { type: "cancel-refinement", id: 1 } }),
+      );
+    if (reason === "parent-disposal") parent.terminate();
+    if (reason === "error") workers[1].onerror?.({ preventDefault: vi.fn() });
+    if (reason === "messageerror") workers[1].onmessageerror?.();
+    expect(workers[1].terminate).toHaveBeenCalledTimes(1);
+    if (reason === "error" || reason === "messageerror")
+      expect(workers[0].postMessage).toHaveBeenCalledWith({
+        type: "refined-diff",
+        id: 1,
+        result: null,
+      });
+  },
+);
+
+it("settles refinement when the child worker cannot be constructed", () => {
+  const { parent, workers, request } = setup(true);
   request();
-  if (reason === "cancel")
-    parent.dispatchEvent(
-      new MessageEvent("message", { data: { type: "cancel-refinement", id: 1 } }),
-    );
-  if (reason === "parent-disposal") parent.terminate();
-  if (reason === "error") workers[1].onerror?.({ preventDefault: vi.fn() });
-  expect(workers[1].terminate).toHaveBeenCalledTimes(1);
-  if (reason === "error")
-    expect(workers[0].postMessage).toHaveBeenCalledWith({
-      type: "refined-diff",
-      id: 1,
-      result: null,
-    });
+  expect(workers).toHaveLength(1);
+  expect(workers[0].postMessage).toHaveBeenCalledExactlyOnceWith({
+    type: "refined-diff",
+    id: 1,
+    result: null,
+  });
+  expect(() => parent.terminate()).not.toThrow();
 });

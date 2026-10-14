@@ -4,7 +4,7 @@ interface TestEditorWorker {
   $computeDiff: (
     original: string,
     modified: string,
-    options: { maxComputationTimeMs: number },
+    options: { maxComputationTimeMs: number; ignoreTrimWhitespace?: boolean },
     algorithm: string,
   ) => Promise<unknown>;
   $acceptRemovedModel: (uri: string) => void;
@@ -97,9 +97,12 @@ it("returns the detailed result and releases its worker", async () => {
 });
 
 it.each(["error", "deadline", "content-change"])(
-  "keeps a complete coarse diff after %s",
+  "keeps the initial diff after %s",
   async (reason) => {
     const { editor, post, fallback } = await setup();
+    const initial = { quitEarly: true, changes: ["initial detail"] };
+    h.compute.mockResolvedValueOnce(initial);
+    await editor.$computeDiff("old", "current", { maxComputationTimeMs: 1000 }, "advanced");
     const pending = editor.$computeDiff(
       "old",
       "current",
@@ -111,10 +114,46 @@ it.each(["error", "deadline", "content-change"])(
       self.onmessage?.(
         new MessageEvent("message", { data: { type: "refined-diff", id: 1, result: null } }),
       );
-    if (reason === "deadline") vi.runAllTimers();
+    if (reason === "deadline") {
+      const settled = vi.fn();
+      void pending.then(settled);
+      await vi.advanceTimersByTimeAsync(11999);
+      expect(settled).not.toHaveBeenCalled();
+      expect(post).not.toHaveBeenCalledWith({ type: "cancel-refinement", id: 1 });
+      await vi.advanceTimersByTimeAsync(1);
+    }
     if (reason === "content-change") editor.$acceptModelChanged("current", {});
-    expect(await pending).toBe(fallback);
+    expect(await pending).toBe(initial);
+    expect(initial).not.toBe(fallback);
+    expect(h.compute).toHaveBeenCalledTimes(1);
     expect(post).toHaveBeenLastCalledWith({ type: "cancel-refinement", id: 1 });
+  },
+);
+
+it.each(["old", "current", "settings", "removed"])(
+  "does not reuse an initial result after %s changes",
+  async (change) => {
+    const { editor, fallback } = await setup();
+    const initial = { quitEarly: true, changes: ["stale detail"] };
+    h.compute.mockResolvedValueOnce(initial);
+    await editor.$computeDiff("old", "current", { maxComputationTimeMs: 1000 }, "advanced");
+    if (change === "old" || change === "current") editor.$acceptModelChanged(change, {});
+    if (change === "removed") editor.$acceptRemovedModel("current");
+    const pending = editor.$computeDiff(
+      "old",
+      "current",
+      {
+        maxComputationTimeMs: 10000,
+        ...(change === "settings" ? { ignoreTrimWhitespace: true } : {}),
+      },
+      "advanced",
+    );
+    await Promise.resolve();
+    self.onmessage?.(
+      new MessageEvent("message", { data: { type: "refined-diff", id: 1, result: null } }),
+    );
+    expect(await pending).toBe(fallback);
+    expect(h.compute).toHaveBeenCalledTimes(2);
   },
 );
 

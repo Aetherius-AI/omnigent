@@ -5,7 +5,14 @@ import { EditorWorker } from "monaco-editor/esm/vs/editor/common/services/editor
 // Keep expensive refinement off the worker that serves newly opened files.
 class RefiningEditorWorker extends EditorWorker {
   refinements = new Set();
+  initialResults = new Map();
   nextRefinementId = 0;
+
+  forgetInitialResults(uri) {
+    for (const [modified, entry] of this.initialResults) {
+      if (entry.original === uri || modified === uri) this.initialResults.delete(modified);
+    }
+  }
 
   cancelRefinements(uri) {
     for (const task of this.refinements) {
@@ -14,11 +21,13 @@ class RefiningEditorWorker extends EditorWorker {
   }
 
   $acceptRemovedModel(uri) {
+    this.forgetInitialResults(uri);
     this.cancelRefinements(uri);
     super.$acceptRemovedModel(uri);
   }
 
   $acceptModelChanged(uri, event) {
+    this.forgetInitialResults(uri);
     this.cancelRefinements(uri);
     super.$acceptModelChanged(uri, event);
   }
@@ -26,19 +35,32 @@ class RefiningEditorWorker extends EditorWorker {
   async $computeDiff(original, modified, options, algorithm) {
     this.cancelRefinements(original);
     this.cancelRefinements(modified);
+    const key = JSON.stringify([
+      original,
+      algorithm,
+      { ...options, maxComputationTimeMs: undefined },
+    ]);
     if (options.maxComputationTimeMs <= INITIAL_DIFF_BUDGET_MS) {
-      return super.$computeDiff(original, modified, options, algorithm);
+      const result = await super.$computeDiff(original, modified, options, algorithm);
+      this.initialResults.delete(modified);
+      if (result?.quitEarly) this.initialResults.set(modified, { original, key, result });
+      return result;
     }
     const before = this.getModels().find((model) => model.uri.toString() === original);
     const after = this.getModels().find((model) => model.uri.toString() === modified);
     if (!before || !after) return null;
-    // This complete, coarse result is also safe to return on worker failure/cancellation.
-    const fallback = await super.$computeDiff(
-      original,
-      modified,
-      { ...options, maxComputationTimeMs: 1 },
-      algorithm,
-    );
+    // Keep the displayed detail on failure; invalidate saved results on content/settings changes.
+    const initial = this.initialResults.get(modified);
+    this.initialResults.delete(modified);
+    const fallback =
+      initial?.key === key
+        ? initial.result
+        : await super.$computeDiff(
+            original,
+            modified,
+            { ...options, maxComputationTimeMs: 1 },
+            algorithm,
+          );
     return new Promise((resolve) => {
       const id = ++this.nextRefinementId;
       let finished = false;
