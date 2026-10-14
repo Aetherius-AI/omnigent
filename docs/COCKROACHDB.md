@@ -41,13 +41,20 @@ internally consistent but a retry exhaustion between the two phases can leave
 the first commit in place without the second.
 
 An empty CRDB database is required for the first startup. Omnigent creates the
-current schema directly and stamps the current Alembic revision. It does not
-run the historical PostgreSQL migration chain. A database left at a partial
-revision by an earlier migration attempt is unsupported and must be replaced
-with a new empty database. A first bootstrap interrupted mid-run is repaired
-automatically when the same Omnigent version restarts; if Omnigent is upgraded
-before that repair completes, startup fails and the database must be replaced
-with a new empty one.
+schema from its application models, stamps the Alembic revision those models
+represent (`MODEL_SCHEMA_REVISION` in `omnigent/db/db_models.py`), and then
+applies any newer migrations, so a column shipped by migration ahead of its
+model mapping still exists on a fresh database. It does not run the historical
+PostgreSQL migration chain. A database left at a partial revision by an earlier
+migration attempt is unsupported and must be replaced with a new empty database.
+
+A first bootstrap interrupted before the model revision is stamped is repaired
+automatically when the same Omnigent version restarts. If Omnigent is upgraded
+before that repair completes, startup fails and leaves the database unchanged:
+back up the database and inspect its tables and the `omnigent_crdb_bootstrap`
+marker before any manual recovery, or start over with a new empty database. Do
+not stamp a guessed revision. A bootstrap interrupted after the stamp continues
+through normal Alembic upgrades on the next start.
 
 Existing CRDB databases created by a supported Omnigent release use normal
 Alembic upgrades for subsequent migrations.

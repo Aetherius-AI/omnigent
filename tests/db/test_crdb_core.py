@@ -16,8 +16,8 @@ from sqlalchemy.exc import NoSuchModuleError
 from omnigent.db import cockroachdb, utils
 
 
-def test_model_schema_revision_matches_model_tables_and_columns(tmp_path: Path) -> None:
-    """Model columns must be represented at the revision stamped by bootstrap."""
+def test_model_schema_revision_matches_model_metadata(tmp_path: Path) -> None:
+    """Model tables, columns, and indexes must exist at the revision stamped by bootstrap."""
     from omnigent.db.db_models import MODEL_SCHEMA_REVISION, ConversationBase, OmnigentBase
 
     uri = f"sqlite:///{tmp_path / 'model_revision.db'}"
@@ -42,8 +42,56 @@ def test_model_schema_revision_matches_model_tables_and_columns(tmp_path: Path) 
             "Advance MODEL_SCHEMA_REVISION with model table/column changes; "
             "CockroachDB bootstrap stamps this revision before later migrations."
         )
+        migrated_indexes = {
+            table: {
+                str(index["name"])
+                for index in inspector.get_indexes(table)
+                if index.get("name") and not str(index["name"]).startswith("sqlite_autoindex")
+            }
+            for table in migrated
+        }
+        model_indexes = {
+            table.name: {
+                index.name
+                for index in table.indexes
+                # Dialect-gated indexes (the CockroachDB trigram index) never exist on SQLite.
+                if index.name and index._ddl_if is None
+            }
+            for metadata in (OmnigentBase.metadata, ConversationBase.metadata)
+            for table in metadata.tables.values()
+        }
+        assert migrated_indexes == model_indexes, (
+            "Advance MODEL_SCHEMA_REVISION with model index changes; "
+            "CockroachDB bootstrap creates model indexes before later migrations."
+        )
     finally:
         engine.dispose()
+
+
+@pytest.mark.parametrize("off_chain", ["not-a-revision", "before-baseline"])
+def test_initialize_rejects_model_revision_off_migration_chain(
+    off_chain: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The declared model revision must sit between the CRDB baseline and head."""
+    from alembic.script import ScriptDirectory
+
+    from omnigent.db import db_models
+
+    uri = "sqlite:///unused.db"
+    if off_chain == "before-baseline":
+        script = ScriptDirectory.from_config(utils._build_alembic_config(uri))
+        down = script.get_revision(cockroachdb.CRDB_BASELINE_REVISION).down_revision
+        assert isinstance(down, str)
+        off_chain = down
+    engine = MagicMock()
+    monkeypatch.setattr(cockroachdb, "_crdb_server_version", lambda _engine: Version("25.2.10"))
+    monkeypatch.setattr(cockroachdb, "_verify_crdb_read_committed", lambda _engine, _version: None)
+    monkeypatch.setattr(db_models, "MODEL_SCHEMA_REVISION", off_chain)
+
+    with pytest.raises(RuntimeError, match="not on the configured migration chain"):
+        cockroachdb._initialize_or_verify_crdb_schema(engine, uri)
+
+    engine.connect.assert_not_called()
 
 
 @pytest.mark.parametrize(

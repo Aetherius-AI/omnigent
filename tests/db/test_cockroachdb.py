@@ -1,23 +1,34 @@
-"""Live CockroachDB compatibility checks selected by OMNIGENT_TEST_DB_URI."""
+"""Live CockroachDB compatibility checks selected by OMNIGENT_TEST_DB_URI.
+
+The fresh-bootstrap scenario also runs on SQLite as a stand-in that stubs only
+the CockroachDB connection preamble, so the bootstrap orchestration stays
+covered where no CockroachDB server is available.
+"""
 
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 from alembic import command
-from sqlalchemy import Engine, inspect, text
+from packaging.version import Version
+from sqlalchemy import Engine, create_engine, inspect, text
+from sqlalchemy.engine import make_url
 
+from omnigent.db import cockroachdb, utils
 from omnigent.db.cockroachdb import (
     _CRDB_BOOTSTRAP_MARKER_TABLE,
     _CRDB_BOOTSTRAP_MARKER_TOKEN,
     CRDB_BASELINE_REVISION,
     _crdb_server_version,
+    _initialize_or_verify_crdb_schema,
     _prepare_crdb_schema_transaction,
 )
 from omnigent.db.utils import (
     _build_alembic_config,
+    _create_engine,
     _get_current_db_revision,
     _get_head_db_revision,
     _initialize_or_verify_schema,
@@ -25,12 +36,140 @@ from omnigent.db.utils import (
     is_cockroachdb,
 )
 
+_PACKAGED_VERSIONS = Path(utils.__file__).parent / "migrations" / "versions"
+_SCHEMA_ONLY_REVISION = "schemaonly0001"
+_SCHEMA_ONLY_COLUMN = "schema_only_probe"
+
 
 def _crdb_engine(db_uri: str) -> Engine:
     engine = get_or_create_engine(db_uri)
     if not is_cockroachdb(engine.dialect.name):
         pytest.skip("requires OMNIGENT_TEST_DB_URI pointing to CockroachDB")
     return engine
+
+
+def _stub_crdb_preamble(monkeypatch: pytest.MonkeyPatch) -> None:
+    # SQLite cannot answer the CockroachDB-only probes that run before the
+    # bootstrap DDL, nor build the CockroachDB-only trigram index.
+    monkeypatch.setattr(cockroachdb, "_crdb_server_version", lambda _engine: Version("23.2.28"))
+    monkeypatch.setattr(cockroachdb, "_verify_crdb_read_committed", lambda _engine, _version: None)
+    monkeypatch.setattr(
+        cockroachdb, "_prepare_crdb_schema_transaction", lambda _connection, _version: None
+    )
+    model_indexes = cockroachdb._crdb_model_indexes
+    monkeypatch.setattr(
+        cockroachdb,
+        "_crdb_model_indexes",
+        lambda: tuple(index for index in model_indexes() if index._ddl_if is None),
+    )
+
+
+def _add_schema_only_migration(
+    tmp_path: Path, down_revision: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ship a nullable ``agents`` column by migration only; the ORM stays unmapped."""
+    extra = tmp_path / "schema_only_versions"
+    extra.mkdir()
+    (extra / f"{_SCHEMA_ONLY_REVISION}_add_schema_only_probe.py").write_text(
+        f'''"""Add a nullable column before its model mapping ships."""
+
+import sqlalchemy as sa
+from alembic import op
+
+revision = "{_SCHEMA_ONLY_REVISION}"
+down_revision = "{down_revision}"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.add_column("agents", sa.Column("{_SCHEMA_ONLY_COLUMN}", sa.String(), nullable=True))
+
+
+def downgrade() -> None:
+    op.drop_column("agents", "{_SCHEMA_ONLY_COLUMN}")
+'''
+    )
+    build_config = utils._build_alembic_config
+
+    def build_extended_config(db_uri: str):
+        config = build_config(db_uri)
+        config.set_main_option("path_separator", "os")
+        config.set_main_option(
+            "version_locations", os.pathsep.join((str(_PACKAGED_VERSIONS), str(extra)))
+        )
+        return config
+
+    monkeypatch.setattr(utils, "_build_alembic_config", build_extended_config)
+
+
+def _fresh_database(db_uri: str, tmp_path: Path) -> tuple[str, Callable[[], None]]:
+    url = make_url(db_uri)
+    if url.get_backend_name() == "sqlite":
+        return f"sqlite:///{tmp_path / 'fresh-bootstrap.db'}", lambda: None
+    name = f"{url.database}_bootstrap"
+    root = create_engine(db_uri, isolation_level="AUTOCOMMIT")
+
+    def run(statement: str) -> None:
+        with root.connect() as connection:
+            connection.execute(text(statement))
+
+    def drop() -> None:
+        run(f'DROP DATABASE IF EXISTS "{name}" CASCADE')
+        root.dispose()
+
+    try:
+        run(f'DROP DATABASE IF EXISTS "{name}" CASCADE')
+        run(f'CREATE DATABASE "{name}"')
+    except Exception:
+        root.dispose()
+        raise
+    return url.set(database=name).render_as_string(hide_password=False), drop
+
+
+def test_cockroachdb_bootstrap_applies_schema_only_migration(
+    db_uri: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dialect = get_or_create_engine(db_uri).dialect.name
+    if dialect not in {"cockroachdb", "sqlite"}:
+        pytest.skip("runs on CockroachDB, or on SQLite as a stand-in for its bootstrap")
+    if dialect == "sqlite":
+        _stub_crdb_preamble(monkeypatch)
+    model_head = _get_head_db_revision(db_uri)
+    _add_schema_only_migration(tmp_path, model_head, monkeypatch)
+    fresh_uri, drop_database = _fresh_database(db_uri, tmp_path)
+    engine = _create_engine(fresh_uri)
+
+    def agents_columns() -> set[str]:
+        return {column["name"] for column in inspect(engine).get_columns("agents")}
+
+    def downgrade_to(revision: str) -> None:
+        config = utils._build_alembic_config(fresh_uri)
+        with engine.connect() as connection:
+            cockroachdb._prepare_crdb_schema_transaction(
+                connection, cockroachdb._crdb_server_version(engine)
+            )
+            config.attributes["connection"] = connection
+            command.downgrade(config, revision)
+            connection.commit()
+
+    try:
+        _initialize_or_verify_crdb_schema(engine, fresh_uri)
+
+        assert _get_current_db_revision(engine) == _SCHEMA_ONLY_REVISION
+        assert _CRDB_BOOTSTRAP_MARKER_TABLE not in inspect(engine).get_table_names()
+        assert _SCHEMA_ONLY_COLUMN in agents_columns()
+
+        downgrade_to(model_head)
+        assert _get_current_db_revision(engine) == model_head
+        assert _SCHEMA_ONLY_COLUMN not in agents_columns()
+
+        _initialize_or_verify_crdb_schema(engine, fresh_uri)
+        assert _get_current_db_revision(engine) == _SCHEMA_ONLY_REVISION
+        assert _SCHEMA_ONLY_COLUMN in agents_columns()
+    finally:
+        engine.dispose()
+        drop_database()
 
 
 def test_cockroachdb_bootstrap_is_at_head(db_uri: str) -> None:
@@ -77,79 +216,6 @@ def test_cockroachdb_upgrades_from_supported_baseline(db_uri: str) -> None:
     _initialize_or_verify_schema(engine, db_uri)
 
     assert _get_current_db_revision(engine) == head
-
-
-def test_cockroachdb_bootstrap_applies_schema_ahead_of_models(
-    db_uri: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A schema-only revision must run after model creation and after downgrade."""
-    from omnigent.db import utils
-    from omnigent.db.db_models import MODEL_SCHEMA_REVISION, ConversationBase, OmnigentBase
-
-    engine = _crdb_engine(db_uri)
-    version = _crdb_server_version(engine)
-    original_head = _get_head_db_revision(db_uri)
-    versions = tmp_path / "versions"
-    versions.mkdir()
-    (versions / "schema_ahead.py").write_text(
-        "from alembic import op\n"
-        "import sqlalchemy as sa\n"
-        "revision = 'test_schema_ahead'\n"
-        f"down_revision = {original_head!r}\n"
-        "def upgrade():\n"
-        "    op.add_column('omnigent_conversation_metadata', "
-        "sa.Column('future_nullable', sa.String(64), nullable=True))\n"
-        "def downgrade():\n"
-        "    op.drop_column('omnigent_conversation_metadata', 'future_nullable')\n"
-    )
-    original_config = utils._build_alembic_config
-
-    def staged_config(uri: str):
-        config = original_config(uri)
-        migration_root = Path(config.get_main_option("script_location"))
-        config.set_main_option("path_separator", "os")
-        config.set_main_option(
-            "version_locations", os.pathsep.join([str(migration_root / "versions"), str(versions)])
-        )
-        return config
-
-    with engine.connect() as connection:
-        _prepare_crdb_schema_transaction(connection, version)
-        ConversationBase.metadata.drop_all(connection)
-        OmnigentBase.metadata.drop_all(connection)
-        connection.execute(text("DROP TABLE alembic_version"))
-        connection.commit()
-    monkeypatch.setattr(utils, "_build_alembic_config", staged_config)
-
-    def column_names() -> set[str]:
-        columns = inspect(engine).get_columns("omnigent_conversation_metadata")
-        return {column["name"] for column in columns}
-
-    try:
-        _initialize_or_verify_schema(engine, db_uri)
-        assert _get_current_db_revision(engine) == "test_schema_ahead"
-        assert "future_nullable" in column_names()
-        config = staged_config(db_uri)
-        with engine.connect() as connection:
-            _prepare_crdb_schema_transaction(connection, version)
-            config.attributes["connection"] = connection
-            command.downgrade(config, MODEL_SCHEMA_REVISION)
-            connection.commit()
-        assert "future_nullable" not in column_names()
-        _initialize_or_verify_schema(engine, db_uri)
-        assert "future_nullable" in column_names()
-    finally:
-        if _get_current_db_revision(engine) == "test_schema_ahead":
-            config = staged_config(db_uri)
-            with engine.connect() as connection:
-                _prepare_crdb_schema_transaction(connection, version)
-                config.attributes["connection"] = connection
-                if "future_nullable" in column_names():
-                    command.downgrade(config, original_head)
-                else:
-                    command.stamp(config, MODEL_SCHEMA_REVISION)
-                    command.upgrade(config, original_head)
-                connection.commit()
 
 
 def test_cockroachdb_resumes_empty_revision_and_repairs_indexes(db_uri: str) -> None:

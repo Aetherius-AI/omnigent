@@ -369,10 +369,14 @@ PR has landed. Managed distributions that extend the models or patch their local
 migration chain must keep the marker on that chain and align it with the schema
 their model metadata creates. Do not stamp an older model's schema at a newer
 migration head.
-Interrupted bootstrap records `MODEL_SCHEMA_REVISION:head` and resumes only when
-both revisions match. A legacy or mismatched marker leaves the database untouched.
+An interrupted bootstrap records `MODEL_SCHEMA_REVISION:head` in its marker.
+Until the model revision is stamped, startup resumes only when both revisions
+match; after the stamp, the next start continues through normal Alembic
+upgrades. Before a revision is stamped, a legacy or mismatched marker leaves
+the database untouched.
 Back up the original database and inspect its columns, indexes, migration chain,
-and bootstrap marker before a reviewed manual recovery. For a new installation,
+and bootstrap marker before a reviewed manual recovery (see
+[CockroachDB](COCKROACHDB.md)). For a new installation,
 use a separate empty database while retaining the original for inspection. Do not
 drop existing data or stamp a guessed revision to bypass the check; the migration
 head alone does not establish which model metadata created a partial schema.
