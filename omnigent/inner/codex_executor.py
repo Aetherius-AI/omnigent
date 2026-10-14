@@ -1351,17 +1351,23 @@ def materialize_codex_provider_config(
             for provider_name, provider_config in generated.items():
                 providers[provider_name] = provider_config
 
-    from omnigent.onboarding.codex_auth_readiness import CODEX_BUILTIN_PROVIDERS
+    from omnigent.onboarding.codex_auth_readiness import (
+        CODEX_BUILTIN_PROVIDERS,
+        effective_codex_model_provider,
+    )
 
     if source_home is not None:
-        selected = document.get("model_provider")
+        selected: object = effective_codex_model_provider(document.unwrap())
         for override in argv_overrides:
-            if override.partition("=")[0].strip() != "model_provider":
+            key, _, value = override.partition("=")
+            if key.strip() != "model_provider":
                 continue
-            # Codex itself accepts a bare ``model_provider=name``; a value that is
-            # not TOML simply does not select a provider to backfill here.
-            with suppress(tomlkit.exceptions.TOMLKitError):
+            # Like Codex's own ``-c`` parsing: a TOML value, else the bare string;
+            # the last override wins.
+            try:
                 selected = tomlkit.parse(override).get("model_provider")
+            except tomlkit.exceptions.TOMLKitError:
+                selected = value.strip()
         if (
             isinstance(selected, str)
             and selected not in CODEX_BUILTIN_PROVIDERS
@@ -1374,7 +1380,13 @@ def materialize_codex_provider_config(
                     if source_path.is_file()
                     else {}
                 )
-            except (OSError, UnicodeDecodeError, tomlkit.exceptions.TOMLKitError):
+            except (OSError, UnicodeDecodeError, tomlkit.exceptions.TOMLKitError) as exc:
+                logger.warning(
+                    "skipping unusable Codex source config %s for provider %r: %s",
+                    source_path,
+                    selected,
+                    exc,
+                )
                 source = {}
             source_providers = source.get("model_providers")
             source_provider = (

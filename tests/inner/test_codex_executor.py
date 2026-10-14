@@ -4580,29 +4580,79 @@ def test_materialize_codex_provider_config_generated_override_outranks_source_de
     assert provider["base_url"] == "https://generated.example.test/v1"
 
 
-def test_materialize_codex_provider_config_passes_bare_selection_override_through(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    "private_selection,overrides,expected",
+    [
+        (None, ["model_provider=gateway"], {"gateway"}),
+        (None, ['model_provider="gateway"', "model_provider=other"], {"other"}),
+        ("other", ["model_provider=gateway"], {"gateway"}),
+    ],
+    ids=["bare-value-selects", "last-override-wins", "override-replaces-private-selection"],
+)
+def test_materialize_codex_provider_config_reads_selection_like_codex(
+    tmp_path: Path, private_selection: str | None, overrides: list[str], expected: set[str]
 ) -> None:
-    """A bare ``model_provider=name`` override is not TOML; it is kept as-is without a lookup."""
+    """A bare ``model_provider=name`` selects that provider and the last override wins."""
+    import tomllib
+
     from omnigent.inner.codex_executor import materialize_codex_provider_config
 
     source = tmp_path / "source"
     source.mkdir()
-    (source / "config.toml").write_text('[model_providers.gateway]\nname = "Gateway"\n')
+    (source / "config.toml").write_text(
+        '[model_providers.gateway]\nname = "Gateway"\n[model_providers.other]\nname = "Other"\n'
+    )
     private = tmp_path / "private"
     private.mkdir()
     config_path = private / "config.toml"
-    config_path.write_text('model = "private-model"\n')
-    overrides = ["model_provider=gateway"]
+    private_config = 'model = "private-model"\n'
+    if private_selection is not None:
+        private_config += f'model_provider = "{private_selection}"\n'
+    config_path.write_text(private_config)
 
     assert materialize_codex_provider_config(private, overrides, source_home=source) == overrides
 
-    assert config_path.read_text() == 'model = "private-model"\n'
+    config = tomllib.loads(config_path.read_text())
+    assert config["model"] == "private-model"
+    assert config.get("model_provider") == private_selection
+    assert set(config["model_providers"]) == expected
+
+
+def test_materialize_codex_provider_config_backfills_the_active_profile_selection(
+    tmp_path: Path,
+) -> None:
+    """Without an override, the private config's active profile decides the selection."""
+    import tomllib
+
+    from omnigent.inner.codex_executor import materialize_codex_provider_config
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.toml").write_text(
+        '[model_providers.gateway]\nname = "Gateway"\n[model_providers.other]\nname = "Other"\n'
+    )
+    private = tmp_path / "private"
+    private.mkdir()
+    config_path = private / "config.toml"
+    config_path.write_text(
+        'model = "private-model"\nprofile = "work"\nmodel_provider = "other"\n'
+        '[profiles.work]\nmodel_provider = "gateway"\n'
+    )
+
+    assert materialize_codex_provider_config(private, [], source_home=source) == []
+
+    config = tomllib.loads(config_path.read_text())
+    assert config["profile"] == "work"
+    assert config["model_provider"] == "other"
+    assert set(config["model_providers"]) == {"gateway"}
 
 
 @pytest.mark.parametrize("source_failure", ["toml", "utf8", "read", "stat"])
 def test_materialize_codex_provider_config_skips_unusable_optional_source(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_failure: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    source_failure: str,
 ) -> None:
     """A host source failure cannot preempt providers supplied by other Codex layers."""
     import tomllib
@@ -4652,6 +4702,7 @@ def test_materialize_codex_provider_config_skips_unusable_optional_source(
         )
         == overrides
     )
+    assert "skipping unusable Codex source config" in caplog.text
     config = tomllib.loads(config_path.read_text())
     assert config["model"] == "private-model"
     assert set(config["model_providers"]) == {"existing"}
