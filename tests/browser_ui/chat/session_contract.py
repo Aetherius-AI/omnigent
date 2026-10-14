@@ -282,6 +282,10 @@ class ChatSessionContract:
         """Merge wire fields into subsequent mocked session snapshots."""
         self._session_updates.update(fields)
 
+    def session_snapshot(self) -> dict[str, Any]:
+        """Return a fresh wire snapshot for route overrides."""
+        return self._session()
+
     def set_health(self, **fields: Any) -> None:
         """Override per-session fields returned by the health endpoint."""
         self._health_updates.update(fields)
@@ -429,6 +433,7 @@ def install_chat_session_routes(handle: ChatSessionContract) -> None:
         },
     )
     contract.json(f"/v1/hosts/{handle.host_id}/worktrees", empty)
+    contract.json(f"/v1/hosts/{handle.host_id}/mcp-servers", {"mcp_servers": []})
     contract.json("/v1/projects", empty)
     contract.json("/v1/projects/order", {"ordered_project_ids": None, "sort_mode": "alphabetical"})
     contract.json("/v1/extensions", empty)
@@ -534,6 +539,10 @@ def install_chat_session_routes(handle: ChatSessionContract) -> None:
     def skills(route: Route) -> None:
         request = route.request
         query = parse_qs(urlparse(request.url).query)
+        # The host's user-level inventory (import review) has nothing to show.
+        if query.get("host_id") == [handle.host_id] and query.get("path") == ["~"]:
+            route.fulfill(json={"skills": []})
+            return
         if request.method != "GET" or query.get("session_id") != [handle.session_id]:
             route.fallback()
             return

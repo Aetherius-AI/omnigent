@@ -4,6 +4,8 @@ import Security
 import UIKit
 import WebKit
 
+/// Ticket sign-in in Safari for OIDC servers whose manifest lacks this app's native redirect.
+/// Deprecated: removal targeted for iOS 0.5.0, once servers ship native sign-in.
 final class OidcLoginManager {
   @MainActor
   private var loginTask: Task<Void, Never>?
