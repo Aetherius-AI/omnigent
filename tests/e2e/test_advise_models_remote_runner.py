@@ -106,7 +106,10 @@ def _advisor_output(reqs: list[dict[str, Any]], call_id: str) -> dict[str, Any]:
                 try:
                     return json.loads(raw)
                 except ValueError:
-                    return ast.literal_eval(raw)
+                    try:
+                        return ast.literal_eval(raw)
+                    except (ValueError, SyntaxError):
+                        return None
             for value in node.values():
                 found = _walk(value)
                 if found is not None:

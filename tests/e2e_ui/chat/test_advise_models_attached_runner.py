@@ -150,15 +150,20 @@ def _settle_turn(page: Page) -> str | None:
     )
     try:
         expect(reply).to_be_visible(timeout=_TURN_TIMEOUT_MS)
-    except AssertionError:
+    except AssertionError as no_reply:
         pill = page.get_by_test_id("error-pill").first
         if not pill.is_visible():
             raise
-        headline = pill.get_by_test_id("error-headline").inner_text()
-        pill.get_by_role("button").first.click()
-        content = pill.get_by_test_id("error-message-content")
-        expect(content).to_be_visible()
-        return f"{headline} | {content.inner_text()}"
+        try:
+            headline = pill.get_by_test_id("error-headline").inner_text()
+            pill.get_by_role("button").first.click()
+            content = pill.get_by_test_id("error-message-content")
+            expect(content).to_be_visible()
+            return f"{headline} | {content.inner_text()}"
+        except Exception as pill_error:
+            raise AssertionError(
+                f"no recommendation, and the error pill could not be read: {pill_error}"
+            ) from no_reply
     return None
 
 
