@@ -202,8 +202,9 @@ def test_cockroachdb_bootstrap_resumes_after_interrupted_migration(
         return {column["name"] for column in inspect(engine).get_columns("agents")}
 
     try:
-        with pytest.raises(RuntimeError, match="injected migration interruption"):
+        with pytest.raises(RuntimeError, match="schema migration failed") as failure:
             _initialize_or_verify_crdb_schema(engine, fresh_uri)
+        assert "injected migration interruption" in str(failure.value.__cause__)
         assert _get_current_db_revision(engine) == MODEL_SCHEMA_REVISION
         assert _CRDB_BOOTSTRAP_MARKER_TABLE in inspect(engine).get_table_names()
         assert _SCHEMA_ONLY_COLUMN not in agents_columns()

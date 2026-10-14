@@ -264,6 +264,36 @@ def _finish_crdb_bootstrap(engine: Engine, version: Version) -> None:
         connection.commit()
 
 
+def _upgrade_crdb_schema(engine: Engine, db_uri: str, current: str, head: str) -> None:
+    """Run Alembic from *current* to *head*, turning failures into operator guidance."""
+    # Imported lazily: utils imports this module at load time.
+    from omnigent.db.utils import _get_current_db_revision, _run_migrations
+
+    # Never echo the raw URI: it may embed a password, and startup
+    # errors land in logs and deployment consoles with broader read
+    # access than the database credential itself.
+    safe_uri = make_url(db_uri).render_as_string(hide_password=True)
+    try:
+        _run_migrations(engine, db_uri)
+    except Exception as exc:
+        raise RuntimeError(
+            "CockroachDB schema migration failed "
+            f"(found revision {current!r}, expected {head!r}). "
+            "Take a backup, then run\n\n"
+            f"    omnigent debug db-upgrade {safe_uri!r}\n\n"
+            "to inspect or retry the migration manually."
+        ) from exc
+    migrated = _get_current_db_revision(engine)
+    if migrated != head:
+        raise RuntimeError(
+            "CockroachDB schema migration did not reach head "
+            f"(started at {current!r}, now at {migrated!r}, expected {head!r}). "
+            "Take a backup, then run\n\n"
+            f"    omnigent debug db-upgrade {safe_uri!r}\n\n"
+            "to inspect or retry the migration manually."
+        )
+
+
 def _initialize_or_verify_crdb_schema(engine: Engine, db_uri: str) -> None:
     """Bootstrap an empty CRDB database or upgrade a supported CRDB schema."""
     from alembic import command
@@ -275,7 +305,6 @@ def _initialize_or_verify_crdb_schema(engine: Engine, db_uri: str) -> None:
         _build_alembic_config,
         _get_current_db_revision,
         _get_head_db_revision,
-        _run_migrations,
         _verify_db_revision_is_supported,
     )
 
@@ -318,7 +347,7 @@ def _initialize_or_verify_crdb_schema(engine: Engine, db_uri: str) -> None:
                 command.stamp(config, MODEL_SCHEMA_REVISION)
                 connection.commit()
             if head != MODEL_SCHEMA_REVISION:
-                _run_migrations(engine, db_uri)
+                _upgrade_crdb_schema(engine, db_uri, MODEL_SCHEMA_REVISION, head)
             if _get_current_db_revision(engine) != head:
                 raise RuntimeError(
                     "CockroachDB schema bootstrap did not reach the expected Alembic head "
@@ -341,27 +370,5 @@ def _initialize_or_verify_crdb_schema(engine: Engine, db_uri: str) -> None:
             current,
             head,
         )
-        # Never echo the raw URI: it may embed a password, and startup
-        # errors land in logs and deployment consoles with broader read
-        # access than the database credential itself.
-        safe_uri = make_url(db_uri).render_as_string(hide_password=True)
-        try:
-            _run_migrations(engine, db_uri)
-        except Exception as exc:
-            raise RuntimeError(
-                "CockroachDB schema migration failed "
-                f"(found revision {current!r}, expected {head!r}). "
-                "Take a backup, then run\n\n"
-                f"    omnigent debug db-upgrade {safe_uri!r}\n\n"
-                "to inspect or retry the migration manually."
-            ) from exc
-        migrated = _get_current_db_revision(engine)
-        if migrated != head:
-            raise RuntimeError(
-                "CockroachDB schema migration did not reach head "
-                f"(started at {current!r}, now at {migrated!r}, expected {head!r}). "
-                "Take a backup, then run\n\n"
-                f"    omnigent debug db-upgrade {safe_uri!r}\n\n"
-                "to inspect or retry the migration manually."
-            )
+        _upgrade_crdb_schema(engine, db_uri, current, head)
     _finish_crdb_bootstrap(engine, version)
