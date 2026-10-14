@@ -3,14 +3,47 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from alembic import command
 from packaging.version import Version
+from sqlalchemy import create_engine, inspect
 from sqlalchemy.exc import NoSuchModuleError
 
 from omnigent.db import cockroachdb, utils
+
+
+def test_model_schema_revision_matches_model_tables_and_columns(tmp_path: Path) -> None:
+    """Model columns must be represented at the revision stamped by bootstrap."""
+    from omnigent.db.db_models import MODEL_SCHEMA_REVISION, ConversationBase, OmnigentBase
+
+    uri = f"sqlite:///{tmp_path / 'model_revision.db'}"
+    engine = create_engine(uri)
+    try:
+        config = utils._build_alembic_config(uri)
+        with engine.begin() as connection:
+            config.attributes["connection"] = connection
+            command.upgrade(config, MODEL_SCHEMA_REVISION)
+        inspector = inspect(engine)
+        migrated = {
+            table: {column["name"] for column in inspector.get_columns(table)}
+            for table in inspector.get_table_names()
+            if table != "alembic_version"
+        }
+        models = {
+            table.name: set(table.columns.keys())
+            for metadata in (OmnigentBase.metadata, ConversationBase.metadata)
+            for table in metadata.tables.values()
+        }
+        assert migrated == models, (
+            "Advance MODEL_SCHEMA_REVISION with model table/column changes; "
+            "CockroachDB bootstrap stamps this revision before later migrations."
+        )
+    finally:
+        engine.dispose()
 
 
 @pytest.mark.parametrize(
@@ -186,22 +219,39 @@ def test_bootstrap_rejects_invalid_marker() -> None:
         )
 
 
-def test_bootstrap_rejects_marker_from_different_schema_head() -> None:
+@pytest.mark.parametrize(
+    ("previous_target", "current_target"),
+    [
+        ("older-head", "current-head"),
+        ("old-model:head", "new-model:head"),
+        ("head", "model:head"),
+    ],
+)
+def test_bootstrap_rejects_marker_from_different_schema_target(
+    previous_target: str, current_target: str
+) -> None:
     result = MagicMock()
-    result.__iter__.return_value = iter([(cockroachdb._CRDB_BOOTSTRAP_MARKER_TOKEN, "older-head")])
+    result.__iter__.return_value = iter(
+        [(cockroachdb._CRDB_BOOTSTRAP_MARKER_TOKEN, previous_target)]
+    )
     connection = MagicMock()
     connection.execute.return_value = result
     engine = MagicMock()
     engine.connect.return_value = nullcontext(connection)
 
-    with pytest.raises(RuntimeError, match="invalid Omnigent bootstrap marker"):
+    with pytest.raises(RuntimeError, match="invalid Omnigent bootstrap marker") as error:
         cockroachdb._start_or_resume_crdb_bootstrap(
             engine,
             Version("25.2.10"),
             {cockroachdb._CRDB_BOOTSTRAP_MARKER_TABLE, "agents"},
             {"agents", "conversations"},
-            "current-head",
+            current_target,
         )
+    assert "Existing data was left unchanged" in str(error.value)
+    assert "Back up and inspect" in str(error.value)
+    assert all(
+        str(call.args[0]).startswith("SELECT") for call in connection.execute.call_args_list
+    )
 
 
 def test_bootstrap_rejects_empty_alembic_table_without_marker() -> None:

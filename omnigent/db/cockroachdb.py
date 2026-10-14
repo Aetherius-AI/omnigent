@@ -22,13 +22,8 @@ from omnigent.db.query_context import query_name_scope
 
 _logger = logging.getLogger(__name__)
 
-# The first revision that can be reached on CockroachDB without executing the
-# PostgreSQL-oriented historical migration chain. This must be the Alembic
-# head at the time CockroachDB support lands: bootstrap builds the schema
-# from current ORM metadata and stamps head, so no CockroachDB database can
-# exist at an earlier revision, and migrations between the old baseline and
-# this head (e.g. gb1b2c3d4e5f's ADD COLUMN) are already baked into every
-# bootstrapped schema and must never be replayed on CockroachDB.
+# Earlier revisions use PostgreSQL-specific migrations and cannot be replayed
+# on CockroachDB. Model bootstrap starts at MODEL_SCHEMA_REVISION instead.
 CRDB_BASELINE_REVISION = "gf1b2c3d4e5f"
 CRDB_MINIMUM_VERSION = Version("23.2.28")
 CRDB_TESTED_VERSIONS = frozenset(
@@ -193,7 +188,10 @@ def _start_or_resume_crdb_bootstrap(
         return
     raise RuntimeError(
         "CockroachDB has an invalid Omnigent bootstrap marker or unexpected tables. "
-        "Use a new empty database rather than stamping an unknown partial schema."
+        "Its target may be legacy or differ from this application's model revision "
+        "and migration head. Existing data was left unchanged. Back up and inspect "
+        "this database and its bootstrap marker before manual recovery, or initialize "
+        "a separate empty database. Do not guess or manually stamp a revision."
     )
 
 
@@ -270,7 +268,7 @@ def _initialize_or_verify_crdb_schema(engine: Engine, db_uri: str) -> None:
     """Bootstrap an empty CRDB database or upgrade a supported CRDB schema."""
     from alembic import command
 
-    from omnigent.db.db_models import ConversationBase, OmnigentBase
+    from omnigent.db.db_models import MODEL_SCHEMA_REVISION, ConversationBase, OmnigentBase
 
     # Imported lazily: utils imports this module at load time.
     from omnigent.db.utils import (
@@ -284,12 +282,20 @@ def _initialize_or_verify_crdb_schema(engine: Engine, db_uri: str) -> None:
     version = _crdb_server_version(engine)
     _verify_crdb_read_committed(engine, version)
     head = _get_head_db_revision(db_uri)
+    if not _crdb_revision_is_supported(db_uri, MODEL_SCHEMA_REVISION, head):
+        raise RuntimeError(
+            f"CockroachDB model schema revision {MODEL_SCHEMA_REVISION!r} is not on the "
+            f"configured migration chain through {head!r}."
+        )
     current = _get_current_db_revision(engine)
     tables = set(inspect(engine).get_table_names())
     expected = set(OmnigentBase.metadata.tables) | set(ConversationBase.metadata.tables)
 
     if current is None:
-        _start_or_resume_crdb_bootstrap(engine, version, tables, expected, head)
+        # Models can advance while the already-deployed migration head stays the same.
+        _start_or_resume_crdb_bootstrap(
+            engine, version, tables, expected, f"{MODEL_SCHEMA_REVISION}:{head}"
+        )
         with query_name_scope("omnigent.database.bootstrap_cockroachdb"):
             with engine.connect() as connection:
                 _prepare_crdb_schema_transaction(connection, version)
@@ -309,8 +315,10 @@ def _initialize_or_verify_crdb_schema(engine: Engine, db_uri: str) -> None:
             with engine.connect() as connection:
                 _prepare_crdb_schema_transaction(connection, version)
                 config.attributes["connection"] = connection
-                command.stamp(config, "head")
+                command.stamp(config, MODEL_SCHEMA_REVISION)
                 connection.commit()
+            if head != MODEL_SCHEMA_REVISION:
+                _run_migrations(engine, db_uri)
             if _get_current_db_revision(engine) != head:
                 raise RuntimeError(
                     "CockroachDB schema bootstrap did not stamp the expected Alembic head "

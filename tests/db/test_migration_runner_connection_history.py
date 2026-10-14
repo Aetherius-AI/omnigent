@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import pytest
 import sqlalchemy as sa
 from alembic import command
 
@@ -30,15 +31,37 @@ def test_runner_connection_history_migration(tmp_path: Path) -> None:
             )
         ).one()
         assert tuple(row) == ("old-runner", 1, None)
+        for valid in ("x" * 64, "é" * 64, "🙂" * 64):
+            connection.execute(
+                sa.text("UPDATE omnigent_conversation_metadata SET runner_connected_id = :value"),
+                {"value": valid},
+            )
+        assert len(valid.encode("utf-8")) == 256
+        for invalid in (
+            "x" * 16_384,
+            "x" * 16_385,
+            "ok\x00" + "x" * 16_384,
+            b"x" * 16_384,
+            b"\x00" + b"x" * 16_384,
+            "x" * 65,
+            "🙂" * 65,
+            "ok\x00" + "x" * 80,
+            b"short",
+        ):
+            with pytest.raises(sa.exc.IntegrityError), connection.begin_nested():
+                connection.execute(
+                    sa.text(
+                        "UPDATE omnigent_conversation_metadata SET runner_connected_id = :value"
+                    ),
+                    {"value": invalid},
+                )
         command.downgrade(config, "mm1a2b3c4d5e")
         assert "runner_connected_id" not in {
             column["name"]
             for column in sa.inspect(connection).get_columns("omnigent_conversation_metadata")
         }
-        assert (
-            connection.execute(
-                sa.text("SELECT runner_id FROM omnigent_conversation_metadata")
-            ).scalar_one()
-            == "old-runner"
-        )
+        row = connection.execute(
+            sa.text("SELECT runner_id, runner_last_seen FROM omnigent_conversation_metadata")
+        ).one()
+        assert tuple(row) == ("old-runner", 1)
     engine.dispose()
