@@ -46,6 +46,32 @@ def test_model_schema_revision_matches_model_tables_and_columns(tmp_path: Path) 
         engine.dispose()
 
 
+@pytest.mark.parametrize("off_chain", ["not-a-revision", "before-baseline"])
+def test_initialize_rejects_model_revision_off_migration_chain(
+    off_chain: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The declared model revision must sit between the CRDB baseline and head."""
+    from alembic.script import ScriptDirectory
+
+    from omnigent.db import db_models
+
+    uri = "sqlite:///unused.db"
+    if off_chain == "before-baseline":
+        script = ScriptDirectory.from_config(utils._build_alembic_config(uri))
+        down = script.get_revision(cockroachdb.CRDB_BASELINE_REVISION).down_revision
+        assert isinstance(down, str)
+        off_chain = down
+    engine = MagicMock()
+    monkeypatch.setattr(cockroachdb, "_crdb_server_version", lambda _engine: Version("25.2.10"))
+    monkeypatch.setattr(cockroachdb, "_verify_crdb_read_committed", lambda _engine, _version: None)
+    monkeypatch.setattr(db_models, "MODEL_SCHEMA_REVISION", off_chain)
+
+    with pytest.raises(RuntimeError, match="not on the configured migration chain"):
+        cockroachdb._initialize_or_verify_crdb_schema(engine, uri)
+
+    engine.connect.assert_not_called()
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
