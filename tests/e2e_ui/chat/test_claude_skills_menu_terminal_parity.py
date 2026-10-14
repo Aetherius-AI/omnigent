@@ -194,9 +194,11 @@ def _host_command(base_url: str, mock_url: str) -> list[str]:
     bootstrap = (
         "import os, runpy, sys, yaml\n"
         "path = os.path.join(os.environ['OMNIGENT_CONFIG_HOME'], 'config.yaml')\n"
-        "config = yaml.safe_load(open(path)) or {}\n"
+        "with open(path) as fh:\n"
+        "    config = yaml.safe_load(fh) or {}\n"
         f"config['providers'] = {providers!r}\n"
-        "yaml.safe_dump(config, open(path, 'w'))\n"
+        "with open(path, 'w') as fh:\n"
+        "    yaml.safe_dump(config, fh)\n"
         f"sys.argv = ['omnigent.host._daemon_entry', '--server', {base_url!r}]\n"
         "runpy.run_module('omnigent.host._daemon_entry', run_name='__main__')\n"
     )
@@ -285,8 +287,8 @@ def test_claude_menu_lists_plugin_commands_the_terminal_lists(
             _wait_terminal_connected(page)
             _focus_tui(page)
             page.keyboard.type(f"/{_PLUGIN}", delay=30)
-            pane = _wait_pane_contains(live_server, session_id, f"{_PLUGIN}:review")
-            assert f"{_PLUGIN}:simplify" in pane
+            _wait_pane_contains(live_server, session_id, f"{_PLUGIN}:review")
+            pane = _wait_pane_contains(live_server, session_id, f"{_PLUGIN}:simplify")
             page.wait_for_timeout(1_500)
             if evidence_dir:
                 Path(evidence_dir, "terminal-pane.txt").write_text(pane)
@@ -304,11 +306,14 @@ def test_claude_menu_lists_plugin_commands_the_terminal_lists(
             if evidence_dir:
                 page.screenshot(path=f"{evidence_dir}/chat-menu.png")
             review_row = page.get_by_test_id(f"slash-menu-item-{_PLUGIN}:review")
-            listed = client.get("/v1/skills", params={"session_id": session_id}).json()
-            names = [skill["name"] for skill in listed.get("skills", [])]
-            assert review_row.is_visible(), (
-                f"chat menu lacks /{_PLUGIN}:review although the terminal lists it; "
-                f"/v1/skills names={names}"
-            )
+            try:
+                expect(review_row).to_be_visible(timeout=30_000)
+            except AssertionError:
+                listed = client.get("/v1/skills", params={"session_id": session_id}).json()
+                names = [skill["name"] for skill in listed.get("skills", [])]
+                raise AssertionError(
+                    f"chat menu lacks /{_PLUGIN}:review although the terminal lists it; "
+                    f"/v1/skills names={names}"
+                ) from None
         finally:
             client.delete(f"/v1/sessions/{session_id}")

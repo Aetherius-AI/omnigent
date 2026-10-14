@@ -519,20 +519,29 @@ def _parse_plugin_command(command_md: Path, segments: tuple[str, ...]) -> SkillS
 
 
 def _declared_command_paths(key: str, install_path: Path, declared: object) -> list[Path]:
-    """Resolve a manifest's ``commands`` entries, dropping any that leave the plugin."""
+    """A manifest's usable ``commands`` paths, as declared, dropping any that leave the plugin.
+
+    The declared spelling is kept so a symlinked entry is named as declared.
+    """
     entries = [declared] if isinstance(declared, str) else declared
     if not isinstance(entries, list):
+        _log.warning("Plugin %r: manifest 'commands' must be a path or a list of paths", key)
         return []
     root = install_path.resolve()
     paths: list[Path] = []
     for entry in entries:
         if not isinstance(entry, str) or not entry:
             continue
-        resolved = (install_path / entry).resolve()
-        if not resolved.is_relative_to(root):
+        path = install_path / entry
+        try:
+            inside = path.resolve().is_relative_to(root)
+        except (OSError, ValueError) as exc:
+            _log.warning("Plugin %r: command path %r is unusable: %s", key, entry, exc)
+            continue
+        if not inside:
             _log.warning("Plugin %r: command path %r is outside the plugin; skipped", key, entry)
             continue
-        paths.append(resolved)
+        paths.append(path)
     return paths
 
 
@@ -544,9 +553,9 @@ def _discover_plugin_commands(
     The manifest's ``commands`` paths (one ``.md`` file or a directory each)
     replace the default ``commands/`` directory when present. Under a directory,
     ``<dir>/<name>.md`` is the command ``<dir>:<name>`` with every subdirectory
-    adding a segment, a directory holding a ``skill.md`` is the single command
-    named by that file, any-case ``.md`` files count, and symlinked entries are
-    skipped.
+    adding a segment, a directory holding a ``skill.md`` (``commands/`` itself
+    included) is the single command named by that file, any-case ``.md`` files
+    count, and symlinked entries are skipped.
 
     :param key: The ``<plugin>@<marketplace>`` key, for diagnostics.
     :param install_path: The plugin's trusted install directory.
@@ -555,6 +564,7 @@ def _discover_plugin_commands(
     """
     out: list[SkillSpec] = []
     scanned = 0
+    bounded = False
 
     def _is_markdown(entry: Path) -> bool:
         return not entry.is_symlink() and entry.is_file() and entry.name.lower().endswith(".md")
@@ -568,15 +578,16 @@ def _discover_plugin_commands(
         if spec is not None:
             out.append(spec)
 
-    def _walk(directory: Path, prefix: tuple[str, ...], own: tuple[str, ...] | None) -> None:
-        # *prefix* names the children; *own* names the directory itself when it
-        # holds a skill.md (None at the default commands root, which is never one command).
-        nonlocal scanned
+    def _walk(directory: Path, prefix: tuple[str, ...], own: tuple[str, ...]) -> None:
+        # *prefix* names the children; *own* names the directory itself when it holds a skill.md.
+        nonlocal scanned, bounded
         scanned += 1
         if len(prefix) >= _MAX_PLUGIN_COMMAND_DEPTH or scanned > _MAX_PLUGIN_COMMAND_DIRS:
-            _log.warning(
-                "Plugin %r: commands beyond the walk's bounds skipped: %s", key, directory
-            )
+            if not bounded:
+                _log.warning(
+                    "Plugin %r: commands beyond the walk's bounds skipped: %s", key, directory
+                )
+            bounded = True
             return
         try:
             entries = sorted(directory.iterdir())
@@ -586,7 +597,7 @@ def _discover_plugin_commands(
         skill_md = next(
             (e for e in entries if e.name.lower() == "skill.md" and _is_markdown(e)), None
         )
-        if skill_md is not None and own is not None:
+        if skill_md is not None:
             _add(skill_md, own)
             return
         for entry in entries:
@@ -599,13 +610,22 @@ def _discover_plugin_commands(
 
     declared = manifest.get("commands") if manifest else None
     if declared is None:
-        _walk(install_path / "commands", (), None)
+        commands_dir = install_path / "commands"
+        if commands_dir.is_symlink() and not commands_dir.resolve().is_relative_to(
+            install_path.resolve()
+        ):
+            _log.warning("Plugin %r: commands/ links outside the plugin; skipped", key)
+            return out
+        _walk(commands_dir, (), (commands_dir.name,))
         return out
     for source in _declared_command_paths(key, install_path, declared):
+        # A declared entry may itself be a symlink; only entries found by walking are not followed.
         if source.is_dir():
             _walk(source, (), (source.name,))
-        elif _is_markdown(source):
+        elif source.is_file() and source.name.lower().endswith(".md"):
             _add(source, (_stem(source),))
+        else:
+            _log.warning("Plugin %r: declared command path %s is missing or not .md", key, source)
     return out
 
 

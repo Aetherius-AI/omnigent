@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -1231,18 +1232,10 @@ def test_plugin_command_without_frontmatter_uses_first_body_line(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Frontmatter is optional on plugin commands; the body's first line labels it."""
-    home = tmp_path / "home"
-    install = home / ".claude" / "plugins" / "cache" / "mkt" / "tools" / "1.0.0"
+    home, install = _claude_home_with_plugin_command(tmp_path / "home", plugin="tools")
     _write_plugin_command(install / "commands", "deploy", "Deploy the current branch.\n")
     _write_plugin_command(install / "commands", "headed", "# Ship it\n\nShip the branch.\n")
     _write_plugin_command(install / "commands", "wordy", "Long first line " + "x" * 120 + "\n")
-    (home / ".claude").mkdir(parents=True, exist_ok=True)
-    (home / ".claude" / "settings.json").write_text(
-        json.dumps({"enabledPlugins": {"tools@mkt": True}})
-    )
-    (home / ".claude" / "plugins" / "installed_plugins.json").write_text(
-        json.dumps({"version": 2, "plugins": {"tools@mkt": [{"installPath": str(install)}]}})
-    )
     monkeypatch.setattr("pathlib.Path.home", lambda: home)
 
     out = resolve_harness_skills(_ctx(tmp_path / "ws", home), "claude-native")
@@ -1364,6 +1357,7 @@ def test_plugin_command_directory_with_skill_md_is_one_command(
 
     out = resolve_harness_skills(_ctx(tmp_path / "ws", home), "claude-native")
     by_name = {s.name: s for s in out}
+    assert by_name["knowledge-base:kb-review"].description == "Review a knowledge-base PR"
     assert by_name["knowledge-base:legacy"].description == "Directory-named command."
     assert by_name["knowledge-base:deep:deepname"].description == "Renamed by its frontmatter."
     for absent in (
@@ -1372,6 +1366,23 @@ def test_plugin_command_directory_with_skill_md_is_one_command(
         "knowledge-base:deep:er",
     ):
         assert absent not in by_name
+
+
+def test_plugin_commands_root_skill_md_collapses_the_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``skill.md`` directly under ``commands/`` makes the whole directory one command."""
+    home, install = _claude_home_with_plugin_command(tmp_path / "home")
+    (install / "commands" / "SKILL.md").write_text(
+        "---\nname: rootskill\ndescription: Root SKILL.md under commands.\n---\nbody\n"
+    )
+    monkeypatch.setattr("pathlib.Path.home", lambda: home)
+
+    names = [s.name for s in resolve_harness_skills(_ctx(tmp_path / "ws", home), "claude-native")]
+    assert "knowledge-base:kb-search" in names
+    assert "knowledge-base:rootskill" in names
+    for absent in ("knowledge-base:kb-review", "knowledge-base:commands"):
+        assert absent not in names
 
 
 def test_plugin_commands_stop_at_claude_code_depth_bound(
@@ -1406,6 +1417,23 @@ def test_plugin_commands_do_not_follow_symlinks(
     assert not any(":loop" in name or name == "knowledge-base:alias" for name in names)
 
 
+def test_plugin_commands_root_linked_outside_plugin_is_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``commands/`` symlink that leaves the plugin is not scanned."""
+    home, install = _claude_home_with_plugin_command(tmp_path / "home")
+    outside = tmp_path / "outside"
+    _write_plugin_command(outside, "leak", "---\ndescription: outside\n---\nbody\n")
+    (install / "commands" / "kb-review.md").unlink()
+    (install / "commands").rmdir()
+    (install / "commands").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr("pathlib.Path.home", lambda: home)
+
+    names = [s.name for s in resolve_harness_skills(_ctx(tmp_path / "ws", home), "claude-native")]
+    assert "knowledge-base:kb-search" in names
+    assert "knowledge-base:leak" not in names
+
+
 def test_plugin_command_over_size_limit_is_skipped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1428,18 +1456,12 @@ def test_plugin_skill_wins_name_collision_with_command(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """When a plugin ships skills/x and commands/x.md, the skill entry wins."""
-    home = tmp_path / "home"
+    home = _claude_home_with_plugin(
+        tmp_path / "home", plugin="dup", marketplace="mkt", skill="review", enabled=True
+    )
     install = home / ".claude" / "plugins" / "cache" / "mkt" / "dup" / "1.0.0"
-    _write_skill(install / "skills", "review")
     _write_plugin_command(
         install / "commands", "review", "---\ndescription: command flavor\n---\nbody\n"
-    )
-    (home / ".claude").mkdir(parents=True, exist_ok=True)
-    (home / ".claude" / "settings.json").write_text(
-        json.dumps({"enabledPlugins": {"dup@mkt": True}})
-    )
-    (home / ".claude" / "plugins" / "installed_plugins.json").write_text(
-        json.dumps({"version": 2, "plugins": {"dup@mkt": [{"installPath": str(install)}]}})
     )
     monkeypatch.setattr("pathlib.Path.home", lambda: home)
 
@@ -1480,19 +1502,65 @@ def test_plugin_manifest_commands_replace_the_default_directory(
 
 
 def test_plugin_manifest_command_path_outside_plugin_is_skipped(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A manifest path that escapes the plugin root is not scanned."""
+    """A manifest path that escapes the plugin root, or points nowhere, is logged and skipped."""
     home, install = _claude_home_with_plugin_command(tmp_path / "home")
     _write_plugin_command(install.parent, "escaped", "---\ndescription: outside\n---\nbody\n")
     _write_plugin_command(tmp_path, "absolute", "---\ndescription: outside\n---\nbody\n")
     _write_plugin_manifest(
         install,
-        commands=["./commands/kb-review.md", "../escaped.md", str(tmp_path / "absolute.md")],
+        commands=[
+            "./commands/kb-review.md",
+            "../escaped.md",
+            str(tmp_path / "absolute.md"),
+            "./typo/missing.md",
+            "./bad\x00.md",
+        ],
     )
     monkeypatch.setattr("pathlib.Path.home", lambda: home)
 
-    names = [s.name for s in resolve_harness_skills(_ctx(tmp_path / "ws", home), "claude-native")]
+    with caplog.at_level(logging.WARNING, logger="omnigent.spec.skill_sources"):
+        names = [
+            s.name for s in resolve_harness_skills(_ctx(tmp_path / "ws", home), "claude-native")
+        ]
     assert "knowledge-base:kb-review" in names
     for absent in ("knowledge-base:escaped", "knowledge-base:absolute"):
         assert absent not in names
+    assert "'../escaped.md' is outside the plugin" in caplog.text
+    assert "typo/missing.md is missing or not .md" in caplog.text
+    assert "'./bad\\x00.md' is unusable" in caplog.text
+
+
+def test_plugin_manifest_links_keep_their_declared_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A declared entry that is a symlink is followed and named as declared."""
+    home, install = _claude_home_with_plugin_command(tmp_path / "home")
+    _write_plugin_command(install / "real-dir", "x", "---\ndescription: linked dir\n---\nbody\n")
+    (install / "alias.md").symlink_to(install / "commands" / "kb-review.md")
+    (install / "dir-link").symlink_to(install / "real-dir", target_is_directory=True)
+    _write_plugin_manifest(install, commands=["./alias.md", "./dir-link/"])
+    monkeypatch.setattr("pathlib.Path.home", lambda: home)
+
+    names = [s.name for s in resolve_harness_skills(_ctx(tmp_path / "ws", home), "claude-native")]
+    assert "knowledge-base:alias" in names
+    assert "knowledge-base:x" in names
+    for absent in ("knowledge-base:kb-review", "knowledge-base:real", "knowledge-base:dir-link"):
+        assert absent not in names
+
+
+def test_plugin_manifest_malformed_commands_field_is_logged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A ``commands`` value that is neither a path nor a list yields no commands and a warning."""
+    home, install = _claude_home_with_plugin_command(tmp_path / "home")
+    _write_plugin_manifest(install, commands={"path": "./commands/"})
+    monkeypatch.setattr("pathlib.Path.home", lambda: home)
+
+    with caplog.at_level(logging.WARNING, logger="omnigent.spec.skill_sources"):
+        names = [
+            s.name for s in resolve_harness_skills(_ctx(tmp_path / "ws", home), "claude-native")
+        ]
+    assert names == ["knowledge-base:kb-search"]
+    assert "manifest 'commands' must be a path or a list of paths" in caplog.text
