@@ -1,9 +1,9 @@
-"""``sys_advise_models`` on runners that run outside the routing-enabled server process.
+"""``sys_advise_models`` in the chat of a runner launched by ``omnigent host --server``.
 
-The server builds the routing backends. A runner attached from another process —
-an ``omnigent host --server`` daemon, or the sibling runner a local deployment
-spawns — must still offer the advisor whenever the server it is attached to
-reports ``smart_routing_enabled: true``.
+The server builds the routing backends. A runner attached from another process
+must still offer the advisor whenever its server reports
+``smart_routing_enabled: true``. ``tests/e2e/test_advise_models_remote_runner.py``
+covers both attachment topologies at the API layer; this is the visible journey.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from playwright.sync_api import Browser, Page, expect
 
 from tests._helpers.host import isolated_host
 from tests._helpers.server_runner import server_runner
-from tests._helpers.session import bind_session_runner, bundle_files, post_session_bundle
+from tests._helpers.session import bundle_files, post_session_bundle
 from tests.e2e_ui.conftest import configure_mock_llm, set_fallback_mock_llm
 
 _JUDGE_MODEL = "routing-judge"
@@ -47,7 +47,6 @@ spawn: true
 class RoutingStack:
     base_url: str
     mock_url: str
-    sibling_runner_id: str
     host_id: str
     workspace: Path
 
@@ -56,7 +55,7 @@ class RoutingStack:
 def routing_stack(
     tmp_path_factory: pytest.TempPathFactory, mock_llm_server_url: str
 ) -> Iterator[RoutingStack]:
-    """A server whose ``llm:`` block builds the OSS judge, plus a sibling runner and a host."""
+    """A server whose ``llm:`` block builds the OSS judge, plus an attached host."""
     root = tmp_path_factory.mktemp("advise-models-stack")
     config = root / "server.yaml"
     config.write_text(
@@ -76,10 +75,9 @@ def routing_stack(
     with server_runner(
         root / "stack", server_env=provider_env, server_args=["--config", str(config)]
     ) as stack:
-        info = httpx.get(f"{stack.base_url}/v1/info", timeout=10)
+        info = httpx.get(f"{stack.base_url}/v1/info", timeout=10, trust_env=False)
         info.raise_for_status()
         assert info.json()["smart_routing_enabled"] is True, info.text
-        stack.start_runner(env=provider_env)
         with (
             isolated_host(root / "host", stack.base_url, env=provider_env) as host,
             httpx.Client(base_url=stack.base_url, trust_env=False) as client,
@@ -88,27 +86,23 @@ def routing_stack(
             yield RoutingStack(
                 base_url=stack.base_url,
                 mock_url=mock_llm_server_url,
-                sibling_runner_id=stack.runner_id,
                 host_id=host.host_id,
                 workspace=workspace,
             )
 
 
-def _create_session(stack: RoutingStack, *, on_host: bool) -> str:
+def _create_session(stack: RoutingStack) -> str:
+    """Create the session on the attached host and wait for its runner to come online."""
     bundle = bundle_files({"config.yaml": _AGENT_YAML.encode()})
-    metadata = {"host_id": stack.host_id, "workspace": str(stack.workspace)} if on_host else None
+    metadata = {"host_id": stack.host_id, "workspace": str(stack.workspace)}
     with httpx.Client(base_url=stack.base_url, trust_env=False, timeout=120.0) as client:
         created = post_session_bundle(client.post, "/v1/sessions", bundle, metadata=metadata)
         created.raise_for_status()
         session_id = str(created.json()["session_id"])
-        if on_host:
-            session = client.get(f"/v1/sessions/{session_id}")
-            session.raise_for_status()
-            runner_id = session.json()["runner_id"]
-            assert runner_id, f"host launch did not bind a runner for session {session_id}"
-        else:
-            runner_id = stack.sibling_runner_id
-            bind_session_runner(client.patch, stack.base_url, session_id, runner_id)
+        session = client.get(f"/v1/sessions/{session_id}")
+        session.raise_for_status()
+        runner_id = session.json()["runner_id"]
+        assert runner_id, f"host launch did not bind a runner for session {session_id}"
         deadline = time.monotonic() + 90
         while time.monotonic() < deadline:
             status = client.get(f"/v1/runners/{runner_id}/status")
@@ -143,7 +137,7 @@ def _script_advisor_call(mock_url: str, nonce: str) -> None:
 
 def _offered_tools(mock_url: str, nonce: str) -> set[str]:
     """Tool names the runner advertised on the model request carrying ``nonce``."""
-    captured = httpx.get(f"{mock_url}/mock/requests", timeout=10)
+    captured = httpx.get(f"{mock_url}/mock/requests", timeout=10, trust_env=False)
     captured.raise_for_status()
     requests = captured.json()["requests"]
     for request in requests:
@@ -183,20 +177,19 @@ def _settle_turn(page: Page) -> str | None:
 
 
 @pytest.mark.timeout(240)
-@pytest.mark.parametrize("on_host", [True, False], ids=["host-daemon", "sibling-runner"])
-def test_attached_runner_offers_advise_models_when_server_routes(
-    browser: Browser, routing_stack: RoutingStack, on_host: bool
+def test_host_launched_runner_offers_advise_models_when_server_routes(
+    browser: Browser, routing_stack: RoutingStack
 ) -> None:
     """A runner outside the server process still advertises the advisor the server can answer."""
     nonce = f"ref-{uuid.uuid4().hex[:8]}"
-    session_id = _create_session(routing_stack, on_host=on_host)
+    session_id = _create_session(routing_stack)
     _script_advisor_call(routing_stack.mock_url, nonce)
     context = browser.new_context()
     try:
         page = context.new_page()
         _send_prompt(page, routing_stack.base_url, session_id, f"{_PROMPT} ({nonce})")
         error_text = _settle_turn(page)
-        info = httpx.get(f"{routing_stack.base_url}/v1/info", timeout=10)
+        info = httpx.get(f"{routing_stack.base_url}/v1/info", timeout=10, trust_env=False)
         info.raise_for_status()
         routing = info.json()
         tools = _offered_tools(routing_stack.mock_url, nonce)

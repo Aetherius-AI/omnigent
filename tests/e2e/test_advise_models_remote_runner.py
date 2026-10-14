@@ -2,11 +2,14 @@
 
 The ``live_server`` fixture's server-level ``llm:`` block builds the OSS judge.
 A runner outside that server process (an ``omnigent host`` daemon's runner, or
-the tunneled sibling runner) must still advertise the advisor the server answers.
+the tunneled sibling runner) must still advertise the advisor, and the server
+must answer the call the model then makes.
 """
 
 from __future__ import annotations
 
+import ast
+import json
 import time
 import uuid
 from collections.abc import Iterator
@@ -32,6 +35,9 @@ from tests.e2e.helpers import POLL_INTERVAL_S
 
 _HOST_ONLINE_TIMEOUT_S = 60.0
 _TURN_TIMEOUT_S = 180.0
+_ADVISOR_ARGUMENTS = {
+    "tasks": [{"title": "auth-refactor", "agents": [{"agent": "worker", "models": None}]}]
+}
 
 
 def _assert_server_routes(client: httpx.Client) -> None:
@@ -64,6 +70,61 @@ def _register_spawn_agent(
     )
 
 
+def _script_advisor_turn(mock_llm_server_url: str, *, model: str, call_id: str) -> None:
+    """Queue the advisor call and the reply; tool-less title requests cannot consume them."""
+    configure_mock_llm(
+        mock_llm_server_url,
+        [
+            {
+                "tool_calls": [
+                    {
+                        "call_id": call_id,
+                        "name": "sys_advise_models",
+                        "arguments": json.dumps(_ADVISOR_ARGUMENTS),
+                    }
+                ]
+            },
+            {"text": "Advisor consulted."},
+        ],
+        key=model,
+        required_tools=["sys_list_models"],
+    )
+
+
+def _advisor_output(reqs: list[dict[str, Any]], call_id: str) -> dict[str, Any]:
+    """The advisor's answer as the model received it on its next request."""
+
+    def _walk(node: Any) -> dict[str, Any] | None:
+        if isinstance(node, dict):
+            if node.get("type") in {"function_call_output", "tool_result"} and call_id in {
+                node.get("call_id"),
+                node.get("tool_use_id"),
+            }:
+                raw = node.get("output", node.get("content"))
+                if not isinstance(raw, str):
+                    return raw
+                try:
+                    return json.loads(raw)
+                except ValueError:
+                    return ast.literal_eval(raw)
+            for value in node.values():
+                found = _walk(value)
+                if found is not None:
+                    return found
+        elif isinstance(node, list):
+            for value in node:
+                found = _walk(value)
+                if found is not None:
+                    return found
+        return None
+
+    for req in reqs:
+        found = _walk(req.get("input"))
+        if found is not None:
+            return found
+    raise AssertionError(f"no model request carried the advisor's output for {call_id}")
+
+
 def _advertised_tool_names(reqs: list[dict[str, Any]]) -> set[str]:
     """Collect tool names offered to the model, normalizing MCP-style prefixes."""
     names: set[str] = set()
@@ -75,29 +136,36 @@ def _advertised_tool_names(reqs: list[dict[str, Any]]) -> set[str]:
     return names
 
 
-def _run_turn_and_collect_tools(
+def _wait_for_session_runner(client: httpx.Client, session_id: str) -> None:
+    """A host-bound session's runner spawns after create; wait until it tunnels in."""
+    deadline = time.monotonic() + _HOST_ONLINE_TIMEOUT_S
+    while time.monotonic() < deadline:
+        session = client.get(f"/v1/sessions/{session_id}")
+        session.raise_for_status()
+        runner_id = session.json().get("runner_id")
+        if runner_id:
+            status = client.get(f"/v1/runners/{runner_id}/status")
+            if status.status_code == 200 and status.json().get("online") is True:
+                return
+        time.sleep(POLL_INTERVAL_S)
+    raise AssertionError(f"the runner for session {session_id} never came online")
+
+
+def _run_advisor_turn(
     client: httpx.Client,
     mock_llm_server_url: str,
     *,
     session_id: str,
     model: str,
-) -> set[str]:
-    """Send one scripted turn and return the tool names its LLM request carried."""
-    # A host-bound session's runner spawns asynchronously after create; the
-    # events endpoint 503s until it tunnels in, so retry like the web UI does.
-    deadline = time.monotonic() + _HOST_ONLINE_TIMEOUT_S
-    while True:
-        try:
-            response_id = send_user_message_to_session(
-                client,
-                session_id=session_id,
-                content="Which model should I use for this task?",
-            )
-            break
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code != 503 or time.monotonic() > deadline:
-                raise
-            time.sleep(POLL_INTERVAL_S)
+    call_id: str,
+) -> tuple[set[str], dict[str, Any]]:
+    """Run the scripted turn; return the offered tool names and the advisor's answer."""
+    _wait_for_session_runner(client, session_id)
+    response_id = send_user_message_to_session(
+        client,
+        session_id=session_id,
+        content="Which model should I use for this task?",
+    )
     body = poll_session_until_terminal(
         client, session_id=session_id, response_id=response_id, timeout=_TURN_TIMEOUT_S
     )
@@ -106,10 +174,12 @@ def _run_turn_and_collect_tools(
     )
     reqs = get_mock_requests(mock_llm_server_url, key=model)
     assert reqs, f"mock LLM captured no requests for model {model!r}"
-    return _advertised_tool_names(reqs)
+    return _advertised_tool_names(reqs), _advisor_output(reqs, call_id)
 
 
-def _assert_advisor_offered(tool_names: set[str], *, topology: str) -> None:
+def _assert_advisor_offered(
+    tool_names: set[str], advisor_output: dict[str, Any], *, topology: str
+) -> None:
     assert "sys_list_models" in tool_names, (
         f"control failed on the {topology}: sys_list_models missing, so the "
         f"sub-agent tool block never registered at all. Advertised: {sorted(tool_names)}"
@@ -120,6 +190,9 @@ def _assert_advisor_offered(tool_names: set[str], *, topology: str) -> None:
         f"(the runner-side routing_available(get_caps()) gate). "
         f"Advertised: {sorted(tool_names)}"
     )
+    # The server answered the intercepted call from its own router.
+    assert advisor_output.get("router_on") is True, advisor_output
+    assert isinstance(advisor_output.get("recommendations"), list), advisor_output
 
 
 @pytest.fixture
@@ -141,9 +214,10 @@ def test_advise_models_offered_on_host_attached_runner(
     session on that host's runner -> the model must be offered ``sys_advise_models``."""
     _assert_server_routes(http_client)
     model = f"mock-advise-host-{uuid.uuid4().hex[:6]}"
+    call_id = f"call-{uuid.uuid4().hex[:8]}"
     reset_mock_llm(mock_llm_server_url)
     agent_name = _register_spawn_agent(http_client, mock_llm_server_url, model=model, label="host")
-    configure_mock_llm(mock_llm_server_url, [{"text": "Acknowledged."}], key=model)
+    _script_advisor_turn(mock_llm_server_url, model=model, call_id=call_id)
 
     workspace = tmp_path / "ws"
     workspace.mkdir()
@@ -159,10 +233,10 @@ def test_advise_models_offered_on_host_attached_runner(
     resp.raise_for_status()
     session_id = str(resp.json()["id"])
 
-    tool_names = _run_turn_and_collect_tools(
-        http_client, mock_llm_server_url, session_id=session_id, model=model
+    tool_names, advisor_output = _run_advisor_turn(
+        http_client, mock_llm_server_url, session_id=session_id, model=model, call_id=call_id
     )
-    _assert_advisor_offered(tool_names, topology="host-attached runner")
+    _assert_advisor_offered(tool_names, advisor_output, topology="host-attached runner")
 
 
 def test_advise_models_offered_on_tunneled_sibling_runner(
@@ -175,16 +249,17 @@ def test_advise_models_offered_on_tunneled_sibling_runner(
     tunneled sibling runner must also be offered ``sys_advise_models``."""
     _assert_server_routes(http_client)
     model = f"mock-advise-sibling-{uuid.uuid4().hex[:6]}"
+    call_id = f"call-{uuid.uuid4().hex[:8]}"
     reset_mock_llm(mock_llm_server_url)
     agent_name = _register_spawn_agent(
         http_client, mock_llm_server_url, model=model, label="sibling"
     )
-    configure_mock_llm(mock_llm_server_url, [{"text": "Acknowledged."}], key=model)
+    _script_advisor_turn(mock_llm_server_url, model=model, call_id=call_id)
 
     session_id = create_runner_bound_session(
         http_client, agent_name=agent_name, runner_id=live_runner_id
     )
-    tool_names = _run_turn_and_collect_tools(
-        http_client, mock_llm_server_url, session_id=session_id, model=model
+    tool_names, advisor_output = _run_advisor_turn(
+        http_client, mock_llm_server_url, session_id=session_id, model=model, call_id=call_id
     )
-    _assert_advisor_offered(tool_names, topology="tunneled sibling runner")
+    _assert_advisor_offered(tool_names, advisor_output, topology="tunneled sibling runner")
