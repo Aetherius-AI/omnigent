@@ -172,6 +172,52 @@ def test_cockroachdb_bootstrap_applies_schema_only_migration(
         drop_database()
 
 
+def test_cockroachdb_bootstrap_resumes_after_interrupted_migration(
+    db_uri: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An interruption after the model stamp finishes through the ordinary upgrade path."""
+    dialect = get_or_create_engine(db_uri).dialect.name
+    if dialect not in {"cockroachdb", "sqlite"}:
+        pytest.skip("runs on CockroachDB, or on SQLite as a stand-in for its bootstrap")
+    if dialect == "sqlite":
+        _stub_crdb_preamble(monkeypatch)
+    model_head = _get_head_db_revision(db_uri)
+    _add_schema_only_migration(tmp_path, model_head, monkeypatch)
+    fresh_uri, drop_database = _fresh_database(db_uri, tmp_path)
+    engine = _create_engine(fresh_uri)
+    run_migrations = utils._run_migrations
+    attempts = 0
+
+    def interrupted_run_migrations(target: Engine, uri: str) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("injected migration interruption")
+        run_migrations(target, uri)
+
+    monkeypatch.setattr(utils, "_run_migrations", interrupted_run_migrations)
+
+    def agents_columns() -> set[str]:
+        return {column["name"] for column in inspect(engine).get_columns("agents")}
+
+    try:
+        with pytest.raises(RuntimeError, match="injected migration interruption"):
+            _initialize_or_verify_crdb_schema(engine, fresh_uri)
+        assert _get_current_db_revision(engine) == model_head
+        assert _CRDB_BOOTSTRAP_MARKER_TABLE in inspect(engine).get_table_names()
+        assert _SCHEMA_ONLY_COLUMN not in agents_columns()
+
+        _initialize_or_verify_crdb_schema(engine, fresh_uri)
+
+        assert attempts == 2
+        assert _get_current_db_revision(engine) == _SCHEMA_ONLY_REVISION
+        assert _SCHEMA_ONLY_COLUMN in agents_columns()
+        assert _CRDB_BOOTSTRAP_MARKER_TABLE not in inspect(engine).get_table_names()
+    finally:
+        engine.dispose()
+        drop_database()
+
+
 def test_cockroachdb_bootstrap_is_at_head(db_uri: str) -> None:
     engine = _crdb_engine(db_uri)
     assert _get_current_db_revision(engine) == _get_head_db_revision(db_uri)
