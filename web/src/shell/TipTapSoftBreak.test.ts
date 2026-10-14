@@ -202,6 +202,39 @@ describe("SoftBreak serialisation", () => {
   });
 });
 
+describe("SoftBreak code-block conversion", () => {
+  it("toggleCodeBlock keeps the source newlines", () => {
+    editor = makeEditor("alpha\nbeta");
+    editor.commands.setTextSelection(2);
+    expect(editor.commands.toggleCodeBlock()).toBe(true);
+    const block = editor.state.doc.child(0);
+    expect(block.type.name).toBe("codeBlock");
+    expect(block.textContent).toBe("alpha\nbeta");
+    expect(editor.getMarkdown().trim()).toBe("```\nalpha\nbeta\n```");
+  });
+
+  it("the ``` input rule keeps the source newlines", () => {
+    const ed = makeEditor("alpha\nbeta");
+    editor = ed;
+    ed.view.dispatch(ed.state.tr.insertText("```", 1));
+    // Simulate typing the space that completes the ``` prefix.
+    const handled = ed.view.someProp("handleTextInput", (handler) =>
+      handler(ed.view, 4, 4, " ", () => ed.state.tr),
+    );
+    expect(handled).toBe(true);
+    const block = ed.state.doc.child(0);
+    expect(block.type.name).toBe("codeBlock");
+    expect(block.textContent).toBe("alpha\nbeta");
+  });
+
+  it("still converts hard breaks to newlines", () => {
+    editor = makeEditor("first line  \nsecond line");
+    editor.commands.setTextSelection(2);
+    expect(editor.commands.toggleCodeBlock()).toBe(true);
+    expect(editor.state.doc.child(0).textContent).toBe("first line\nsecond line");
+  });
+});
+
 describe("SoftBreak text consumers", () => {
   const ACROSS = "Markdown\ndocuments";
 
