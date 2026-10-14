@@ -769,3 +769,26 @@ it("keeps Created stable across updates, active-row overrides, and hover freezes
   expect(ids([{ ...old, updated_at: 1000 }, sameSecond, newer])).toEqual(["c", "b", "a"]);
   expect(sortConversations([old, newer], null).map((row) => row.id)).toEqual(["a", "b"]);
 });
+
+it("holds equal-updated_at rows in place while the order is frozen", () => {
+  const same = new Date("2026-10-14T10:00:00Z");
+  const a = conversation("a", "A", same);
+  const b = conversation("b", "B", same);
+  const c = conversation("c", "C", same);
+  const frozen = new Map<string, number>();
+  const first = sortConversations([a, b, c], null, frozen).map((row) => row.id);
+  // A refresh can hand the same rows back in another order while the pointer is inside.
+  expect(sortConversations([c, a, b], null, frozen).map((row) => row.id)).toEqual(first);
+});
+
+it("orders equal-updated_at rows by id even with no freeze active", () => {
+  const same = new Date("2026-10-14T10:00:00Z");
+  const rows = [
+    conversation("a", "A", same),
+    conversation("b", "B", same),
+    conversation("c", "C", same),
+  ];
+  const ids = (input: Conversation[]) => sortConversations(input, null).map((row) => row.id);
+  expect(ids(rows)).toEqual(["c", "b", "a"]);
+  expect(ids([rows[2], rows[0], rows[1]])).toEqual(["c", "b", "a"]);
+});
