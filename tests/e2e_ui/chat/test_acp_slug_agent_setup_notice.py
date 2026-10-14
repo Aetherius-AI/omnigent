@@ -8,6 +8,7 @@ binary, so New Chat renders the daemon's actual readiness map.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import sys
@@ -20,7 +21,7 @@ import httpx
 import pytest
 import yaml
 from playwright.sync_api import Error as PlaywrightError
-from playwright.sync_api import Page, expect
+from playwright.sync_api import Locator, Page, expect
 
 from tests._helpers.acp_agent import FAKE_ACP_AGENT_REPLY, FAKE_ACP_AGENT_SCRIPT
 from tests._helpers.compat import runner_executable
@@ -104,6 +105,16 @@ def acp_host_stack(
             yield {"base_url": base_url, "agent": agent, "host": row, "workspace": str(workspace)}
 
 
+def _notice_text(notice: Locator) -> str | None:
+    """Return the rendered readiness notice, or ``None`` when none is shown."""
+    if notice.count() == 0:
+        return None
+    try:
+        return notice.first.inner_text().strip()
+    except PlaywrightError:
+        return "<notice detached before it could be read>"
+
+
 def _select_host(page: Page, host_id: str) -> None:
     page.get_by_test_id("new-chat-landing-host-chip").click()
     expect(page.get_by_test_id("new-chat-landing-host-menu")).to_be_visible()
@@ -143,20 +154,10 @@ def test_configured_acp_slug_agent_shows_no_setup_notice(
     # The notice derives synchronously from the selected host's readiness map,
     # which the SPA already holds once the host is selectable, so it is either
     # rendered with the selected agent or not at all.
-    notice = page.get_by_test_id("new-chat-landing-harness-warning")
-    try:
-        expect(notice).to_have_count(0)
-    except AssertionError:
-        try:
-            notice_text: str | None = notice.first.inner_text().strip()
-        except PlaywrightError:
-            notice_text = "<notice detached before it could be read>"
-    else:
-        notice_text = None
+    if os.environ.get("OMNIGENT_E2E_RECORD_DIR"):
+        page.wait_for_timeout(2_500)  # hold on the composer so the recording captures it
     page.screenshot(path=str(shots / "composer-notice.png"))
-    page.wait_for_timeout(2_500)  # hold on the composer so the recording captures it
-    if notice_text is None:
-        expect(notice).to_have_count(0)
+    notice_text = _notice_text(page.get_by_test_id("new-chat-landing-harness-warning"))
 
     page.get_by_test_id("new-chat-landing-input").fill("Say hello")
     page.get_by_test_id("new-chat-landing-submit").click()

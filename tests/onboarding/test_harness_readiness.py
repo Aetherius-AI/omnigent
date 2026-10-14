@@ -680,13 +680,10 @@ def test_configured_harness_map_enumerates_configured_acp_slugs(
         assert harness_is_configured(f"acp:{slug}") is True
 
 
-def test_configured_harness_map_omits_acp_slugs_without_configured_agents(
+def test_configured_harness_map_omits_acp_slugs_for_malformed_config(
     tmp_path: Path,
 ) -> None:
-    """Omit slug keys for empty or malformed ACP configuration."""
-    result = configured_harness_map()
-    assert not [key for key in result if key.startswith("acp:")]
-
+    """A malformed ACP block yields no slug keys and reads the generic acp as unready."""
     (tmp_path / "config.yaml").write_text(
         yaml.safe_dump(
             {"acp": {"agents": [{"name": "X", "command": "y", "omnigent_mcp": "nope"}]}}

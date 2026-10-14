@@ -40,3 +40,5 @@ for line in sys.stdin:
             "usage": {"inputTokens": 3, "outputTokens": 5, "totalTokens": 8},
         }})
 """.replace('"__REPLY__"', json.dumps(FAKE_ACP_AGENT_REPLY))
+
+assert "__REPLY__" not in FAKE_ACP_AGENT_SCRIPT, "reply placeholder was not substituted"
