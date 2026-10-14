@@ -17,8 +17,7 @@ from omnigent.onboarding.harness_install import (
 
 _logger = logging.getLogger(__name__)
 
-# Only Pi today: it is the CLI arclet owners keep installing by hand, and one
-# auto-installed CLI keeps the boot footprint bounded.
+# Only Pi is auto-installed; one CLI keeps the boot footprint bounded.
 _MANAGED_HARNESS_KEYS: tuple[str, ...] = (PI_KEY,)
 
 

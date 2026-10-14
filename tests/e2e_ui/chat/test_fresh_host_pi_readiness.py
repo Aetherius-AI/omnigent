@@ -4,9 +4,11 @@ PATH and ``npm`` is an offline stand-in that links this runner's own ``pi``."""
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 import re
+import shlex
 import shutil
 import time
 import uuid
@@ -33,6 +35,8 @@ _HOST_ONLINE_TIMEOUT_S = 180.0
 _READINESS_PUBLISH_TIMEOUT_S = 150.0
 _PI_PREPARE_TIMEOUT_S = 90.0
 _RUNNER_ONLINE_TIMEOUT_S = 120.0
+# The report's acceptance requires the same flow on another fresh arclet with no
+# setup repeated, so a second independent host is driven, not just one.
 _FRESH_HOST_COUNT = 2
 _PI_PACKAGE = "@earendil-works/pi-coding-agent"
 
@@ -63,9 +67,9 @@ def install_offline_npm(bin_dir: Path, real_pi: str) -> None:
         "#!/bin/sh\n"
         'printf "%s\\n" "$*" >> "$HOME/npm-invocations.log"\n'
         'case "$*" in\n'
-        f'  *"install -g "*"{_PI_PACKAGE}"*)\n'
+        f'  "install -g {_PI_PACKAGE}")\n'
         '    mkdir -p "$HOME/.npm-global/bin" || exit 1\n'
-        f'    ln -sf "{real_pi}" "$HOME/.npm-global/bin/pi" ;;\n'
+        f'    ln -sf {shlex.quote(real_pi)} "$HOME/.npm-global/bin/pi" ;;\n'
         '  *) echo "offline npm stand-in: unsupported arguments: $*" >&2; exit 1 ;;\n'
         "esac\n"
     )
@@ -114,7 +118,11 @@ def pi_provider_config(mock_url: str) -> dict[str, Any]:
 
 
 def host_row(client: httpx.Client, host_id: str) -> dict[str, Any] | None:
-    rows = client.get("/v1/hosts", timeout=10.0).json().get("hosts", [])
+    """The host's ``/v1/hosts`` row; ``None`` when absent or momentarily unreadable."""
+    try:
+        rows = client.get("/v1/hosts", timeout=10.0).json().get("hosts", [])
+    except (httpx.HTTPError, ValueError):
+        return None
     return next((row for row in rows if row.get("host_id") == host_id), None)
 
 
@@ -151,7 +159,8 @@ def wait_runner_online(client: httpx.Client, session_id: str, *, timeout: float)
     deadline = time.monotonic() + timeout
     snapshot: dict[str, Any] = {}
     while time.monotonic() < deadline:
-        snapshot = client.get(f"/v1/sessions/{session_id}", timeout=10.0).json()
+        with contextlib.suppress(httpx.HTTPError, ValueError):  # transient; keep polling
+            snapshot = client.get(f"/v1/sessions/{session_id}", timeout=10.0).json()
         if snapshot.get("runner_online") is True:
             return
         time.sleep(1.0)
@@ -179,6 +188,8 @@ def fresh_hosts_without_pi(
     real_pi = shutil.which("pi")
     if real_pi is None:
         pytest.skip("pi CLI not installed on this runner")
+    if shutil.which("node") is None:
+        pytest.skip("node not installed on this runner; the linked pi needs it")
     root = tmp_path_factory.mktemp("fresh_hosts_without_pi")
     base_env = host_base_env(path_without_pi(root))
     install_offline_npm(root / "bin", real_pi)
@@ -280,7 +291,12 @@ async def _drive(base_url: str, hosts: list[dict[str, Any]], agent_id: str) -> N
                 # The picker reads readiness at render, so wait for the host's Pi
                 # flip first; on an unfixed host this times out and the row stays disabled.
                 with httpx.Client(base_url=base_url, trust_env=False) as client:
-                    wait_pi_native_ready(client, host["host_id"], timeout=_PI_PREPARE_TIMEOUT_S)
+                    await asyncio.to_thread(
+                        wait_pi_native_ready,
+                        client,
+                        host["host_id"],
+                        timeout=_PI_PREPARE_TIMEOUT_S,
+                    )
                 async with async_user_page(
                     browser, headers={}, viewport={"width": 1280, "height": 800}
                 ) as page:
@@ -298,7 +314,11 @@ async def _drive(base_url: str, hosts: list[dict[str, Any]], agent_id: str) -> N
                             if await badge.count()
                             else None
                         )
-                        pytest.fail(_setup_still_required(base_url, host, agent_id, label))
+                        pytest.fail(
+                            await asyncio.to_thread(
+                                _setup_still_required, base_url, host, agent_id, label
+                            )
+                        )
                     await row.click()
                     await _dismiss_agent_menu(page)
                     await expect(
@@ -311,8 +331,11 @@ async def _drive(base_url: str, hosts: list[dict[str, Any]], agent_id: str) -> N
                     assert match is not None, page.url
                     created.append(match.group(1))
                     with httpx.Client(base_url=base_url, trust_env=False) as client:
-                        wait_runner_online(
-                            client, match.group(1), timeout=_RUNNER_ONLINE_TIMEOUT_S
+                        await asyncio.to_thread(
+                            wait_runner_online,
+                            client,
+                            match.group(1),
+                            timeout=_RUNNER_ONLINE_TIMEOUT_S,
                         )
                     _assert_pi_installed_by_host(base_url, host)
     finally:
