@@ -465,8 +465,15 @@ def test_pick_translates_only_when_codex_login_serves_it(
     assert f"model={json.dumps(expected_pin)}" in app_server.config_overrides
 
 
-def test_undecodable_model_provider_override_fails_the_build(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("override", "match"),
+    [
+        pytest.param("model_provider=openai", "Expecting value", id="not-json"),
+        pytest.param("model_provider=1", "must decode to a string", id="json-but-not-a-string"),
+    ],
+)
+def test_malformed_model_provider_override_fails_the_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, override: str, match: str
 ) -> None:
     """An override that is not a TOML basic string fails at build, not at first resume."""
     monkeypatch.setattr(
@@ -474,7 +481,7 @@ def test_undecodable_model_provider_override_fails_the_build(
         lambda: sys.executable,
     )
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=match):
         build_codex_native_server(
             socket_path=tmp_path / "codex.sock",
             codex_home=tmp_path / "codex-home",
@@ -484,7 +491,7 @@ def test_undecodable_model_provider_override_fails_the_build(
             bridge_dir=tmp_path / "bridge",
             ap_server_url=None,
             ap_auth_headers={},
-            extra_config_overrides=["model_provider=openai"],
+            extra_config_overrides=[override],
         )
 
 
