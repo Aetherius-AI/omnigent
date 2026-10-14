@@ -186,9 +186,17 @@ def test_bootstrap_rejects_invalid_marker() -> None:
         )
 
 
-def test_bootstrap_rejects_marker_from_different_schema_head() -> None:
+@pytest.mark.parametrize(
+    ("previous_target", "current_target"),
+    [("older-head", "current-head"), ("old-model:head", "new-model:head")],
+)
+def test_bootstrap_rejects_marker_from_different_schema_target(
+    previous_target: str, current_target: str
+) -> None:
     result = MagicMock()
-    result.__iter__.return_value = iter([(cockroachdb._CRDB_BOOTSTRAP_MARKER_TOKEN, "older-head")])
+    result.__iter__.return_value = iter(
+        [(cockroachdb._CRDB_BOOTSTRAP_MARKER_TOKEN, previous_target)]
+    )
     connection = MagicMock()
     connection.execute.return_value = result
     engine = MagicMock()
@@ -200,7 +208,7 @@ def test_bootstrap_rejects_marker_from_different_schema_head() -> None:
             Version("25.2.10"),
             {cockroachdb._CRDB_BOOTSTRAP_MARKER_TABLE, "agents"},
             {"agents", "conversations"},
-            "current-head",
+            current_target,
         )
 
 

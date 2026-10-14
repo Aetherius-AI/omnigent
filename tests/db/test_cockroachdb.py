@@ -153,11 +153,19 @@ def test_cockroachdb_bootstrap_applies_schema_ahead_of_models(
 
 
 def test_cockroachdb_resumes_empty_revision_and_repairs_indexes(db_uri: str) -> None:
+    from omnigent.db.db_models import MODEL_SCHEMA_REVISION
+
     engine = _crdb_engine(db_uri)
     version = _crdb_server_version(engine)
     head = _get_head_db_revision(db_uri)
     index_name = "ix_agents_created_at"
     with engine.connect() as connection:
+        _prepare_crdb_schema_transaction(connection, version)
+        config = _build_alembic_config(db_uri)
+        config.attributes["connection"] = connection
+        # Interrupted model creation has not applied schema-only revisions yet.
+        command.downgrade(config, MODEL_SCHEMA_REVISION)
+        connection.commit()
         _prepare_crdb_schema_transaction(connection, version)
         connection.execute(
             text(
@@ -175,7 +183,10 @@ def test_cockroachdb_resumes_empty_revision_and_repairs_indexes(db_uri: str) -> 
                 f"INSERT INTO {_CRDB_BOOTSTRAP_MARKER_TABLE} "
                 "(token, target_revision) VALUES (:token, :target_revision)"
             ),
-            {"token": _CRDB_BOOTSTRAP_MARKER_TOKEN, "target_revision": head},
+            {
+                "token": _CRDB_BOOTSTRAP_MARKER_TOKEN,
+                "target_revision": f"{MODEL_SCHEMA_REVISION}:{head}",
+            },
         )
         connection.execute(text("DELETE FROM alembic_version"))
 
