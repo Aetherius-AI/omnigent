@@ -19,12 +19,14 @@ vi.mock("@/lib/host", async (importOriginal) => ({
 vi.mock("@/lib/nativeBridge", async (importOriginal) => ({
   ...(await importOriginal<typeof NativeBridgeModule>()),
   isAndroidShell: vi.fn(() => false),
+  isElectronShell: vi.fn(() => false),
   isIOSShell: vi.fn(() => false),
 }));
 
 import { useSessionHostOnline, useSessionRunnerOnline } from "@/hooks/RunnerHealthProvider";
 import { isDatabricksWorkspace } from "@/lib/host";
-import { isAndroidShell, isIOSShell } from "@/lib/nativeBridge";
+import { isAndroidShell, isElectronShell, isIOSShell } from "@/lib/nativeBridge";
+import { setSessionHost } from "@/lib/sessionHost";
 import { useChatStore } from "@/store/chatStore";
 import {
   downloadWorkspaceFile,
@@ -105,6 +107,9 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
+  vi.useRealTimers();
+  setSessionHost("sess_desktop", null);
   // restore (not just reset) so any `vi.spyOn` a test installs is removed even
   // if that test threw before its own cleanup — otherwise a leaked
   // `document.createElement` spy is recaptured as the "original" by the next
@@ -177,13 +182,14 @@ describe("fileContentToBlob", () => {
 
 describe("triggerBrowserDownload", () => {
   it("creates and clicks a synthetic link then removes it", () => {
+    vi.useFakeTimers();
     const blob = new Blob(["data"], { type: "text/plain" });
     const createdLinks: HTMLAnchorElement[] = [];
     const origCreateElement = document.createElement.bind(document);
     vi.spyOn(document, "createElement").mockImplementation((tag: string) => {
       const el = origCreateElement(tag);
       if (tag === "a") {
-        vi.spyOn(el as HTMLAnchorElement, "click");
+        vi.spyOn(el as HTMLAnchorElement, "click").mockImplementation(() => {});
         createdLinks.push(el as HTMLAnchorElement);
       }
       return el;
@@ -202,6 +208,8 @@ describe("triggerBrowserDownload", () => {
     expect(link.click).toHaveBeenCalledOnce();
     // Element must have been removed from the DOM.
     expect(document.body.contains(link)).toBe(false);
+    expect(URL.revokeObjectURL).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(60_000);
     expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:fake");
 
     vi.restoreAllMocks();
@@ -283,6 +291,31 @@ describe("downloadWorkspaceFile", () => {
 
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it("preserves host routing when downloading in Electron", async () => {
+    vi.mocked(isElectronShell).mockReturnValueOnce(true);
+    vi.stubEnv("VITE_OMNIGENT_HOST_ROUTING", "true");
+    setSessionHost("sess_desktop", "host_desktop");
+    const file = new Blob([new Uint8Array([0, 255, 1, 128])]);
+    fetchMock.mockImplementationOnce(async (_url: string, init: RequestInit) => {
+      const key = new Headers(init.headers).get("X-Databricks-Omnigent-Slice-Key");
+      return key === "host_desktop"
+        ? blobResponse(file)
+        : { ok: false, status: 400, statusText: "Wrong replica" };
+    });
+    const clicked = captureDownloadClicks();
+    const createObjectURL = vi.fn(() => "blob:desktop");
+    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL: vi.fn() });
+
+    await downloadWorkspaceFile("sess_desktop", "report.bin");
+
+    expect(createObjectURL).toHaveBeenCalledWith(file);
+    expect(clicked).toEqual([["blob:desktop", "report.bin"]]);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/v1/sessions/sess_desktop/resources/environments/default/filesystem/report.bin?download=true",
+      expect.anything(),
+    );
   });
 
   it("names the host base for an absolute path alongside download=true", async () => {
