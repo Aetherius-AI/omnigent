@@ -9,7 +9,7 @@ type DiffResultEditor = editor.IStandaloneDiffEditor & {
   getDiffComputationResult?: () => { quitEarly: boolean } | null;
 };
 
-/** Retry a timed-out comparison once, leaving Monaco's current diff visible. */
+/** Retry once per content/settings state; the owning viewer keeps models stable per mount. */
 export function attachAutomaticDiffRefinement(
   diffEditor: editor.IStandaloneDiffEditor,
   onStatus: (status: DiffRefinementStatus) => void,

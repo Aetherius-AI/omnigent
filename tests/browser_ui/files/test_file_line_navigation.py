@@ -470,7 +470,7 @@ def test_large_diff_has_bounded_computation(
         assert before_scroll
         assert before_scroll != initial_scroll
         page.evaluate("window.releaseRefinement()")
-        expect(viewer.get_by_role("status")).to_have_count(0, timeout=5000)
+        expect(viewer.get_by_role("status")).to_have_text("", timeout=5000)
         expect(editor).to_have_attribute("data-refinement-identity", "same-editor")
         page.wait_for_timeout(250)
         after_scroll = editor.locator(".modified .view-line").evaluate_all(visible_text)

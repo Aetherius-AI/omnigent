@@ -13,6 +13,7 @@ const h = vi.hoisted(() => ({
     original?: string;
     modified?: string;
     options?: {
+      maxComputationTime?: number;
       renderSideBySide?: boolean;
       scrollBeyondLastLine?: boolean;
       readOnly?: boolean;
@@ -23,6 +24,7 @@ const h = vi.hoisted(() => ({
     };
   } | null,
   onMount: null as DiffOnMount | null,
+  budgets: [] as number[],
   commentOptions: null as { editorRef: { current: unknown }; mounted: boolean } | null,
 }));
 vi.mock("@monaco-editor/react", () => ({
@@ -33,6 +35,7 @@ vi.mock("@monaco-editor/react", () => ({
     onMount?: DiffOnMount;
   }) => {
     h.diffProps = props;
+    h.budgets.push(props.options?.maxComputationTime as number);
     h.onMount = props.onMount ?? null;
     return null;
   },
@@ -142,6 +145,7 @@ function scrollStubs() {
 
 beforeEach(() => {
   h.diffProps = null;
+  h.budgets = [];
   h.onMount = null;
   h.commentOptions = null;
 });
@@ -153,6 +157,34 @@ afterEach(() => {
 });
 
 describe("MonacoDiffViewer", () => {
+  it("starts whitespace changes with the initial budget after refinement", async () => {
+    const props = { before: "old", after: "new", layout: "split" as const };
+    const { rerender } = renderDiff(props);
+    await waitFor(() => expect(h.onMount).not.toBeNull());
+    const modified = makeFindableModified(makeFindController());
+    const editor = {
+      getModifiedEditor: () => modified,
+      getOriginalEditor: () => ({ getModel: () => null }),
+      getModel: () => null,
+      getDiffComputationResult: () => ({ quitEarly: true }),
+      onDidUpdateDiff: () => ({ dispose: vi.fn() }),
+      updateOptions: vi.fn(),
+    };
+    act(() =>
+      h.onMount?.(
+        editor as unknown as Parameters<DiffOnMount>[0],
+        {
+          editor: { EndOfLineSequence: { LF: 0, CRLF: 1 } },
+        } as unknown as Parameters<DiffOnMount>[1],
+      ),
+    );
+    await waitFor(() => expect(h.diffProps?.options?.maxComputationTime).toBe(10000));
+    h.budgets = [];
+    rerender(diffTree({ ...props, hideWhitespace: true }));
+    expect(h.budgets.length).toBeGreaterThan(0);
+    expect(h.budgets.every((budget) => budget === 1000)).toBe(true);
+  });
+
   it("feeds before→original and after→modified into the diff editor", async () => {
     renderDiff({ before: "old line\n", after: "new line\n", layout: "split" });
     await waitFor(() => expect(h.diffProps).not.toBeNull());

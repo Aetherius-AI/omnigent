@@ -155,7 +155,9 @@ export function MonacoDiffViewer({
   const originalModelRef = useRef<ReturnType<CodeEditorInstance["getModel"]>>(null);
   const modifiedModelRef = useRef<ReturnType<CodeEditorInstance["getModel"]>>(null);
   const [mounted, setMounted] = useState(false);
-  const [diffBudget, setDiffBudget] = useState(INITIAL_DIFF_BUDGET_MS);
+  const [budgetState, setBudgetState] = useState({ hideWhitespace, value: INITIAL_DIFF_BUDGET_MS });
+  const diffBudget =
+    budgetState.hideWhitespace === hideWhitespace ? budgetState.value : INITIAL_DIFF_BUDGET_MS;
   const [refinementStatus, setRefinementStatus] = useState<DiffRefinementStatus>("idle");
   const refinementStartedRef = useRef(false);
   useEffect(() => {
@@ -165,13 +167,13 @@ export function MonacoDiffViewer({
     const inspectExistingResult = !refinementStartedRef.current;
     refinementStartedRef.current = true;
     setRefinementStatus("idle");
-    setDiffBudget(INITIAL_DIFF_BUDGET_MS);
+    setBudgetState({ hideWhitespace, value: INITIAL_DIFF_BUDGET_MS });
     editor.updateOptions({ maxComputationTime: INITIAL_DIFF_BUDGET_MS });
     return attachAutomaticDiffRefinement(
       editor,
       setRefinementStatus,
       inspectExistingResult,
-      setDiffBudget,
+      (value) => setBudgetState({ hideWhitespace, value }),
     );
   }, [mounted, hideWhitespace]);
   const cancelScrollRestoreRef = useRef<(() => void) | null>(null);
@@ -344,16 +346,20 @@ export function MonacoDiffViewer({
 
   return (
     <div className="relative flex h-full flex-col">
-      {refinementStatus !== "idle" && (
-        <div
-          role="status"
-          className="pointer-events-none absolute bottom-2 right-2 z-10 max-w-[90%] rounded bg-background/95 px-3 py-1 text-ui text-muted-foreground shadow-sm"
-        >
-          {refinementStatus === "refining"
-            ? "Refining diff…"
-            : "Diff computation stopped early. Highlighting may include unchanged text."}
-        </div>
-      )}
+      <div
+        role="status"
+        className={
+          refinementStatus === "idle"
+            ? "sr-only"
+            : "pointer-events-none absolute bottom-2 right-2 z-10 max-w-[90%] rounded bg-background/95 px-3 py-1 text-ui text-muted-foreground shadow-sm"
+        }
+      >
+        {refinementStatus === "refining"
+          ? "Refining diff…"
+          : refinementStatus === "limited"
+            ? "Diff computation stopped early. Highlighting may include unchanged text."
+            : ""}
+      </div>
       <div className="relative min-h-0 flex-1">
         {loadError && (
           <div className="flex items-center justify-center p-8 text-destructive text-ui">
