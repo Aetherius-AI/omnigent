@@ -400,10 +400,11 @@ _OVERLAY_SURFACE = "an overlay"
 # lacks it is not such a surface — e.g. a launch wrapper's output before
 # Claude Code has drawn its input box — and an Escape cannot clear it.
 _ESCAPE_DISMISS_HINT = re.compile(r"\bEsc to \w", re.IGNORECASE)
-# An option row offering to quit, as on the workspace trust dialog, whose Escape
-# exits Claude Code. Matched per dialog option row (:func:`_exit_option_in_dialog`),
-# never against the whole capture, so a transcript echo cannot block an overlay's Escape.
+# The paired choices of a dialog whose Escape quits Claude Code: the workspace
+# trust dialog's "No, exit" beside "Yes, I trust this folder". Read per option row
+# by :func:`_exit_option_in_dialog`, never against the whole capture.
 _EXIT_OPTION_ROW = re.compile(r"\s*(?:❯\s*)?(?:\d+\.\s*)?No, exit\s*")
+_AFFIRMATIVE_OPTION_ROW = re.compile(r"\s*(?:❯\s*)?(?:\d+\.\s*)?Yes\b.*")
 # Rows above a dialog's footer that may hold its option list: the trust and
 # bypass-permissions prompts list two options, the MCP approval three, with slack
 # for a hint row between the options and the footer.
@@ -6146,13 +6147,15 @@ def _exit_option_in_dialog(pane: str) -> bool:
     Whether the dialog holding the pane offers to quit Claude Code.
 
     Its option list sits directly above the "Enter to … · Esc to …" footer, so
-    only the :data:`_DIALOG_OPTION_ROWS` rows before that footer are read. A
-    transcript row that merely says "No, exit" higher up — above a ``/model``
-    picker or the rewind dialog, say — is outside that window, so those
-    overlays keep their Escape.
+    only the :data:`_DIALOG_OPTION_ROWS` rows before that footer are read, with
+    any box border stripped as for the headline, and "No, exit" counts only next
+    to its affirmative counterpart ("Yes, I trust this folder", "Yes, I accept").
+    A transcript row that merely says "No, exit" — above a ``/model`` picker or
+    the rewind dialog, say — has no such neighbour, so those overlays keep their
+    Escape.
 
     :param pane: Captured pane text from :func:`_capture_pane`.
-    :returns: ``True`` when one of the dialog's option rows reads "No, exit".
+    :returns: ``True`` when the dialog's option rows pair "No, exit" with a "Yes".
     """
     region = _dialog_region(pane)
     footer = next(
@@ -6162,7 +6165,14 @@ def _exit_option_in_dialog(pane: str) -> bool:
     if footer is None:
         return False
     options = region[max(0, footer - _DIALOG_OPTION_ROWS) : footer]
-    return any(_EXIT_OPTION_ROW.fullmatch(line) for line in options)
+    rows = [line.strip().strip("│") for line in options]
+    return any(
+        _EXIT_OPTION_ROW.fullmatch(row)
+        and any(
+            _AFFIRMATIVE_OPTION_ROW.fullmatch(rows[j]) for j in (i - 1, i + 1) if 0 <= j < len(rows)
+        )
+        for i, row in enumerate(rows)
+    )
 
 
 def _wait_for_claude_prompt_ready(

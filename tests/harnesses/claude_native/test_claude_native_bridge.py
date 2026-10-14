@@ -10202,6 +10202,16 @@ _MODEL_PICKER_PANE = """\
   Enter to set as default · s to use this session only · Esc to cancel
 """
 
+# The same picker over a two-model catalog: short enough that a transcript row
+# sits within a few rows of its footer.
+_COMPACT_MODEL_PICKER_PANE = """\
+  Select model
+  Switch between Claude models. Your pick becomes the default for new sessions.
+  ❯ 1. Default (recommended)         Use the default model (currently Opus 4.8) · $5/$25 per Mtok
+    2. Haiku                         Haiku 4.5 · Fastest for quick answers · $1/$5 per Mtok
+  Enter to set as default · s to use this session only · Esc to cancel
+"""
+
 # The ``/effort`` confirmation, as Claude Code 2.1.222 renders it: the same
 # component as "Switch model?", titled for what is being switched.
 _EFFORT_DIALOG_PANE = """\
@@ -11227,7 +11237,14 @@ def test_delivery_never_escapes_the_workspace_trust_dialog(
             ),
             True,
         ),
+        (
+            _TRUST_DIALOG_PANE.replace(" ❯ No, exit", "│ ❯ No, exit               │").replace(
+                "   Yes, I trust this folder", "│   Yes, I trust this folder │"
+            ),
+            True,
+        ),
         ("❯ No, exit\n" + _MODEL_PICKER_PANE, False),
+        ("❯ No, exit\n" + _COMPACT_MODEL_PICKER_PANE, False),
         ("  1. No, exit\n" + _REWIND_PANE, False),
         (_MCP_APPROVAL_DIALOG_PANE, False),
         (_API_KEY_DIALOG_PANE, False),
@@ -11237,7 +11254,9 @@ def test_delivery_never_escapes_the_workspace_trust_dialog(
     ids=[
         "folder-trust",
         "folder-trust-with-hint-row",
+        "folder-trust-framed-rows",
         "exit-echo-above-picker",
+        "exit-echo-above-compact-picker",
         "exit-echo-above-rewind",
         "mcp-single",
         "api-key",
@@ -11247,32 +11266,38 @@ def test_delivery_never_escapes_the_workspace_trust_dialog(
 )
 def test_exit_option_is_read_from_the_dialog_option_rows(pane: str, offers_exit: bool) -> None:
     """
-    Only an option row of the dialog itself counts as "No, exit".
+    Only the dialog's own paired "No, exit" / "Yes, …" rows count as a quit option.
 
-    A transcript line with the same text above a picker or rewind dialog sits
-    outside the option rows under the footer, so those overlays stay
-    dismissible; a hint row between the options and the footer still leaves
-    the quit option inside the window; dialogs without a quit option are not
-    mistaken for one.
+    A transcript line reading "No, exit" above a picker or rewind dialog has no
+    "Yes" neighbour, even when a short picker puts it within the rows read under
+    the footer, so those overlays stay dismissible; a hint row between the
+    options and the footer, or box borders around the rows, still leave the
+    pair recognised; dialogs without a quit option are not mistaken for one.
     """
     assert claude_native_bridge._exit_option_in_dialog(pane) is offers_exit
 
 
+@pytest.mark.parametrize(
+    "occupied_pane",
+    ["❯ No, exit\n" + _MODEL_PICKER_PANE, "❯ No, exit\n" + _COMPACT_MODEL_PICKER_PANE],
+    ids=["exit-echo-above-picker", "exit-echo-above-compact-picker"],
+)
 def test_inject_slash_command_dismisses_an_overlay_below_an_exit_echo(
+    occupied_pane: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
     A "No, exit" transcript echo above a picker does not block a slash command.
 
-    The picker is still Escaped and the command typed; the refusal that names
-    a quitting dialog is reserved for the dialog's own option rows.
+    The picker is still Escaped and the command typed, even when a short picker
+    puts the echo within the rows read under the footer; the refusal that names
+    a quitting dialog is reserved for the dialog's own paired option rows.
     """
     bridge_dir = _picker_bridge_dir(tmp_path)
-    occupied = "❯ No, exit\n" + _MODEL_PICKER_PANE
     sends = _fake_tmux(
         monkeypatch,
-        [occupied, occupied, _IDLE_PANE, _composer_pane("/effort high"), _IDLE_PANE],
+        [occupied_pane, occupied_pane, _IDLE_PANE, _composer_pane("/effort high"), _IDLE_PANE],
     )
 
     claude_native_bridge.inject_slash_command(bridge_dir, command="/effort high")
