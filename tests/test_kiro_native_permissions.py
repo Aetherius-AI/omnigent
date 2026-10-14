@@ -662,8 +662,11 @@ async def test_supervise_mirror_reaps_finished_task_and_mirrors_next_request(
 async def test_delivery_waits_for_explicit_retry_before_sending_again(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
     outage: int | str | None,
 ) -> None:
+    # Expected failures arrive without real backoff; skip costly traceback rendering.
+    caplog.set_level("CRITICAL", logger=knp.__name__)
     monkeypatch.setattr(knp, "_DELIVERY_CONFIRM_TIMEOUT_S", 0)
     sleep = AsyncMock()
     monkeypatch.setattr(knp, "asyncio", SimpleNamespace(**{**vars(asyncio), "sleep": sleep}))
