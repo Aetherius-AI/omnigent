@@ -405,10 +405,10 @@ _ESCAPE_DISMISS_HINT = re.compile(r"\bEsc to \w", re.IGNORECASE)
 # by :func:`_exit_option_in_dialog`, never against the whole capture.
 _EXIT_OPTION_ROW = re.compile(r"\s*(?:❯\s*)?(?:\d+\.\s*)?No, exit\s*")
 _AFFIRMATIVE_OPTION_ROW = re.compile(r"\s*(?:❯\s*)?(?:\d+\.\s*)?Yes\b.*")
-# Rows above a dialog's footer that may hold its option list: the trust and
-# bypass-permissions prompts list two options, the MCP approval three, with slack
-# for a hint row between the options and the footer.
-_DIALOG_OPTION_ROWS = 6
+# Rows directly above a dialog's footer that can hold its quitting pair: the two
+# options plus one hint row between them and the footer. Anything higher belongs
+# to a different dialog or to the transcript.
+_DIALOG_OPTION_ROWS = 3
 # Titles of the confirmation dialog Claude Code pops when a switch invalidates
 # the prompt cache — one component, titled for what is being switched. It only
 # appears on a session with history, and it took ~1.9s to render on a warm
@@ -6155,13 +6155,13 @@ def _exit_option_in_dialog(pane: str) -> bool:
     """
     Whether the dialog holding the pane offers to quit Claude Code.
 
-    Its option list sits directly above the "Enter to … · Esc to …" footer, so
+    Its option pair sits directly above the "Enter to … · Esc to …" footer, so
     only the :data:`_DIALOG_OPTION_ROWS` rows before that footer are read, with
     any box border stripped as for the headline, and "No, exit" counts only next
     to its affirmative counterpart ("Yes, I trust this folder", "Yes, I accept").
-    A transcript row that merely says "No, exit" — above a ``/model`` picker or
-    the rewind dialog, say — has no such neighbour, so those overlays keep their
-    Escape.
+    Transcript rows above a ``/model`` picker or the rewind dialog — even a pair
+    echoing both choices — are separated from the footer by that overlay's own
+    rows, so those overlays keep their Escape.
 
     :param pane: Captured pane text from :func:`_capture_pane`.
     :returns: ``True`` when the dialog's option rows pair "No, exit" with a "Yes".

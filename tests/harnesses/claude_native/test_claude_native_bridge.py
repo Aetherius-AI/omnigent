@@ -5442,7 +5442,11 @@ def test_tmux_injections_are_serialized_per_bridge(
         return {"socket_path": "/tmp/tmux.sock", "tmux_target": "claude:0.0"}
 
     monkeypatch.setattr(claude_native_bridge, "_wait_for_tmux_info", wait_for_tmux_info)
-    monkeypatch.setattr(claude_native_bridge, "_restore_occupied_input", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        claude_native_bridge,
+        "_restore_occupied_input",
+        lambda *_a, **_k: claude_native_bridge._InputBoxReclaim(None, ""),
+    )
     monkeypatch.setattr(
         claude_native_bridge, "_wait_for_claude_prompt_ready", lambda *_a, **_k: None
     )
@@ -11245,6 +11249,7 @@ def test_delivery_never_escapes_the_workspace_trust_dialog(
         ),
         ("❯ No, exit\n" + _MODEL_PICKER_PANE, False),
         ("❯ No, exit\n" + _COMPACT_MODEL_PICKER_PANE, False),
+        ("❯ No, exit\n  Yes, I trust this folder\n" + _COMPACT_MODEL_PICKER_PANE, False),
         ("  1. No, exit\n" + _REWIND_PANE, False),
         (_MCP_APPROVAL_DIALOG_PANE, False),
         (_API_KEY_DIALOG_PANE, False),
@@ -11257,6 +11262,7 @@ def test_delivery_never_escapes_the_workspace_trust_dialog(
         "folder-trust-framed-rows",
         "exit-echo-above-picker",
         "exit-echo-above-compact-picker",
+        "paired-echo-above-compact-picker",
         "exit-echo-above-rewind",
         "mcp-single",
         "api-key",
@@ -11268,19 +11274,28 @@ def test_exit_option_is_read_from_the_dialog_option_rows(pane: str, offers_exit:
     """
     Only the dialog's own paired "No, exit" / "Yes, …" rows count as a quit option.
 
-    A transcript line reading "No, exit" above a picker or rewind dialog has no
-    "Yes" neighbour, even when a short picker puts it within the rows read under
-    the footer, so those overlays stay dismissible; a hint row between the
-    options and the footer, or box borders around the rows, still leave the
-    pair recognised; dialogs without a quit option are not mistaken for one.
+    Transcript rows reading "No, exit" (even paired with a "Yes" echo) above a
+    picker or rewind dialog sit above that overlay's own rows, outside the rows
+    read directly under the footer, so those overlays stay dismissible; a hint
+    row between the options and the footer, or box borders around the rows,
+    still leave the pair recognised; dialogs without a quit option are not
+    mistaken for one.
     """
     assert claude_native_bridge._exit_option_in_dialog(pane) is offers_exit
 
 
 @pytest.mark.parametrize(
     "occupied_pane",
-    ["❯ No, exit\n" + _MODEL_PICKER_PANE, "❯ No, exit\n" + _COMPACT_MODEL_PICKER_PANE],
-    ids=["exit-echo-above-picker", "exit-echo-above-compact-picker"],
+    [
+        "❯ No, exit\n" + _MODEL_PICKER_PANE,
+        "❯ No, exit\n" + _COMPACT_MODEL_PICKER_PANE,
+        "❯ No, exit\n  Yes, I trust this folder\n" + _COMPACT_MODEL_PICKER_PANE,
+    ],
+    ids=[
+        "exit-echo-above-picker",
+        "exit-echo-above-compact-picker",
+        "paired-echo-above-compact-picker",
+    ],
 )
 def test_inject_slash_command_dismisses_an_overlay_below_an_exit_echo(
     occupied_pane: str,
