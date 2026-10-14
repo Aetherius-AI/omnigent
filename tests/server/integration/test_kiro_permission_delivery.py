@@ -356,29 +356,37 @@ async def test_kiro_child_delivery_stays_pending_in_parent_until_receipt(
 
 
 @pytest.mark.parametrize(
-    "delivery",
+    ("delivery", "policy_name"),
     [
-        {"state": [], "attempt": "retry"},
-        {"state": "unconfirmed", "attempt": "retry", "action": {}},
-        {"state": "sending", "attempt": "retry", "action": "accept"},
-        {"state": "ready", "attempt": ""},
+        ({"state": [], "attempt": "retry"}, "kiro_native_permission"),
+        ({"state": "unconfirmed", "attempt": "retry", "action": {}}, "kiro_native_permission"),
+        ({"state": "sending", "attempt": "retry", "action": "accept"}, "kiro_native_permission"),
+        ({"state": "ready", "attempt": ""}, "kiro_native_permission"),
+        pytest.param(
+            {"state": "ready", "attempt": "retry"}, "native_permission", id="wrong-policy"
+        ),
     ],
 )
 async def test_invalid_kiro_delivery_metadata_is_rejected(
-    client: httpx.AsyncClient, delivery: dict
+    client: httpx.AsyncClient, delivery: dict, policy_name: str
 ) -> None:
+    from omnigent.server.routes import sessions
+
     agent = await create_test_agent(client, "kiro-invalid-delivery")
     sid = await create_session_for_agent(client, agent["id"])
+    eid = f"elicit_kiro_{sid}"
     response = await client.post(
         f"/v1/sessions/{sid}/hooks/native-permission-request",
         json={
-            "elicitation_id": f"elicit_kiro_{sid}",
+            "elicitation_id": eid,
             "agent": "Kiro",
-            "policy_name": "kiro_native_permission",
+            "policy_name": policy_name,
             "native_delivery": delivery,
         },
     )
     assert response.status_code == 400
+    assert pending_elicitations.count_for(sid) == 0
+    assert eid not in sessions._harness_elicitation_registry
 
 
 @pytest.mark.parametrize("ending", ["disconnect", "sending", "repark", "receipt", "new_attempt"])

@@ -18,6 +18,7 @@ from omnigent.harnesses.kiro_native.permissions import (
     kiro_permission_elicitation_id,
     parse_permission_request,
 )
+from tests.budgets import budget
 
 
 def _permission_msg(
@@ -716,7 +717,7 @@ async def test_delivery_waits_for_explicit_retry_before_sending_again(
             )
         )
         try:
-            async with asyncio.timeout(5):
+            async with asyncio.timeout(budget(5)):
                 await asked_to_retry.wait()
             assert sent == ["accept"]
             assert not task.done()
@@ -727,7 +728,7 @@ async def test_delivery_waits_for_explicit_retry_before_sending_again(
             ):
                 assert ceiling / 2 <= delay <= ceiling
             user_retries.set()
-            async with asyncio.timeout(5):
+            async with asyncio.timeout(budget(5)):
                 await task
             assert sent == ["accept", "accept"]
             assert len(requests) == failures + 2
