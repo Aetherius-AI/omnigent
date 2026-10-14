@@ -30,6 +30,12 @@ accepted message or steering input sharing the same response ID is retained.
 The client's send ID remains available for an explicit resend; the existing
 native transcript source ID still takes precedence for a mirrored item.
 
+Deploy the updated server, runners, and resume CLI before enabling the managed
+capability metadata. Older reconstruction code does not understand this marker
+and can replay a refused message after a rebind or cold resume. The existing
+session-initialization protocol does not negotiate this capability; the
+per-message no-replay behavior requires the updated reconstruction code.
+
 The executor repeats the guard immediately before terminal injection. Moving
 from a known text-only model to a known image-capable model requires the live
 terminal to confirm adoption before the image is injected. A refusal at this
