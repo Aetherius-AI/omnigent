@@ -20,19 +20,17 @@ import httpx
 import pytest
 import yaml
 from playwright.sync_api import Page, expect
-from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
+from tests._helpers.acp_agent import FAKE_ACP_AGENT_REPLY, FAKE_ACP_AGENT_SCRIPT
 from tests._helpers.compat import runner_executable
 from tests._helpers.host import isolated_host
 from tests._helpers.live_server import isolated_local_server
-from tests.e2e_ui.files.test_files_tab_survives_acp_reply import _ACP_REPLY_TEXT, _FAKE_ACP_AGENT
 
 _ACP_AGENT_NAME = "TraeX"
 _ACP_SLUG = "traex"
 _ACP_HARNESS = f"acp:{_ACP_SLUG}"
 _HOST_ONLINE_TIMEOUT_S = 180.0
 _REPLY_TIMEOUT_MS = 120_000
-_NOTICE_SETTLE_MS = 15_000
 
 # isolated_host owns the host identity in config.yaml, so the acp: block is merged
 # into that file by the daemon's own bootstrap before it reads any config.
@@ -57,7 +55,7 @@ def acp_host_stack(
     """Yield the server URL, the seeded TraeX row, the online host row and a workspace."""
     root = tmp_path_factory.mktemp("acp_slug_stack")
     agent_script = root / "fake_acp_agent.py"
-    agent_script.write_text(_FAKE_ACP_AGENT)
+    agent_script.write_text(FAKE_ACP_AGENT_SCRIPT)
     acp_block = {
         "acp": {
             "agents": [
@@ -139,29 +137,33 @@ def test_configured_acp_slug_agent_shows_no_setup_notice(
         re.compile(re.escape(agent_label), re.IGNORECASE), timeout=15_000
     )
 
+    # The notice derives synchronously from the selected host's readiness map,
+    # which the SPA already holds once the host is selectable, so it is either
+    # rendered with the selected agent or not at all.
     notice = page.get_by_test_id("new-chat-landing-harness-warning")
     try:
-        notice.wait_for(state="visible", timeout=_NOTICE_SETTLE_MS)
-        notice_text: str | None = notice.inner_text().strip()
-    except PlaywrightTimeoutError:
+        expect(notice).to_have_count(0)
+    except AssertionError:
+        notice_text: str | None = notice.first.inner_text().strip()
+    else:
         notice_text = None
     page.screenshot(path=str(shots / "composer-notice.png"))
-    page.wait_for_timeout(2_500)  # hold on the notice so the recording captures it
+    page.wait_for_timeout(2_500)  # hold on the composer so the recording captures it
+    if notice_text is None:
+        expect(notice).to_have_count(0)
 
     page.get_by_test_id("new-chat-landing-input").fill("Say hello")
     page.get_by_test_id("new-chat-landing-submit").click()
     page.wait_for_url(re.compile(r"/c/[0-9a-f]+"), timeout=60_000)
     session_id = page.url.rsplit("/c/", 1)[-1]
-    expect(page.get_by_text(_ACP_REPLY_TEXT)).to_be_visible(timeout=_REPLY_TIMEOUT_MS)
+    expect(page.get_by_text(FAKE_ACP_AGENT_REPLY)).to_be_visible(timeout=_REPLY_TIMEOUT_MS)
     expect(page.locator('[data-testid="error-pill"]')).to_have_count(0)
     page.screenshot(path=str(shots / "agent-reply.png"))
 
-    readiness = (
-        httpx.get(f"{base_url}/v1/hosts/{host['host_id']}", timeout=10.0)
-        .json()
-        .get("configured_harnesses")
-        or {}
-    )
+    with httpx.Client(base_url=base_url, trust_env=False, timeout=10.0) as client:
+        response = client.get(f"/v1/hosts/{host['host_id']}")
+    response.raise_for_status()
+    readiness = response.json().get("configured_harnesses") or {}
     assert notice_text is None, (
         f"{_ACP_AGENT_NAME} launched on {host['name']} (session {session_id}) and replied, "
         f"yet New Chat warned {notice_text!r}; host readiness: acp={readiness.get('acp')!r}, "
