@@ -15,7 +15,7 @@ import socket
 import sys
 import tempfile
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeAlias, cast
@@ -3302,7 +3302,9 @@ def build_codex_native_server(
     :param socket_path: Unix socket path for the app-server.
     :param codex_home: Private per-session ``CODEX_HOME`` path.
     :param cwd: Working directory for Codex, e.g. the user's repo.
-    :param model: Optional Codex model id, e.g. ``"gpt-5.4-mini"``.
+    :param model: Optional model id, e.g. ``"gpt-5.4-mini"``. A catalog-spelled
+        id (``"system.ai.gpt-6-1-sol"``) is pinned as codex's own slug when the
+        launch routes through codex's login (see :func:`_pins_codex_login`).
     :param profile: Optional Databricks CLI profile, e.g.
         ``"<your-profile>"``.
     :param bridge_dir: Native Codex bridge directory; the policy hook is
@@ -3380,6 +3382,10 @@ def build_codex_native_server(
         # forwarder mirror and cost gate report the model this session runs
         # instead of whatever the shared file was last left on.
         pinned_model = codex_spawn_model(databricks.model) or databricks.model
+    elif model and _pins_codex_login(extra_config_overrides or ()):
+        # Codex's own backend knows a model only by codex's slug; the catalog
+        # spelling (``system.ai.gpt-6-1-sol``) is rejected with a 400.
+        pinned_model = codex_spawn_model(model) or model
     if extra_config_overrides:
         config_overrides.extend(extra_config_overrides)
     if bypass_sandbox:
@@ -3499,15 +3505,46 @@ def codex_session_meta_model_provider(launch: NativeCodexLaunch) -> str:
     :returns: Provider id for ``session_meta.model_provider``, e.g.
         ``"omnigent_databricks"``.
     """
-    for override in launch.config_overrides:
+    pinned = _model_provider_override(launch.config_overrides)
+    if pinned is not None:
+        return pinned
+    if launch.profile is not None:
+        return "omnigent_databricks"
+    return "openai"
+
+
+def _model_provider_override(config_overrides: Iterable[str]) -> str | None:
+    """Provider id an explicit ``model_provider`` ``-c`` override pins, or ``None``.
+
+    :param config_overrides: Codex ``-c`` overrides, e.g.
+        ``['model_provider="openai"']``.
+    :returns: The decoded provider id, e.g. ``"openai"``.
+    :raises ValueError: When the override value is not a TOML basic string.
+    """
+    for override in config_overrides:
         if override.startswith(_MODEL_PROVIDER_OVERRIDE_PREFIX):
             decoded: object = json.loads(override.removeprefix(_MODEL_PROVIDER_OVERRIDE_PREFIX))
             if not isinstance(decoded, str):
                 raise ValueError("model_provider override must decode to a string")
             return decoded
-    if launch.profile is not None:
-        return "omnigent_databricks"
-    return "openai"
+    return None
+
+
+def _pins_codex_login(config_overrides: Iterable[str]) -> bool:
+    """Whether the ``-c`` overrides pin codex's built-in ``openai`` provider.
+
+    Only an explicit pin counts: an override-free launch defers to the shared
+    config.toml's default provider, which may be a gateway that wants the
+    catalog spelling, so its model is left as given.
+
+    :param config_overrides: Codex ``-c`` overrides, e.g.
+        ``['model_provider="openai"']``.
+    :returns: ``True`` when the launch routes through codex's own login.
+    """
+    try:
+        return _model_provider_override(config_overrides) == "openai"
+    except ValueError:
+        return False
 
 
 def native_codex_launch_base_url(launch: NativeCodexLaunch) -> str | None:

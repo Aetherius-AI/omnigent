@@ -274,6 +274,8 @@ def test_build_codex_native_server_pins_profile_resolved_model(
         # Subscription: an explicit pick and a catalog-resolved Default.
         ("gpt-5.5", None, ['model_provider="openai"']),
         ("gpt-5.6-terra", None, ['model_provider="openai"']),
+        # Subscription: a catalog-spelled pick lands in codex's spelling on both.
+        ("system.ai.gpt-6-1-sol", None, ['model_provider="openai"']),
         # cli-config: the user's own provider table rides the config copy.
         ("gpt-5.5", None, ['model_provider="Databricks"']),
         # Databricks profile: Default and an explicit pick.
@@ -342,6 +344,131 @@ def test_launch_argv_and_config_pin_name_the_same_model(
     assert comparable_model_id(argv_model) == comparable_model_id(pinned)
     if profile is None:
         assert argv_model == pinned
+
+
+@pytest.mark.parametrize(
+    ("pick", "codex_slug"),
+    [
+        pytest.param("system.ai.gpt-6-sol", "gpt-6-sol", id="route-prefix"),
+        pytest.param("system.ai.gpt-6-1-sol", "gpt-6.1-sol", id="route-prefix-dotted-minor"),
+        pytest.param("databricks-gpt-5-6-sol", "gpt-5.6-sol", id="serving-prefix"),
+    ],
+)
+def test_codex_login_launch_pins_a_gateway_spelled_pick_in_codex_spelling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pick: str,
+    codex_slug: str,
+) -> None:
+    """
+    On codex's own login a catalog-spelled pick reaches codex as codex's slug.
+
+    The ChatGPT-account backend rejects catalog ids outright ("The
+    'system.ai.gpt-6-1-sol' model is not supported when using Codex with a
+    ChatGPT account"), so the launch must translate the pick on this shape the
+    way the profile shape already does.
+    """
+    monkeypatch.setattr(
+        "omnigent.harnesses.codex_native.app_server._find_codex_cli",
+        lambda: sys.executable,
+    )
+
+    app_server = build_codex_native_server(
+        socket_path=tmp_path / "codex.sock",
+        codex_home=tmp_path / "codex-home",
+        cwd=tmp_path,
+        model=pick,
+        profile=None,
+        bridge_dir=tmp_path / "bridge",
+        ap_server_url=None,
+        ap_auth_headers={},
+        extra_config_overrides=['model_provider="openai"'],
+    )
+
+    assert app_server.pinned_model == codex_slug
+    assert f"model={json.dumps(codex_slug)}" in app_server.config_overrides
+
+
+@pytest.mark.parametrize(
+    "extra_overrides",
+    [
+        pytest.param(['model_provider="Databricks"'], id="cli-config-provider"),
+        pytest.param(None, id="config-default-provider"),
+        pytest.param(["model_provider=openai"], id="undecodable-provider-override"),
+    ],
+)
+def test_gateway_launch_keeps_the_catalog_spelled_pick(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    extra_overrides: list[str] | None,
+) -> None:
+    """
+    Only an explicit codex login translates; a gateway gets the id it serves.
+
+    A cli-config provider, or the shared config.toml's default provider when
+    no override pins one, may be a Databricks gateway that knows the model by
+    its catalog id, so the pick reaches codex exactly as given. An override
+    that does not decode pins nothing recognisable and is left alone too.
+    """
+    monkeypatch.setattr(
+        "omnigent.harnesses.codex_native.app_server._find_codex_cli",
+        lambda: sys.executable,
+    )
+
+    app_server = build_codex_native_server(
+        socket_path=tmp_path / "codex.sock",
+        codex_home=tmp_path / "codex-home",
+        cwd=tmp_path,
+        model="system.ai.gpt-6-1-sol",
+        profile=None,
+        bridge_dir=tmp_path / "bridge",
+        ap_server_url=None,
+        ap_auth_headers={},
+        extra_config_overrides=extra_overrides,
+    )
+
+    assert app_server.pinned_model == "system.ai.gpt-6-1-sol"
+    assert 'model="system.ai.gpt-6-1-sol"' in app_server.config_overrides
+
+
+async def test_start_writes_codex_slug_for_a_gateway_spelled_pick_on_codex_login(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The private config copy's ``model`` line carries codex's slug, not the catalog id.
+
+    The TUI footer and the forwarder's ``model_override`` mirror both read that
+    line, so a catalog-spelled pick on codex's own login must land there as the
+    slug the ChatGPT backend accepts, replacing the shared file's stale model.
+    """
+    source_home = tmp_path / "source"
+    source_home.mkdir()
+    original = 'model = "gpt-5.4"\n'
+    (source_home / "config.toml").write_text(original, encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(source_home))
+    _disable_codex_startup_rpc(monkeypatch)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    server = build_codex_native_server(
+        socket_path=tmp_path / "codex.sock",
+        codex_home=tmp_path / "codex-home",
+        cwd=workspace,
+        model="system.ai.gpt-6-1-sol",
+        profile=None,
+        bridge_dir=tmp_path / "bridge",
+        codex_path=sys.executable,
+        python_executable="/new/python",
+        extra_config_overrides=['model_provider="openai"'],
+    )
+    try:
+        await server.start()
+        config = tomllib.loads((server.codex_home / "config.toml").read_text(encoding="utf-8"))
+        assert config["model"] == "gpt-6.1-sol"
+        assert 'model="gpt-6.1-sol"' in server.config_overrides
+        assert (source_home / "config.toml").read_text(encoding="utf-8") == original
+    finally:
+        await server.close()
 
 
 async def test_start_pins_reasoning_effort_in_config(
