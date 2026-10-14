@@ -1365,6 +1365,29 @@ def test_draft_in_input_region_keeps_prompt_text_with_status_words() -> None:
     assert _mod._draft_in_input_region(pane, needle, baseline)
 
 
+def test_draft_in_input_region_matches_word_wrapped_attachment_line() -> None:
+    """A long ``[Attached: <path>]`` first line that agy word-wraps is still a rendered draft.
+
+    Composer rows captured from a real agy 1.2.4 pane 115 columns wide: the only
+    internal space follows the colon, so no single row carries the needle even
+    though the whole draft is visible. A web attachment turn must not be reported
+    as "never rendered" for that; the fresh composer after submit still reads as
+    the draft being gone.
+    """
+    sep = "─" * 115
+    path = (
+        "/tmp/omnigent-osenv-ntantkpg/omnigent-pytest-fohvp937/attachments/"
+        "fd7fa3a610aa62ef9e26825a0e7b76f9/fork-attachment.png"
+    )
+    content = f"[Attached: {path}]\nhello"
+    needle = _mod._submit_needle(content)
+    baseline = _mod._agy_input_region(f"{sep}\n>\n{sep}\n? for shortcuts")
+    pane = f"{sep}\n> [Attached:\n  {path[:112]}\n  {path[112:]}]\n  hello\n{sep}\n? for shortcuts"
+    assert _mod._draft_in_input_region(pane, needle, baseline)
+    submitted = f"{sep}\n> [Attached: {path}]\n  hello\n{sep}\n>\n{sep}\nesc to cancel"
+    assert not _mod._draft_in_input_region(submitted, needle, baseline)
+
+
 def test_draft_in_input_region_matches_short_message_by_composer_change() -> None:
     """An empty needle (short message) is detected by a changed composer, not text.
 
