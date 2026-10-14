@@ -247,3 +247,66 @@ it.each(["success", "http error", "network error"])(
     }
   },
 );
+
+it.each(
+  ["success", "http error", "network error"].flatMap((outcome) =>
+    [false, true].map((retryFirst) => ({ outcome, retryFirst })),
+  ),
+)(
+  "adopts a newer attempt during a stalled POST ($outcome, retry first: $retryFirst)",
+  async ({ outcome, retryFirst }) => {
+    vi.useFakeTimers();
+    let delivery = { state: "ready", attempt: "first", action: "accept" };
+    const submissions: { resolve: (value: Response) => void; reject: (error: Error) => void }[] =
+      [];
+    const fetch = vi.mocked(identity.authenticatedFetch);
+    fetch.mockImplementation(async (_url, init) => {
+      if (init?.method === "POST") {
+        return new Promise<Response>((resolve, reject) => {
+          submissions.push({ resolve, reject });
+        });
+      }
+      return jsonResponse({ status: "pending", message: "Approve pwd", native_delivery: delivery });
+    });
+    const poll = () =>
+      act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+    const retry = () =>
+      fireEvent.click(screen.getByRole("button", { name: "Retry sending approval" }));
+    try {
+      await act(async () => {
+        renderPage();
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+      await poll();
+      expect(screen.getByText("Waiting for Kiro to confirm")).toBeInTheDocument();
+      delivery = { state: "unconfirmed", attempt: "second", action: "accept" };
+      await poll();
+      expect(screen.getByRole("button", { name: "Retry sending approval" })).toBeEnabled();
+      if (retryFirst) retry();
+      await act(async () => {
+        if (outcome === "network error") submissions[0]!.reject(new Error("offline"));
+        else submissions[0]!.resolve(jsonResponse({}, { ok: outcome === "success", status: 500 }));
+      });
+      if (!retryFirst) retry();
+      await poll();
+      expect(screen.getByText("Waiting for Kiro to confirm")).toBeInTheDocument();
+      expect(submissions).toHaveLength(2);
+      const posts = fetch.mock.calls.filter(([, init]) => init?.method === "POST");
+      expect(JSON.parse(posts[1]![1]!.body as string)).toEqual({
+        action: "accept",
+        _meta: { native_delivery_attempt: "second" },
+      });
+      await act(async () => {
+        submissions[1]!.reject(new Error("retry failed"));
+      });
+      expect(screen.getByText(/Network error:/)).toBeInTheDocument();
+      await poll();
+      expect(screen.getByRole("button", { name: "Retry sending approval" })).toBeEnabled();
+    } finally {
+      cleanup();
+      vi.useRealTimers();
+    }
+  },
+);

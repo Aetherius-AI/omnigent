@@ -51,7 +51,10 @@ export function ApprovePage() {
     elicitationId: string;
   }>();
   const [state, setState] = useState<PageState>({ kind: "loading" });
-  const submission = useRef({ revision: 0, pending: false });
+  const submission = useRef<{ revision: number; pending: boolean; attempt?: string }>({
+    revision: 0,
+    pending: false,
+  });
 
   useEffect(() => {
     if (!sessionId || !elicitationId) {
@@ -80,9 +83,18 @@ export function ApprovePage() {
           data.status !== "resolved" &&
           (Boolean(data.native_delivery) || revision !== submission.current.revision);
         if (data.status === "resolved") {
+          submission.current = { revision: submission.current.revision + 1, pending: false };
           setState({ kind: "resolved" });
-        } else if (!submission.current.pending && revision === submission.current.revision) {
-          setState({ kind: "pending", data });
+        } else if (revision === submission.current.revision) {
+          // A new server attempt supersedes the POST still waiting on its response.
+          if (
+            data.native_delivery &&
+            submission.current.attempt &&
+            data.native_delivery.attempt !== submission.current.attempt
+          ) {
+            submission.current = { revision: revision + 1, pending: false };
+          }
+          if (!submission.current.pending) setState({ kind: "pending", data });
         }
       } catch (err) {
         if (!cancelled && !polling && revision === submission.current.revision) {
@@ -102,7 +114,12 @@ export function ApprovePage() {
   const submit = useCallback(
     async (action: "accept" | "decline" | "cancel", meta?: Record<string, unknown>) => {
       if (!sessionId || !elicitationId || submission.current.pending) return;
-      submission.current = { revision: submission.current.revision + 1, pending: true };
+      const submitted = {
+        revision: submission.current.revision + 1,
+        pending: true,
+        attempt: state.kind === "pending" ? state.data.native_delivery?.attempt : undefined,
+      };
+      submission.current = submitted;
       if (state.kind === "pending" && state.data.native_delivery) {
         setState({
           kind: "pending",
@@ -123,21 +140,15 @@ export function ApprovePage() {
             body: JSON.stringify({ action, ...(meta ? { _meta: meta } : {}) }),
           },
         );
-        if (!res.ok) {
-          setState((current) =>
-            current.kind === "resolved"
-              ? current
-              : { kind: "error", message: `Resolve failed: ${res.status}` },
-          );
+        if (!res.ok && submission.current === submitted) {
+          setState({ kind: "error", message: `Resolve failed: ${res.status}` });
         }
       } catch (err) {
-        setState((current) =>
-          current.kind === "resolved"
-            ? current
-            : { kind: "error", message: `Network error: ${String(err)}` },
-        );
+        if (submission.current === submitted) {
+          setState({ kind: "error", message: `Network error: ${String(err)}` });
+        }
       } finally {
-        submission.current.pending = false;
+        submitted.pending = false;
       }
     },
     [sessionId, elicitationId, state],

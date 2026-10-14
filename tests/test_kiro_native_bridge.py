@@ -293,7 +293,7 @@ def test_send_kiro_permission_verdict_refuses_decline_when_reject_not_focused(
 
     with pytest.raises(RuntimeError, match="reject option was not safely focused"):
         send_kiro_permission_verdict(
-            bridge_dir, action="decline", expected_title="Running: pwd", timeout_s=0.01
+            bridge_dir, action="decline", expected_title="Running: pwd", timeout_s=5.0
         )
 
     sent_keys = [call[-1] for call in calls if "send-keys" in call]

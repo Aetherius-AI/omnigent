@@ -51,9 +51,7 @@ def _shim(mode: str, *, dropped_enters: int = 1) -> str:
 
 @pytest.mark.timeout(180)
 @pytest.mark.parametrize("kiro_shim_session", [_shim("drop")], indirect=True, ids=["lost-enter"])
-@pytest.mark.parametrize(
-    "surface", ["chat", "mobile", "inbox", "standalone", "reject", "terminal"]
-)
+@pytest.mark.parametrize("surface", ["chat", "inbox", "standalone", "reject", "terminal"])
 def test_kiro_manual_retry(
     kiro_shim_session: tuple[str, str, Path], page: Page, surface: str, tmp_path: Path
 ) -> None:
@@ -61,8 +59,6 @@ def test_kiro_manual_retry(
     record_file = acp_record_path(bridge_dir)
     first_id = "perm-req-1-1"
     eid = kiro_permission_elicitation_id(session_id, first_id)
-    if surface == "mobile":
-        page.set_viewport_size({"width": 390, "height": 844})
     page.goto(f"{base_url}/c/{session_id}")
     _ensure_chat_view(page)
     _send(page, "Run two identical commands requiring separate approvals.")
@@ -72,6 +68,18 @@ def test_kiro_manual_retry(
         page.goto(f"{base_url}/inbox")
     elif surface == "standalone":
         page.goto(f"{base_url}/approve/{session_id}/{eid}")
+    held_responses: list[Route] = []
+    resolve_url = f"{base_url}/v1/sessions/{session_id}/elicitations/{eid}/resolve"
+    if surface in ("inbox", "standalone"):
+
+        def hold_first_response(route: Route) -> None:
+            if held_responses:
+                route.continue_()
+                return
+            assert route.fetch().status == 202
+            held_responses.append(route)
+
+        page.route(resolve_url, hold_first_response)
     started = time.monotonic()
     page.get_by_role(
         "button", name="Reject" if surface == "reject" else "Approve", exact=True
@@ -88,8 +96,17 @@ def test_kiro_manual_retry(
     assert record_file.with_suffix(record_file.suffix + ".enters").read_text().splitlines() == [
         first_id
     ]
-    page.reload()
-    expect(retry).to_be_visible(timeout=15_000)
+    if surface not in ("inbox", "standalone"):
+        page.reload()
+        expect(retry).to_be_visible(timeout=15_000)
+    else:
+        assert len(held_responses) == 1
+    if surface == "chat":
+        close_sidebar = page.get_by_role("button", name="Close sidebar", exact=True)
+        if close_sidebar.is_visible():
+            close_sidebar.click()
+        page.set_viewport_size({"width": 390, "height": 844})
+        expect(retry).to_be_in_viewport()
     expect(
         page.get_by_text("The previous attempt may still be pending.", exact=False)
     ).to_be_visible()
@@ -102,7 +119,10 @@ def test_kiro_manual_retry(
         page.keyboard.press("Enter")
         _select_view_mode(page, "Chat")
     else:
-        retry.click()
+        with page.expect_request(resolve_url):
+            retry.click()
+        if held_responses:
+            held_responses[0].fulfill(status=503, json={"error": "late response failure"})
     _wait_for(lambda: first_id in _recorder_response_ids(record_file), timeout_s=15)
     expect(retry).not_to_be_visible(timeout=15_000)
     second_eid = kiro_permission_elicitation_id(session_id, "perm-req-1-2")
