@@ -225,11 +225,14 @@ Other connection providers alone do not enable the managed MCP picker.
 - **`attachments`:**
   `tests/browser_ui/chat/test_composer_attachments.py::test_attach_supported_files_and_remove`,
   `tests/browser_ui/chat/test_composer_attachments.py::test_file_dropped_on_the_transcript_attaches`,
-  `tests/browser_ui/chat/test_composer_attachments.py::test_landing_rejects_unsupported_type_and_keeps_message`
+  `tests/browser_ui/chat/test_composer_attachments.py::test_landing_rejects_unsupported_type_and_keeps_message`,
+  `tests/browser_ui/chat/test_text_only_model_image_refusal.py::test_text_only_model_image_refusal_keeps_the_draft_and_shows_guidance`
   Claude's server validation and reload behavior are covered by
   `tests/server/routes/test_session_resources.py::test_native_image_preflight_retains_refused_input_without_starting_turn`
   and `tests/server/routes/test_session_resources.py::test_native_image_preflight_refuses_uploaded_image_without_reading_bytes`
-  (component tests; plain pytest). On a host with managed capability metadata,
+  (component tests; plain pytest); the browser contract above pins the composer
+  keeping the text and image chip and showing the refusal and reload banner
+  against a mocked refusing backend. On a host with managed capability metadata,
   manually send an image by attach, paste, and drop, both from a new session
   and an existing session using a known text-only Claude model. Expect “Image
   was not sent,” retained image and text after reload, and one delivery after
