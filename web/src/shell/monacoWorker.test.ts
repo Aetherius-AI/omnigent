@@ -24,7 +24,10 @@ vi.mock("monaco-editor/esm/vs/base/common/worker/webWorkerBootstrap.js", () => (
 vi.mock("monaco-editor/esm/vs/editor/common/services/editorWebWorker.js", () => ({
   EditorWorker: class {
     getModels() {
-      return ["old", "current"].map((uri) => ({ uri, getLinesContent: () => ["content"] }));
+      return ["old", "current", "other-old"].map((uri) => ({
+        uri,
+        getLinesContent: () => ["content"],
+      }));
     }
     $computeDiff(...args: unknown[]) {
       return h.compute(...args);
@@ -114,3 +117,17 @@ it.each(["error", "deadline", "content-change"])(
     expect(post).toHaveBeenLastCalledWith({ type: "cancel-refinement", id: 1 });
   },
 );
+
+it("cancels a superseded comparison that shares only the modified model", async () => {
+  const { editor, post, fallback } = await setup();
+  const pending = editor.$computeDiff(
+    "old",
+    "current",
+    { maxComputationTimeMs: 10000 },
+    "advanced",
+  );
+  await Promise.resolve();
+  await editor.$computeDiff("other-old", "current", { maxComputationTimeMs: 1000 }, "advanced");
+  expect(await pending).toBe(fallback);
+  expect(post).toHaveBeenLastCalledWith({ type: "cancel-refinement", id: 1 });
+});

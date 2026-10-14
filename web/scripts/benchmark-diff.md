@@ -45,7 +45,9 @@ The browser test checks initial and refinement budgets, complete changed-line
 coverage, character mappings, scroll stability, navigation cancellation, and
 final-timeout feedback. Dense cases shorten the initial algorithm deadline to
 1ms to force the boundary even on fast machines, and hold the detailed response
-while checking that the initial diff remains usable. Timing is diagnostic rather than a machine-dependent CI limit.
+while checking that the initial diff remains usable. The final-timeout case also
+shortens the refinement deadline, and the navigation case stalls the refinement
+worker so cancellation is deterministic. Timing is diagnostic rather than a machine-dependent CI limit.
 
 Refinement integration uses Monaco's internal worker bootstrap and runtime
 `getDiffComputationResult()` method. Re-run the browser tests and both builds on

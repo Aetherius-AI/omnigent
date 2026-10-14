@@ -370,14 +370,20 @@ def test_large_diff_has_bounded_computation(
     # Force the timeout boundary on fast CI machines; the refinement still uses real Monaco.
     page.add_init_script(f"window.forceInitialBudget = {str(dense).lower()};")
     page.add_init_script(f"window.holdRefinement = {str(scenario == 'dense').lower()};")
+    page.add_init_script(f"window.refinementScenario = {json.dumps(scenario)};")
     # Observe the configured budget and real worker results.
     page.add_init_script("""(() => {
       window.diffComputations = [];
       window.releaseRefinement = null;
+      window.refinementWorkers = [];
       const NativeWorker = window.Worker;
       window.Worker = class extends NativeWorker {
         constructor(...args) {
           super(...args);
+          this.terminated = false;
+          if (String(args[0]).includes('monacoRefinement.worker')) {
+            window.refinementWorkers.push(this);
+          }
           this.pendingDiffs = new Map();
           this.addEventListener('message', (event) => {
             const {data} = event;
@@ -398,10 +404,17 @@ def test_large_diff_has_bounded_computation(
           });
         }
         terminate() {
+          this.terminated = true;
           for (const record of this.pendingDiffs.values()) record.terminated = true;
           super.terminate();
         }
         postMessage(message, ...args) {
+          if (message?.before && message?.options) {
+            if (window.refinementScenario === 'navigate') return; // Stall until cancelled.
+            if (window.refinementScenario === 'limited') {
+              message = {...message, options: {...message.options, maxComputationTimeMs: 1}};
+            }
+          }
           if (message?.method === '$computeDiff') {
             const record = {
               started: performance.now(),
@@ -433,12 +446,13 @@ def test_large_diff_has_bounded_computation(
     expect(viewer.locator(".line-insert, .char-insert").first).to_be_visible()
     computations = page.evaluate("window.diffComputations")
     if scenario == "navigate":
-        page.wait_for_function("window.diffComputations.length === 2")
+        page.wait_for_function("window.refinementWorkers.length === 1")
+        assert page.evaluate("!window.refinementWorkers[0].terminated")
         viewer.get_by_role("button", name="Exit diff view").click()
         expect(viewer.locator(".monaco-diff-editor")).to_have_count(0)
         # Disposing the models terminates refinement instead of queuing behind its 10s budget.
         page.wait_for_function(
-            "window.diffComputations[1].result || window.diffComputations[1].terminated",
+            "window.refinementWorkers[0].terminated",
             timeout=3000,
         )
         expect(viewer.get_by_role("status")).to_have_count(0)

@@ -1,3 +1,4 @@
+import { INITIAL_DIFF_BUDGET_MS } from "./automaticDiffRefinement";
 import { initialize } from "monaco-editor/esm/vs/base/common/worker/webWorkerBootstrap.js";
 import { EditorWorker } from "monaco-editor/esm/vs/editor/common/services/editorWebWorker.js";
 
@@ -24,7 +25,8 @@ class RefiningEditorWorker extends EditorWorker {
 
   async $computeDiff(original, modified, options, algorithm) {
     this.cancelRefinements(original);
-    if (options.maxComputationTimeMs <= 1000) {
+    this.cancelRefinements(modified);
+    if (options.maxComputationTimeMs <= INITIAL_DIFF_BUDGET_MS) {
       return super.$computeDiff(original, modified, options, algorithm);
     }
     const before = this.getModels().find((model) => model.uri.toString() === original);
