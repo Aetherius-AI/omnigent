@@ -1,7 +1,6 @@
-// Soft line break: a newline inside a paragraph's markdown source. @tiptap/markdown
-// keeps it as "\n" and ProseMirror's break-spaces CSS draws it as a line break, so
-// hard-wrapped prose read as short lines in Edit mode. This inline leaf renders as a
-// collapsible space instead; tiptapMarkdownPatches.ts splits and rejoins it around "\n".
+// A newline inside a paragraph's markdown source: ProseMirror's break-spaces CSS
+// would draw it as a line break, so hard-wrapped prose reads as short lines. This
+// leaf renders a collapsible space; tiptapMarkdownPatches.ts splits/rejoins "\n".
 
 import { Node, mergeAttributes } from "@tiptap/core";
 

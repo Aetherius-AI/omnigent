@@ -83,9 +83,17 @@ let serializeWrapped = false;
 export function installMarkdownSerializerPatch(): void {
   if (!serializeWrapped) {
     serializeWrapped = true;
-    const originalSerialize = MarkdownManager.prototype.serialize;
-    MarkdownManager.prototype.serialize = function (this: MarkdownManager, content: JSONContent) {
-      return originalSerialize.call(this, joinSoftBreaks(content));
+    const originalSerialize = MarkdownManager.prototype.serialize as (
+      this: MarkdownManager,
+      content: JSONContent,
+      ...rest: unknown[]
+    ) => string;
+    MarkdownManager.prototype.serialize = function (
+      this: MarkdownManager,
+      content: JSONContent,
+      ...rest: unknown[]
+    ) {
+      return originalSerialize.call(this, joinSoftBreaks(content), ...rest);
     };
   }
   const proto = MarkdownManager.prototype as unknown as SerializerInternals;
