@@ -5914,9 +5914,9 @@ export function NewChatLandingScreen() {
   const localHosts = listedHosts.filter((host) => !isCloudHostEntry(host));
   const myMachines = allHosts.filter((host) => !isCloudHostEntry(host));
   let myMachinesEmptyText: string | null = null;
-  if (allHosts.length === 0) {
+  if (myMachines.length === 0) {
     myMachinesEmptyText = "No hosts connected yet.";
-  } else if (myMachines.length > 0 && !myMachines.some((host) => host.status === "online")) {
+  } else if (!myMachines.some((host) => host.status === "online")) {
     myMachinesEmptyText = "No hosts online.";
   }
   const hasCloudOptions =

@@ -2865,6 +2865,8 @@ describe("Run on this machine (desktop host enrollment)", () => {
     const userAgent = vi
       .spyOn(navigator, "userAgent", "get")
       .mockReturnValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)");
+    // An unrelated stopped host is hidden and must not replace the action with a notice.
+    mockHosts([host("offline", 2)]);
     renderLanding();
     await act(async () => {});
     await openHostMenu();
@@ -2873,6 +2875,10 @@ describe("Run on this machine (desktop host enrollment)", () => {
     expect(item).toHaveTextContent("This Mac");
     expect(within(item).getByTestId("new-chat-landing-use-this-machine")).toHaveTextContent(
       "Use this machine",
+    );
+    expect(screen.queryByTestId("new-chat-landing-host-host_2")).toBeNull();
+    expect(screen.getByTestId("new-chat-landing-host-menu")).not.toHaveTextContent(
+      "No hosts online.",
     );
     userAgent.mockRestore();
   });
@@ -3306,18 +3312,34 @@ describe("NewChatLandingScreen", () => {
   );
 
   it.each([
-    { hosts: [] as Host[], text: "No hosts connected yet." },
-    { hosts: [host("offline", 1), host("offline", 2)], text: "No hosts online." },
+    {
+      name: "no hosts",
+      hosts: [] as Host[],
+      chip: /No host selected/,
+      text: "No hosts connected yet.",
+    },
+    {
+      name: "every host offline",
+      hosts: [host("offline", 1), host("offline", 2)],
+      chip: /No host selected/,
+      text: "No hosts online.",
+    },
+    {
+      name: "only a cloud host",
+      hosts: [
+        { host_id: "cloud-1", name: "team-cloud-box", owner: "me", status: "online" },
+      ] as Host[],
+      chip: /, Online$/,
+      text: "No hosts connected yet.",
+    },
   ])(
-    "explains an empty My machines list ($text) instead of listing dead rows",
-    async ({ hosts, text }) => {
+    "explains an empty My machines list ($name) instead of listing dead rows",
+    async ({ hosts, chip: chipName, text }) => {
       mockHosts(hosts);
       renderLanding();
 
       const chip = screen.getByTestId("new-chat-landing-host-chip");
-      await waitFor(() =>
-        expect(chip).toHaveAccessibleName(expect.stringContaining("No host selected")),
-      );
+      await waitFor(() => expect(chip).toHaveAccessibleName(chipName));
       fireEvent.pointerDown(chip, { button: 0 });
       const menu = screen.getByTestId("new-chat-landing-host-menu");
       expect(menu.querySelectorAll('[data-testid^="new-chat-landing-host-host_"]')).toHaveLength(0);
