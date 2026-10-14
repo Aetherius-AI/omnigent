@@ -254,8 +254,8 @@ import {
   STATUS_BUCKETS,
   type StatusBucket,
   statusBucket,
-  UPDATED_BUCKETS,
-  updatedBucket,
+  DATE_BUCKETS,
+  dateBucket,
   writeLegacyPinnedConversationIds,
   isOwnedByViewer,
   sessionBelongsToProject,
@@ -1752,8 +1752,13 @@ function ConversationList({
     [view.grouping, saveView, selectionMode, onExitSelectionMode],
   );
   const grouped = view.grouping !== "default";
-  const groupOrder: readonly string[] =
-    view.grouping === "status" ? STATUS_BUCKETS : UPDATED_BUCKETS;
+  const groupOrder = useMemo(
+    () =>
+      view.grouping === "status"
+        ? STATUS_BUCKETS
+        : DATE_BUCKETS.map((bucket) => `${GROUPING_LABELS[view.grouping]} ${bucket}`),
+    [view.grouping],
+  );
   // Status buckets read the unread mirror and the drafts store; only a status
   // view subscribes, so other views don't re-render the list on those writes.
   const statusView = view.grouping === "status";
@@ -1977,11 +1982,13 @@ function ConversationList({
         c.id,
         view.grouping === "status"
           ? statusOf(c)
-          : updatedBucket(
-              frozenKeys?.get(c.id) ??
-                (activeOverride?.id === c.id ? activeOverride.updatedAt : c.updated_at),
+          : `${GROUPING_LABELS[view.grouping]} ${dateBucket(
+              view.grouping === "created"
+                ? c.created_at
+                : (frozenKeys?.get(c.id) ??
+                    (activeOverride?.id === c.id ? activeOverride.updatedAt : c.updated_at)),
               now,
-            ),
+            )}`,
       ]),
     );
     const sessions = groupConversations(ordered, (c) => groupTitles.get(c.id), groupOrder).flatMap(
@@ -3227,6 +3234,7 @@ function SectionHeader({
 const GROUPING_LABELS: Record<SidebarGrouping, string> = {
   default: "Default",
   status: "Status",
+  created: "Created",
   updated: "Updated",
 };
 const ORDERING_LABELS: Record<SidebarOrdering, string> = { updated: "Updated", created: "Created" };

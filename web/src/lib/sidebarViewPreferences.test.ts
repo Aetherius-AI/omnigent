@@ -14,8 +14,8 @@ describe("sidebarViewPreferences", () => {
     expect(readSidebarViewPreferences()).toEqual(DEFAULT_SIDEBAR_VIEW);
   });
 
-  it("round-trips a stored selection", () => {
-    const view = { grouping: "updated", ordering: "created", show: ["updated", "branch"] } as const;
+  it.each(["created", "updated"] as const)("round-trips %s grouping", (grouping) => {
+    const view = { grouping, ordering: "created", show: ["updated", "branch"] } as const;
     writeSidebarViewPreferences(view);
     expect(readSidebarViewPreferences()).toEqual(view);
   });

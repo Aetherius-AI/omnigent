@@ -3065,11 +3065,16 @@ describe("Sidebar view options", () => {
     "Working",
     "Draft",
     "Done",
-    "Today",
-    "Yesterday",
-    "Previous 7 days",
-    "Previous 30 days",
-    "Older",
+    "Created today",
+    "Created yesterday",
+    "Created in the last 7 days",
+    "Created in the last 30 days",
+    "Created earlier",
+    "Updated today",
+    "Updated yesterday",
+    "Updated in the last 7 days",
+    "Updated in the last 30 days",
+    "Updated earlier",
   ]);
   const groupHeaders = () =>
     screen
@@ -3097,6 +3102,7 @@ describe("Sidebar view options", () => {
       "aria-checked",
       "true",
     );
+    expect(screen.getByRole("menuitemradio", { name: "Created" })).toBeInTheDocument();
     expect(screen.getByRole("menuitemradio", { name: "Updated" })).toBeInTheDocument();
   });
 
@@ -3114,10 +3120,10 @@ describe("Sidebar view options", () => {
     selectSessionFilter("all");
 
     expect(screen.queryByRole("button", { name: "Shared" })).toBeNull();
-    expect(groupHeaders()).toEqual(["Today", "Older"]);
-    expect(within(groupSection("Older")).getByText("conv_shared")).toBeInTheDocument();
+    expect(groupHeaders()).toEqual(["Updated today", "Updated earlier"]);
+    expect(within(groupSection("Updated earlier")).getByText("conv_shared")).toBeInTheDocument();
     // The first group carries every list control: filter, Select and New session.
-    const firstGroup = groupSection("Today");
+    const firstGroup = groupSection("Updated today");
     expect(within(firstGroup).getByTestId("session-filter")).toBeTruthy();
     expect(within(firstGroup).getByTestId("toggle-selection-mode")).toBeTruthy();
     expect(within(firstGroup).getByTestId("sessions-new-session")).toBeTruthy();
@@ -3159,9 +3165,9 @@ describe("Sidebar view options", () => {
 
     // A next page can land in any group, so collapsing only the last one
     // mustn't stall pagination; collapsing every group does.
-    fireEvent.click(screen.getByRole("button", { name: "Older" }));
+    fireEvent.click(screen.getByRole("button", { name: "Updated earlier" }));
     expect(screen.getByRole("button", { name: "Load more" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Today" }));
+    fireEvent.click(screen.getByRole("button", { name: "Updated today" }));
     expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
   });
 
@@ -3182,22 +3188,56 @@ describe("Sidebar view options", () => {
     expect(screen.getByTestId("toggle-selection-mode")).toBeInTheDocument();
   });
 
-  it("groups sessions by updated day, folding project sessions into the groups", () => {
-    localStorage.setItem("omnigent:sidebar-view", JSON.stringify({ grouping: "updated" }));
-    projectsMock.push("Customer X");
-    mockConversations([
-      conv("conv_old", "Codex", { updated_at: 0 }),
-      conv("conv_today", "Codex", { updated_at: Date.now() / 1000 }),
-      conv("conv_filed", "Codex", { updated_at: 0, labels: { omni_project: "Customer X" } }),
-    ]);
-    renderGroupingSidebar();
-
-    expect(groupHeaders()).toEqual(["Today", "Older"]);
-    expect(within(groupSection("Older")).getByText("conv_old")).toBeInTheDocument();
-    expect(within(groupSection("Older")).getByText("conv_filed")).toBeInTheDocument();
-    expect(screen.queryByText("Projects")).toBeNull();
-    expect(screen.getAllByTestId("session-filter")).toHaveLength(1);
-  });
+  it.each([
+    ["created", "updated"],
+    ["updated", "created"],
+  ])(
+    "groups by %s day independently of %s ordering, including project sessions",
+    (grouping, ordering) => {
+      localStorage.setItem("omnigent:sidebar-view", JSON.stringify({ grouping, ordering }));
+      projectsMock.push("Customer X");
+      const now = new Date();
+      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() / 1000;
+      const yesterday =
+        new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1).getTime() / 1000;
+      mockConversations([
+        conv("conv_old", "Codex", { created_at: 0, updated_at: Date.now() / 1000 }),
+        conv("conv_today", "Codex", { created_at: today, updated_at: today }),
+        conv("conv_yesterday", "Codex", { created_at: yesterday, updated_at: yesterday }),
+        conv("conv_filed", "Codex", {
+          created_at: 0,
+          updated_at: 0,
+          labels: { omni_project: "Customer X" },
+        }),
+      ]);
+      renderGroupingSidebar();
+      const prefix = grouping === "created" ? "Created" : "Updated";
+      expect(groupHeaders()).toEqual([
+        `${prefix} today`,
+        `${prefix} yesterday`,
+        `${prefix} earlier`,
+      ]);
+      expect(within(groupSection(`${prefix} today`)).getByText("conv_today")).toBeInTheDocument();
+      expect(
+        within(groupSection(`${prefix} yesterday`)).getByText("conv_yesterday"),
+      ).toBeInTheDocument();
+      expect(
+        within(groupSection(`${prefix} ${grouping === "created" ? "earlier" : "today"}`)).getByText(
+          "conv_old",
+        ),
+      ).toBeInTheDocument();
+      expect(within(groupSection(`${prefix} earlier`)).getByText("conv_filed")).toBeInTheDocument();
+      if (grouping === "updated") {
+        expect(
+          within(groupSection("Updated today"))
+            .getAllByRole("link", { name: /^conv_/ })
+            .map((link) => link.textContent),
+        ).toEqual(["conv_today", "conv_old"]);
+      }
+      expect(screen.queryByText("Projects")).toBeNull();
+      expect(screen.getAllByTestId("session-filter")).toHaveLength(1);
+    },
+  );
 
   it("uses fresh timestamps when switching Created to Updated through the menu", () => {
     mockConversations([
@@ -3238,7 +3278,7 @@ describe("Sidebar view options", () => {
     ).toEqual(["conv_done_new", "conv_done_old", "conv_running"]);
   });
 
-  it.each(["default", "status", "updated"])(
+  it.each(["default", "status", "created", "updated"])(
     "uses Created for saved %s grouping and project folders",
     (grouping) => {
       localStorage.setItem(
@@ -3261,7 +3301,7 @@ describe("Sidebar view options", () => {
         }),
       ]);
       renderGroupingSidebar();
-      if (grouping !== "updated")
+      if (grouping === "default" || grouping === "status")
         fireEvent.click(screen.getByRole("button", { name: /^Customer X/ }));
       expect(
         screen.getAllByRole("link", { name: /^conv_/ }).map((link) => link.textContent),
@@ -3472,7 +3512,11 @@ describe("sidebar_grouping_ui release flag", () => {
   it("keeps the default sidebar while off, ignoring stored view options", async () => {
     localStorage.setItem(
       "omnigent:sidebar-view",
-      JSON.stringify({ grouping: "status", ordering: "created", show: ["environment", "updated"] }),
+      JSON.stringify({
+        grouping: "created",
+        ordering: "created",
+        show: ["environment", "updated"],
+      }),
     );
     useHostsMock.mockReturnValue({
       data: [{ host_id: "host_box", name: "Build box", sandbox_provider: null }],
