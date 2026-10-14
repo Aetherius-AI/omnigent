@@ -19,7 +19,7 @@ import uuid
 from pathlib import Path
 
 import pytest
-from playwright.sync_api import Browser, Page, expect
+from playwright.sync_api import Browser, expect
 
 from omnigent.harnesses.antigravity_native.bridge import (
     _AGY_IDLE_MARKER,
@@ -65,47 +65,6 @@ def _pane_size(session: AntigravitySession) -> str:
     return size.stdout.strip() if size.returncode == 0 else "unknown"
 
 
-def _send_attachment_turn(
-    page: Page, session: AntigravitySession, png: Path, token: str, evidence: Path
-) -> None:
-    composer = page.get_by_label("Message the agent")
-    expect(composer).to_be_visible(timeout=60_000)
-    page.locator('input[type="file"][accept*="image/"]').set_input_files(str(png))
-    expect(page.get_by_role("button", name=f"Remove {png.name}")).to_be_visible(timeout=10_000)
-    composer.fill(f"Reply {token}. No tools.")
-    pane_size = _pane_size(session)
-    width = int(pane_size.split("x")[0]) if "x" in pane_size else 0
-    assert 0 < width < _WRAP_FORCING_WIDTH, (
-        f"pane {pane_size} must be narrower than {_WRAP_FORCING_WIDTH} columns so agy wraps "
-        "the attachment line; otherwise this test passes without exercising the bug"
-    )
-    page.get_by_role("button", name="Send", exact=True).click()
-
-    error_pill = page.get_by_test_id("error-pill")
-    # Match the reply on the token so an in-flight assistant bubble cannot pass
-    # for a reply that raced the delivery error.
-    reply = page.locator(_ASSISTANT).filter(has_text=token)
-    expect(reply.or_(error_pill).first).to_be_visible(timeout=120_000)
-    if not error_pill.count():
-        expect(reply).to_have_count(1)
-        expect(page.get_by_test_id("working-indicator")).to_have_count(0, timeout=60_000)
-    # Re-check once the turn settled so a late error pill still gets the diagnostics.
-    if error_pill.count():
-        error_pill.first.click()
-        message = page.get_by_test_id("error-message-content")
-        expect(message).to_be_visible(timeout=10_000)
-        # Hold the expanded error so a recording of the journey shows it.
-        page.wait_for_timeout(1_500)
-        page.screenshot(path=str(evidence / "delivery-error.png"))
-        pytest.fail(
-            f"the attachment turn was not delivered to agy (pane {pane_size}):\n"
-            f"{message.inner_text()}\n--- agy pane (redacted tail) ---\n"
-            f"{_format_pane_debug_tail(_pane_text(session))}"
-        )
-    # Hold the delivered reply so a recording of the journey shows it.
-    page.wait_for_timeout(1_500)
-
-
 def test_attachment_turn_from_chat_view_is_delivered(
     request: pytest.FixtureRequest,
     browser: Browser,  # session-scoped: launches before the stack isolates HOME
@@ -128,7 +87,42 @@ def test_attachment_turn_from_chat_view_is_delivered(
     page = request.getfixturevalue("page")
     try:
         page.goto(f"{session.base_url}/c/{session.session_id}")
-        _send_attachment_turn(page, session, png, token, tmp_path)
+        composer = page.get_by_label("Message the agent")
+        expect(composer).to_be_visible(timeout=60_000)
+        page.locator('input[type="file"][accept*="image/"]').set_input_files(str(png))
+        expect(page.get_by_role("button", name=f"Remove {png.name}")).to_be_visible(timeout=10_000)
+        composer.fill(f"Reply {token}. No tools.")
+        pane_size = _pane_size(session)
+        width = int(pane_size.split("x")[0]) if "x" in pane_size else 0
+        assert 0 < width < _WRAP_FORCING_WIDTH, (
+            f"pane {pane_size} must be narrower than {_WRAP_FORCING_WIDTH} columns so agy "
+            "wraps the attachment line; otherwise this test passes without exercising the bug"
+        )
+        page.get_by_role("button", name="Send", exact=True).click()
+
+        error_pill = page.get_by_test_id("error-pill")
+        # Match the reply on the token so an in-flight assistant bubble cannot pass
+        # for a reply that raced the delivery error.
+        reply = page.locator(_ASSISTANT).filter(has_text=token)
+        expect(reply.or_(error_pill).first).to_be_visible(timeout=120_000)
+        if not error_pill.count():
+            expect(reply).to_have_count(1)
+            expect(page.get_by_test_id("working-indicator")).to_have_count(0, timeout=60_000)
+        # Re-check once the turn settled so a late error pill still gets the diagnostics.
+        if error_pill.count():
+            error_pill.first.click()
+            message = page.get_by_test_id("error-message-content")
+            expect(message).to_be_visible(timeout=10_000)
+            # Hold the expanded error so a recording of the journey shows it.
+            page.wait_for_timeout(1_500)
+            page.screenshot(path=str(tmp_path / "delivery-error.png"))
+            pytest.fail(
+                f"the attachment turn was not delivered to agy (pane {pane_size}):\n"
+                f"{message.inner_text()}\n--- agy pane (redacted tail) ---\n"
+                f"{_format_pane_debug_tail(_pane_text(session))}"
+            )
+        # Hold the delivered reply so a recording of the journey shows it.
+        page.wait_for_timeout(1_500)
     finally:
         # A dynamically requested page is not closed before fixture teardown.
         page.context.close()

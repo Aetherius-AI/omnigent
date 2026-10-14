@@ -1075,17 +1075,10 @@ def test_draft_in_input_region_detects_collapsed_paste_placeholder() -> None:
 
 
 def test_draft_in_input_region_detects_needle_split_across_a_wrap() -> None:
-    """
-    A needle split across an app-level word-wrap is still detected.
+    """A needle split across agy's own word-wrap is still detected.
 
-    agy word-wraps a long single-line message (e.g. an attachment reference,
-    ``"[Attached: <path>]"``) at its own idea of the pane width before the
-    ~13-line collapse threshold applies — this is Ink-style output (real
-    emitted lines), not the terminal reflowing after the fact, so
-    ``tmux capture-pane -J`` cannot undo it. Reproduced live at the 80x24 a
-    fresh terminal is spawned at (``inner/terminal.py``) before a client ever
-    attaches to grow it: the one space in ``"[Attached: "`` is essentially the
-    only wrap point, so the needle is cut in the same place every time.
+    agy wraps composer text itself, so the verification needle can span rows even
+    when tmux joins terminal-wrapped lines; rows captured from an 80-column pane.
     """
     sep = "─" * 80
     baseline = _mod._agy_input_region(f"{sep}\n>\n{sep}")
@@ -1096,8 +1089,7 @@ def test_draft_in_input_region_detects_needle_split_across_a_wrap() -> None:
     )
     needle = _mod._submit_needle(content)
     assert needle == "[Attached: /data/.omnige"
-    # Exactly as observed live: agy's own wrap breaks right after "[Attached:",
-    # so no single rendered line contains the needle.
+    # agy wraps after "[Attached:", so no single rendered row contains the needle.
     pane = (
         f"{sep}\n"
         "> [Attached:\n"
