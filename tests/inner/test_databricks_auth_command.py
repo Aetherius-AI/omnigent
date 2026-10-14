@@ -762,3 +762,14 @@ def test_the_sdk_fallback_still_completes_a_service_principal_exchange_without_t
     assert resolved == (host, "sp-access-token")
     assert [grant["grant_type"] for grant in grants] == [["client_credentials"]]
     assert _cli_auth_token_calls(log) == []
+
+
+@pytest.fixture(autouse=True)
+def _restore_ambient_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The entrypoint pops every SDK credential variable straight out of
+    ``os.environ``; register the ones present so monkeypatch puts them back."""
+    from omnigent.inner import databricks_token
+
+    for name in databricks_token._ambient_credential_env_vars():
+        if name in os.environ:
+            monkeypatch.setenv(name, os.environ[name])

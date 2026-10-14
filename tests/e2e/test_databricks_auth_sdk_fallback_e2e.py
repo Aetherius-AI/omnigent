@@ -88,7 +88,8 @@ def test_generated_command_uses_the_sdk_without_repeating_cli_auth(
         capture_output=True,
     )
     issuer = ThreadingHTTPServer(("127.0.0.1", 0), Issuer)
-    context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(certificate, key)
     issuer.socket = context.wrap_socket(issuer.socket, server_side=True)
     base = f"https://127.0.0.1:{issuer.server_port}"
@@ -135,6 +136,7 @@ def test_generated_command_uses_the_sdk_without_repeating_cli_auth(
             timeout=30,
         )
         assert result.returncode == 0, result.stderr
+        assert calls.exists(), "the generated command never ran the fixture CLI"
         assert len(calls.read_text().splitlines()) == 1
         if profile == "service":
             assert result.stdout.strip() == "fixture-service-token", result.stderr
