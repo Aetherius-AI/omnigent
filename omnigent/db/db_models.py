@@ -34,6 +34,10 @@ from omnigent.db.compression import CompressedText
 from omnigent.util.uuid import InvalidUuidError as InvalidUuidError
 from omnigent.util.uuid import uuid_to_bytes as uuid_to_bytes
 
+# The schema created by these model definitions; later migrations can precede
+# their application mappings during a staged deployment.
+MODEL_SCHEMA_REVISION = "mm1a2b3c4d5e"
+
 # 32-byte sha256 digest column. LargeBinary → BYTEA (Postgres) / BLOB (SQLite),
 # but MySQL cannot index a BLOB without a key-prefix length, so use fixed-length
 # BINARY(32) there — an exact fit for the digest and fully indexable.

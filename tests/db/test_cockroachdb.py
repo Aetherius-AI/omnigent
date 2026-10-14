@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import pytest
 from alembic import command
 from sqlalchemy import Engine, inspect, text
@@ -74,6 +77,79 @@ def test_cockroachdb_upgrades_from_supported_baseline(db_uri: str) -> None:
     _initialize_or_verify_schema(engine, db_uri)
 
     assert _get_current_db_revision(engine) == head
+
+
+def test_cockroachdb_bootstrap_applies_schema_ahead_of_models(
+    db_uri: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A schema-only revision must run after model creation and after downgrade."""
+    from omnigent.db import utils
+    from omnigent.db.db_models import MODEL_SCHEMA_REVISION, ConversationBase, OmnigentBase
+
+    engine = _crdb_engine(db_uri)
+    version = _crdb_server_version(engine)
+    original_head = _get_head_db_revision(db_uri)
+    versions = tmp_path / "versions"
+    versions.mkdir()
+    (versions / "schema_ahead.py").write_text(
+        "from alembic import op\n"
+        "import sqlalchemy as sa\n"
+        "revision = 'test_schema_ahead'\n"
+        f"down_revision = {original_head!r}\n"
+        "def upgrade():\n"
+        "    op.add_column('omnigent_conversation_metadata', "
+        "sa.Column('future_nullable', sa.String(64), nullable=True))\n"
+        "def downgrade():\n"
+        "    op.drop_column('omnigent_conversation_metadata', 'future_nullable')\n"
+    )
+    original_config = utils._build_alembic_config
+
+    def staged_config(uri: str):
+        config = original_config(uri)
+        migration_root = Path(config.get_main_option("script_location"))
+        config.set_main_option("path_separator", "os")
+        config.set_main_option(
+            "version_locations", os.pathsep.join([str(migration_root / "versions"), str(versions)])
+        )
+        return config
+
+    with engine.connect() as connection:
+        _prepare_crdb_schema_transaction(connection, version)
+        ConversationBase.metadata.drop_all(connection)
+        OmnigentBase.metadata.drop_all(connection)
+        connection.execute(text("DROP TABLE alembic_version"))
+        connection.commit()
+    monkeypatch.setattr(utils, "_build_alembic_config", staged_config)
+
+    def column_names() -> set[str]:
+        columns = inspect(engine).get_columns("omnigent_conversation_metadata")
+        return {column["name"] for column in columns}
+
+    try:
+        _initialize_or_verify_schema(engine, db_uri)
+        assert _get_current_db_revision(engine) == "test_schema_ahead"
+        assert "future_nullable" in column_names()
+        config = staged_config(db_uri)
+        with engine.connect() as connection:
+            _prepare_crdb_schema_transaction(connection, version)
+            config.attributes["connection"] = connection
+            command.downgrade(config, MODEL_SCHEMA_REVISION)
+            connection.commit()
+        assert "future_nullable" not in column_names()
+        _initialize_or_verify_schema(engine, db_uri)
+        assert "future_nullable" in column_names()
+    finally:
+        if _get_current_db_revision(engine) == "test_schema_ahead":
+            config = staged_config(db_uri)
+            with engine.connect() as connection:
+                _prepare_crdb_schema_transaction(connection, version)
+                config.attributes["connection"] = connection
+                if "future_nullable" in column_names():
+                    command.downgrade(config, original_head)
+                else:
+                    command.stamp(config, MODEL_SCHEMA_REVISION)
+                    command.upgrade(config, original_head)
+                connection.commit()
 
 
 def test_cockroachdb_resumes_empty_revision_and_repairs_indexes(db_uri: str) -> None:
