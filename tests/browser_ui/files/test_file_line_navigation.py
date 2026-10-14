@@ -445,6 +445,10 @@ def test_large_diff_has_bounded_computation(
     expect(viewer.locator(".monaco-diff-editor")).to_have_count(1)
     expect(viewer.locator(".line-insert, .char-insert").first).to_be_visible()
     computations = page.evaluate("window.diffComputations")
+    # These are contract expectations, independent of the application's constants.
+    assert computations[0]["options"]["maxComputationTimeMs"] == 1000, (
+        "Initial budget changed: update the Worker interception and budget expectations together"
+    )
     if scenario == "navigate":
         page.wait_for_function("window.refinementWorkers.length === 1")
         assert page.evaluate("!window.refinementWorkers[0].terminated")
@@ -479,14 +483,31 @@ def test_large_diff_has_bounded_computation(
         assert pane is not None
         page.mouse.move(pane["x"] + pane["width"] / 2, pane["y"] + pane["height"] / 2)
         page.mouse.wheel(0, 1400)
-        page.wait_for_timeout(250)
+        # Wait for movement and then stable rendered positions, including smooth scrolling.
+        page.wait_for_function(
+            """initial => {
+                const lines = [...document.querySelectorAll(
+                    '.monaco-diff-editor .modified .view-line'
+                )].filter(e => {
+                    const r = e.getBoundingClientRect(); return r.top > 200 && r.top < 700;
+                }).map(e => [e.textContent, e.getBoundingClientRect().top]);
+                const value = JSON.stringify(lines);
+                if (value !== window.scrollSample?.value) {
+                    window.scrollSample = {value, since: performance.now()};
+                }
+                return lines.length && value !== JSON.stringify(initial)
+                    && performance.now() - window.scrollSample.since >= 100;
+            }""",
+            arg=initial_scroll,
+        )
         before_scroll = editor.locator(".modified .view-line").evaluate_all(visible_text)
         assert before_scroll
         assert before_scroll != initial_scroll
         page.evaluate("window.releaseRefinement()")
         expect(viewer.get_by_role("status")).to_have_text("", timeout=5000)
         expect(editor).to_have_attribute("data-refinement-identity", "same-editor")
-        page.wait_for_timeout(250)
+        # Let Monaco finish painting the newly applied result before comparing positions.
+        page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
         after_scroll = editor.locator(".modified .view-line").evaluate_all(visible_text)
         assert before_scroll == after_scroll
         computations = page.evaluate("window.diffComputations")
